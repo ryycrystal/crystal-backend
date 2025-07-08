@@ -125,15 +125,18 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                     for m in range(last_head_num + 1, blk):
                         _add_missing(m)
 
+                if last_head_num is not None:
+                    SEQUENCER.note_block(last_head_num)
+
                 last_head_ts = time.monotonic()
                 last_head_num = blk
-                SEQUENCER.note_block(blk)
                 continue
 
             if sid == logs_sub:
                 tag = h.EVENT_SIGS.get(res["topics"][0].lower())
                 if tag:
                     event_counts[tag] += 1
+                
                 SEQUENCER.add_log(res)
 
         return last_head_num
