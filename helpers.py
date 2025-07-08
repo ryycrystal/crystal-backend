@@ -1,7 +1,8 @@
-import json, textwrap, websockets, decimal
+import json, decimal, uuid, asyncio, websockets
 from decimal import Decimal
 
 decimal.getcontext().prec = 50
+
 
 WS_URL = "wss://testnet-rpc.monad.xyz"
 CONTRACTS = {
@@ -12,14 +13,13 @@ CONTRACTS = {
     "DAKMON": "0x93cBC4b52358c489665680182f0056f4F23C76CD",
     "CHOGMON": "0xf00A3bd942DC0e32d07048ED6255E281667784f6",
     "YAKIMON": "0x3051ec9feFaEc14F2bAB836FAb5A4c970A71874a",
-    "WETHUSDC": "0x9fA48CFB43829A932A227E4d7996e310ccf40E9C",
-    "WBTCUSDC": "0x45f7db719367bbf9E508D3CeA401EBC62fc732A9",
-    "WSOLUSDC": "0x5a6f296032AaAE6737ed5896bC09D01dc2d42507",
+    "WETHUSDC": "0x9fA48CFB43829A932A227e4d7996e310ccf40E9C",
+    "WBTCUSDC": "0x45f7db719367bbf9E508D3CeA401EBC62fc732a9",
+    "WSOLUSDC": "0x5a6f296032AaAE6737ed5896bc09d01dc2d42507",
     "USDTUSDC": "0xCF16582dC82c4C17fA5b54966ee67b74FD715fB5",
     "ROUTER": "0x4e77071D619Aa164cA6427547aefA41AC51BE7A0",
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
-MARKET_OF = {a.lower(): m for m, a in CONTRACTS.items()}
 MARKETS = {
     "0xcd5455b24f3622a1cfece944615ae5bc8f36ee18": (10**15, 1000, 6, 18),
     "0x97fa0031e2c9a21f0727bcab884e15c090ec3ee3": (10**4, 10000, 18, 18),
@@ -62,11 +62,11 @@ def scale_fill_base(raw: int, addr: str) -> Decimal:
     return Decimal(raw) / Decimal(10**bd)
 
 
-def to_addr(w):
+def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
 
-def chunks(s, n):
+def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
 
@@ -74,26 +74,24 @@ def parse_referral(t, d):
     return {"referrer": to_addr(t[1]), "referee": "0x" + d[-40:]}
 
 
-def parse_username(t, d):
-    caller = to_addr(t[1])
-    ln = int(d[64:128], 16)
+def parse_username(topics, data):
+    caller = to_addr(topics[1])
+    length = int(data[64:128], 16)
+    name_hex = data[128 : 128 + length * 2]
     return {
         "caller": caller,
-        "username": bytes.fromhex(d[128 : 128 + 2 * ln]).decode("utf-8", "replace"),
+        "username": bytes.fromhex(name_hex).decode("utf-8", "replace"),
     }
 
 
 def parse_orders_filled(addr, tops, data):
-
     caller = to_addr(tops[1])
-
     amount_in_raw = int(data[0:32], 16)
     amount_out_raw = int(data[32:64], 16)
     buy_sell_flag = int(data[64], 16) & 1
     is_buy = buy_sell_flag == 1
     start_price_raw = int(data[65:96], 16)
     end_price_raw = int(data[96:128], 16)
-
     offset_bytes = int(data[128:192], 16)
     filled_len = int(data[offset_bytes * 2 : offset_bytes * 2 + 64], 16)
     filled_start = offset_bytes * 2 + 64
@@ -164,79 +162,26 @@ def parse_orders_updated(addr, tops, data):
     return {"caller": caller, "ops": ops}
 
 
+def _parse_ra(_addr, topics, data):
+    return parse_referral(topics, data)
+
+
+def _parse_uu(_addr, topics, data):
+    return parse_username(topics, data)
+
+
 PARSERS = {
-    "RA": lambda t, d, *_: parse_referral(t, d),
-    "UU": lambda t, d, *_: parse_username(t, d),
+    "RA": _parse_ra,
+    "UU": _parse_uu,
     "OF": parse_orders_filled,
     "OU": parse_orders_updated,
 }
 
 
-async def stream_logs():
-    async with websockets.connect(WS_URL) as ws:
-        await ws.send(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "eth_subscribe",
-                    "params": ["newHeads"],
-                }
-            )
-        )
-        heads = (await _ack(ws, 1))["result"]
-
-        await ws.send(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "eth_subscribe",
-                    "params": ["logs", {"address": ADDRS, "topics": [TOPICS]}],
-                }
-            )
-        )
-        logs = (await _ack(ws, 2))["result"]
-
-        latest = None
-        async for raw in ws:
-            m = json.loads(raw)
-            if m.get("method") != "eth_subscription":
-                continue
-            sid = m["params"]["subscription"]
-            res = m["params"]["result"]
-
-            if sid == heads:
-                blk = int(res["number"], 16)
-                if latest and blk > latest + 1:
-                    print(f"! missed blocks {latest+1} → {blk-1}")
-                latest = blk
-                continue
-
-            if sid != logs:
-                continue
-            tag = EVENT_SIGS.get(res["topics"][0].lower())
-            if not tag:
-                continue
-            addr = res["address"].lower()
-            data = res["data"][2:]
-            tops = res["topics"]
-
-            parsed = (
-                PARSERS[tag](addr, tops, data)
-                if tag in ("OF", "OU")
-                else PARSERS[tag](tops, data)
-            )
-            print(
-                f"{tag} blk{latest} [{MARKET_OF.get(addr,'?')}] "
-                + textwrap.shorten(str(parsed), 2400)
-            )
-
-
-async def _ack(ws, rid):
+async def ack(ws, rid):
     while True:
-        r = json.loads(await ws.recv())
-        if r.get("id") == rid:
-            if "error" in r:
-                raise RuntimeError(r)
-            return r
+        resp = json.loads(await ws.recv())
+        if resp.get("id") == rid:
+            if "error" in resp:
+                raise RuntimeError(resp)
+            return resp
