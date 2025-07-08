@@ -1,4 +1,8 @@
 from __future__ import annotations
+from collections import defaultdict
+from decimal import Decimal
+from typing import Dict, List, Tuple
+
 """
 in-memory state management for obs + “points” logic
 
@@ -30,7 +34,7 @@ def _multiplier(price: Decimal, mid: Decimal) -> Decimal:
 
 
 def _points_rate(size: Decimal, price: Decimal, mid: Decimal) -> Decimal:
-    return size * _multiplier(price, mid)
+    return size * _multiplier(price, mid) / 100
 
 
 @dataclass(slots=True)
@@ -212,9 +216,6 @@ class State:
             book.accrue_points(new_mid, ev.block_number)
             self._last_mid[market] = new_mid
 
-            if market == h.CONTRACTS["MONUSDC"].lower():
-                print(f"[mid] mon-usdc {new_mid:f}")
-
     def apply_order_filled(self, ev: models.OrderFilled, market: str) -> None:
         book = self._book(market)
         mid = book.mid_price()
@@ -228,3 +229,15 @@ class State:
                     self._finalise_order(order)
             else:
                 book.update_order_size(f.order_id, f.price, f.new_quote_size)
+
+    def leaderboard(self) -> List[Tuple[str, Decimal]]:
+        totals: Dict[str, Decimal] = defaultdict(Decimal)
+
+        for maker, pts in self.final_points.items():
+            totals[maker] += pts
+
+        for ob in self._books.values():
+            for order in ob._orders.values():
+                totals[order.maker] += order.accum_points
+
+        return sorted(totals.items(), key=lambda x: x[1], reverse=True)

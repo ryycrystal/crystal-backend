@@ -1,4 +1,4 @@
-import json, decimal, uuid, asyncio, websockets
+import json, decimal, asyncio, time
 from decimal import Decimal
 
 decimal.getcontext().prec = 50
@@ -185,3 +185,16 @@ async def ack(ws, rid):
             if "error" in resp:
                 raise RuntimeError(resp)
             return resp
+
+_RPC_MAX_RPS = 20
+_last_rpc_ts = 0.0
+_rpc_lock = asyncio.Lock()
+
+async def rate_gate() -> None:
+    global _last_rpc_ts
+    async with _rpc_lock:
+        now = time.monotonic()
+        wait = 1 / _RPC_MAX_RPS - (now - _last_rpc_ts)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_rpc_ts = time.monotonic()
