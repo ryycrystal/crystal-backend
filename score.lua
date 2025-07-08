@@ -1,1 +1,0 @@
--- atomic points logic

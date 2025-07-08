@@ -19,41 +19,56 @@ def _add_missing(blk: int):
         missing_set.add(blk)
 
 
+# stream.py
 async def _gap_worker(event_counts):
     while True:
-        if missing_blocks:
-            blk = missing_blocks.popleft()
-            missing_set.discard(blk)
+        if not missing_blocks:
+            await asyncio.sleep(0.5)
+            continue
 
+        blk_start = missing_blocks.popleft()
+        blk_end = blk_start
+        missing_set.discard(blk_start)
+
+        while missing_blocks and missing_blocks[0] == blk_end + 1 and (blk_end - blk_start + 1) < BACKFILL_BATCH:
+            blk_end += 1
+            missing_set.discard(missing_blocks.popleft())
+
+        try:
             async with websockets.connect(h.WS_URL) as gap_ws:
                 rid = str(uuid.uuid4())
-                await gap_ws.send(
-                    json.dumps({
-                        "jsonrpc": "2.0",
-                        "id": rid,
-                        "method": "eth_getLogs",
-                        "params": [{
-                            "fromBlock": hex(blk),
-                            "toBlock": hex(blk),
-                            "address": h.ADDRS,
-                            "topics": [h.TOPICS],
-                        }],
-                    })
-                )
+                await h.rate_gate()                             # ← new
+                await gap_ws.send(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "method": "eth_getLogs",
+                    "params": [{
+                        "fromBlock": hex(blk_start),
+                        "toBlock":   hex(blk_end),
+                        "address": h.ADDRS,
+                        "topics":  [h.TOPICS],
+                    }],
+                }))
                 resp = await h.ack(gap_ws, rid)
 
-                for log in resp.get("result", []):
-                    tag = h.EVENT_SIGS.get(log["topics"][0].lower())
-                    if tag:
-                        SEQUENCER.add_log(log)
+            for log in resp.get("result", []):
+                tag = h.EVENT_SIGS.get(log["topics"][0].lower())
+                if tag:
+                    SEQUENCER.add_log(log)
 
+            for blk in range(blk_start, blk_end + 1):
                 SEQUENCER.note_block(blk)
 
-            # print(f"[Backfill] done block {blk}, counts: {{}}".format(
-            #     {k: event_counts[k] for k in event_counts}
-            # ))
-        else:
-            await asyncio.sleep(0.5)
+        except RuntimeError as e:
+            err = e.args[0]
+            if isinstance(err, dict) and err.get("error", {}).get("code") == -32007:
+                print("[RL] hit provider cap, retrying after 1 s")
+
+                for blk in range(blk_start, blk_end + 1):
+                    _add_missing(blk)
+                await asyncio.sleep(1.0)
+            else:
+                raise
 
 
 async def _stream_once(prev_last_head: int | None) -> int | None:
