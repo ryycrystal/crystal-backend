@@ -4,6 +4,8 @@ from collections import deque
 import helpers as h
 import backfill
 
+from sequencer import SEQUENCER
+
 HEAD_TIMEOUT = 5.0
 BACKFILL_BATCH = 100
 
@@ -43,13 +45,13 @@ async def _gap_worker(event_counts):
                 for log in resp.get("result", []):
                     tag = h.EVENT_SIGS.get(log["topics"][0].lower())
                     if tag:
-                        h.PARSERS[tag](
-                            log["address"].lower(), log["topics"], log["data"][2:]
-                        )
-                        event_counts[tag] += 1
-            print(f"[Backfill] done block {blk}, counts: {{}}".format(
-                {k: event_counts[k] for k in event_counts}
-            ))
+                        SEQUENCER.add_log(log)
+
+                SEQUENCER.note_block(blk)
+
+            # print(f"[Backfill] done block {blk}, counts: {{}}".format(
+            #     {k: event_counts[k] for k in event_counts}
+            # ))
         else:
             await asyncio.sleep(0.5)
 
@@ -104,11 +106,11 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 blk = int(res["number"], 16)
 
                 if last_head_num is not None:
-                    counts_snapshot = event_counts.copy()
-                    print(
-                        f"blk{last_head_num}: "
-                        f"OF {counts_snapshot['OF']}  OU {counts_snapshot['OU']}  UU {counts_snapshot['UU']}  RA {counts_snapshot['RA']}"
-                    )
+                    # counts_snapshot = event_counts.copy()
+                    # print(
+                    #     f"[WS] {last_head_num}: "
+                    #     f"OF {counts_snapshot['OF']}  OU {counts_snapshot['OU']}  UU {counts_snapshot['UU']}  RA {counts_snapshot['RA']}"
+                    # )
 
                     for key in event_counts:
                         event_counts[key] = 0
@@ -125,13 +127,14 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                 last_head_ts = time.monotonic()
                 last_head_num = blk
+                SEQUENCER.note_block(blk)
                 continue
 
             if sid == logs_sub:
                 tag = h.EVENT_SIGS.get(res["topics"][0].lower())
                 if tag:
-                    h.PARSERS[tag](res["address"].lower(), res["topics"], res["data"][2:])
                     event_counts[tag] += 1
+                SEQUENCER.add_log(res)
 
         return last_head_num
 

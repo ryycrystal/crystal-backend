@@ -5,7 +5,7 @@ import uuid
 import websockets
 
 import helpers as h
-
+from sequencer import SEQUENCER
 
 def parse_args():
     parser = argparse.ArgumentParser(description="backfiller")
@@ -81,22 +81,19 @@ async def backfill(start_block: int, batch: int) -> int:
             logs = await fetch_logs(ws, chunk_start, chunk_end)
 
             counts = {v: 0 for v in h.EVENT_SIGS.values()}
-            for log in logs:
-                tag = h.EVENT_SIGS.get(log["topics"][0].lower())
-                if not tag:
-                    continue
-                _ = h.PARSERS[tag](
-                    log["address"].lower(),
-                    log["topics"],
-                    log["data"][2:],
-                )
-                counts[tag] += 1
+            for raw in logs:
+                tag = h.EVENT_SIGS.get(raw["topics"][0].lower())
+                if tag:
+                    counts[tag] += 1
+                SEQUENCER.add_log(raw)
 
-            print(
-                f"{chunk_start}-{chunk_end}: "
-                f"OF {counts['OF']}  OU {counts['OU']}  "
-                f"UU {counts['UU']}  RA {counts['RA']}"
-            )
+            for blk in range(chunk_start, chunk_end + 1):
+                SEQUENCER.note_block(blk)
+
+            # print(
+            #     f"[BF] {chunk_end}:"
+            #     f"OF {counts['OF']}  OU {counts['OU']}  UU {counts['UU']}  RA {counts['RA']}"
+            # )
 
             last_processed = chunk_end
 
