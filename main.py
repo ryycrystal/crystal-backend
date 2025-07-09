@@ -2,12 +2,11 @@ import asyncio, sys
 import uvicorn
 from fastapi import FastAPI
 
-from api import app as api_app          # fastapi instance w/ cache loop
-from stream import stream_logs          # log-streamer keeps state hot
+from api import app as api_app
+from stream import stream_logs
 
-app: FastAPI = api_app                  # uvicorn expects “app”
+app: FastAPI = api_app
 
-# start the websockets / backfill worker alongside http
 @app.on_event("startup")
 async def _boot_streamer() -> None:
     start_blk = int(sys.argv[1], 0) if len(sys.argv) > 1 else None
