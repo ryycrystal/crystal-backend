@@ -19,7 +19,6 @@ def _add_missing(blk: int):
         missing_set.add(blk)
 
 
-# stream.py
 async def _gap_worker(event_counts):
     while True:
         if not missing_blocks:
@@ -37,7 +36,7 @@ async def _gap_worker(event_counts):
         try:
             async with websockets.connect(h.WS_URL) as gap_ws:
                 rid = str(uuid.uuid4())
-                await h.rate_gate()                             # ← new
+                await h.rate_gate()
                 await gap_ws.send(json.dumps({
                     "jsonrpc": "2.0",
                     "id": rid,
