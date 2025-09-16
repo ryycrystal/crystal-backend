@@ -43,9 +43,9 @@ async def _gap_worker(event_counts):
                     "method": "eth_getLogs",
                     "params": [{
                         "fromBlock": hex(blk_start),
-                        "toBlock":   hex(blk_end),
+                        "toBlock": hex(blk_end),
                         "address": h.ADDRS,
-                        "topics":  [h.TOPICS],
+                        "topics": [h.TOPICS],
                     }],
                 }))
                 resp = await h.ack(gap_ws, rid)
@@ -120,12 +120,6 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 blk = int(res["number"], 16)
 
                 if last_head_num is not None:
-                    # counts_snapshot = event_counts.copy()
-                    # print(
-                    #     f"[WS] {last_head_num}: "
-                    #     f"OF {counts_snapshot['OF']}  OU {counts_snapshot['OU']}  UU {counts_snapshot['UU']}  RA {counts_snapshot['RA']}"
-                    # )
-
                     for key in event_counts:
                         event_counts[key] = 0
 

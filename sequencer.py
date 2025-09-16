@@ -1,21 +1,6 @@
 from __future__ import annotations
 
-"""block‑strict event sequencer
-
-all raw log objects are funnelled through the*single global SEQUENCER
-
-add_log(log): push an individual eth_getLogs / subscription payload
-note_block(blk): tell the sequencer that blk has finished producing logs
-
-once all contiguous blocks have been marked ready, the sequencer drains them in
-order → parses events → mutates the in‑memory order books (via state.State)
-
-this guarantees no out‑of‑order application even if the rpc/websocket delivers
-logs ahead of their headers
-"""
-
 from collections import defaultdict
-from decimal import Decimal
 from typing import Dict, List
 
 import helpers as h
@@ -51,56 +36,54 @@ class Sequencer:
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"OF": 0, "OU": 0, "UU": 0, "RA": 0}
+        counts = {"TC": 0, "LT": 0}
+        seen = set()
 
         for log in logs:
+            txh = log.get("transactionHash")
+            li  = log.get("logIndex")
+            lii = int(li, 16) if isinstance(li, str) else int(li or 0)
+            uid = (txh, lii)
+            
+            if uid in seen:
+                continue
+            seen.add(uid)
+
             tag = h.EVENT_SIGS.get(log["topics"][0].lower())
             if tag:
                 counts[tag] += 1
 
-            if tag not in ("OF", "OU"):
+            if tag not in ("LT", "TC"):
                 continue
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
-            if tag == "OF":
-                ev = self._to_order_filled(parsed, blk)
-                self._state.apply_order_filled(ev, log["address"].lower())
+            if tag == "LT":
+                ev = self._to_launchpad_trade(parsed, blk)
+                self._state.apply_launchpad_trade(ev, log["address"].lower())
             else:
-                ev = self._to_orders_updated(parsed, blk)
-                self._state.apply_orders_updated(ev, log["address"].lower())
+                ev = self._to_token_created(parsed, blk)
+                self._state.apply_token_created(ev, log["address"].lower())
         
-        print(f"[SQ] {blk}: OF {counts['OF']}  OU {counts['OU']}  UU {counts['UU']}  RA {counts['RA']}")
+        print(f"[SQ] {blk}: TC {counts['TC']}  LT {counts['LT']}")
 
     @staticmethod
-    def _to_order_filled(d: dict, blk: int) -> models.OrderFilled:
-        fills = [
-            models.Fill(price=f["price"], order_id=f["order_id"], new_quote_size=f["new_size"])  # type: ignore[arg-type]
-            for f in d["fills"]
-        ]
-        return models.OrderFilled(
+    def _to_launchpad_trade(d: dict, blk: int) -> models.LaunchpadTrade:
+        return models.LaunchpadTrade(
             block_number=blk,
-            caller=d["caller"],
-            side=d["side"],
-            amount_in=d["amount_in"],
-            amount_out=d["amount_out"],
-            start_price=d["start_price"],
-            end_price=d["end_price"],
-            fills=fills,
+            token=d.get("token", d.get("caller","")).lower(),
+            user=d.get("user","").lower(),
+            is_buy=bool(d["is_buy"]) if "is_buy" in d else bool(d.get("side", 0)),
+            amount_in=int(d["amount_in"]),
+            amount_out=int(d["amount_out"]),
         )
 
     @staticmethod
-    def _to_orders_updated(d: dict, blk: int) -> models.OrdersUpdated:
-        actions = [
-            models.OrderAction(
-                action=op["action"],
-                side=op["side"],
-                price=op["price"],
-                order_id=op["order_id"],
-                quote_size=op["quote_size"],
-            )
-            for op in d["ops"]
-        ]
-        return models.OrdersUpdated(block_number=blk, caller=d["caller"], actions=actions)
+    def _to_token_created(d: dict, blk: int) -> models.TokenCreated:
+        return models.TokenCreated(
+            block_number=blk,
+            token=d.get("token", d.get("caller","")).lower(),
+            creator=d.get("creator","").lower(),
+        )
 
 
 SEQUENCER = Sequencer(_st.State())

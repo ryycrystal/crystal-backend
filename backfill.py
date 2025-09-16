@@ -90,11 +90,6 @@ async def backfill(start_block: int, batch: int) -> int:
             for blk in range(chunk_start, chunk_end + 1):
                 SEQUENCER.note_block(blk)
 
-            # print(
-            #     f"[BF] {chunk_end}:"
-            #     f"OF {counts['OF']}  OU {counts['OU']}  UU {counts['UU']}  RA {counts['RA']}"
-            # )
-
             last_processed = chunk_end
 
         print(f"[Backfill] complete, last processed = {last_processed}")
