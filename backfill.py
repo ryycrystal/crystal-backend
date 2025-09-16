@@ -25,6 +25,7 @@ def parse_args():
 
 async def get_head(ws) -> int:
     rid = str(uuid.uuid4())
+    await h.rate_gate()
     await ws.send(
         json.dumps(
             {
@@ -41,6 +42,7 @@ async def get_head(ws) -> int:
 
 async def fetch_logs(ws, frm: int, to: int):
     rid = str(uuid.uuid4())
+    await h.rate_gate()
     await ws.send(
         json.dumps(
             {
