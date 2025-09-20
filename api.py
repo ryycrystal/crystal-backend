@@ -24,12 +24,12 @@ def health() -> Dict[str, Any]:
     return {"ok": True}
 
 @app.get("/stats/{token}")
-def stats_for_token(token: str) -> Dict[str, Dict[str, int]]:
+def stats_for_token(token: str) -> Dict[str, Dict[str, Any]]:
     snap = SEQUENCER._state.snapshot(token.lower())
     return { LABEL[h]: snap[h] for h in INTERVALS }
 
 @app.get("/stats")
-def stats_batch(tokens: List[str] = Query(...)) -> Dict[str, Dict[str, Dict[str, int]]]:
+def stats_batch(tokens: List[str] = Query(...)) -> Dict[str, Dict[str, Dict[str, Any]]]:
     out: Dict[str, Dict[str, Dict[str, int]]] = {}
     for t in tokens:
         snap = SEQUENCER._state.snapshot(t.lower())
