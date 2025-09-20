@@ -112,56 +112,56 @@ class State:
             return res
 
         _, head_ts = self._bt.head()
-
         items = list(dq)
-        n = len(items)
+        last_price = items[-1].native_per_token if items else None
 
-        last_price = items[-1].native_per_token if n > 0 else None
+        cutoffs = {h: head_ts - h for h in INTERVALS}
 
-        prune_idx = -1
-        last_pre_24h_idx = -1
-        for idx in range(n - 1, -1, -1):
-            e = items[idx]
+        cutoff_24h = cutoffs[86400]
+        prune_n = 0
+        for e in items:
+            ts = self._bt.ts(e.block)
+            if ts < cutoff_24h:
+                prune_n += 1
+            else:
+                break
+        for _ in range(prune_n):
+            dq.popleft()
+
+        if prune_n:
+            items = list(dq)
+            if not items:
+                return res
+            last_price = items[-1].native_per_token
+
+        for e in items:
             ts = self._bt.ts(e.block)
             age = head_ts - ts
-
-            if last_pre_24h_idx == -1 and ts <= head_ts - 86400:
-                last_pre_24h_idx = idx
-
-            oldest_price = items[0].native_per_token
-            for h in INTERVALS:
-                if res[h]["start_price_native"] is None:
-                    res[h]["start_price_native"] = oldest_price
-
             for h in INTERVALS:
                 if age <= h:
+                    if res[h]["start_price_native"] is None:
+                        res[h]["start_price_native"] = e.native_per_token
                     if e.is_buy:
                         res[h]["buy_cnt"] += 1
                         res[h]["buy_vol_native"] += e.native_vol
                     else:
                         res[h]["sell_cnt"] += 1
                         res[h]["sell_vol_native"] += e.native_vol
-                else:
-                    if res[h]["start_price_native"] is None:
-                        res[h]["start_price_native"] = e.native_per_token
-
-            if prune_idx == -1 and age > 86400:
-                prune_idx = idx
 
         for h in INTERVALS:
             res[h]["total_vol_native"] = res[h]["buy_vol_native"] + res[h]["sell_vol_native"]
             res[h]["last_price_native"] = float(last_price) if last_price is not None else None
+
             sp = res[h]["start_price_native"]
             lp = last_price
-            if sp is not None and lp is not None and sp != 0:
-                res[h]["change_pct"] = float(((lp - sp) / sp) * Decimal(100))
-            if isinstance(sp, Decimal):
-                res[h]["start_price_native"] = float(sp)
+            if sp is not None and lp is not None:
+                sp_val = float(sp) if not isinstance(sp, (int, float)) else sp
+                lp_val = float(lp) if not isinstance(lp, (int, float)) else lp
+                if sp_val != 0:
+                    res[h]["change_pct"] = ((lp_val - sp_val) / sp_val) * 100.0
 
-        if prune_idx != -1:
-            end = max(0, min(prune_idx, last_pre_24h_idx))
-            for _ in range(end):
-                dq.popleft()
+            if sp is not None and not isinstance(sp, (int, float)):
+                res[h]["start_price_native"] = float(sp)
 
         return res
 
