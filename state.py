@@ -18,8 +18,8 @@ class _Evt:
     block: int
     is_buy: bool
     native_vol: int
-    price_native: int
-    price_tokens: int
+    native_reserve: int
+    token_reserve: int
 
 class _BlockTimeCache:
     def __init__(self) -> None:
@@ -73,19 +73,16 @@ class State:
         if native < 0:
             native = 0
 
-        price_native = ev.amount_in if ev.is_buy else ev.amount_out
-        price_tokens = ev.amount_out if ev.is_buy else ev.amount_in
-        if price_native is None or price_native < 0:
-            price_native = 0
-        if price_tokens is None or price_tokens < 0:
-            price_tokens = 0
+        nr = ev.native_reserve or 0
+        tr = ev.token_reserve or 0
+
         dq = self._events.setdefault(token, deque())
         dq.append(_Evt(
             block=ev.block_number,
             is_buy=ev.is_buy,
             native_vol=native,
-            price_native=price_native,
-            price_tokens=price_tokens,
+            native_reserve=nr,
+            token_reserve=tr,
         ))
 
     def apply_token_created(self, ev: models.TokenCreated, _log_addr: str) -> None:
@@ -130,26 +127,25 @@ class State:
         for h in (300, 3600, 21600, 86400):
             res[h]["total_vol_native"] = res[h]["buy_vol_native"] + res[h]["sell_vol_native"]
         
-        if recent:
-            recent.reverse()
-            last_price: float | None = None
-            base_by_win: Dict[int, float | None] = {300: None, 3600: None, 21600: None, 86400: None}
+        p_now = None
+        for e in reversed(recent):
+            if e.native_reserve > 0 and e.token_reserve > 0:
+                p_now = e.native_reserve / e.token_reserve
+                break
 
-            for e in recent:
-                if e.price_native > 0 and e.price_tokens > 0:
-                    last_price = e.price_native / e.price_tokens
+        for h in (300, 3600, 21600, 86400):
+            cutoff = head_ts - h
+            p_then = None
+            for e in reversed(recent):
                 ts = self._bt.ts(e.block)
-                age = head_ts - ts
-                for h in (300, 3600, 21600, 86400):
-                    if base_by_win[h] is None and age <= h and last_price is not None:
-                        base_by_win[h] = last_price
+                if ts <= cutoff and e.native_reserve > 0 and e.token_reserve > 0:
+                    p_then = e.native_reserve / e.token_reserve
+                    break
 
-            for h in (300, 3600, 21600, 86400):
-                bp = base_by_win[h]
-                if bp and last_price:
-                    res[h]["price_change_pct"] = (last_price - bp) / bp * 100.0
-                else:
-                    res[h]["price_change_pct"] = None
+            if p_now is not None and p_then is not None and p_then > 0:
+                res[h]["price_change_pct"] = (p_now / p_then - 1.0) * 100.0
+            else:
+                res[h]["price_change_pct"] = None
 
         for _ in range(prune):
             dq.popleft()

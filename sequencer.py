@@ -73,8 +73,10 @@ class Sequencer:
             token=d.get("token", d.get("caller","")).lower(),
             user=d.get("user","").lower(),
             is_buy=bool(d["is_buy"]) if "is_buy" in d else bool(d.get("side", 0)),
-            amount_in=int(d["amount_in"]),
-            amount_out=int(d["amount_out"]),
+            amount_in=int(d.get("amount_in", 0)),
+            amount_out=int(d.get("amount_out", 0)),
+            native_reserve=int(d.get("native_reserve", 0)),
+            token_reserve=int(d.get("token_reserve", 0)),
         )
 
     @staticmethod
@@ -84,6 +86,5 @@ class Sequencer:
             token=d.get("token", d.get("caller","")).lower(),
             creator=d.get("creator","").lower(),
         )
-
 
 SEQUENCER = Sequencer(_st.State())
