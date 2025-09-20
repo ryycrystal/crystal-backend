@@ -8,7 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 router = APIRouter()
 
 STATS_BASE_URL = "http://127.0.0.1:8000"
-POLL_SECONDS = 5.0
+POLL_SECONDS = 0.4
 
 _subscribers: Dict[str, Set[WebSocket]] = defaultdict(set)
 _tasks: Dict[str, asyncio.Task] = {}
