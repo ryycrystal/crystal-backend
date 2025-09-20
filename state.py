@@ -2,11 +2,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Deque, List, Tuple
 from collections import deque
+from decimal import Decimal, getcontext
 import json
 import urllib.request
 import time
-
 import models
+
+getcontext().prec = 50
 
 INTERVALS = (300, 3600, 21600, 86400)
 LABEL = {300:"5m", 3600:"1h", 21600:"6h", 86400:"24h"}
@@ -18,8 +20,8 @@ class _Evt:
     block: int
     is_buy: bool
     native_vol: int
-    native_reserve: int
-    token_reserve: int
+    token_amt: int
+    native_per_token: Decimal
 
 class _BlockTimeCache:
     def __init__(self) -> None:
@@ -69,20 +71,22 @@ class State:
 
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
         token = ev.token.lower()
-        native = ev.amount_in if ev.is_buy else ev.amount_out
-        if native < 0:
-            native = 0
 
-        nr = ev.native_reserve or 0
-        tr = ev.token_reserve or 0
+        native_amt = ev.amount_in if ev.is_buy else ev.amount_out
+        token_amt  = ev.amount_out if ev.is_buy else ev.amount_in
 
-        dq = self._events.setdefault(token, deque())
-        dq.append(_Evt(
+        if token_amt <= 0:
+            price = Decimal(0)
+        else:
+            price = Decimal(native_amt) / Decimal(token_amt)
+
+        q = self._events.setdefault(token, deque())
+        q.append(_Evt(
             block=ev.block_number,
             is_buy=ev.is_buy,
-            native_vol=native,
-            native_reserve=nr,
-            token_reserve=tr,
+            native_vol=int(native_amt),
+            token_amt=int(token_amt),
+            native_per_token=price,
         ))
 
     def apply_token_created(self, ev: models.TokenCreated, _log_addr: str) -> None:
@@ -90,31 +94,46 @@ class State:
         self._created_at_block.setdefault(token, ev.block_number)
         self._events.setdefault(token, deque())
 
-    def _compute_token_snapshot(self, token: str) -> Dict[int, Dict[str, float]]:
+    def _compute_token_snapshot(self, token: str) -> dict[int, dict]:
         token = token.lower()
-        dq = self._events.get(token, deque())
-        _, head_ts = self._bt.head()
-        res = {
-            300: {"buy_cnt":0,"sell_cnt":0,"buy_vol_native":0,"sell_vol_native":0,"total_vol_native":0,"price_change_pct": None},
-            3600: {"buy_cnt":0,"sell_cnt":0,"buy_vol_native":0,"sell_vol_native":0,"total_vol_native":0,"price_change_pct": None},
-            21600: {"buy_cnt":0,"sell_cnt":0,"buy_vol_native":0,"sell_vol_native":0,"total_vol_native":0,"price_change_pct": None},
-            86400: {"buy_cnt":0,"sell_cnt":0,"buy_vol_native":0,"sell_vol_native":0,"total_vol_native":0,"price_change_pct": None},
-        }
+        dq = self._events.get(token)
+        res = {h: {
+            "buy_cnt": 0,
+            "sell_cnt": 0,
+            "buy_vol_native": 0,
+            "sell_vol_native": 0,
+            "total_vol_native": 0,
+            "start_price_native": None,
+            "last_price_native": None,
+            "change_pct": None,
+        } for h in INTERVALS}
+
         if not dq:
             return res
 
-        cutoff_24h = head_ts - 86400
-        prune = 0
+        _, head_ts = self._bt.head()
+
         items = list(dq)
-        recent: List[_Evt] = []
-        for idx in range(len(items)-1, -1, -1):
+        n = len(items)
+
+        last_price = items[-1].native_per_token if n > 0 else None
+
+        prune_idx = -1
+        last_pre_24h_idx = -1
+        for idx in range(n - 1, -1, -1):
             e = items[idx]
             ts = self._bt.ts(e.block)
-            if ts <= cutoff_24h:
-                prune = idx + 1
-                break
             age = head_ts - ts
-            for h in (300, 3600, 21600, 86400):
+
+            if last_pre_24h_idx == -1 and ts <= head_ts - 86400:
+                last_pre_24h_idx = idx
+
+            oldest_price = items[0].native_per_token
+            for h in INTERVALS:
+                if res[h]["start_price_native"] is None:
+                    res[h]["start_price_native"] = oldest_price
+
+            for h in INTERVALS:
                 if age <= h:
                     if e.is_buy:
                         res[h]["buy_cnt"] += 1
@@ -122,33 +141,28 @@ class State:
                     else:
                         res[h]["sell_cnt"] += 1
                         res[h]["sell_vol_native"] += e.native_vol
-            recent.append(e)
+                else:
+                    if res[h]["start_price_native"] is None:
+                        res[h]["start_price_native"] = e.native_per_token
 
-        for h in (300, 3600, 21600, 86400):
+            if prune_idx == -1 and age > 86400:
+                prune_idx = idx
+
+        for h in INTERVALS:
             res[h]["total_vol_native"] = res[h]["buy_vol_native"] + res[h]["sell_vol_native"]
-        
-        p_now = None
-        for e in reversed(recent):
-            if e.native_reserve > 0 and e.token_reserve > 0:
-                p_now = e.native_reserve / e.token_reserve
-                break
+            res[h]["last_price_native"] = float(last_price) if last_price is not None else None
+            sp = res[h]["start_price_native"]
+            lp = last_price
+            if sp is not None and lp is not None and sp != 0:
+                res[h]["change_pct"] = float(((lp - sp) / sp) * Decimal(100))
+            if isinstance(sp, Decimal):
+                res[h]["start_price_native"] = float(sp)
 
-        for h in (300, 3600, 21600, 86400):
-            cutoff = head_ts - h
-            p_then = None
-            for e in reversed(recent):
-                ts = self._bt.ts(e.block)
-                if ts <= cutoff and e.native_reserve > 0 and e.token_reserve > 0:
-                    p_then = e.native_reserve / e.token_reserve
-                    break
+        if prune_idx != -1:
+            end = max(0, min(prune_idx, last_pre_24h_idx))
+            for _ in range(end):
+                dq.popleft()
 
-            if p_now is not None and p_then is not None and p_then > 0:
-                res[h]["price_change_pct"] = (p_now / p_then - 1.0) * 100.0
-            else:
-                res[h]["price_change_pct"] = None
-
-        for _ in range(prune):
-            dq.popleft()
         return res
 
     def snapshot(self, token: str) -> Dict[int, Dict[str, int]]:
