@@ -1,4 +1,3 @@
-# x_api.py
 from __future__ import annotations
 import os, time, json
 from typing import Any, Dict, Optional, Tuple
@@ -25,10 +24,10 @@ class _Entry:
 
 CACHE: Dict[str, _Entry] = {}
 
-PROF_TTL = 6 * 3600  # 6h fresh
-PROF_STALE = 24 * 3600  # 24h serve-stale
-TWEET_TTL = 3600  # 1h fresh
-TWEET_STALE = 6 * 3600  # 6h serve-stale
+PROF_TTL = 6 * 3600
+PROF_STALE = 24 * 3600
+TWEET_TTL = 3600
+TWEET_STALE = 6 * 3600
 
 
 def _now() -> int:
@@ -41,9 +40,8 @@ def _cache_get(key: str) -> Optional[Any]:
         return None
     n = _now()
     if e.exp > n:
-        return e.value  # fresh
+        return e.value
     if e.stale_exp > n:
-        # attach a hint to the payload (not part of API contract if you don't want it)
         v = dict(e.value)
         v["_stale"] = True
         return v
@@ -56,19 +54,16 @@ def _cache_set(key: str, value: Any, fresh_ttl: int, stale_ttl: int) -> None:
     CACHE[key] = _Entry(value, n + fresh_ttl, n + stale_ttl)
 
 
-# ---------------- Helpers ----------------
 def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
     s = input_s.strip()
     if not s:
         return None
 
-    # bare / @handle
     if "://" not in s:
         h = s[1:] if s.startswith("@") else s
         if 1 <= len(h) <= 15 and all(c.isalnum() or c == "_" for c in h):
             return {"kind": "user", "username": h}
 
-    # url form
     try:
         from urllib.parse import urlparse
 
@@ -77,7 +72,6 @@ def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
         if not (host.endswith("x.com") or host.endswith("twitter.com")):
             return None
 
-        # /{user}/status/{id}
         import re
 
         t = re.match(r"^/([A-Za-z0-9_]{1,15})/status/(\d+)", u.path)
@@ -101,7 +95,7 @@ def _json_response(
         headers={
             "Cache-Control": f"public, s-maxage={s_maxage}, stale-while-revalidate=86400",
             "Content-Type": "application/json; charset=utf-8",
-            "Access-Control-Allow-Origin": "*",  # OK for your setup; tighten if needed
+            "Access-Control-Allow-Origin": "*",
         },
     )
 
@@ -113,7 +107,6 @@ def _process_media_url(media: dict) -> Optional[str]:
 
     if mtype in ("video", "animated_gif"):
         variants = media.get("variants") or []
-        # keep only video/*, sort by bitrate desc
         vids = [
             v
             for v in variants
@@ -121,12 +114,11 @@ def _process_media_url(media: dict) -> Optional[str]:
         ]
         vids.sort(key=lambda v: v.get("bit_rate", 0), reverse=True)
         if vids:
-            # prefer mp4
             for v in vids:
                 if v.get("content_type") == "video/mp4" or (".mp4" in v.get("url", "")):
                     return v["url"]
             return vids[0]["url"]
-        # fallback
+
         return media.get("url") or media.get("preview_image_url")
 
     return media.get("url") or media.get("preview_image_url")
@@ -142,8 +134,6 @@ async def _twitter_call(url: str, bearer: str) -> Tuple[int, str]:
         r = await client.get(url, headers={"Authorization": f"Bearer {bearer}"})
         return r.status_code, r.text
 
-
-# ---------------- Route ----------------
 @router.get("/x")
 async def x_resolve(req: Request):
     q = req.query_params.get("url", "") or ""
@@ -163,7 +153,6 @@ async def x_resolve(req: Request):
     )
     cached = _cache_get(key)
     if cached:
-        # s-maxage mirrors fresh TTL by type
         smax = PROF_TTL if parsed["kind"] == "user" else TWEET_TTL
         return _json_response(cached, 200, smaxage=smax)
 
@@ -206,7 +195,6 @@ async def x_resolve(req: Request):
             _cache_set(key, payload, PROF_TTL, PROF_STALE)
             return _json_response(payload, 200, s_maxage=PROF_TTL)
 
-        # tweet
         url = (
             f"https://api.twitter.com/2/tweets/{parsed['id']}"
             f"?tweet.fields=created_at,public_metrics,entities,possibly_sensitive"
