@@ -6,7 +6,7 @@ decimal.getcontext().prec = 50
 
 WS_URL = "wss://testnet-rpc.monad.xyz"
 CONTRACTS = {
-    "ROUTER": "0x363D3D0ECe8995DfB9a4d6D7B76A6a4eFA70B7D7",
+    "ROUTER": "0x37C9089F28997b030b33a8d5C89bf19412D05572",
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
 EVENT_SIGS = {
