@@ -1,7 +1,10 @@
 from __future__ import annotations
-import os, time, json
+import os
+import time
+import json
 from typing import Any, Dict, Optional, Tuple
-from fastapi import APIRouter, Request, HTTPException
+
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 try:
@@ -11,51 +14,60 @@ except Exception:
 
 router = APIRouter()
 
-BEARER = os.getenv("X_BEARER_TOKEN")
+API_KEY = os.getenv("X_BEARER_TOKEN", "new1_455ca2672bbe4493808f4704350723cc")
 
-class _Entry:
-    __slots__ = ("value", "exp", "stale_exp")
-
-    def __init__(self, value: Any, exp: int, stale_exp: int) -> None:
-        self.value = value
-        self.exp = exp
-        self.stale_exp = stale_exp
-
-
-CACHE: Dict[str, _Entry] = {}
-
-PROF_TTL = 6 * 3600
-PROF_STALE = 24 * 3600
-TWEET_TTL = 3600
-TWEET_STALE = 6 * 3600
-
-
-def _now() -> int:
-    return int(time.time())
-
+CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL_MS = 1000 * 60 * 15
 
 def _cache_get(key: str) -> Optional[Any]:
-    e = CACHE.get(key)
-    if not e:
+    item = CACHE.get(key)
+    if not item:
         return None
-    n = _now()
-    if e.exp > n:
-        return e.value
-    if e.stale_exp > n:
-        v = dict(e.value)
-        v["_stale"] = True
-        return v
-    CACHE.pop(key, None)
+    if time.time() * 1000 > item["exp"]:
+        CACHE.pop(key, None)
+        return None
+    return item["data"]
+
+def _cache_set(key: str, data: Any) -> None:
+    CACHE[key] = {"data": data, "exp": int(time.time() * 1000) + CACHE_TTL_MS}
+
+def _respond(payload: Any, status: int = 200) -> JSONResponse:
+    return JSONResponse(
+        content=payload,
+        status_code=status,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "max-age=900, public",
+        },
+    )
+
+def _normalize_verified_type(a: dict | None) -> Optional[str]:
+    if not a:
+        return None
+    vt = str(a.get("verifiedType") or a.get("verified_type") or "").lower()
+    if vt and vt != "none":
+        return vt
+    if a.get("isBlueVerified"):
+        return "blue"
+    if (a.get("affiliatesHighlightedLabel") or {}).get("label", {}).get("user_label_type") == "BusinessLabel":
+        return "business"
+    if a.get("isVerified"):
+        return "blue"
     return None
 
-
-def _cache_set(key: str, value: Any, fresh_ttl: int, stale_ttl: int) -> None:
-    n = _now()
-    CACHE[key] = _Entry(value, n + fresh_ttl, n + stale_ttl)
-
+def _compute_verified_flag(a: dict | None) -> bool:
+    if not a:
+        return False
+    return bool(
+        a.get("isBlueVerified")
+        or a.get("isVerified")
+        or str(a.get("verifiedType") or "").lower() == "business"
+        or (a.get("affiliatesHighlightedLabel") or {}).get("label", {}).get("user_label_type") == "BusinessLabel"
+    )
 
 def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
-    s = input_s.strip()
+    s = (input_s or "").strip()
     if not s:
         return None
 
@@ -66,196 +78,210 @@ def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
 
     try:
         from urllib.parse import urlparse
-
+        import re
         u = urlparse(s)
         host = (u.hostname or "").lower()
         if not (host.endswith("x.com") or host.endswith("twitter.com")):
             return None
 
-        import re
-
-        t = re.match(r"^/([A-Za-z0-9_]{1,15})/status/(\d+)", u.path)
-        if t:
-            return {"kind": "tweet", "id": t.group(2)}
-
-        m = re.match(r"^/([A-Za-z0-9_]{1,15})(?:/|$)", u.path)
+        m = re.match(r"^/([A-Za-z0-9_]{1,15})/status/(\d+)", u.path)
         if m:
-            return {"kind": "user", "username": m.group(1)}
+            return {"kind": "tweet", "id": m.group(2)}
+
+        mc = re.match(r"^/i/communities/(\d+)", u.path)
+        if mc:
+            return {"kind": "community", "id": mc.group(1)}
+
+        mu = re.match(r"^/([A-Za-z0-9_]{1,15})(?:/|$)", u.path)
+        if mu:
+            return {"kind": "user", "username": mu.group(1)}
+
         return None
     except Exception:
         return None
 
-
-def _json_response(
-    payload: Any, status: int = 200, s_maxage: int = 3600
-) -> JSONResponse:
-    return JSONResponse(
-        content=payload,
-        status_code=status,
-        headers={
-            "Cache-Control": f"public, s-maxage={s_maxage}, stale-while-revalidate=86400",
-            "Content-Type": "application/json; charset=utf-8",
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
-
-
-def _process_media_url(media: dict) -> Optional[str]:
-    mtype = media.get("type")
-    if mtype == "photo":
-        return media.get("url") or media.get("preview_image_url")
-
-    if mtype in ("video", "animated_gif"):
-        variants = media.get("variants") or []
-        vids = [
-            v
-            for v in variants
-            if v.get("url") and "video" in (v.get("content_type") or "")
-        ]
-        vids.sort(key=lambda v: v.get("bit_rate", 0), reverse=True)
-        if vids:
-            for v in vids:
-                if v.get("content_type") == "video/mp4" or (".mp4" in v.get("url", "")):
-                    return v["url"]
-            return vids[0]["url"]
-
-        return media.get("url") or media.get("preview_image_url")
-
-    return media.get("url") or media.get("preview_image_url")
-
-
-async def _twitter_call(url: str, bearer: str) -> Tuple[int, str]:
+async def _fetch_with_retry(url: str, headers: Dict[str, str], retries: int = 1) -> Tuple[int, str]:
     if not httpx:
-        raise HTTPException(
-            status_code=500,
-            detail="httpx not installed; add `httpx` to requirements.txt",
-        )
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.get(url, headers={"Authorization": f"Bearer {bearer}"})
+        raise RuntimeError("httpx not installed; add `httpx` to requirements.txt")
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(url, headers=headers)
+        if r.status_code == 429 and retries > 0:
+            await asyncio_sleep(5.0)
+            return await _fetch_with_retry(url, headers, retries - 1)
         return r.status_code, r.text
 
+async def asyncio_sleep(sec: float) -> None:
+    import asyncio
+    await asyncio.sleep(sec)
+
+@router.post("/x")
+async def x_post(req: Request):
+    q = req.query_params.get("clear") or ""
+    if q == "1":
+        CACHE.clear()
+        return _respond({"message": "Backend CACHE cleared ✅"})
+    return _respond({"error": "Missing ?clear=1 param"}, 400)
+
 @router.get("/x")
-async def x_resolve(req: Request):
-    q = req.query_params.get("url", "") or ""
-    if not q:
-        return _json_response({"error": "Missing url"}, 400)
-    if not BEARER:
-        return _json_response({"error": "Missing X_BEARER_TOKEN on server"}, 500)
+async def x_get(req: Request):
+    if not API_KEY:
+        return _respond({"error": "Missing X_BEARER_TOKEN"}, 500)
 
-    parsed = _parse_input(q)
+    url_q = (req.query_params.get("url") or "").strip()
+    if not url_q:
+        return _respond({"error": "Missing url"}, 400)
+
+    parsed = _parse_input(url_q)
     if not parsed:
-        return _json_response({"error": "Unsupported X/Twitter URL or handle"}, 422)
+        return _respond({"error": "Unsupported X/Twitter URL or handle"}, 422)
 
-    key = (
-        f"u:{parsed['username'].lower()}"
-        if parsed["kind"] == "user"
-        else f"t:{parsed['id']}"
-    )
-    cached = _cache_get(key)
+    cache_key = json.dumps(parsed, sort_keys=True)
+    cached = _cache_get(cache_key)
     if cached:
-        smax = PROF_TTL if parsed["kind"] == "user" else TWEET_TTL
-        return _json_response(cached, 200, smaxage=smax)
+        return _respond(cached)
 
+    headers = {"X-API-Key": API_KEY}
     try:
         if parsed["kind"] == "user":
-            url = (
-                f"https://api.twitter.com/2/users/by/username/{parsed['username']}"
-                f"?user.fields=profile_image_url,profile_banner_url,verified,verified_type,created_at,"
-                f"public_metrics,description,location,url,protected,entities"
-            )
-            status, text = await _twitter_call(url, BEARER)
-
-            if status == 429:
-                stale = _cache_get(key)
-                if stale:
-                    return _json_response(stale, 200, s_maxage=300)
-                return _json_response({"error": "Rate limited (429)"}, 429)
-
+            url = f"https://api.twitterapi.io/twitter/user/info?userName={parsed['username']}"
+            status, text = await _fetch_with_retry(url, headers)
             if status < 200 or status >= 300:
-                return _json_response({"error": text or "Upstream error"}, status)
+                return _respond({"error": f"HTTP {status}: {text}"}, status)
+            j = json.loads(text)
+            u = j.get("data")
+            if not u:
+                return _respond({"error": "User not found"}, 404)
 
-            u = json.loads(text).get("data", {}) or {}
             payload = {
                 "kind": "user",
                 "user": {
                     "id": u.get("id"),
                     "name": u.get("name"),
-                    "username": u.get("username"),
-                    "avatar": u.get("profile_image_url"),
-                    "banner": u.get("profile_banner_url") or None,
-                    "verified": bool(u.get("verified")),
-                    "created_at": u.get("created_at"),
-                    "followers": (u.get("public_metrics") or {}).get("followers_count"),
-                    "following": (u.get("public_metrics") or {}).get("following_count"),
+                    "username": u.get("userName"),
+                    "avatar": u.get("profilePicture"),
+                    "banner": u.get("coverPicture") or None,
+                    "verified": _compute_verified_flag(u),
+                    "verified_type": _normalize_verified_type(u),
+                    "created_at": u.get("createdAt"),
+                    "followers": u.get("followers"),
+                    "following": u.get("following"),
                     "description": u.get("description") or "",
                     "location": u.get("location") or "",
-                    "url": q,
+                    "url": url_q,
                 },
             }
-            _cache_set(key, payload, PROF_TTL, PROF_STALE)
-            return _json_response(payload, 200, s_maxage=PROF_TTL)
+            _cache_set(cache_key, payload)
+            return _respond(payload)
 
-        url = (
-            f"https://api.twitter.com/2/tweets/{parsed['id']}"
-            f"?tweet.fields=created_at,public_metrics,entities,possibly_sensitive"
-            f"&expansions=author_id,attachments.media_keys"
-            f"&user.fields=name,username,profile_image_url,verified"
-            f"&media.fields=preview_image_url,url,width,height,type,variants,duration_ms"
-        )
-        status, text = await _twitter_call(url, BEARER)
+        if parsed["kind"] == "tweet":
+            url = f"https://api.twitterapi.io/twitter/tweets?tweet_ids={parsed['id']}"
+            status, text = await _fetch_with_retry(url, headers)
+            if status < 200 or status >= 300:
+                return _respond({"error": f"HTTP {status}: {text}"}, status)
+            j = json.loads(text)
+            t = (j.get("tweets") or [None])[0]
+            if not t:
+                return _respond({"error": "Tweet not found"}, 404)
 
-        if status == 429:
-            stale = _cache_get(key)
-            if stale:
-                return _json_response(stale, 200, s_maxage=300)
-            return _json_response({"error": "Rate limited (429)"}, 429)
+            media_items = (t.get("extendedEntities") or {}).get("media") or []
+            media: list[dict] = []
+            for m in media_items:
+                mtype = m.get("type")
+                if mtype == "photo":
+                    media.append({
+                        "type": "photo",
+                        "url": m.get("media_url_https") or m.get("media_url"),
+                    })
+                elif mtype in ("video", "animated_gif"):
+                    variants = ((m.get("video_info") or {}).get("variants") or [])
+                    mp4s = [v for v in variants if (v.get("content_type") == "video/mp4")]
+                    mp4s.sort(key=lambda v: v.get("bitrate", 0), reverse=True)
+                    url_pick = (mp4s[0]["url"] if mp4s else (m.get("url")))
+                    media.append({"type": mtype, "url": url_pick})
 
-        if status < 200 or status >= 300:
-            return _json_response({"error": text or "Upstream error"}, status)
-
-        j = json.loads(text)
-        t = j.get("data") or {}
-        author = (j.get("includes") or {}).get("users", [None])[0]
-        media_in = (j.get("includes") or {}).get("media") or []
-        media = [
-            {
-                "type": m.get("type"),
-                "url": _process_media_url(m),
-                "width": m.get("width"),
-                "height": m.get("height"),
-                "duration_ms": m.get("duration_ms"),
-            }
-            for m in media_in
-        ]
-
-        payload = {
-            "kind": "tweet",
-            "tweet": {
-                "id": t.get("id"),
-                "text": t.get("text"),
-                "created_at": t.get("created_at"),
-                "metrics": t.get("public_metrics") or {},
-                "possibly_sensitive": bool(t.get("possibly_sensitive")),
-                "media": media,
-            },
-            "author": (
-                {
+            author = t.get("author")
+            author_payload = None
+            if author:
+                author_payload = {
                     "id": author.get("id"),
                     "name": author.get("name"),
-                    "username": author.get("username"),
-                    "avatar": author.get("profile_image_url"),
-                    "verified": bool(author.get("verified")),
+                    "username": author.get("userName"),
+                    "avatar": author.get("profilePicture"),
+                    "verified": _compute_verified_flag(author),
+                    "verified_type": _normalize_verified_type(author),
+                    "followers": author.get("followers"),
+                    "following": author.get("following"),
+                    "created_at": author.get("createdAt"),
                 }
-                if author
-                else None
-            ),
-            "url": q,
-        }
 
-        _cache_set(key, payload, TWEET_TTL, TWEET_STALE)
-        return _json_response(payload, 200, s_maxage=TWEET_TTL)
+            payload = {
+                "kind": "tweet",
+                "tweet": {
+                    "id": t.get("id"),
+                    "text": t.get("text"),
+                    "created_at": t.get("createdAt"),
+                    "metrics": {
+                        "reply_count": t.get("replyCount") or t.get("reply_count") or 0,
+                        "retweet_count": t.get("retweetCount") or t.get("retweet_count") or 0,
+                        "like_count": t.get("likeCount") or t.get("like_count") or 0,
+                    },
+                    "possibly_sensitive": bool(t.get("possiblySensitive")),
+                    "is_reply": bool(t.get("isReply")),
+                    "in_reply_to_username": t.get("inReplyToUsername") or "",
+                    "media": media,
+                },
+                "author": author_payload,
+                "url": url_q,
+            }
+            _cache_set(cache_key, payload)
+            return _respond(payload)
 
-    except HTTPException:
-        raise
+        if parsed["kind"] == "community":
+            url = f"https://api.twitterapi.io/twitter/community/info?community_id={parsed['id']}"
+            status, text = await _fetch_with_retry(url, headers)
+            if status < 200 or status >= 300:
+                return _respond({"error": f"HTTP {status}: {text}"}, status)
+            j = json.loads(text)
+            comm = j.get("community_info")
+            if not comm:
+                return _respond({"error": "Community not found"}, 404)
+
+            def parse_user(obj: Optional[dict]) -> Optional[dict]:
+                if not obj:
+                    return None
+                u = obj.get("user") or obj
+                return {
+                    "id": u.get("id"),
+                    "name": u.get("name"),
+                    "username": u.get("userName") or u.get("username") or u.get("screen_name") or "",
+                    "avatar": u.get("profilePicture") or u.get("profile_image_url") or u.get("profile_image_url_https"),
+                    "verified": _compute_verified_flag(u),
+                    "verified_type": _normalize_verified_type(u),
+                    "description": u.get("description") or "",
+                    "followers": u.get("followers") or u.get("followers_count") or 0,
+                    "following": u.get("following") or u.get("following_count") or u.get("friends_count") or 0,
+                    "created_at": u.get("createdAt") or u.get("created_at"),
+                }
+
+            payload = {
+                "kind": "community",
+                "community": {
+                    "id": comm.get("id"),
+                    "name": comm.get("name"),
+                    "description": comm.get("description") or "",
+                    "member_count": comm.get("member_count") or 0,
+                    "created_at": comm.get("created_at"),
+                    "banner_url": comm.get("banner_url") or None,
+                    "creator": parse_user(comm.get("creator")),
+                    "admin": parse_user(comm.get("admin")),
+                    "members_preview": comm.get("members_preview") or [],
+                },
+                "url": url_q,
+            }
+            _cache_set(cache_key, payload)
+            return _respond(payload)
+
+        return _respond({"error": "Unhandled kind"}, 500)
+
     except Exception as e:
-        return _json_response({"error": getattr(e, "message", repr(e))}, 500)
+        return _respond({"error": getattr(e, "message", repr(e))}, 500)
