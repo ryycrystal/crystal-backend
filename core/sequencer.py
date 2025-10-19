@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List
 
-import helpers as h
+from core import chain as h
+import modules.launchpad as lp
 import models
 import state as _st
-
 
 class Sequencer:
     def __init__(self, global_state: _st.State) -> None:
@@ -36,12 +36,12 @@ class Sequencer:
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"TC": 0, "LT": 0}
+        counts = {"TC": 0, "LT": 0, "TR": 0}
         seen = set()
 
         for log in logs:
             txh = log.get("transactionHash")
-            li  = log.get("logIndex")
+            li = log.get("logIndex")
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
             uid = (txh, lii)
             
@@ -53,7 +53,7 @@ class Sequencer:
             if tag:
                 counts[tag] += 1
 
-            if tag not in ("LT", "TC"):
+            if tag not in ("LT", "TC", "TR"):
                 continue
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
