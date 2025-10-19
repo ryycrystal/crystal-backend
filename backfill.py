@@ -4,8 +4,8 @@ import argparse
 import uuid
 import websockets
 
-import helpers as h
-from sequencer import SEQUENCER
+from core import chain as h
+from core.sequencer import SEQUENCER
 
 def parse_args():
     parser = argparse.ArgumentParser(description="backfiller")

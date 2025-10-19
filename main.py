@@ -3,8 +3,8 @@ import sys
 import uvicorn
 from fastapi import FastAPI
 
-from api import app as api_app
-from stream import stream_logs
+from api.api import app as api_app
+from core.stream import stream_logs
 
 app: FastAPI = api_app
 
