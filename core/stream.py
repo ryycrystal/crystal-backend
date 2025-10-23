@@ -1,9 +1,10 @@
-import json, asyncio, time, uuid, sys, websockets
+import json, asyncio, time, uuid, sys, websockets, urllib.request
 from collections import deque
 
 from core import chain as h
-import modules.launchpad as lp
 import backfill
+from state import RPC_HTTP
+import state as _st
 
 from core.sequencer import SEQUENCER
 
@@ -12,6 +13,52 @@ BACKFILL_BATCH = 100
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
+
+def _rpc_batch(calls: list[dict]) -> list[dict]:
+    payload = json.dumps(calls).encode()
+    req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type":"application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+async def vault_sampler(state: _st.State):
+    rid = 100000
+    while True:
+        try:
+            meta = state.vault_meta()
+            if not meta:
+                await asyncio.sleep(5); continue
+
+            calls = [{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]
+            rid += 1
+            res0 = _rpc_batch(calls)[0]["result"]
+            blk_hex = res0
+            blk_num = int(blk_hex, 16)
+            ts = state._bt.ts(blk_num)
+
+            calls = []
+            for v, (quote, base) in meta.items():
+                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_getBalance","params":[v, blk_hex]}); rid += 1
+                data_q = "0x70a08231" + "0"*24 + v[2:]
+                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_call","params":[{"to": quote, "data": data_q}, blk_hex]}); rid += 1
+                data_b = "0x70a08231" + "0"*24 + v[2:]
+                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_call","params":[{"to": base, "data": data_b}, blk_hex]}); rid += 1
+
+            results = _rpc_batch(calls)
+            
+            i = 0
+            for v, (_q, _b) in meta.items():
+                mon_hex = results[i]["result"]; i += 1
+                q_hex = results[i]["result"]; i += 1
+                b_hex = results[i]["result"]; i += 1
+                mon_bal = int(mon_hex, 16)
+                quote_bal = int(q_hex, 16)
+                base_bal = int(b_hex, 16)
+                state.apply_vault_snapshot(v, blk_num, ts, mon_bal, quote_bal, base_bal, total_shares=0)
+
+        except Exception:
+            pass
+
+        await asyncio.sleep(5)
 
 
 def _add_missing(blk: int):

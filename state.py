@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, Deque, List, Tuple
 from collections import deque
 from decimal import Decimal, getcontext
+from core import chain as h
 import json
 import urllib.request
 import time
@@ -11,7 +12,7 @@ import models
 getcontext().prec = 50
 
 INTERVALS = (300, 3600, 21600, 86400)
-LABEL = {300:"5m", 3600:"1h", 21600:"6h", 86400:"24h"}
+LABEL = { 300:"5m", 3600:"1h", 21600:"6h", 86400:"24h" }
 
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
 
@@ -22,6 +23,23 @@ class _Evt:
     native_vol: int
     token_amt: int
     native_per_token: Decimal
+
+@dataclass(slots=True)
+class _VaultSnap:
+    ts: int
+    block: int
+    mon_bal: int
+    quote_bal: int
+    base_bal: int
+    total_shares: int = 0
+
+@dataclass(slots=True)
+class _BinPoint:
+    ts: int
+    mon_bal: int
+    quote_bal: int
+    base_bal: int
+    total_shares: int
 
 class _BlockTimeCache:
     def __init__(self) -> None:
@@ -68,12 +86,18 @@ class State:
         self._events: Dict[str, Deque[_Evt]] = {}
         self._created_at_block: Dict[str, int] = {}
         self._bt = _BlockTimeCache()
+        self._mon_usd: Decimal = Decimal(0)
+        self._vault_meta: Dict[str, Tuple[str, str]] = {}
+        self._vault_last_min: Dict[str, _VaultSnap] = {}
+        self._vault_bins: Dict[str, Dict[int, Deque[_BinPoint]]] = {}
+        self._vault_bin_sizes = (3600, 21600, 43200, 86400)
+        self._vault_retention = {3600: 86400, 21600: 7*86400, 43200: 14*86400, 86400: 30*86400}
 
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
         token = ev.token.lower()
 
         native_amt = ev.amount_in if ev.is_buy else ev.amount_out
-        token_amt  = ev.amount_out if ev.is_buy else ev.amount_in
+        token_amt = ev.amount_out if ev.is_buy else ev.amount_in
 
         if token_amt <= 0:
             price = Decimal(0)
@@ -93,6 +117,94 @@ class State:
         token = ev.token.lower()
         self._created_at_block.setdefault(token, ev.block_number)
         self._events.setdefault(token, deque())
+    
+    def apply_trade(self, ev: models.Trade, _log_addr: str) -> None:
+        mon_usd_addr = h.CONTRACTS.get("MON_USD_PAIR", "").lower()
+        if not mon_usd_addr:
+            return
+        if ev.market.lower() != mon_usd_addr:
+            return
+
+        if ev.end_price:
+            try:
+                self._mon_usd = Decimal(ev.end_price) / 1e9
+                return
+            except Exception:
+                pass
+
+        ain, aout = int(ev.amount_in), int(ev.amount_out)
+        if ev.is_buy:
+            if ain != 0:
+                self._mon_usd = Decimal(aout) / Decimal(ain)
+        else:
+            if aout != 0:
+                self._mon_usd = Decimal(ain) / Decimal(aout)
+
+    def mon_usd_price(self) -> float:
+        return float(self._mon_usd) if self._mon_usd else 0.0
+
+    def register_vault(self, vault: str, quote: str, base: str) -> None:
+        v = vault.lower()
+        self._vault_meta.setdefault(v, (quote.lower(), base.lower()))
+        
+        if v not in self._vault_bins:
+            self._vault_bins[v] = {b: deque() for b in self._vault_bin_sizes}
+
+    def apply_vault_snapshot(
+        self, vault: str, blk: int, ts: int,
+        mon_bal: int, quote_bal: int, base_bal: int,
+        total_shares: int = 0
+    ) -> None:
+        v = vault.lower()
+        snap = _VaultSnap(ts, blk, mon_bal, quote_bal, base_bal, total_shares)
+        self._vault_last_min[v] = snap
+        
+        for b in self._vault_bin_sizes:
+            bucket_ts = ts - (ts % b)
+            dq = self._vault_bins.setdefault(v, {}).setdefault(b, deque())
+            
+            if dq and dq[-1].ts == bucket_ts:
+                dq[-1] = _BinPoint(bucket_ts, mon_bal, quote_bal, base_bal, total_shares)
+            else:
+                dq.append(_BinPoint(bucket_ts, mon_bal, quote_bal, base_bal, total_shares))
+                
+            horizon = self._vault_retention[b]
+            cut = ts - horizon
+            
+            while dq and dq[0].ts < cut:
+                dq.popleft()
+
+    def vault_meta(self) -> Dict[str, Tuple[str, str]]:
+        return dict(self._vault_meta)
+
+    def vault_latest_minute(self, vault: str) -> Dict[str, int]:
+        s = self._vault_last_min.get(vault.lower())
+        
+        if not s: return {}
+        
+        return {
+            "ts": s.ts, 
+            "block": s.block, 
+            "mon_bal": s.mon_bal,
+            "quote_bal": s.quote_bal, 
+            "base_bal": s.base_bal,
+            "total_shares": s.total_shares
+        }
+
+    def vault_series(self, vault: str, horizon: str) -> List[Dict[str, int]]:
+        map_bin = {"1d":3600, "7d":21600, "14d":43200, "30d":86400}
+        b = map_bin[horizon]
+        dq = self._vault_bins.get(vault.lower(), {}).get(b, deque())
+        return [
+            {
+                "ts": p.ts, 
+                "mon_bal": p.mon_bal, 
+                "quote_bal": p.quote_bal,
+                "base_bal": p.base_bal, 
+                "total_shares": p.total_shares
+            } 
+            for p in dq
+        ]
 
     def _compute_token_snapshot(self, token: str) -> dict[int, dict]:
         token = token.lower()
