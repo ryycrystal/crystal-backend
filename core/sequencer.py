@@ -36,7 +36,7 @@ class Sequencer:
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"TC": 0, "LT": 0, "TR": 0}
+        counts = {"TC": 0, "LT": 0, "TR": 0, "VC": 0}
         seen = set()
 
         for log in logs:
@@ -53,18 +53,24 @@ class Sequencer:
             if tag:
                 counts[tag] += 1
 
-            if tag not in ("LT", "TC", "TR"):
+            if tag not in ("LT", "TC", "TR", "VC"):
                 continue
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
             if tag == "LT":
                 ev = self._to_launchpad_trade(parsed, blk)
                 self._state.apply_launchpad_trade(ev, log["address"].lower())
-            else:
+            elif tag == "TC":
                 ev = self._to_token_created(parsed, blk)
                 self._state.apply_token_created(ev, log["address"].lower())
+            elif tag == "TR":
+                ev = self._to_trade(parsed, blk)
+                self._state.apply_trade(ev, log["address"].lower())
+            elif tag == "VC":
+                ev = self._to_vault_created(parsed, blk)
+                self._state.register_vault(ev.vault, ev.quote, ev.base)
         
-        print(f"[SQ] {blk}: TC {counts['TC']}  LT {counts['LT']}")
+        print(f"[SQ] {blk}: TC {counts['TC']} LT {counts['LT']} TR {counts['TR']} VC {counts['VC']}")
 
     @staticmethod
     def _to_launchpad_trade(d: dict, blk: int) -> models.LaunchpadTrade:
@@ -85,6 +91,28 @@ class Sequencer:
             block_number=blk,
             token=d.get("token", d.get("caller","")).lower(),
             creator=d.get("creator","").lower(),
+        )
+    
+    @staticmethod
+    def _to_trade(d: dict, blk: int) -> models.Trade:
+        return models.Trade(
+            block_number=blk,
+            market=d.get("market", "").lower(),
+            user=d.get("user", "").lower(),
+            is_buy=bool(d.get("is_buy", False)),
+            amount_in=int(d.get("amount_in", 0)),
+            amount_out=int(d.get("amount_out", 0)),
+            start_price=int(d.get("start_price", 0)),
+            end_price=int(d.get("end_price", 0)),
+        )
+    
+    @staticmethod
+    def _to_vault_created(d: dict, blk: int) -> models.VaultCreated:
+        return models.VaultCreated(
+            block_number=blk,
+            vault=d.get("vault","").lower(),
+            quote=d.get("quote","").lower(),
+            base=d.get("base","").lower(),
         )
 
 SEQUENCER = Sequencer(_st.State())
