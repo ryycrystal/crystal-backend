@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.sequencer import SEQUENCER
 from state import INTERVALS, LABEL
-from api.ws import router as ws_router
 from api.x_api import router as x_router
 
 app = FastAPI(title="pre-migration launchpad token stats", version="0.1.0")
@@ -18,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(ws_router)
 app.include_router(x_router)
 
 @app.get("/health")
