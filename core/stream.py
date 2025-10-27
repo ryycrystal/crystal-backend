@@ -26,7 +26,8 @@ async def vault_sampler(state: _st.State):
         try:
             meta = state.vault_meta()
             if not meta:
-                await asyncio.sleep(5); continue
+                await asyncio.sleep(5)
+                continue
 
             calls = [{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]
             rid += 1
@@ -43,7 +44,9 @@ async def vault_sampler(state: _st.State):
                 data_b = "0x70a08231" + "0"*24 + v[2:]
                 calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_call","params":[{"to": base, "data": data_b}, blk_hex]}); rid += 1
 
+            print(calls)
             results = _rpc_batch(calls)
+            print(results)
             
             i = 0
             for v, (_q, _b) in meta.items():
@@ -56,6 +59,7 @@ async def vault_sampler(state: _st.State):
                 state.apply_vault_snapshot(v, blk_num, ts, mon_bal, quote_bal, base_bal, total_shares=0)
 
         except Exception:
+            print("error")
             pass
 
         await asyncio.sleep(5)

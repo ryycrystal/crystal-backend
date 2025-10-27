@@ -87,7 +87,7 @@ class State:
         self._created_at_block: Dict[str, int] = {}
         self._bt = _BlockTimeCache()
         self._mon_usd: Decimal = Decimal(0)
-        self._vault_meta: Dict[str, Tuple[str, str]] = {}
+        self._vault_meta: Dict[str, Tuple[str, str]] = {"0x699f8882572fcb47b6264c99f588999f0e7ad73e": ("0xf817257fed379853cde0fa4f97ab987181b1e5ea", "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701")} # {}
         self._vault_last_min: Dict[str, _VaultSnap] = {}
         self._vault_bins: Dict[str, Dict[int, Deque[_BinPoint]]] = {}
         self._vault_bin_sizes = (3600, 21600, 43200, 86400)
