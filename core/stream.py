@@ -26,7 +26,7 @@ async def vault_sampler(state: _st.State):
         try:
             meta = state.vault_meta()
             if not meta:
-                await asyncio.sleep(5)
+                await asyncio.sleep(300)
                 continue
 
             calls = [{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]
@@ -37,32 +37,27 @@ async def vault_sampler(state: _st.State):
             ts = state._bt.ts(blk_num)
 
             calls = []
-            for v, (quote, base) in meta.items():
-                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_getBalance","params":[v, blk_hex]}); rid += 1
-                data_q = "0x70a08231" + "0"*24 + v[2:]
-                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_call","params":[{"to": quote, "data": data_q}, blk_hex]}); rid += 1
-                data_b = "0x70a08231" + "0"*24 + v[2:]
-                calls.append({"jsonrpc":"2.0","id":rid,"method":"eth_call","params":[{"to": base, "data": data_b}, blk_hex]}); rid += 1
+            for v, (_quote, _base) in meta.items():
+                calls.append({
+                    "jsonrpc":"2.0","id":rid,"method":"eth_call",
+                    "params":[{"to": v.lower(), "data": "0x00113e08"}, blk_hex]
+                }); rid += 1
 
-            print(calls)
             results = _rpc_batch(calls)
-            print(results)
             
             i = 0
-            for v, (_q, _b) in meta.items():
-                mon_hex = results[i]["result"]; i += 1
-                q_hex = results[i]["result"]; i += 1
-                b_hex = results[i]["result"]; i += 1
-                mon_bal = int(mon_hex, 16)
-                quote_bal = int(q_hex, 16)
-                base_bal = int(b_hex, 16)
-                state.apply_vault_snapshot(v, blk_num, ts, mon_bal, quote_bal, base_bal, total_shares=0)
+            for v, _ in meta.items():
+                ret = results[i]["result"]; i += 1
+                s = ret[2:].rjust(64 * 4, "0")
+                quote_bal = int(s[128:192], 16)
+                base_bal = int(s[192:256], 16)
+                state.apply_vault_snapshot(v, blk_num, ts, 0, quote_bal, base_bal, total_shares=0)
 
         except Exception:
-            print("error")
+            print(f"[SAMPLER][error] {e!r}")
             pass
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(300)
 
 
 def _add_missing(blk: int):
