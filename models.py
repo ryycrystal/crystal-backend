@@ -35,3 +35,26 @@ class VaultCreated:
     vault: str
     quote: str
     base: str
+    
+@dataclass(slots=True)
+class MarketInfo:
+    isCanonical: bool
+    quoteAsset: str
+    baseAsset: str
+    market: str
+    quoteAddress: str
+    quoteDecimals: int
+    quoteTicker: str
+    quoteName: str
+    baseAddress: str
+    baseDecimals: int
+    baseTicker: str
+    baseName: str
+    marketId: int
+    marketType: int
+    scaleFactor: int
+    tickSize: int
+    maxPrice: int
+    minSize: int
+    takerFee: int
+    makerRebate: int

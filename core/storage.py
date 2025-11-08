@@ -1,58 +1,108 @@
-import os, json, time
-from typing import Dict, Tuple, Iterable
-from src import Store as _Store
+from __future__ import annotations
+import json
+import gzip
+import os
+import time
+from typing import Any, Dict, Deque
+from collections import deque
+from state import _BinPoint
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+SNAP_PATH = "snapshot.json.gz"
+VERSION = 1
 
-try:
-    _rust = True
-except Exception:
-    _rust = False
+def _atomic_write(path: str, data: bytes) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
-if _rust:
-    _store = _Store(os.environ.get("REDIS_URL"))
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
-    def init(): _store.ping()
+def _to_serializable_state(state) -> Dict[str, Any]:
+    meta = state.vault_meta()
+    bins_out: Dict[str, Dict[str, list]] = {}
 
-    def set_last_indexed_block(blk: int) -> None: _store.set_last_block(blk)
-    def get_last_indexed_block() -> int | None: return _store.get_last_block()
+    vault_bins = getattr(state, "_vault_bins", {})
+    for v, bucket_map in vault_bins.items():
+        v_lower = v.lower()
+        v_obj: Dict[str, list] = {}
+        for bucket, dq in bucket_map.items():
+            series = []
+            for p in dq:
+                series.append([
+                    int(p.ts),
+                    str(int(p.mon_bal)),
+                    str(int(p.quote_bal)),
+                    str(int(p.base_bal)),
+                    str(int(p.total_shares)),
+                ])
+            v_obj[str(int(bucket))] = series
+        bins_out[v_lower] = v_obj
 
-    def upsert_vault_meta(vault: str, quote: str, base: str) -> None:
-        _store.upsert_vault_meta({vault.lower(): (quote.lower(), base.lower())})
+    out = {
+        "version": VERSION,
+        "saved_at_ms": _now_ms(),
+        "meta": {v.lower(): [q, b] for v, (q, b) in meta.items()},
+        "bins": bins_out,
+        "last_block": getattr(state, "_last_block_cursor", None),
+    }
+    return out
 
-    def load_vault_meta() -> Dict[str, Tuple[str, str]]:
-        return _store.load_vault_meta()
+def _from_serialized_state(state, payload: Dict[str, Any]) -> int | None:
+    meta = payload.get("meta", {})
+    for v, pair in meta.items():
+        q, b = pair
+        state.register_vault(v, q, b)
 
-    def upsert_vault_bins(vault: str, bucket: int, points: Iterable[tuple[int,int,int,int,int]]) -> None:
-        _store.upsert_vault_bins(vault.lower(), int(bucket), list(points))
 
-    def load_vault_bins(vault: str):
-        return _store.load_vault_bins(vault.lower())
+    bins = payload.get("bins", {})
+    state._vault_bins = getattr(state, "_vault_bins", {})
+    for v, bucket_map in bins.items():
+        v_lower = v.lower()
+        state._vault_bins.setdefault(v_lower, {})
+        for bucket_str, series in bucket_map.items():
+            dq: Deque[_BinPoint] = deque()
+            for ts, mon, qb, bb, sh in series:
+                dq.append(_BinPoint(
+                    ts=int(ts),
+                    mon_bal=int(mon),
+                    quote_bal=int(qb),
+                    base_bal=int(bb),
+                    total_shares=int(sh),
+                ))
+            state._vault_bins[v_lower][int(bucket_str)] = dq
 
-    def store_snapshot(state) -> None:
-        meta = state.vault_meta()
-        if meta:
-            _store.upsert_vault_meta({v.lower(): (q.lower(), b.lower()) for v,(q,b) in meta.items()})
-        for v in meta.keys():
-            buckets = state._vault_bins.get(v.lower(), {})
-            for bucket, dq in buckets.items():
-                if dq:
-                    pts = [(p.ts, p.mon_bal, p.quote_bal, p.base_bal, p.total_shares) for p in dq]
-                    _store.upsert_vault_bins(v.lower(), int(bucket), pts)
+    last_block = payload.get("last_block")
+    if last_block is not None:
+        try:
+            last_block = int(last_block)
+        except Exception:
+            last_block = None
+    state._last_block_cursor = last_block
+    return last_block
 
-    def load_snapshot(state) -> int | None:
-        meta = _store.load_vault_meta()
-        for v,(q,b) in meta.items():
-            state.register_vault(v, q, b)
-        from collections import deque
-        from state import _BinPoint
-        for v in meta.keys():
-            bucket_map = _store.load_vault_bins(v)
-            state._vault_bins.setdefault(v.lower(), {})
-            for bucket, rows in bucket_map.items():
-                dq = state._vault_bins[v.lower()].get(bucket) or deque()
-                dq.clear()
-                for ts, mon, qbal, bbal, sh in rows:
-                    dq.append(_BinPoint(ts=ts, mon_bal=mon, quote_bal=qbal, base_bal=bbal, total_shares=sh))
-                state._vault_bins[v.lower()][bucket] = dq
-        return get_last_indexed_block()
+def save(state) -> None:
+    payload = _to_serializable_state(state)
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    comp = gzip.compress(raw, compresslevel=5)
+    _atomic_write(SNAP_PATH, comp)
+
+def load(state) -> int | None:
+    if not os.path.exists(SNAP_PATH):
+        return None
+    try:
+        with gzip.open(SNAP_PATH, "rb") as f:
+            raw = f.read()
+        payload = json.loads(raw.decode("utf-8"))
+        if int(payload.get("version", 0)) != VERSION:
+            pass
+        return _from_serialized_state(state, payload)
+    except Exception as e:
+        print(f"[Snapshot][load][error] {e!r}")
+        return None
+
+def set_last_indexed_block(state, blk: int) -> None:
+    state._last_block_cursor = int(blk)
