@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Callable, Optional
 
 from core import chain as h
 import modules.launchpad as lp
@@ -14,6 +14,10 @@ class Sequencer:
         self._logs_by_block: Dict[int, List[dict]] = defaultdict(list)
         self._ready_blocks: set[int] = set()
         self._next_block: int | None = None
+        self._on_block: Optional[Callable[[int], None]] = None
+    
+    def set_on_block(self, fn: Callable[[int], None]) -> None:
+        self._on_block = fn
 
     def add_log(self, raw_log: dict) -> None:
         blk = int(raw_log["blockNumber"], 16) if isinstance(raw_log["blockNumber"], str) else raw_log["blockNumber"]
@@ -33,6 +37,11 @@ class Sequencer:
             logs = self._logs_by_block.pop(self._next_block, [])
             self._ready_blocks.discard(self._next_block)
             self._process_block(self._next_block, logs)
+            if self._on_block:
+                try:
+                    self._on_block(self._next_block)
+                except Exception as e:
+                    print(f"[SQ][persist][error] {e!r}")
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):

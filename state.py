@@ -15,6 +15,7 @@ INTERVALS = (300, 3600, 21600, 86400)
 LABEL = { 300:"5m", 3600:"1h", 21600:"6h", 86400:"24h" }
 
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
+USDC_ADDR = "0xf817257fed379853cde0fa4f97ab987181b1e5ea"
 
 @dataclass(slots=True)
 class _Evt:
@@ -87,11 +88,16 @@ class State:
         self._created_at_block: Dict[str, int] = {}
         self._bt = _BlockTimeCache()
         self._mon_usd: Decimal = Decimal(0)
-        self._vault_meta: Dict[str, Tuple[str, str]] = {"0x699f8882572fcb47b6264c99f588999f0e7ad73e": ("0xf817257fed379853cde0fa4f97ab987181b1e5ea", "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701")} # {}
+        self._vault_meta: Dict[str, Tuple[str, str]] = {}
         self._vault_last_min: Dict[str, _VaultSnap] = {}
         self._vault_bins: Dict[str, Dict[int, Deque[_BinPoint]]] = {}
         self._vault_bin_sizes = (3600, 21600, 43200, 86400)
         self._vault_retention = {3600: 86400, 21600: 7*86400, 43200: 14*86400, 86400: 30*86400}
+        self.addressToMarket: Dict[str, List[models.MarketInfo]] = {}
+        self.tokenToPrice: Dict[str, Decimal] = {}
+        self.tokenGraph: Dict[str, models.MarketInfo] = {}
+        self.pathToUSDC: Dict[str, List[str]] = {}
+        self.tokenToPrice["0xf817257fed379853cde0fa4f97ab987181b1e5ea"] = Decimal(1)
 
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
         token = ev.token.lower()
@@ -118,30 +124,108 @@ class State:
         self._created_at_block.setdefault(token, ev.block_number)
         self._events.setdefault(token, deque())
     
-    def apply_trade(self, ev: models.Trade, _log_addr: str) -> None:
-        mon_usd_addr = h.CONTRACTS.get("MON_USD_PAIR", "").lower()
-        if not mon_usd_addr:
-            return
-        if ev.market.lower() != mon_usd_addr:
+    def apply_market_created(self, ev: models.MarketInfo, _log_addr: str) -> None:
+        if not ev.isCanonical:
             return
 
+        base = ev.baseAddress.lower()
+
+        lst = self.addressToMarket.setdefault(base, [])
+        lst.append(ev)
+
+        target = USDC_ADDR.lower()
+        if base == target:
+            self.pathToUSDC[base] = [base]
+            return
+
+        visited: Dict[str, bool] = {}
+        prev_token: Dict[str, str] = {}
+        prev_edge: Dict[str, models.MarketInfo] = {}
+
+        queue: List[str] = []
+        queue.append(base)
+        visited[base] = True
+
+        found = False
+        qi = 0
+        while qi < len(queue):
+            u = queue[qi]
+            qi += 1
+            for m in self.addressToMarket.get(u, []):
+                v = m.quoteAddress.lower()
+                if v in visited:
+                    continue
+                visited[v] = True
+                prev_token[v] = u
+                prev_edge[v] = m
+                if v == target:
+                    found = True
+                    queue.clear()
+                    break
+                queue.append(v)
+
+        if found:
+            tokens_rev: List[str] = []
+            cur = target
+            while cur != base:
+                tokens_rev.append(cur)
+                cur = prev_token[cur]
+            tokens_rev.append(base)
+            tokens = list(reversed(tokens_rev))
+            self.pathToUSDC[base] = tokens
+
+            first_hop_token = tokens[1] if len(tokens) > 1 else target
+            self.tokenGraph[base] = prev_edge[first_hop_token]
+        else:
+            self.pathToUSDC[base] = []
+            if base not in self.tokenToPrice:
+                self.tokenToPrice[base] = Decimal(0)
+    
+
+    def apply_trade(self, ev: models.Trade, _log_addr: str) -> None:
+        maddr = ev.market.lower()
+        mi: models.MarketInfo | None = None
+
+        for _, markets in self.addressToMarket.items():
+            for m in markets:
+                if m.market.lower() == maddr:
+                    mi = m
+                    break
+            if mi is not None:
+                break
+
+        if mi is None:
+            return
+
+        base = mi.baseAddress.lower()
+        quote = mi.quoteAddress.lower()
+        
+        pf = int(mi.quoteDecimals) + int(mi.scaleFactor) - int(mi.baseDecimals)
+        if pf < 0:
+            return
+
+        price_unscaled = Decimal(0)
         if ev.end_price:
             try:
-                self._mon_usd = Decimal(ev.end_price) / 1e9
-                return
+                price_unscaled = Decimal(ev.end_price) / (Decimal(10) ** pf)
             except Exception:
-                pass
+                price_unscaled = Decimal(0)
 
-        ain, aout = int(ev.amount_in), int(ev.amount_out)
-        if ev.is_buy:
-            if ain != 0:
-                self._mon_usd = Decimal(aout) / Decimal(ain)
-        else:
-            if aout != 0:
-                self._mon_usd = Decimal(ain) / Decimal(aout)
+        if price_unscaled <= 0:
+            if base not in self.tokenToPrice:
+                self.tokenToPrice[base] = Decimal(0)
+            return
 
-    def mon_usd_price(self) -> float:
-        return float(self._mon_usd) if self._mon_usd else 0.0
+        quote_usdc = self.tokenToPrice.get(quote, Decimal(0))
+        if quote_usdc <= 0:
+            self.tokenToPrice.setdefault(base, Decimal(0))
+            return
+
+        self.tokenToPrice[base] = price_unscaled * quote_usdc
+
+    def token_price(self, token: str) -> float:
+        v = self.tokenToPrice.get(token.lower())
+        return float(v) if v is not None else 0.0
 
     def register_vault(self, vault: str, quote: str, base: str) -> None:
         v = vault.lower()
