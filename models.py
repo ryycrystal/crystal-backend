@@ -48,6 +48,7 @@ class Vault:
     circulatingShares: int
     quoteDecimals: int
     baseDecimals: int
+    timestamp: int
     
 @dataclass(slots=True)
 class VaultBalance:

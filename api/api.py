@@ -1,29 +1,55 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Deque
-from decimal import Decimal
-
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import time
 
 from core.sequencer import SEQUENCER
 from state import INTERVALS, LABEL
 from api.x_api import router as x_router
 import models
 
-_TIMEFRAME_MAP = {
-    1: "day",
-    2: "week",
-    3: "month",
-    4: "all",
+_TIMEFRAME_SEC = {
+    1: 86400,
+    2: 7 * 86400,
+    3: 30 * 86400,
+    4: 10 * 365 * 86400,
 }
+
+def _pick_effective_step(age_sec: int, requested_window: int) -> int:
+    window = min(max(0, age_sec), max(0, requested_window))
+    if window >= 30 * 86400 and age_sec >= 30 * 86400:
+        return 86400
+    if window >= 7 * 86400:
+        return 21600
+    if window >= 86400:
+        return 3600
+    return 900
+
+def _row_to_dict(b: Any) -> Dict[str, Any]:
+    if isinstance(b, dict):
+        return {
+            "block": int(b.get("block", 0)),
+            "timestamp": int(b.get("timestamp", 0)),
+            "quoteBalance": int(b.get("quoteBalance", 0)),
+            "baseBalance": int(b.get("baseBalance", 0)),
+            "usdValue": float(b.get("usdValue", 0.0)),
+        }
+    return {
+        "block": int(getattr(b, "block", 0)),
+        "timestamp": int(getattr(b, "timestamp", 0)),
+        "quoteBalance": int(getattr(b, "quoteBalance", 0)),
+        "baseBalance": int(getattr(b, "baseBalance", 0)),
+        "usdValue": float(getattr(b, "usdValue", 0.0)),
+    }
 
 def _pick_bucket(vaddr: str) -> Dict[int, Deque[models.VaultBalance]]:
     st = SEQUENCER._state
     return {
-        1: st.vaultBalancesDay.get(vaddr, None),
-        2: st.vaultBalancesWeek.get(vaddr, None),
-        3: st.vaultBalancesMonth.get(vaddr, None),
-        4: st.vaultBalancesAllTime.get(vaddr, None),
+        900: st.vaultBalancesDay.get(vaddr, None),
+        3600: st.vaultBalancesWeek.get(vaddr, None),
+        21600: st.vaultBalancesMonth.get(vaddr, None),
+        86400: st.vaultBalancesAllTime.get(vaddr, None),
     }
 
 app = FastAPI(title="backend", version="0.1.0")
@@ -220,28 +246,29 @@ def vault_history(
     if not v:
         raise HTTPException(status_code=404, detail="vault not found")
 
-    if timeframe not in _TIMEFRAME_MAP:
+    if timeframe not in _TIMEFRAME_SEC:
         raise HTTPException(status_code=400, detail="invalid timeframe")
 
-    def _row_to_dict(b: Any) -> Dict[str, Any]:
-        if isinstance(b, dict):
-            return {
-                "block": int(b.get("block", 0)),
-                "timestamp": int(b.get("timestamp", 0)),
-                "quoteBalance": int(b.get("quoteBalance", 0)),
-                "baseBalance": int(b.get("baseBalance", 0)),
-                "usdValue": float(b.get("usdValue", 0.0)),
-            }
-        return {
-            "block": int(getattr(b, "block", 0)),
-            "timestamp": int(getattr(b, "timestamp", 0)),
-            "quoteBalance": int(getattr(b, "quoteBalance", 0)),
-            "baseBalance": int(getattr(b, "baseBalance", 0)),
-            "usdValue": float(getattr(b, "usdValue", 0.0)),
-        }
+    now = int(time.time())
+    created_ts = int(getattr(v, "timestamp", 0)) or 0
+    age = max(0, now - created_ts)
+
+    requested_window = _TIMEFRAME_SEC[timeframe]
+    step = _pick_effective_step(age, requested_window)
 
     buckets = _pick_bucket(vaddr)
-    dq = buckets.get(timeframe)
+    dq = buckets.get(step)
+
+    if (not dq) or len(dq) == 0:
+        for fallback in [3600, 21600, 900, 86400]:
+            if fallback == step:
+                continue
+            cand = buckets.get(fallback)
+            if cand and len(cand) > 0:
+                dq = cand
+                step = fallback
+                break
+
     if not dq or len(dq) == 0:
         return {
             "ok": True,
@@ -253,9 +280,10 @@ def vault_history(
                 "base": v.base,
                 "locked": v.locked,
                 "closed": v.closed,
+                "circulatingShares": int(v.circulatingShares),
             },
             "series": {"tvl": [], "pnl": []},
-            "info": {"timeframe": _TIMEFRAME_MAP[timeframe], "count": 0},
+            "info": {"step": step, "count": 0, "effectiveWindowSec": 0},
         }
 
     pts_raw = list(dq)[-limit:] if limit and limit > 0 else list(dq)
@@ -277,6 +305,8 @@ def vault_history(
             "pnlPct": pnl_pct,
         })
 
+    effective_window = pts[-1]["timestamp"] - pts[0]["timestamp"] if len(pts) >= 2 else 0
+
     return {
         "ok": True,
         "meta": {
@@ -290,5 +320,11 @@ def vault_history(
             "circulatingShares": int(v.circulatingShares),
         },
         "series": {"tvl": tvl_series, "pnl": pnl_series},
-        "info": {"timeframe": _TIMEFRAME_MAP[timeframe], "count": len(pts)},
+        "info": {
+            "step": step,
+            "count": len(pts),
+            "effectiveWindowSec": effective_window,
+            "requestedWindowSec": requested_window,
+            "ageSec": age,
+        },
     }
