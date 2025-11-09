@@ -81,6 +81,7 @@ class State:
         self.vaultToDeposits: Dict[str, List[models.VaultDeposit]] = {}
         self.vaultToWithdraws: Dict[str, List[models.VaultWithdraw]] = {}
         self.vaultToUsers: Dict[str, Dict[str, models.VaultUser]] = {}
+        self.vaultLatest: Dict[str, Dict[str, int]] = {}
         
         if True: # for testing
             self.seed_single_market()
@@ -329,6 +330,19 @@ class State:
             u.deposits += 1
             u.lastDeposit = int(ev.timestamp)
         
+        latest = self.vaultLatest.get(v, {"quote": 0, "base": 0, "ts": int(ev.timestamp)})
+        latest["quote"] += int(ev.quoteAmount)
+        latest["base"] += int(ev.baseAmount)
+        latest["ts"] = int(ev.timestamp)
+        self.vaultLatest[v] = latest
+
+        day_empty = len(self.vaultBalancesDay.get(v, [])) == 0
+        week_empty = len(self.vaultBalancesWeek.get(v, [])) == 0
+        month_empty = len(self.vaultBalancesMonth.get(v, [])) == 0
+        all_empty = len(self.vaultBalancesAllTime.get(v, [])) == 0
+        if day_empty or week_empty or month_empty or all_empty:
+            self._seed_first_point(v, latest["ts"], latest["quote"], latest["base"])
+        
     def apply_vault_withdraw(self, vault:str, ev: models.VaultWithdraw) -> None:
         v = vault.lower()
         if v not in self.vaults:
@@ -370,7 +384,46 @@ class State:
             u.withdraws += 1
             u.lastWithdraw = int(ev.timestamp)
     
-    
+    def _vault_usd(self, vaddr: str, quote: int, base: int) -> float:
+        v = self.vaults.get(vaddr)
+        if not v:
+            return 0.0
+        q_price = self.token_price(v.quote)
+        b_price = self.token_price(v.base)
+        q_dec = int(v.quoteDecimals or 0)
+        b_dec = int(v.baseDecimals or 0)
+        usd_q = float(quote) / (10 ** q_dec) * q_price
+        usd_b = float(base) / (10 ** b_dec) * b_price
+        return usd_q + usd_b
+
+    def _seed_first_point(self, vaddr: str, ts: int, quote: int, base: int) -> None:
+        usd = self._vault_usd(vaddr, quote, base)
+        row = {
+            "block": 0,
+            "timestamp": int(ts),
+            "quoteBalance": int(quote),
+            "baseBalance": int(base),
+            "usdValue": float(usd),
+        }
+        if vaddr not in self.vaultBalancesDay:
+            self.vaultBalancesDay[vaddr] = deque()
+        if vaddr not in self.vaultBalancesWeek:
+            self.vaultBalancesWeek[vaddr] = deque()
+        if vaddr not in self.vaultBalancesMonth:
+            self.vaultBalancesMonth[vaddr] = deque()
+        if vaddr not in self.vaultBalancesAllTime:
+            self.vaultBalancesAllTime[vaddr] = deque()
+
+        if len(self.vaultBalancesDay[vaddr]) == 0:
+            self.vaultBalancesDay[vaddr].append(row.copy())
+        if len(self.vaultBalancesWeek[vaddr]) == 0:
+            self.vaultBalancesWeek[vaddr].append(row.copy())
+        if len(self.vaultBalancesMonth[vaddr]) == 0:
+            self.vaultBalancesMonth[vaddr].append(row.copy())
+        if len(self.vaultBalancesAllTime[vaddr]) == 0:
+            self.vaultBalancesAllTime[vaddr].append(row.copy())
+
+
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
         token = ev.token.lower()
 
