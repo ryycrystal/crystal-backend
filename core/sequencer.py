@@ -76,8 +76,8 @@ class Sequencer:
                 self._state.apply_trade(ev, log["address"].lower())
                 
             elif tag == "VD":
-                v = self._to_vault_deployed(parsed, ts)
-                self._state.apply_vault_deployed(v, log["address"].lower(), blk_ts)
+                ev = self._to_vault_deployed(parsed, blk_ts)
+                self._state.apply_vault_deployed(blk_ts, ev, log["address"].lower())
 
             elif tag == "VDP":
                 vault_addr = parsed.get("vault", "").lower()
