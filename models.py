@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from decimal import Decimal
 
 @dataclass(slots=True)
 class LaunchpadTrade:
@@ -30,11 +31,58 @@ class Trade:
     end_price: int
     
 @dataclass(slots=True)
-class VaultCreated:
-    block_number: int
+class Vault:
     vault: str
     quote: str
     base: str
+    market: str
+    owner: str
+    name: str
+    description: str
+    social1: str
+    social2: str
+    social3: str
+    locked: bool
+    closed: bool
+    maxShares: int
+    circulatingShares: int
+    quoteDecimals: int
+    baseDecimals: int
+    
+@dataclass(slots=True)
+class VaultBalance:
+    quoteBalance: int
+    baseBalance: int
+    timestamp: int
+    usdValue: Decimal
+    
+@dataclass(slots=True)
+class VaultDeposit:
+    user: str
+    timestamp: int
+    quoteAmount: int
+    baseAmount: int
+    shares: int
+    hash: str
+    
+@dataclass(slots=True)
+class VaultWithdraw:
+    user: str
+    timestamp: int
+    quoteAmount: int
+    baseAmount: int
+    shares: int
+    hash: str
+    
+@dataclass(slots=True)
+class VaultUser:
+    address: str
+    vault: str
+    shares: int
+    deposits: int
+    withdraws: int
+    lastDeposit: int
+    lastWithdraw: int
     
 @dataclass(slots=True)
 class MarketInfo:
@@ -58,3 +106,4 @@ class MarketInfo:
     minSize: int
     takerFee: int
     makerRebate: int
+    price: float

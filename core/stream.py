@@ -1,5 +1,6 @@
 import json, asyncio, time, uuid, sys, websockets, urllib.request
 from collections import deque
+from decimal import Decimal
 
 from core import chain as h
 import backfill
@@ -19,47 +20,8 @@ def _rpc_batch(calls: list[dict]) -> list[dict]:
     req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type":"application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode())
-
-async def vault_sampler(state: _st.State):
-    rid = 100000
-    while True:
-        try:
-            meta = state.vault_meta()
-            if not meta:
-                await asyncio.sleep(300)
-                continue
-
-            calls = [{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]
-            rid += 1
-            res0 = _rpc_batch(calls)[0]["result"]
-            blk_hex = res0
-            blk_num = int(blk_hex, 16)
-            ts = state._bt.ts(blk_num)
-
-            calls = []
-            for v, (_quote, _base) in meta.items():
-                calls.append({
-                    "jsonrpc":"2.0","id":rid,"method":"eth_call",
-                    "params":[{"to": v.lower(), "data": "0x00113e08"}, blk_hex]
-                }); rid += 1
-
-            results = _rpc_batch(calls)
-            
-            i = 0
-            for v, _ in meta.items():
-                ret = results[i]["result"]; i += 1
-                s = ret[2:].rjust(64 * 4, "0")
-                quote_bal = int(s[128:192], 16)
-                base_bal = int(s[192:256], 16)
-                state.apply_vault_snapshot(v, blk_num, ts, 0, quote_bal, base_bal, total_shares=0)
-
-        except Exception:
-            print(f"[SAMPLER][error] {e!r}")
-            pass
-
-        await asyncio.sleep(300)
-
-
+    
+    
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
@@ -165,6 +127,8 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
             if sid == heads_sub:
                 blk = int(res["number"], 16)
+                ts = int(res["timestamp"], 16)
+                SEQUENCER._state._bt.note(blk, ts)
 
                 if last_head_num is not None:
                     for key in event_counts:
@@ -211,6 +175,106 @@ async def stream_logs(start_block: int | None = None):
             print(f"[Error] {e!r} stream dropped")
             await asyncio.sleep(0.5)
 
+
+def _dec_pow(n: int) -> Decimal:
+    try:
+        return Decimal(10) ** int(n or 0)
+    except Exception:
+        return Decimal(1)
+
+def _prune_by_age(dq: deque, now_ts: int, horizon: int) -> None:
+    cutoff = max(0, int(now_ts) - int(horizon))
+    while dq and int(dq[0].get("timestamp", 0)) < cutoff:
+        dq.popleft()
+
+async def vault_sampler(state: _st.State):
+    rid = 100000
+    while True:
+        try:
+            if not state.vaults:
+                await asyncio.sleep(30)
+                continue
+
+            head_res = _rpc_batch([{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]); rid += 1
+            blk_hex = head_res[0]["result"]
+            blk_num = int(blk_hex, 16)
+
+            ts = state.block_ts(blk_num)
+            if ts == 0:
+                _, hts = state.head_block_and_ts()
+                ts = int(hts or int(time.time()))
+
+            calls = []
+            order = []
+            for vaddr in list(state.vaults.keys()):
+                order.append(vaddr)
+                calls.append({
+                    "jsonrpc":"2.0","id":rid,"method":"eth_call",
+                    "params":[{"to": vaddr, "data":"0x00113e08"}, blk_hex]
+                }); rid += 1
+
+            if not calls:
+                await asyncio.sleep(30)
+                continue
+
+            results = _rpc_batch(calls)
+
+            for i, vaddr in enumerate(order):
+                row = results[i] if i < len(results) else {}
+                ret = row.get("result")
+                if not isinstance(ret, str) or len(ret) < 2:
+                    continue
+
+                s = ret[2:].rjust(64 * 4, "0")
+                try:
+                    quote_bal = int(s[128:192], 16)
+                    base_bal  = int(s[192:256], 16)
+                except Exception:
+                    continue
+
+                v = state.vaults.get(vaddr)
+                if not v:
+                    continue
+
+                qd = int(getattr(v, "quoteDecimals", 0) or 0)
+                bd = int(getattr(v, "baseDecimals", 0) or 0)
+                qaddr = getattr(v, "quote", "").lower()
+                baddr = getattr(v, "base", "").lower()
+
+                pq = state.tokenToPrice.get(qaddr, Decimal(0))
+                pb = state.tokenToPrice.get(baddr, Decimal(0))
+
+                q_units = Decimal(quote_bal) / _dec_pow(qd)
+                b_units = Decimal(base_bal) / _dec_pow(bd)
+                tvl_usd = (q_units * pq) + (b_units * pb)
+                usd_value = float(tvl_usd) if tvl_usd.is_finite() else 0.0
+
+                snap = {
+                    "block": int(blk_num),
+                    "timestamp": int(ts),
+                    "quoteBalance": int(quote_bal),
+                    "baseBalance": int(base_bal),
+                    "usdValue": usd_value,
+                }
+
+                day = state.vaultBalancesDay.setdefault(vaddr, deque())
+                week = state.vaultBalancesWeek.setdefault(vaddr, deque())
+                month = state.vaultBalancesMonth.setdefault(vaddr, deque())
+                alltm = state.vaultBalancesAllTime.setdefault(vaddr, deque())
+
+                day.append(snap)
+                week.append(snap)
+                month.append(snap)
+                alltm.append(snap)
+
+                _prune_by_age(day, ts, 24 * 3600)
+                _prune_by_age(week, ts, 7 * 24 * 3600)
+                _prune_by_age(month, ts, 30 * 24 * 3600)
+
+        except Exception as e:
+            print(f"[SAMPLER][error] {e!r}")
+
+        await asyncio.sleep(30)
 
 if __name__ == "__main__":
     blk = int(sys.argv[1], 0) if len(sys.argv) > 1 else None
