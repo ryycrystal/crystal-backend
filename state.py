@@ -232,7 +232,7 @@ class State:
         return float(v) if v is not None else 0.0
 
 
-    def apply_vault_deployed(self, ev: models.Vault, ts: int) -> None:
+    def apply_vault_deployed(self, ts: int, ev: models.Vault, _log_addr: str) -> None:
         v = ev.vault.lower()
         if v in self.vaults:
             return
