@@ -12,21 +12,32 @@ CONTRACTS = {
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
 EVENT_SIGS = {
+    "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
+    "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c82982": "TR",
+    
+    "0xc06e2355c9da33769608ef0b4a541792c64990d67d8fe190ccc295daffa0a61c": "VD",
+    "0x4e2ca0515ed1aef1395f66b5303bb5d6f1bf9d61a353fa53f73f8ac9973fa9f6": "VDP",
+    "0xebff2602b3f468259e1e99f613fed6691f3a6526effe6ef3e768ba7ae7a36c4f": "VWD",
+    "0x44427e3003a08f22cf803894075ac0297524e09e521fc1c15bc91741ce3dc159": "VLOCK",
+    "0x7e6adfec7e3f286831a0200a754127c171a2da564078722cb97704741bbdb0ea": "VUNLOCK",
+    "0x13607bf9d2dd20e1f3a7daf47ab12856f8aad65e6ae7e2c75ace3d0c424a40e8": "VCLOSE",
+        
     "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
     "0xc367a2f5396f96d105baaaa90fe29b1bb18ef54c712964410d02451e67c19d3e": "LT",
-    "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c82982": "TR",
-    "0xc06e2355c9da33769608ef0b4a541792c64990d67d8fe190ccc295daffa0a61c": "VC",
-    "": "MC",
 }
 TOPICS = list(EVENT_SIGS.keys())
 PARSERS = {
+    "MC": m.parse_market_created,
+    "TR": m.parse_trade,
+    "VD": v.parse_vault_created,
+    "VDP": v.parse_vault_deposit,
+    "VWD": v.parse_vault_withdraw,
+    "VLOCK": v.parse_vault_lock,
+    "VUNLOCK": v.parse_vault_unlock,
+    "VCLOSE": v.parse_vault_close,
     "LT": lp.parse_launchpad_trade,
     "TC": lp.parse_token_created,
-    "TR": m.parse_trade,
-    "VC": v.parse_vault_created,
-    "MC": m.parse_market_created,
 }
-
 WS_URL = "wss://testnet-rpc.monad.xyz"
 
 async def ack(ws, rid):

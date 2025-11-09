@@ -45,8 +45,9 @@ class Sequencer:
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"TC": 0, "LT": 0, "TR": 0, "VC": 0}
+        counts = {"MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "LT": 0, "TC": 0}
         seen = set()
+        blk_ts = self._state.block_ts(blk)
 
         for log in logs:
             txh = log.get("transactionHash")
@@ -59,28 +60,153 @@ class Sequencer:
             seen.add(uid)
 
             tag = h.EVENT_SIGS.get(log["topics"][0].lower())
-            if tag:
-                counts[tag] += 1
-
-            if tag not in ("LT", "TC", "TR", "VC"):
+            if not tag:
                 continue
+            if tag in counts:
+                counts[tag] += 1
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
-            if tag == "LT":
-                ev = self._to_launchpad_trade(parsed, blk)
-                self._state.apply_launchpad_trade(ev, log["address"].lower())
-            elif tag == "TC":
-                ev = self._to_token_created(parsed, blk)
-                self._state.apply_token_created(ev, log["address"].lower())
+
+            if tag == "MC":
+                ev = self._to_market_created(parsed)
+                self._state.apply_market_created(ev, log["address"].lower())
+                
             elif tag == "TR":
                 ev = self._to_trade(parsed, blk)
                 self._state.apply_trade(ev, log["address"].lower())
-            elif tag == "VC":
-                ev = self._to_vault_created(parsed, blk)
-                self._state.register_vault(ev.vault, ev.quote, ev.base)
-        
-        print(f"[SQ] {blk}: TC {counts['TC']} LT {counts['LT']} TR {counts['TR']} VC {counts['VC']}")
+                
+            elif tag == "VD":
+                v = self._to_vault_deployed(parsed)
+                self._state.apply_vault_deployed(v, log["address"].lower())
 
+            elif tag == "VDP":
+                vault_addr = parsed.get("vault", "").lower()
+                dep = self._to_vault_deposit(parsed, blk_ts, txh)
+                self._state.apply_vault_deposit(vault_addr, dep)
+
+            elif tag == "VWD":
+                vault_addr = parsed.get("vault", "").lower()
+                wdr = self._to_vault_withdraw(parsed, blk_ts, txh)
+                self._state.apply_vault_withdraw(vault_addr, wdr)
+
+            elif tag == "VLOCK":
+                vaddr = parsed.get("vault", "").lower()
+                if vaddr in self._state.vaults:
+                    self._state.vaults[vaddr].locked = True
+
+            elif tag == "VUNLOCK":
+                vaddr = parsed.get("vault", "").lower()
+                if vaddr in self._state.vaults:
+                    self._state.vaults[vaddr].locked = False
+
+            elif tag == "VCLOSE":
+                vaddr = parsed.get("vault", "").lower()
+                if vaddr in self._state.vaults:
+                    self._state.vaults[vaddr].closed = True
+
+            elif tag == "LT":
+                ev = self._to_launchpad_trade(parsed, blk)
+                self._state.apply_launchpad_trade(ev, log["address"].lower())
+
+            elif tag == "TC":
+                ev = self._to_token_created(parsed, blk)
+                self._state.apply_token_created(ev, log["address"].lower())
+        
+        print(f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} TC {counts['TC']} LT {counts['LT']}")
+        
+    @staticmethod
+    def _to_market_created(d: dict) -> models.MarketInfo:
+        return models.MarketInfo(
+            isCanonical=bool(d.get("isCanonical", False)),
+            quoteAsset=d.get("quoteAsset", "").lower(),
+            baseAsset=d.get("baseAsset", "").lower(),
+            market=d.get("market", "").lower(),
+            quoteAddress=d.get("quoteAddress", "").lower(),
+            quoteDecimals=int(d.get("quoteDecimals", 0)),
+            quoteTicker=d.get("quoteTicker", ""),
+            quoteName=d.get("quoteName", ""),
+            baseAddress=d.get("baseAddress", "").lower(),
+            baseDecimals=int(d.get("baseDecimals", 0)),
+            baseTicker=d.get("baseTicker", ""),
+            baseName=d.get("baseName", ""),
+            marketId=int(d.get("marketId", 0)),
+            marketType=int(d.get("marketType", 0)),
+            scaleFactor=int(d.get("scaleFactor,") or d.get("scaleFactor", 0)),
+            tickSize=int(d.get("tickSize", 0)),
+            maxPrice=int(d.get("maxPrice", 0)),
+            minSize=int(d.get("minSize", 0)),
+            takerFee=int(d.get("takerFee", 0)),
+            makerRebate=int(d.get("makerRebate", 0)),
+        )
+        
+    @staticmethod
+    def _to_trade(d: dict, blk: int) -> models.Trade:
+        return models.Trade(
+            block_number=blk,
+            market=d.get("market", "").lower(),
+            user=d.get("user", "").lower(),
+            is_buy=bool(d.get("is_buy", False)),
+            amount_in=int(d.get("amount_in", 0)),
+            amount_out=int(d.get("amount_out", 0)),
+            start_price=int(d.get("start_price", 0)),
+            end_price=int(d.get("end_price", 0)),
+        )
+
+    @staticmethod
+    def _to_vault_deployed(d: dict) -> models.Vault:
+        vaddr = d.get("vault", "").lower()
+        quote = d.get("quoteAsset", "").lower()
+        base = d.get("baseAsset", "").lower()
+        owner = d.get("owner", "").lower()
+
+        metadata = d.get("metadata", {}) or {}
+        name = metadata.get("name", "")
+        description = metadata.get("description", "")
+        social1 = metadata.get("social1", "")
+        social2 = metadata.get("social2", "")
+        social3 = metadata.get("social3", "")
+
+        return models.Vault(
+            vault=vaddr,
+            quote=quote,
+            base=base,
+            market="",
+            owner=owner,
+            name=name,
+            description=description,
+            social1=social1,
+            social2=social2,
+            social3=social3,
+            locked=bool(d.get("locked", False)),
+            closed=bool(d.get("closed", False)),
+            maxShares=int(d.get("maxShares", 0)),
+            circulatingShares=0,
+            quoteDecimals=int(d.get("quoteDecimals", 0)),
+            baseDecimals=int(d.get("baseDecimals", 0)),
+        )
+
+    @staticmethod
+    def _to_vault_deposit(d: dict, ts: int, txh: str | None) -> models.VaultDeposit:
+        return models.VaultDeposit(
+            user=d.get("sender", d.get("user", "")).lower(),
+            timestamp=int(ts),
+            quoteAmount=int(d.get("quoteAmount", d.get("amountQuote", 0))),
+            baseAmount=int(d.get("baseAmount", d.get("amountBase", 0))),
+            shares=int(d.get("shares", 0)),
+            hash=(txh or "").lower(),
+        )
+
+    @staticmethod
+    def _to_vault_withdraw(d: dict, ts: int, txh: str | None) -> models.VaultWithdraw:
+        return models.VaultWithdraw(
+            user=d.get("sender", d.get("user", "")).lower(),
+            timestamp=int(ts),
+            quoteAmount=int(d.get("quoteAmount", d.get("amountQuote", 0))),
+            baseAmount=int(d.get("baseAmount", d.get("amountBase", 0))),
+            shares=int(d.get("shares", 0)),
+            hash=(txh or "").lower(),
+        )
+        
     @staticmethod
     def _to_launchpad_trade(d: dict, blk: int) -> models.LaunchpadTrade:
         return models.LaunchpadTrade(
@@ -100,28 +226,6 @@ class Sequencer:
             block_number=blk,
             token=d.get("token", d.get("caller","")).lower(),
             creator=d.get("creator","").lower(),
-        )
-    
-    @staticmethod
-    def _to_trade(d: dict, blk: int) -> models.Trade:
-        return models.Trade(
-            block_number=blk,
-            market=d.get("market", "").lower(),
-            user=d.get("user", "").lower(),
-            is_buy=bool(d.get("is_buy", False)),
-            amount_in=int(d.get("amount_in", 0)),
-            amount_out=int(d.get("amount_out", 0)),
-            start_price=int(d.get("start_price", 0)),
-            end_price=int(d.get("end_price", 0)),
-        )
-    
-    @staticmethod
-    def _to_vault_created(d: dict, blk: int) -> models.VaultCreated:
-        return models.VaultCreated(
-            block_number=blk,
-            vault=d.get("vault","").lower(),
-            quote=d.get("quote","").lower(),
-            base=d.get("base","").lower(),
         )
 
 SEQUENCER = Sequencer(_st.State())

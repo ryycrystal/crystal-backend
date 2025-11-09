@@ -3,9 +3,11 @@ import asyncio
 import argparse
 import uuid
 import websockets
+import urllib.request
 
 from core import chain as h
 from core.sequencer import SEQUENCER
+from state import RPC_HTTP
 
 def parse_args():
     parser = argparse.ArgumentParser(description="backfiller")
@@ -22,6 +24,12 @@ def parse_args():
     )
     return parser.parse_args()
 
+
+def _rpc_batch_http(calls: list[dict]) -> list[dict]:
+    payload = json.dumps(calls).encode()
+    req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
 
 async def get_head(ws) -> int:
     rid = str(uuid.uuid4())
@@ -64,6 +72,31 @@ async def fetch_logs(ws, frm: int, to: int):
     return resp["result"]
 
 
+def seed_headers_http(frm: int, to: int) -> None:
+    calls = []
+    rid = 1
+    for b in range(frm, to + 1, start=1):
+        calls.append(
+            {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "method": "eth_getBlockByNumber",
+                "params": [hex(b), False],
+            }
+        )
+        rid += 1
+
+    results = _rpc_batch_http(calls)
+    by_id = {row["id"]: row for row in results if "id" in row}
+    for i, b in enumerate(range(frm, to + 1), start=1):
+        res = by_id.get(i, {}).get("result")
+        if not res:
+            continue
+        blk = int(res["number"], 16)
+        ts = int(res["timestamp"], 16)
+        SEQUENCER._state._bt.note(blk, ts)
+        
+        
 async def backfill(start_block: int, batch: int) -> int:
     async with websockets.connect(h.WS_URL) as ws:
         head_snapshot = await get_head(ws)
@@ -79,6 +112,11 @@ async def backfill(start_block: int, batch: int) -> int:
                 if current_head >= chunk_end:
                     break
                 await asyncio.sleep(0.5)
+                
+            try:
+                seed_headers_http(chunk_start, chunk_end)
+            except Exception:
+                pass
 
             logs = await fetch_logs(ws, chunk_start, chunk_end)
 
