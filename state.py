@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Deque, List, Tuple, Set
+from types import SimpleNamespace
 from collections import deque
 from decimal import Decimal, getcontext
 from core import chain as h
@@ -80,8 +81,63 @@ class State:
         self.vaultToDeposits: Dict[str, List[models.VaultDeposit]] = {}
         self.vaultToWithdraws: Dict[str, List[models.VaultWithdraw]] = {}
         self.vaultToUsers: Dict[str, Dict[str, models.VaultUser]] = {}
+        
+        if True: # for testing
+            self.seed_single_market()
+            self.sweep()
     
-    
+    def seed_single_market(self) -> None:
+        m = {
+            "id": "0xd91708c758a73590df354bda6b0b137564f54a0a",
+            "baseAsset": "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701",
+            "quoteAsset": "0xf817257fed379853cde0fa4f97ab987181b1e5ea",
+            "baseDecimals": 18,
+            "quoteDecimals": 6,
+            "baseTicker": "WMON",
+            "quoteTicker": "USDC",
+            "baseName": "Wrapped Monad",
+            "quoteName": "USD Coin",
+            "marketType": 2,
+            "scaleFactor": 21,
+            "tickSize": 1,
+            "minSize": 1_000_000,
+            "maxPrice": 1_000_000_000_000_000,
+            "takerFee": 99_950,
+            "makerRebate": 99_990,
+            "latestPrice": 0,
+        }
+
+        pf = int(m["quoteDecimals"]) + int(m["scaleFactor"]) - int(m["baseDecimals"])
+        price_dec = Decimal(int(m["latestPrice"])) / (Decimal(10) ** pf)
+
+        mi = models.MarketInfo(
+            isCanonical=True,
+            quoteAsset=m["quoteAsset"].lower(),
+            baseAsset=m["baseAsset"].lower(),
+            market=m["id"].lower(),
+            quoteAddress=m["quoteAsset"].lower(),
+            quoteDecimals=int(m["quoteDecimals"]),
+            quoteTicker=m["quoteTicker"],
+            quoteName=m["quoteName"],
+            baseAddress=m["baseAsset"].lower(),
+            baseDecimals=int(m["baseDecimals"]),
+            baseTicker=m["baseTicker"],
+            baseName=m["baseName"],
+            marketId=0,
+            marketType=int(m["marketType"]),
+            scaleFactor=int(m["scaleFactor"]),
+            tickSize=int(m["tickSize"]),
+            maxPrice=int(m["maxPrice"]),
+            minSize=int(m["minSize"]),
+            takerFee=int(m["takerFee"]),
+            makerRebate=int(m["makerRebate"]),
+            price=price_dec,
+        )
+
+        self.apply_market_created(mi, mi.market)
+        self.addressToMarket[mi.market] = mi
+
+
     def block_ts(self, block: int) -> int:
         t = self._bt.ts(block)
         if t is not None:
@@ -170,6 +226,8 @@ class State:
                 if old is None or new != old:
                     self.tokenToPrice[ba] = new
                     q.append(ba)
+    
+        print(self.token_price("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701"))
         
     def token_price(self, token: str) -> float:
         v = self.tokenToPrice.get(token.lower())
