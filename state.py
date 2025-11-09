@@ -226,8 +226,6 @@ class State:
                 if old is None or new != old:
                     self.tokenToPrice[ba] = new
                     q.append(ba)
-    
-        print(self.token_price("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701"))
         
     def token_price(self, token: str) -> float:
         v = self.tokenToPrice.get(token.lower())
