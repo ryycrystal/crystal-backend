@@ -194,7 +194,7 @@ async def vault_sampler(state: _st.State):
             state.sweep()
             
             if not state.vaults:
-                await asyncio.sleep(300)
+                await asyncio.sleep(900)
                 continue
 
             head_res = _rpc_batch([{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]); rid += 1
@@ -216,7 +216,7 @@ async def vault_sampler(state: _st.State):
                 }); rid += 1
 
             if not calls:
-                await asyncio.sleep(300)
+                await asyncio.sleep(900)
                 continue
 
             results = _rpc_batch(calls)
@@ -276,7 +276,7 @@ async def vault_sampler(state: _st.State):
         except Exception as e:
             print(f"[SAMPLER][error] {e!r}")
 
-        await asyncio.sleep(300)
+        await asyncio.sleep(900)
 
 if __name__ == "__main__":
     blk = int(sys.argv[1], 0) if len(sys.argv) > 1 else None

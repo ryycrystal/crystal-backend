@@ -232,7 +232,7 @@ class State:
         return float(v) if v is not None else 0.0
 
 
-    def apply_vault_deployed(self, ev: models.Vault, _log_addr: str) -> None:
+    def apply_vault_deployed(self, ev: models.Vault, ts: int) -> None:
         v = ev.vault.lower()
         if v in self.vaults:
             return
@@ -270,6 +270,7 @@ class State:
             circulatingShares=int(ev.circulatingShares),
             quoteDecimals=int(qd),
             baseDecimals=int(bd),
+            timestamp=ts,
         )
         self.vaults[v] = vault_obj
         

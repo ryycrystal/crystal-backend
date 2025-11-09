@@ -76,8 +76,8 @@ class Sequencer:
                 self._state.apply_trade(ev, log["address"].lower())
                 
             elif tag == "VD":
-                v = self._to_vault_deployed(parsed)
-                self._state.apply_vault_deployed(v, log["address"].lower())
+                v = self._to_vault_deployed(parsed, ts)
+                self._state.apply_vault_deployed(v, log["address"].lower(), blk_ts)
 
             elif tag == "VDP":
                 vault_addr = parsed.get("vault", "").lower()
@@ -153,7 +153,7 @@ class Sequencer:
         )
 
     @staticmethod
-    def _to_vault_deployed(d: dict) -> models.Vault:
+    def _to_vault_deployed(d: dict, ts: int) -> models.Vault:
         vaddr = d.get("vault", "").lower()
         quote = d.get("quoteAsset", "").lower()
         base = d.get("baseAsset", "").lower()
@@ -183,6 +183,7 @@ class Sequencer:
             circulatingShares=0,
             quoteDecimals=int(d.get("quoteDecimals", 0)),
             baseDecimals=int(d.get("baseDecimals", 0)),
+            timestamp=ts
         )
 
     @staticmethod
