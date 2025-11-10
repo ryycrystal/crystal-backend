@@ -336,3 +336,25 @@ def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
         "count": len(out),
         "prices": out,
     }
+
+@app.get("/vaults/{address}/{timeframe}")
+def vault_chart_only(
+    address: str,
+    timeframe: int,
+    limit: int = Query(400, ge=1, le=2000),
+) -> Dict[str, Any]:
+    vaddr = address.lower()
+    st = SEQUENCER._state
+    v = st.vaults.get(vaddr)
+    if not v:
+        raise HTTPException(status_code=404, detail="vault not found")
+
+    info, series = _build_history(v, timeframe, limit)
+    return {
+        "ok": True,
+        "timeframe": timeframe,
+        "history": {
+            "info": info,
+            "series": series,
+        },
+    }
