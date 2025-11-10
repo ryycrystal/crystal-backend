@@ -247,13 +247,19 @@ def vault_combined(
     }
 
 @app.get("/vaults/list")
-def list_vaults(limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
+def list_vaults(
+    limit: int = Query(100, ge=1, le=1000),
+    timeframe: int = Query(2, ge=1, le=4),
+    hist_limit: int = Query(40, ge=8, le=200),
+    include_snapshots: bool = Query(True),
+) -> Dict[str, Any]:
     st = SEQUENCER._state
 
-    rows = []
+    rows: List[Dict[str, Any]] = []
     for vaddr, v in st.vaults.items():
         latest = _latest_balance_for(vaddr)
-        rows.append({
+
+        base_row = {
             "vault": v.vault,
             "name": v.name,
             "owner": v.owner,
@@ -267,10 +273,52 @@ def list_vaults(limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
             "timestamp": int(getattr(v, "timestamp", 0) or 0),
             "latest": latest,
             "tvlUsd": latest["usdValue"],
-        })
+        }
+
+        if include_snapshots:
+            info, series = _build_history(v, timeframe, hist_limit)
+            tvl = series.get("tvl", [])
+
+            if tvl:
+                vals = [float(p.get("tvlUsd", 0.0)) for p in tvl]
+                last_usd = vals[-1]
+                base = vals[0] if vals[0] > 0 else 0.0
+                pct = ((last_usd / base) - 1.0) * 100.0 if base > 0 else 0.0
+                compact = [[int(p["timestamp"]), float(p["tvlUsd"])] for p in tvl]
+                snap = {
+                    "ok": True,
+                    "timeframe": timeframe,
+                    "info": info,
+                    "tvl": compact,
+                    "stats": {
+                        "lastUsd": last_usd,
+                        "pctChange": pct,
+                        "min": min(vals),
+                        "max": max(vals),
+                    },
+                }
+            else:
+                snap = {
+                    "ok": True,
+                    "timeframe": timeframe,
+                    "info": info,
+                    "tvl": [],
+                    "stats": {"lastUsd": 0.0, "pctChange": 0.0, "min": 0.0, "max": 0.0},
+                }
+
+            base_row["snapshot"] = snap
+
+        rows.append(base_row)
 
     rows.sort(key=lambda r: (r["tvlUsd"], r["latest"]["timestamp"]), reverse=True)
-    return {"ok": True, "count": min(limit, len(rows)), "vaults": rows[:limit]}
+
+    return {
+        "ok": True,
+        "count": min(limit, len(rows)),
+        "timeframe": timeframe,
+        "histLimit": hist_limit,
+        "vaults": rows[:limit],
+    }
 
 @app.get("/debug/token-to-price")
 def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
