@@ -388,8 +388,8 @@ class State:
         v = self.vaults.get(vaddr)
         if not v:
             return 0.0
-        q_price = self.token_price(v.quote)
-        b_price = self.token_price(v.base)
+        q_price = self.token_price(v.quote.lower())
+        b_price = self.token_price(v.base.lower())
         q_dec = int(v.quoteDecimals or 0)
         b_dec = int(v.baseDecimals or 0)
         usd_q = float(quote) / (10 ** q_dec) * q_price
