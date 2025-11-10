@@ -9,7 +9,7 @@ import state as _st
 
 from core.sequencer import SEQUENCER
 
-HEAD_TIMEOUT = 5.0
+HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = 100
 
 missing_blocks: deque[int] = deque()
@@ -80,7 +80,14 @@ async def _gap_worker(event_counts):
 
 
 async def _stream_once(prev_last_head: int | None) -> int | None:
-    async with websockets.connect(h.WS_URL) as ws:
+    connect_kwargs = dict(
+        ping_interval=20,
+        ping_timeout=20,
+        close_timeout=5,
+        max_queue=None,
+        open_timeout=10,
+    )
+    async with websockets.connect(h.WS_URL, **connect_kwargs) as ws:
         await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}))
         heads_sub = (await h.ack(ws, 1))["result"]
 
@@ -109,11 +116,11 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
             while True:
                 await asyncio.sleep(0.5)
                 if time.monotonic() - last_head_ts > HEAD_TIMEOUT:
-                    print(f"[Error] newHeads dropped, starting backfill")
+                    print("[wd] no newHeads, forcing reconnect and backfill", flush=True)
                     if last_head_num is not None:
                         await backfill.backfill(last_head_num + 1, BACKFILL_BATCH)
                     await ws.close()
-                    break
+                    return
 
         asyncio.create_task(watchdog())
 
@@ -162,18 +169,17 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
 
 async def stream_logs(start_block: int | None = None):
-    last_seen: int | None = None
-
-    if start_block is not None:
-        print(f"[Startup] backfilling {start_block} → head")
-        last_seen = await backfill.backfill(start_block, BACKFILL_BATCH)
-
+    last_seen = None
+    delay = 0.5
     while True:
         try:
             last_seen = await _stream_once(last_seen)
+            delay = 0.5
         except Exception as e:
-            print(f"[Error] {e!r} stream dropped")
-            await asyncio.sleep(0.5)
+            print(f"[ws] dropped {e!r}", flush=True)
+
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
 
 
 def _dec_pow(n: int) -> Decimal:
