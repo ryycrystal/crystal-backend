@@ -271,3 +271,20 @@ def list_vaults(limit: int = Query(100, ge=1, le=1000)) -> Dict[str, Any]:
 
     rows.sort(key=lambda r: (r["tvlUsd"], r["latest"]["timestamp"]), reverse=True)
     return {"ok": True, "count": min(limit, len(rows)), "vaults": rows[:limit]}
+
+@app.get("/debug/token-to-price")
+def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
+    st = SEQUENCER._state
+    out: Dict[str, Any] = {}
+
+    for addr, decv in st.tokenToPrice.items():
+        try:
+            out[addr.lower()] = str(decv) if as_strings else float(decv)
+        except Exception:
+            out[addr.lower()] = str(decv)
+
+    return {
+        "ok": True,
+        "count": len(out),
+        "prices": out,
+    }
