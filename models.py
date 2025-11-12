@@ -107,4 +107,4 @@ class MarketInfo:
     minSize: int
     takerFee: int
     makerRebate: int
-    price: float
+    price: float = 0.0
