@@ -358,3 +358,57 @@ def vault_chart_only(
             "series": series,
         },
     }
+    
+@app.get("/pools/list")
+def list_pools():
+    state = SEQUENCER._state
+    pools = []
+
+    for pool in state.ammPools.values():
+        pools.append({
+            "market": pool.market,
+            "quote": pool.quote,
+            "base": pool.base,
+            "feeBps": int(getattr(pool, "feeBps", 0)),
+            "quoteTicker": getattr(pool, "quoteTicker", ""),
+            "quoteName": getattr(pool, "quoteName", ""),
+            "baseTicker": getattr(pool, "baseTicker", ""),
+            "baseName": getattr(pool, "baseName", ""),
+            "quoteDecimals": int(getattr(pool, "quoteDecimals", 0)),
+            "baseDecimals": int(getattr(pool, "baseDecimals", 0)),
+            "tvlUsd": float(getattr(pool, "tvlUsd", 0)),
+            "volume24hUsd": float(getattr(pool, "volume24hUsd", 0)),
+            "fees24hUsd": float(getattr(pool, "fees24hUsd", 0)),
+            "apy24h": float(getattr(pool, "apy24h", 0)),
+        })
+
+    return {"pools": pools}
+
+@app.get("/pools/{address}")
+def get_pool(address: str):
+    state = SEQUENCER._state
+    maddr = address.lower()
+
+    pool = state.ammPools.get(maddr)
+    if pool is None:
+        raise HTTPException(status_code=404, detail="pool not found")
+
+    return {
+        "market": pool.market,
+        "quote": pool.quote,
+        "base": pool.base,
+        "feeBps": int(getattr(pool, "feeBps", 0)),
+        "quoteTicker": getattr(pool, "quoteTicker", ""),
+        "quoteName": getattr(pool, "quoteName", ""),
+        "baseTicker": getattr(pool, "baseTicker", ""),
+        "baseName": getattr(pool, "baseName", ""),
+        "quoteDecimals": int(getattr(pool, "quoteDecimals", 0)),
+        "baseDecimals": int(getattr(pool, "baseDecimals", 0)),
+        "reserveQuote": str(getattr(pool, "reserveQuote", 0)),
+        "reserveBase": str(getattr(pool, "reserveBase", 0)),
+        "tvlUsd": float(getattr(pool, "tvlUsd", 0)),
+        "totalShares": str(getattr(pool, "totalShares", 0)),
+        "volume24hUsd": float(getattr(pool, "volume24hUsd", 0)),
+        "fees24hUsd": float(getattr(pool, "fees24hUsd", 0)),
+        "apy24h": float(getattr(pool, "apy24h", 0)),
+    }
