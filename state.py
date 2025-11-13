@@ -84,7 +84,7 @@ class State:
         
         self.ammPools: Dict[str, models.AMMPool] = {}
         self.ammEvents24h: Dict[str, Deque[dict]] = {} # each dict is { timestamp: int, volume: float }
-        self.ammVolume24h: Dict[str, float]
+        self.ammVolume24h: Dict[str, float] = {}
         
         if True: # for testing
             self.seed_single_market()
@@ -140,6 +140,30 @@ class State:
 
         self.apply_market_created(mi, mi.market)
         self.addressToMarket[mi.market] = mi
+        
+        if mi.isCanonical and int(mi.marketType) not in (0, 1):
+            if not hasattr(self, "ammPools"):
+                self.ammPools = {}
+            maddr = mi.market.lower()
+            if maddr not in self.ammPools:
+                self.ammPools[maddr] = models.AMMPool(
+                    market=maddr,
+                    quote=mi.quoteAddress.lower(),
+                    base=mi.baseAddress.lower(),
+                    marketType=int(mi.marketType),
+                    quoteDecimals=int(mi.quoteDecimals),
+                    baseDecimals=int(mi.baseDecimals),
+                    quoteTicker=mi.quoteTicker,
+                    quoteName=mi.quoteName,
+                    baseTicker=mi.baseTicker,
+                    baseName=mi.baseName,
+                    feeBps=int(getattr(mi, "takerFee", 0)),
+                    reserveQuote=0,
+                    reserveBase=0,
+                    tvlUsd=Decimal(0),
+                    totalShares=0,
+                    volume24hUsd=Decimal(0),
+                )
 
 
     def block_ts(self, block: int) -> int:
@@ -517,6 +541,71 @@ class State:
             dq_events.popleft()
         self.ammVolume24h[market] = max(total, 0.0)
         pool.volume24hUsd = Decimal(self.ammVolume24h[market])
+
+    def apply_amm_mint(self, blk: int, ev: dict) -> None:
+        market = ev.get("market", "").lower()
+        pool = self.ammPools.get(market)
+        if pool is None:
+            return
+
+        amt_q = int(ev.get("amountQuote", 0))
+        amt_b = int(ev.get("amountBase", 0))
+
+        if amt_q <= 0 or amt_b <= 0:
+            return
+
+        new_q = int(pool.reserveQuote)
+        new_b = int(pool.reserveBase)
+        if new_q < amt_q or new_b < amt_b:
+            return
+
+        old_q = new_q - amt_q
+        old_b = new_b - amt_b
+        old_s = int(pool.totalShares)
+
+        if old_s <= 0 or old_q <= 0 or old_b <= 0:
+            return
+
+        liq_from_q = amt_q * old_s // old_q if old_q > 0 else 0
+        liq_from_b = amt_b * old_s // old_b if old_b > 0 else 0
+
+        minted = liq_from_q if liq_from_q < liq_from_b else liq_from_b
+        if minted <= 0:
+            return
+
+        pool.totalShares = old_s + minted
+
+    def apply_amm_burn(self, blk: int, ev: dict) -> None:
+        market = ev.get("market", "").lower()
+        pool = self.ammPools.get(market)
+        if pool is None:
+            return
+
+        amt_q = int(ev.get("amountQuote", 0))
+        amt_b = int(ev.get("amountBase", 0))
+
+        if amt_q <= 0 or amt_b <= 0:
+            return
+
+        new_q = int(pool.reserveQuote)
+        new_b = int(pool.reserveBase)
+
+        old_q = new_q + amt_q
+        old_b = new_b + amt_b
+        old_s = int(pool.totalShares)
+
+        if old_s <= 0 or old_q <= 0 or old_b <= 0:
+            return
+
+        liq_from_q = amt_q * old_s // old_q if old_q > 0 else 0
+        liq_from_b = amt_b * old_s // old_b if old_b > 0 else 0
+
+        burned = liq_from_q if liq_from_q < liq_from_b else liq_from_b
+        if burned <= 0:
+            return
+
+        new_s = old_s - burned
+        pool.totalShares = new_s if new_s > 0 else 0
 
 
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
