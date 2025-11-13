@@ -108,3 +108,22 @@ class MarketInfo:
     takerFee: int
     makerRebate: int
     price: float = 0.0
+    
+@dataclass(slots=True)
+class AMMPool:
+    market: str
+    quote: str
+    base: str
+    marketType: int
+    quoteDecimals: int
+    baseDecimals: int
+    quoteTicker: str
+    baseTicker: str
+    quoteName: str
+    baseName: str
+    feeBps: int
+    reserveQuote: int = 0
+    reserveBase: int = 0
+    tvlUsd: Decimal = Decimal(0)
+    totalShares: int = 0
+    volume24hUsd: Decimal = 0

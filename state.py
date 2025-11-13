@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Deque, List, Tuple, Set
-from types import SimpleNamespace
 from collections import deque
 from decimal import Decimal, getcontext
 from core import chain as h
@@ -83,6 +82,10 @@ class State:
         self.vaultToUsers: Dict[str, Dict[str, models.VaultUser]] = {}
         self.vaultLatest: Dict[str, Dict[str, int]] = {}
         
+        self.ammPools: Dict[str, models.AMMPool] = {}
+        self.ammEvents24h: Dict[str, Deque[dict]] = {} # each dict is { timestamp: int, volume: float }
+        self.ammVolume24h: Dict[str, float]
+        
         if True: # for testing
             self.seed_single_market()
             self.sweep()
@@ -158,6 +161,30 @@ class State:
         market = ev.market.lower()
         
         self.addressToMarket[market] = ev
+        
+        if int(ev.marketType) not in (0, 1):
+            if market not in self.ammPools:
+                fee_bps = 25
+                self.ammPools[market] = models.AMMPool(
+                    market=market,
+                    quote=ev.quoteAddress.lower(),
+                    base=ev.baseAddress.lower(),
+                    marketType=int(ev.marketType),
+                    quoteDecimals=int(ev.quoteDecimals),
+                    baseDecimals=int(ev.baseDecimals),
+                    quoteTicker=ev.quoteTicker,
+                    baseTicker=ev.baseTicker,
+                    quoteName=ev.quoteName,
+                    baseName=ev.baseName,
+                    feeBps=fee_bps,
+                    reserveQuote=0,
+                    reserveBase=0,
+                    tvlUsd=Decimal(0),
+                    totalShares=0,
+                    volume24hUsd=Decimal(0),         
+                )
+                self.ammEvents24h[market] = deque()
+                self.ammVolume24h[market] = 0.0
         
         try:
             if getattr(ev, "price", None) is None:
@@ -422,6 +449,74 @@ class State:
             self.vaultBalancesMonth[vaddr].append(row.copy())
         if len(self.vaultBalancesAllTime[vaddr]) == 0:
             self.vaultBalancesAllTime[vaddr].append(row.copy())
+
+
+    def _pool_tvl_usd(self, pool: models.AMMPool) -> float:
+        q_price = self.token_price(pool.quote)
+        b_price = self.token_price(pool.base)
+        q_dec = int(pool.quoteDecimals or 0)
+        b_dec = int(pool.baseDecimals or 0)
+
+        usd_q = float(pool.reserveQuote) / (10 ** q_dec) * q_price
+        usd_b = float(pool.reserveBase) / (10 ** b_dec) * b_price
+        return usd_q + usd_b
+    
+    def _pool_trade_volume_usd(self, pool: models.AMMPool, dq: int, db: int) -> float:
+        q_price = self.token_price(pool.quote)
+        b_price = self.token_price(pool.base)
+        q_dec = int(pool.quoteDecimals or 0)
+        b_dec = int(pool.baseDecimals or 0)
+
+        usd_q = abs(float(dq)) / (10 ** q_dec) * q_price
+        usd_b = abs(float(db)) / (10 ** b_dec) * b_price
+        return max(usd_q, usd_b)
+
+    def apply_amm_sync(self, blk: int, ev: dict) -> None:
+        market = ev.get("market", "").lower()
+        pool = self.ammPools.get(market)
+        if pool is None:
+            return
+
+        new_q = int(ev.get("reserveQuote", 0))
+        new_b = int(ev.get("reserveBase", 0))
+
+        old_q = pool.reserveQuote
+        old_b = pool.reserveBase
+
+        if old_q == 0 and old_b == 0:
+            pool.reserveQuote = new_q
+            pool.reserveBase = new_b
+            pool.tvlUsd = Decimal(self._pool_tvl_usd(pool))
+            return
+
+        dq = new_q - old_q
+        db = new_b - old_b
+
+        pool.reserveQuote = new_q
+        pool.reserveBase = new_b
+        pool.tvlUsd = Decimal(self._pool_tvl_usd(pool))
+
+        if dq == 0 and db == 0:
+            return
+
+        if (dq > 0 and db > 0) or (dq < 0 and db < 0):
+            return
+
+        ts = self.block_ts(blk)
+        vol_usd = self._pool_trade_volume_usd(pool, dq, db)
+        if vol_usd <= 0:
+            return
+
+        dq_events = self.ammEvents24h.setdefault(market, deque())
+        dq_events.append({"timestamp": int(ts), "volumeUsd": float(vol_usd)})
+
+        cutoff = max(0, int(ts) - 24 * 3600)
+        total = self.ammVolume24h.get(market, 0.0) + float(vol_usd)
+        while dq_events and int(dq_events[0]["timestamp"]) < cutoff:
+            total -= float(dq_events[0]["volumeUsd"])
+            dq_events.popleft()
+        self.ammVolume24h[market] = max(total, 0.0)
+        pool.volume24hUsd = Decimal(self.ammVolume24h[market])
 
 
     def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
