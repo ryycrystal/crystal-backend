@@ -7,8 +7,8 @@ import modules.lp as amm
 decimal.getcontext().prec = 50
 
 CONTRACTS = {
-    "ROUTER": "0x4658c8879Ec0dD9063EE12371Bd70eA694F4284d",
-    "VAULTS": "0x91C46195325633be39062Fe907323D5c9d1050Ae",
+    "ROUTER": "0x4DFBBd9E574ecA7273A169E1F6F7A1bf31B92462",
+    "VAULTS": "0x7d1b6913Fa4f3CFc4195Eda84dfD1B5e2B6E491C",
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
 EVENT_SIGS = {
