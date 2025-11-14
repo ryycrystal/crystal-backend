@@ -93,7 +93,7 @@ class State:
     
     def seed_single_market(self) -> None:
         m = {
-            "id": "0x80dBb4C2a87Cee46c4EDA8238cb4DA7110a493AA",
+            "id": "0xA4dCef430fc8056713e6865fe64b6150e541Ef23",
             "baseAsset": "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701",
             "quoteAsset": "0xf817257fed379853cde0fa4f97ab987181b1e5ea",
             "baseDecimals": 18,
