@@ -198,86 +198,117 @@ async def vault_sampler(state: _st.State):
     while True:
         try:
             state.sweep()
-            
-            if not state.vaults:
-                await asyncio.sleep(15)
-                continue
 
-            head_res = _rpc_batch([{"jsonrpc":"2.0","id":rid,"method":"eth_blockNumber","params":[]}]); rid += 1
-            blk_hex = head_res[0]["result"]
-            blk_num = int(blk_hex, 16)
+            if state.vaults:
+                head_res = _rpc_batch([{
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "method": "eth_blockNumber",
+                    "params": [],
+                }])
+                rid += 1
 
-            ts = state.block_ts(blk_num)
-            if ts == 0:
+                blk_hex = head_res[0]["result"]
+                blk_num = int(blk_hex, 16)
+
+                ts = state.block_ts(blk_num)
+                if ts == 0:
+                    _, hts = state.head_block_and_ts()
+                    ts = int(hts or int(time.time()))
+
+                calls = []
+                order = []
+                for vaddr in list(state.vaults.keys()):
+                    order.append(vaddr)
+                    calls.append({
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "method": "eth_call",
+                        "params": [
+                            {"to": vaddr, "data": "0x00113e08"},
+                            blk_hex,
+                        ],
+                    })
+                    rid += 1
+
+                if calls:
+                    results = _rpc_batch(calls)
+
+                    for i, vaddr in enumerate(order):
+                        row = results[i] if i < len(results) else {}
+                        ret = row.get("result")
+                        if not isinstance(ret, str) or len(ret) < 2:
+                            continue
+
+                        s = ret[2:].rjust(64 * 4, "0")
+                        try:
+                            quote_bal = int(s[128:192], 16)
+                            base_bal = int(s[192:256], 16)
+                        except Exception:
+                            continue
+
+                        v = state.vaults.get(vaddr)
+                        if not v:
+                            continue
+
+                        qd = int(getattr(v, "quoteDecimals", 0) or 0)
+                        bd = int(getattr(v, "baseDecimals", 0) or 0)
+                        qaddr = getattr(v, "quote", "").lower()
+                        baddr = getattr(v, "base", "").lower()
+
+                        pq = state.tokenToPrice.get(qaddr, Decimal(0))
+                        pb = state.tokenToPrice.get(baddr, Decimal(0))
+
+                        q_units = Decimal(quote_bal) / _dec_pow(qd)
+                        b_units = Decimal(base_bal) / _dec_pow(bd)
+                        tvl_usd = (q_units * pq) + (b_units * pb)
+                        usd_value = float(tvl_usd) if tvl_usd.is_finite() else 0.0
+
+                        snap = {
+                            "block": int(blk_num),
+                            "timestamp": int(ts),
+                            "quoteBalance": int(quote_bal),
+                            "baseBalance": int(base_bal),
+                            "usdValue": usd_value,
+                        }
+
+                        day = state.vaultBalancesDay.setdefault(vaddr, deque())
+                        week = state.vaultBalancesWeek.setdefault(vaddr, deque())
+                        month = state.vaultBalancesMonth.setdefault(vaddr, deque())
+                        alltm = state.vaultBalancesAllTime.setdefault(vaddr, deque())
+
+                        day.append(snap)
+                        week.append(snap)
+                        month.append(snap)
+                        alltm.append(snap)
+
+                        _prune_by_age(day, ts, 24 * 3600)
+                        _prune_by_age(week, ts, 7 * 24 * 3600)
+                        _prune_by_age(month, ts, 30 * 24 * 3600)
+
+            else:
                 _, hts = state.head_block_and_ts()
                 ts = int(hts or int(time.time()))
 
-            calls = []
-            order = []
-            for vaddr in list(state.vaults.keys()):
-                order.append(vaddr)
-                calls.append({
-                    "jsonrpc":"2.0","id":rid,"method":"eth_call",
-                    "params":[{"to": vaddr, "data":"0x00113e08"}, blk_hex]
-                }); rid += 1
+            for market, pool in state.ammPools.items():
+                tvl = float(pool.tvlUsd)
+                vol_24h = float(pool.volume24hUsd)
 
-            if not calls:
-                await asyncio.sleep(15)
-                continue
+                fee_rate = float(pool.feeBps) / 10_000.0
+                fees_24h = vol_24h * fee_rate
+                pool.fees24hUsd = Decimal(fees_24h)
 
-            results = _rpc_batch(calls)
+                if tvl > 0.0 and fees_24h > 0.0:
+                    r_day = fees_24h / tvl
+                    apy = (1.0 + r_day) ** 365 - 1.0
+                    pool.apy24h = Decimal(apy)
 
-            for i, vaddr in enumerate(order):
-                row = results[i] if i < len(results) else {}
-                ret = row.get("result")
-                if not isinstance(ret, str) or len(ret) < 2:
-                    continue
-
-                s = ret[2:].rjust(64 * 4, "0")
-                try:
-                    quote_bal = int(s[128:192], 16)
-                    base_bal  = int(s[192:256], 16)
-                except Exception:
-                    continue
-
-                v = state.vaults.get(vaddr)
-                if not v:
-                    continue
-
-                qd = int(getattr(v, "quoteDecimals", 0) or 0)
-                bd = int(getattr(v, "baseDecimals", 0) or 0)
-                qaddr = getattr(v, "quote", "").lower()
-                baddr = getattr(v, "base", "").lower()
-
-                pq = state.tokenToPrice.get(qaddr, Decimal(0))
-                pb = state.tokenToPrice.get(baddr, Decimal(0))
-
-                q_units = Decimal(quote_bal) / _dec_pow(qd)
-                b_units = Decimal(base_bal) / _dec_pow(bd)
-                tvl_usd = (q_units * pq) + (b_units * pb)
-                usd_value = float(tvl_usd) if tvl_usd.is_finite() else 0.0
-
-                snap = {
-                    "block": int(blk_num),
-                    "timestamp": int(ts),
-                    "quoteBalance": int(quote_bal),
-                    "baseBalance": int(base_bal),
-                    "usdValue": usd_value,
-                }
-
-                day = state.vaultBalancesDay.setdefault(vaddr, deque())
-                week = state.vaultBalancesWeek.setdefault(vaddr, deque())
-                month = state.vaultBalancesMonth.setdefault(vaddr, deque())
-                alltm = state.vaultBalancesAllTime.setdefault(vaddr, deque())
-
-                day.append(snap)
-                week.append(snap)
-                month.append(snap)
-                alltm.append(snap)
-
-                _prune_by_age(day, ts, 24 * 3600)
-                _prune_by_age(week, ts, 7 * 24 * 3600)
-                _prune_by_age(month, ts, 30 * 24 * 3600)
+                    hist = state.ammHistory.setdefault(market, [])
+                    hist.append({"timestamp": int(ts), "apy": float(apy)})
+                    if len(hist) > 200:
+                        hist[:] = hist[-200:]
+                else:
+                    pool.apy24h = Decimal(0)
 
         except Exception as e:
             print(f"[SAMPLER][error] {e!r}")

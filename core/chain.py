@@ -22,8 +22,6 @@ EVENT_SIGS = {
     "0x7e6adfec7e3f286831a0200a754127c171a2da564078722cb97704741bbdb0ea": "VUNLOCK",
     "0x13607bf9d2dd20e1f3a7daf47ab12856f8aad65e6ae7e2c75ace3d0c424a40e8": "VCLOSE",
     
-    "0x2f00e3cdd69a77be7ed215ec7b2a36784dd158f921fca79ac29deffa353fe6ee": "MINT",
-    "0xd3986fdc78865c06fb072387efddb45772a87fe2105e598db99f085be3d05b84": "BURN",
     "0xc95e30a514d4115dee44b3ba17b2fc114501726562d4c5f2663c06f42df8f1e7": "SYNC",
         
     "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
@@ -39,8 +37,6 @@ PARSERS = {
     "VLOCK": v.parse_vault_lock,
     "VUNLOCK": v.parse_vault_unlock,
     "VCLOSE": v.parse_vault_close,
-    "MINT": amm.parse_mint,
-    "BURN": amm.parse_burn,
     "SYNC": amm.parse_sync,
     "LT": lp.parse_launchpad_trade,
     "TC": lp.parse_token_created,

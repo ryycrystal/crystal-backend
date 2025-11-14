@@ -125,7 +125,6 @@ class AMMPool:
     reserveQuote: int = 0
     reserveBase: int = 0
     tvlUsd: Decimal = Decimal(0)
-    totalShares: int = 0
     volume24hUsd: Decimal = Decimal(0)
     fees24hUsd: Decimal = Decimal(0)
     apy24h: Decimal = Decimal(0)
