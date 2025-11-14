@@ -11,7 +11,7 @@ app: FastAPI = api_app
 
 @app.on_event("startup")
 async def _boot_streamer() -> None:
-    last_blk = None # 49225741
+    last_blk = 49389715
     start_blk = (last_blk + 1) if last_blk is not None else None
     asyncio.create_task(stream_logs(start_blk))
     asyncio.create_task(vault_sampler(SEQUENCER._state))
