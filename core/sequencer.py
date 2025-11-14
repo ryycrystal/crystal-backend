@@ -41,11 +41,11 @@ class Sequencer:
                 try:
                     self._on_block(self._next_block)
                 except Exception as e:
-                    print(f"[SQ][persist][error] {e!r}")
+                    print(f"[SQ] Persist Error: {e!r}")
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "MINT": 0, "BURN": 0, "SYNC": 0, "LT": 0, "TC": 0}
+        counts = {"MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0, "LT": 0, "TC": 0}
         seen = set()
         blk_ts = self._state.block_ts(blk)
 
@@ -104,12 +104,6 @@ class Sequencer:
                 if vaddr in self._state.vaults:
                     self._state.vaults[vaddr].closed = True
                     
-            elif tag == "MINT":
-                self._state.apply_amm_mint(blk, parsed)
-
-            elif tag == "BURN":
-                self._state.apply_amm_burn(blk, parsed)
-                    
             elif tag == "SYNC":
                 self._state.apply_amm_sync(blk, parsed)
 
@@ -120,8 +114,8 @@ class Sequencer:
             elif tag == "TC":
                 ev = self._to_token_created(parsed, blk)
                 self._state.apply_token_created(ev, log["address"].lower())
-        
-        print(f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} MINT {counts['MINT']} BURN {counts['BURN']} SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']}")
+
+        print(f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']}")
         
     @staticmethod
     def _to_market_created(d: dict) -> models.MarketInfo:
