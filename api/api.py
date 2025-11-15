@@ -1,4 +1,6 @@
 from __future__ import annotations
+from decimal import Decimal
+from dataclasses import asdict
 from typing import Dict, Any, List, Deque, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -335,6 +337,49 @@ def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
         "ok": True,
         "count": len(out),
         "prices": out,
+    }
+
+@app.get("/debug/markets")
+def debug_markets() -> Dict[str, Any]:
+    st = SEQUENCER._state
+
+    def serialize_market(mi: Any) -> Dict[str, Any]:
+        if isinstance(mi, dict):
+            out: Dict[str, Any] = {}
+            for k, v in mi.items():
+                if isinstance(v, Decimal):
+                    out[k] = float(v)
+                else:
+                    out[k] = v
+            return out
+
+        try:
+            data = asdict(mi)
+        except TypeError:
+            data = {
+                k: getattr(mi, k)
+                for k in dir(mi)
+                if not k.startswith("_") and not callable(getattr(mi, k))
+            }
+
+        for k, v in list(data.items()):
+            if isinstance(v, Decimal):
+                data[k] = float(v)
+
+        return data
+
+    token_graph_out: Dict[str, List[Dict[str, Any]]] = {}
+    for token, markets in st.tokenGraph.items():
+        token_graph_out[token.lower()] = [serialize_market(m) for m in markets]
+
+    markets_out: Dict[str, Dict[str, Any]] = {}
+    for addr, mi in st.addressToMarket.items():
+        markets_out[addr.lower()] = serialize_market(mi)
+
+    return {
+        "ok": True,
+        "tokenGraph": token_graph_out,
+        "markets": markets_out,
     }
 
 @app.get("/vaults/{address}/{timeframe}")
