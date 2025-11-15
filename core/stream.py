@@ -171,6 +171,15 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 async def stream_logs(start_block: int | None = None):
     last_seen = None
     delay = 0.5
+
+    if start_block is not None:
+        try:
+            last_seen = await backfill.backfill(start_block, BACKFILL_BATCH)
+            print(f"[WS] Backfill from {start_block} to {last_seen}", flush=True)
+        except Exception as e:
+            print(f"[WS] Backfill failed {e!r}", flush=True)
+            last_seen = start_block - 1 if start_block > 0 else None
+
     while True:
         try:
             last_seen = await _stream_once(last_seen)
