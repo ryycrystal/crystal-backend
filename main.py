@@ -6,7 +6,7 @@ from api.api import app as api_app
 from core.stream import stream_logs
 from core.sequencer import SEQUENCER
 from core.stream import vault_sampler
-from core.state import State, SNAPSHOT_FILE
+from state import State, SNAPSHOT_FILE
 
 app: FastAPI = api_app
 
