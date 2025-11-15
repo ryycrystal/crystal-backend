@@ -163,7 +163,7 @@ class State:
 
         self.last_processed_block: int | None = None
 
-        if True:
+        if False:
             self.seed_single_market()
             self.sweep()
 
