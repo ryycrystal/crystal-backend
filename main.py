@@ -26,10 +26,10 @@ async def _boot_streamer() -> None:
     snap = State.load_from_file(SNAPSHOT_FILE)
     if snap is not None:
         SEQUENCER._state = snap
-        last_blk = snap.last_processed_block or 49389714
+        last_blk = snap.last_processed_block or 49389578
         print(f"loaded snapshot at block {last_blk}")
     else:
-        last_blk = 49389714
+        last_blk = 49389578
         print("no snapshot found, starting from hardcoded block")
 
     start_blk = (last_blk + 1) if last_blk is not None else None
