@@ -47,9 +47,9 @@ class Sequencer:
     def _process_block(self, blk: int, logs: List[dict]):
         counts = {"MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0, "LT": 0, "TC": 0}
         seen = set()
-        blk_ts = self._state.block_ts(blk)
 
         for log in logs:
+            blk_ts = int(log.get("blockTimestamp"), 16)
             txh = log.get("transactionHash")
             li = log.get("logIndex")
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
@@ -105,7 +105,7 @@ class Sequencer:
                     self._state.vaults[vaddr].closed = True
                     
             elif tag == "SYNC":
-                self._state.apply_amm_sync(blk, parsed)
+                self._state.apply_amm_sync(blk, parsed, blk_ts)
 
             elif tag == "LT":
                 ev = self._to_launchpad_trade(parsed, blk)
