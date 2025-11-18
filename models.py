@@ -128,3 +128,44 @@ class AMMPool:
     volume24hUsd: Decimal = Decimal(0)
     fees24hUsd: Decimal = Decimal(0)
     apy24h: Decimal = Decimal(0)
+
+@dataclass(slots=True)
+class LaunchpadToken:
+    token: str
+    creator: str
+    name: str
+    symbol: str
+    metadata_cid: str
+    description: str
+    social1: str
+    social2: str
+    social3: str
+    social4: str
+    created_block: int = 0
+    migrated: bool = False
+    migrated_block: int = 0
+    market: str = ""
+    source: int = 0
+    last_price_native: Decimal = Decimal(0)
+
+@dataclass(slots=True)
+class LaunchpadUser:
+    address: str
+    total_realized_pnl_native: Decimal = Decimal(0)
+    total_trades: int = 0
+    tokens_created: int
+    tokens_graduated: 0
+
+@dataclass(slots=True)
+class LaunchpadPosition:
+    user: str
+    token: str
+    token_bought: int = 0
+    token_sold: int = 0
+    native_spent: int = 0
+    native_received: int = 0
+    balance_token: int = 0
+    realized_pnl_native: Decimal = Decimal(0)
+    trade_count: int = 0
+    buy_count: int = 0
+    sell_count: int = 0

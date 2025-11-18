@@ -29,7 +29,7 @@ async def _boot_streamer() -> None:
         last_blk = snap.last_processed_block or 49389578
         print(f"loaded snapshot at block {last_blk}")
     else:
-        last_blk = 49389578
+        last_blk = None # 49389578
         print("no snapshot found, starting from hardcoded block")
 
     start_blk = (last_blk + 1) if last_blk is not None else None

@@ -3,7 +3,6 @@ from dataclasses import dataclass, is_dataclass, asdict
 from typing import Dict, Deque, List, Tuple, Set
 from collections import deque
 from decimal import Decimal, getcontext
-from core import chain as h
 import json
 import urllib.request
 import time
@@ -19,15 +18,6 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
 
 SNAPSHOT_FILE = os.getenv("CRYSTAL_STATE_SNAPSHOT", "state_snapshot.json")
-
-
-@dataclass(slots=True)
-class _Evt:
-    block: int
-    is_buy: bool
-    native_vol: int
-    token_amt: int
-    native_per_token: Decimal
 
 
 class _BlockTimeCache:
@@ -161,12 +151,17 @@ class State:
         self.ammVolume24h: Dict[str, float] = {}
         self.ammHistory: Dict[str, List[dict]] = {}
 
+        self.launchpad_tokens: Dict[str, models.LaunchpadToken] = {}
+        self.launchpad_users: Dict[str, models.LaunchpadUser] = {}
+        self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {}
+
         self.last_processed_block: int | None = None
 
         if False:
             self.seed_single_market()
             self.sweep()
 
+    # snapshotting/persistence, db related things
     def _to_snapshot_dict(self) -> dict:
         return {
             "version": 1,
@@ -337,6 +332,7 @@ class State:
     def head_block_and_ts(self) -> tuple[int | None, int | None]:
         return self._bt._last_head_block, self._bt._last_head_ts
 
+    # market creation, prices
     def apply_market_created(self, ev: models.MarketInfo, _log_addr: str) -> None:
         if not ev.isCanonical:
             return
@@ -444,6 +440,7 @@ class State:
         v = self.tokenToPrice.get(token.lower())
         return float(v) if v is not None else 0.0
 
+    # strategy vaults
     def apply_vault_deployed(self, ts: int, ev: models.Vault, _log_addr: str) -> None:
         v = ev.vault.lower()
         if v in self.vaults:
@@ -640,6 +637,7 @@ class State:
         if len(self.vaultBalancesAllTime[vaddr]) == 0:
             self.vaultBalancesAllTime[vaddr].append(row.copy())
 
+    # amm lp
     def _pool_tvl_usd(self, pool: models.AMMPool) -> float:
         q_price = self.token_price(pool.quote)
         b_price = self.token_price(pool.base)
@@ -668,7 +666,7 @@ class State:
 
         return 0.0
 
-    def apply_amm_sync(self, blk: int, ev: dict) -> None:
+    def apply_amm_sync(self, blk: int, ev: dict, ts: int) -> None:
         market = ev.get("market", "").lower()
         pool = self.ammPools.get(market)
         if pool is None:
@@ -699,7 +697,6 @@ class State:
         if (dq > 0 and db > 0) or (dq < 0 and db < 0):
             return
 
-        ts = self.block_ts(blk)
         vol_usd = self._pool_trade_volume_usd(pool, dq, db)
         if vol_usd <= 0:
             return
@@ -717,116 +714,209 @@ class State:
         self.ammVolume24h[market] = total
         pool.volume24hUsd = Decimal(total)
 
-    def apply_launchpad_trade(self, ev: models.LaunchpadTrade, _log_addr: str) -> None:
-        token = ev.token.lower()
+    # launchpad
+        def apply_token_created(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+        """
+        handle launchpad TokenCreated events.
 
-        native_amt = ev.amount_in if ev.is_buy else ev.amount_out
-        token_amt = ev.amount_out if ev.is_buy else ev.amount_in
+        expected ev shape (from parse_token_created):
 
-        if token_amt <= 0:
-            price = Decimal(0)
-        else:
-            price = Decimal(native_amt) / Decimal(token_amt)
-
-        q = self._events.setdefault(token, deque())
-        q.append(
-            _Evt(
-                block=ev.block_number,
-                is_buy=ev.is_buy,
-                native_vol=int(native_amt),
-                token_amt=int(token_amt),
-                native_per_token=price,
-            )
-        )
-
-    def apply_token_created(self, ev: models.TokenCreated, _log_addr: str) -> None:
-        token = ev.token.lower()
-        self._created_at_block.setdefault(token, ev.block_number)
-        self._events.setdefault(token, deque())
-
-    def _compute_token_snapshot(self, token: str) -> dict[int, dict]:
-        token = token.lower()
-        dq = self._events.get(token)
-        res = {
-            h: {
-                "buy_cnt": 0,
-                "sell_cnt": 0,
-                "buy_vol_native": 0,
-                "sell_vol_native": 0,
-                "total_vol_native": 0,
-                "start_price_native": None,
-                "last_price_native": None,
-                "change_pct": None,
-            }
-            for h in INTERVALS
+        {
+            "token": str,
+            "creator": str,
+            "name": str,
+            "symbol": str,
+            "metadata_cid": str,
+            "description": str,
+            "social1": str,
+            "social2": str,
+            "social3": str,
+            "social4": str,
+            # optional:
+            # "source": int  # 0 = own router, 1 = nad.fun, 2 = printr
         }
+        """
+        token = ev.get("token", "").lower()
+        if not token:
+            return
 
-        if not dq:
-            return res
+        creator = ev.get("creator", "").lower()
+        name = ev.get("name", "")
+        symbol = ev.get("symbol", "")
+        metadata_cid = ev.get("metadata_cid", "")
+        description = ev.get("description", "")
+        social1 = ev.get("social1", "")
+        social2 = ev.get("social2", "")
+        social3 = ev.get("social3", "")
+        social4 = ev.get("social4", "")
+        source = int(ev.get("source", 0))
 
-        _, head_ts = self._bt.head()
-        items = list(dq)
-        last_price = items[-1].native_per_token if items else None
+        existing = self.launchpad_tokens.get(token)
 
-        cutoffs = {h: head_ts - h for h in INTERVALS}
-
-        cutoff_24h = cutoffs[86400]
-        prune_n = 0
-        for e in items:
-            ts = self._bt.ts(e.block)
-            if ts < cutoff_24h:
-                prune_n += 1
-            else:
-                break
-        for _ in range(prune_n):
-            dq.popleft()
-
-        if prune_n:
-            items = list(dq)
-            if not items:
-                return res
-            last_price = items[-1].native_per_token
-
-        for e in items:
-            ts = self._bt.ts(e.block)
-            age = head_ts - ts
-            for h in INTERVALS:
-                if age <= h:
-                    if res[h]["start_price_native"] is None:
-                        res[h]["start_price_native"] = e.native_per_token
-                    if e.is_buy:
-                        res[h]["buy_cnt"] += 1
-                        res[h]["buy_vol_native"] += e.native_vol
-                    else:
-                        res[h]["sell_cnt"] += 1
-                        res[h]["sell_vol_native"] += e.native_vol
-
-        for h in INTERVALS:
-            res[h]["total_vol_native"] = (
-                res[h]["buy_vol_native"] + res[h]["sell_vol_native"]
+        if existing is None:
+            # create a fresh token record from metadata
+            lp = models.LaunchpadToken(
+                token=token,
+                creator=creator,
+                name=name,
+                symbol=symbol,
+                metadata_cid=metadata_cid,
+                description=description,
+                social1=social1,
+                social2=social2,
+                social3=social3,
+                social4=social4,
             )
-            res[h]["last_price_native"] = (
-                float(last_price) if last_price is not None else None
+            # fill non-init fields
+            if hasattr(lp, "created_block"):
+                lp.created_block = blk
+            if hasattr(lp, "source"):
+                lp.source = source
+            self.launchpad_tokens[token] = lp
+        else:
+            # backfill any missing metadata; do NOT overwrite non-empty values
+            if not getattr(existing, "creator", "") and creator:
+                existing.creator = creator
+            if not getattr(existing, "name", "") and name:
+                existing.name = name
+            if not getattr(existing, "symbol", "") and symbol:
+                existing.symbol = symbol
+            if not getattr(existing, "metadata_cid", "") and metadata_cid:
+                existing.metadata_cid = metadata_cid
+            if not getattr(existing, "description", "") and description:
+                existing.description = description
+            if not getattr(existing, "social1", "") and social1:
+                existing.social1 = social1
+            if not getattr(existing, "social2", "") and social2:
+                existing.social2 = social2
+            if not getattr(existing, "social3", "") and social3:
+                existing.social3 = social3
+            if not getattr(existing, "social4", "") and social4:
+                existing.social4 = social4
+
+            if hasattr(existing, "created_block") and getattr(existing, "created_block", 0) == 0:
+                existing.created_block = blk
+            if hasattr(existing, "source") and getattr(existing, "source", 0) == 0:
+                existing.source = source
+
+        # cache block timestamp in case we need it later for time-based analytics
+        if ts:
+            self._bt.note(blk, int(ts))
+
+
+    def apply_launchpad_trade(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+        """
+        handle LaunchpadTrade events (both from our router and future integrations).
+
+        expected ev shape (from parse_launchpad_trade):
+
+        {
+            "token": str,
+            "user": str,
+            "is_buy": bool,
+            "amount_in": int,
+            "amount_out": int,
+            "native_reserve": int,
+            "token_reserve": int,
+            # optional:
+            # "source": int  # if you ever need per-trade source
+        }
+        """
+        token = ev.get("token", "").lower()
+        user = ev.get("user", "").lower()
+        if not token or not user:
+            return
+
+        is_buy = bool(ev.get("is_buy", False))
+        amount_in = int(ev.get("amount_in", 0) or 0)
+        amount_out = int(ev.get("amount_out", 0) or 0)
+
+        # normalize direction:
+        # - native = what the user pays on buy, what they receive on sell
+        # - token_amt = what the user receives on buy, what they pay on sell
+        native_amt = amount_in if is_buy else amount_out
+        token_amt = amount_out if is_buy else amount_in
+
+        if token_amt > 0:
+            try:
+                price = Decimal(native_amt) / Decimal(token_amt)
+            except Exception:
+                price = Decimal(0)
+        else:
+            price = Decimal(0)
+
+        # ensure token record exists; if token_created fired already, this won't overwrite metadata
+        lp = self.launchpad_tokens.get(token)
+        if lp is None:
+            lp = models.LaunchpadToken(
+                token=token,
+                creator="",
+                name="",
+                symbol="",
+                metadata_cid="",
+                description="",
+                social1="",
+                social2="",
+                social3="",
+                social4="",
             )
+            if hasattr(lp, "created_block"):
+                lp.created_block = blk
+            self.launchpad_tokens[token] = lp
 
-            sp = res[h]["start_price_native"]
-            lp = last_price
-            if sp is not None and lp is not None:
-                sp_val = float(sp) if not isinstance(sp, (int, float)) else sp
-                lp_val = float(lp) if not isinstance(lp, (int, float)) else lp
-                if sp_val != 0:
-                    res[h]["change_pct"] = ((lp_val - sp_val) / sp_val) * 100.0
+        # update last seen price
+        if hasattr(lp, "last_price_native"):
+            lp.last_price_native = price
 
-            if sp is not None and not isinstance(sp, (int, float)):
-                res[h]["start_price_native"] = float(sp)
+        # you can later add more per-token aggregates here (volumes, fees, tx counts, etc.)
 
-        return res
+        # ensure user record
+        lu = self.launchpad_users.get(user)
+        if lu is None:
+            lu = models.LaunchpadUser(address=user)
+            self.launchpad_users[user] = lu
+        lu.total_trades += 1
 
-    def snapshot(self, token: str) -> Dict[int, Dict[str, int]]:
-        return self._compute_token_snapshot(token)
+        # per-user, per-token position
+        key = (user, token)
+        pos = self.launchpad_positions.get(key)
+        if pos is None:
+            pos = models.LaunchpadPosition(user=user, token=token)
+            self.launchpad_positions[key] = pos
 
-    def batch_snapshot(self, tokens: List[str]) -> Dict[str, Dict[int, Dict[str, int]]]:
-        return {t.lower(): self._compute_token_snapshot(t) for t in tokens}
+        pos.trade_count += 1
+        if is_buy:
+            pos.buy_count += 1
+            pos.token_bought += token_amt
+            pos.native_spent += native_amt
+            pos.balance_token += token_amt
+        else:
+            pos.sell_count += 1
+            pos.token_sold += token_amt
+            pos.native_received += native_amt
+            pos.balance_token -= token_amt
+            if pos.balance_token < 0:
+                pos.balance_token = 0
 
-    def debug_tokens(self) -> Dict[str, int]:
-        return {t: len(q) for t, q in self._events.items()}
+        # pnl logic will be added later; for now we leave realized_pnl_native untouched
+
+        if ts:
+            self._bt.note(blk, int(ts))
+
+
+    def apply_migrated(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+        token = ev.get("token", "").lower()
+        if not token:
+            return
+
+        lp = self.launchpad_tokens.get(token)
+        if lp is None:
+            return
+        
+        if hasattr(lp, "migrated"):
+            lp.migrated = True
+        if hasattr(lp, "migrated_block") and getattr(lp, "migrated_block", 0) == 0:
+            lp.migrated_block = blk
+
+        if ts:
+            self._bt.note(blk, int(ts))
