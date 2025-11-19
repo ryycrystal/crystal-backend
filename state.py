@@ -48,6 +48,7 @@ class State:
         self.launchpad_users: Dict[str, models.LaunchpadUser] = {}
         self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {}
         self.launchpad_market_to_token: Dict[str, str] = {}
+        self.launchpad_trades: Dict[str, List[models.LaunchpadTrade]] = {}
 
         if True:
             self.seed_single_market()
@@ -253,16 +254,7 @@ class State:
         except Exception:
             price_native = Decimal(0)
         lp.last_price_native = price_native
-        
-        if (not lp.approaching_75) and lp.last_price_native >= 18_750:
-            lp.approaching_75 = True
-            lp.approaching_75_block = blk
-            lp.approaching_75_at = ts
-        elif ( lp.approaching_75) and lp.last_price_native < 18_750:
-            lp.approaching_75 = False
-            lp.approaching_75_block = 0
-            lp.approaching_75_at = 0
-        
+
         # per-token aggregate stats
         lp.native_volume += native_amt
         lp.token_volume += token_amt
@@ -310,6 +302,22 @@ class State:
         
         delta = pos.realized_pnl_native - old_realized
         lu.total_realized_pnl_native += delta
+        
+        trades = self.launchpad_trades.setdefault(token_addr, [])
+        trades.append(
+            models.LaunchpadTrade(
+                block_number=blk,
+                timestamp=int(ts),
+                token=token_addr,
+                user=user,
+                is_buy=token_is_buy,
+                native_amount=int(native_amt),
+                token_amount=int(token_amt),
+                price_native=lp.last_price_native,
+            )
+        )
+        if len(trades) > 500000:
+            trades[:] = trades[-500000:]
 
     def sweep(self) -> None:
         root = "0xf817257fed379853cde0fa4f97ab987181b1e5ea"
@@ -695,16 +703,16 @@ class State:
             return
         
         try:
-            price_native = Decimal(native_amt) / Decimal(token_amt)
+            price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
         except Exception:
             price_native = Decimal(0)
         lp.last_price_native = price_native
         
-        if (not lp.approaching_75) and lp.last_price_native * Decimal(1e9) >= 18_750:
+        if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
             lp.approaching_75 = True
             lp.approaching_75_block = blk
             lp.approaching_75_at = ts
-        elif ( lp.approaching_75) and lp.last_price_native * Decimal(1e9) < 18_750:
+        elif (lp.approaching_75) and ev.get("native_reserve") < 2500000000000000000000:
             lp.approaching_75 = False
             lp.approaching_75_block = 0
             lp.approaching_75_at = 0
@@ -755,6 +763,22 @@ class State:
 
         delta = pos.realized_pnl_native - old_realized
         lu.total_realized_pnl_native += delta
+        
+        trades = self.launchpad_trades.setdefault(token, [])
+        trades.append(
+            models.LaunchpadTrade(
+                block_number=blk,
+                timestamp=int(ts),
+                token=token,
+                user=user,
+                is_buy=is_buy,
+                native_amount=int(native_amt),
+                token_amount=int(token_amt),
+                price_native=lp.last_price_native,
+            )
+        )
+        if len(trades) > 500000:
+            trades[:] = trades[-500000:]
 
     def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> None:
         token = ev.get("token", "").lower()
