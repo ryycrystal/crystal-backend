@@ -49,7 +49,7 @@ class State:
         self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {}
         self.launchpad_market_to_token: Dict[str, str] = {}
 
-        if False:
+        if True:
             self.seed_single_market()
             self.sweep()
 
@@ -102,7 +102,7 @@ class State:
             price=price_dec,
         )
 
-        self.apply_market_created(mi, mi.market)
+        self.apply_market_created(mi, mi.market, "")
         self.addressToMarket[mi.market] = mi
 
         if mi.isCanonical and int(mi.marketType) not in (0, 1):
@@ -700,11 +700,11 @@ class State:
             price_native = Decimal(0)
         lp.last_price_native = price_native
         
-        if (not lp.approaching_75) and lp.last_price_native >= 18_750:
+        if (not lp.approaching_75) and lp.last_price_native * Decimal(1e9) >= 18_750:
             lp.approaching_75 = True
             lp.approaching_75_block = blk
             lp.approaching_75_at = ts
-        elif ( lp.approaching_75) and lp.last_price_native < 18_750:
+        elif ( lp.approaching_75) and lp.last_price_native * Decimal(1e9) < 18_750:
             lp.approaching_75 = False
             lp.approaching_75_block = 0
             lp.approaching_75_at = 0

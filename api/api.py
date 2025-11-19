@@ -491,7 +491,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
 
     holders, dev_holding, top10_holding = _holders_for_token(lt.token)
 
-    marketcap_native_raw: Decimal = lt.last_price_native
+    marketcap_native_raw: Decimal = lt.last_price_native * Decimal(1e9)
 
     tx_buy = lt.buy_count
     tx_sell = lt.sell_count
