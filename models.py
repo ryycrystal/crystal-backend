@@ -5,13 +5,13 @@ from decimal import Decimal
 @dataclass(slots=True)
 class LaunchpadTrade:
     block_number: int
+    timestamp: int
     token: str
     user: str
     is_buy: bool
-    amount_in: int
-    amount_out: int
-    native_reserve: int = 0
-    token_reserve: int = 0
+    native_amount: int
+    token_amount: int
+    price_native: Decimal
 
 @dataclass(slots=True)
 class TokenCreated:
@@ -149,7 +149,7 @@ class LaunchpadToken:
     migrated_at: int = 0
     market: str = ""
     source: int = 0 # 0 is our launchpad, 1 is nadfun, 2 is printr
-    last_price_native: Decimal = Decimal(0)
+    last_price_native: Decimal = Decimal(0.000001)
     native_volume: int = 0
     token_volume: int = 0
     volume_usd: Decimal = Decimal(0)
