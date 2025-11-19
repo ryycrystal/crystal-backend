@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, is_dataclass, asdict
+from dataclasses import is_dataclass, asdict
 from typing import Dict, Deque, List, Tuple, Set
 from collections import deque
 from decimal import Decimal, getcontext
@@ -17,124 +17,15 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
 
-SNAPSHOT_FILE = os.getenv("CRYSTAL_STATE_SNAPSHOT", "state_snapshot.json")
-
-
-class _BlockTimeCache:
-    def __init__(self) -> None:
-        self._ts_by_block: Dict[int, int] = {}
-        self._last_head_block: int | None = None
-        self._last_head_ts: int | None = None
-
-    def _rpc(self, method: str, params: list) -> dict:
-        payload = json.dumps(
-            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        ).encode()
-        req = urllib.request.Request(
-            RPC_HTTP, data=payload, headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())["result"]
-
-    def head(self) -> Tuple[int, int]:
-        try:
-            head_hex = self._rpc("eth_blockNumber", [])
-            head_num = int(head_hex, 16)
-            if self._last_head_block == head_num and self._last_head_ts is not None:
-                return head_num, self._last_head_ts
-            blk = self._rpc("eth_getBlockByNumber", [hex(head_num), False])
-            ts = int(blk["timestamp"], 16)
-            self._last_head_block = head_num
-            self._last_head_ts = ts
-            self._ts_by_block[head_num] = ts
-            return head_num, ts
-        except Exception:
-            now = int(time.time())
-            return self._last_head_block or 0, self._last_head_ts or now
-
-    def ts(self, block: int) -> int | None:
-        return self._ts_by_block.get(block)
-
-    def note(self, block: int, ts: int) -> None:
-        self._ts_by_block[block] = ts
-        self._last_head_block = block
-        self._last_head_ts = ts
-
-
-def _json_encode(obj):
-    if isinstance(obj, Decimal):
-        return {"__decimal__": str(obj)}
-    if isinstance(obj, deque):
-        return {"__deque__": [_json_encode(x) for x in obj]}
-    if isinstance(obj, set):
-        return {"__set__": [_json_encode(x) for x in obj]}
-    if is_dataclass(obj):
-        data = asdict(obj)
-        return {
-            "__dataclass__": obj.__class__.__name__,
-            "data": {k: _json_encode(v) for k, v in data.items()},
-        }
-    if hasattr(obj, "dict") and callable(getattr(obj, "dict", None)):
-        data = obj.dict()
-        return {
-            "__model__": obj.__class__.__name__,
-            "data": {k: _json_encode(v) for k, v in data.items()},
-        }
-    if isinstance(obj, dict):
-        return {k: _json_encode(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_encode(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [_json_encode(v) for v in obj]
-    return obj
-
-
-def _lookup_class(name: str):
-    cls = getattr(models, name, None)
-    if cls is not None:
-        return cls
-    mod = sys.modules.get(__name__)
-    if mod is not None and hasattr(mod, name):
-        return getattr(mod, name)
-    return None
-
-
-def _json_decode(obj):
-    if isinstance(obj, dict):
-        if "__decimal__" in obj:
-            return Decimal(obj["__decimal__"])
-        if "__set__" in obj:
-            return set(_json_decode(v) for v in obj["__set__"])
-        if "__deque__" in obj:
-            return deque(_json_decode(v) for v in obj["__deque__"])
-        if "__dataclass__" in obj or "__model__" in obj:
-            cname = obj.get("__dataclass__") or obj.get("__model__")
-            data_raw = obj.get("data", {})
-            data = {k: _json_decode(v) for k, v in data_raw.items()}
-            cls = _lookup_class(cname) if cname else None
-            if cls is None:
-                return data
-            try:
-                return cls(**data)
-            except Exception:
-                return data
-        return {k: _json_decode(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_decode(v) for v in obj]
-    return obj
-
-
 class State:
     def __init__(self) -> None:
-        self._events: Dict[str, Deque[_Evt]] = {}
-        self._created_at_block: Dict[str, int] = {}
-        self._bt = _BlockTimeCache()
-
+        # markets n prices n tokens
         self.addressToMarket: Dict[str, models.MarketInfo] = {}
         self.tokenToPrice: Dict[str, Decimal] = {}
         self.tokenGraph: Dict[str, List[models.MarketInfo]] = {}
         self.tokenToPrice["0xf817257fed379853cde0fa4f97ab987181b1e5ea"] = Decimal(1)
 
+        # vaults
         self.allVaults: Set[str] = set()
         self.vaults: Dict[str, models.Vault] = {}
         self.vaultBalancesDay: Dict[str, Deque[models.VaultBalance]] = {}
@@ -146,109 +37,23 @@ class State:
         self.vaultToUsers: Dict[str, Dict[str, models.VaultUser]] = {}
         self.vaultLatest: Dict[str, Dict[str, int]] = {}
 
+        # amm lp
         self.ammPools: Dict[str, models.AMMPool] = {}
         self.ammEvents24h: Dict[str, Deque[dict]] = {}
         self.ammVolume24h: Dict[str, float] = {}
         self.ammHistory: Dict[str, List[dict]] = {}
 
+        # launchpad
         self.launchpad_tokens: Dict[str, models.LaunchpadToken] = {}
         self.launchpad_users: Dict[str, models.LaunchpadUser] = {}
         self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {}
-
-        self.last_processed_block: int | None = None
+        self.launchpad_market_to_token: Dict[str, str] = {}
 
         if False:
             self.seed_single_market()
             self.sweep()
 
-    # snapshotting/persistence, db related things
-    def _to_snapshot_dict(self) -> dict:
-        return {
-            "version": 1,
-            "block_time_cache": {
-                "ts_by_block": self._bt._ts_by_block,
-                "last_head_block": self._bt._last_head_block,
-                "last_head_ts": self._bt._last_head_ts,
-            },
-            "events": self._events,
-            "created_at_block": self._created_at_block,
-            "addressToMarket": self.addressToMarket,
-            "tokenToPrice": self.tokenToPrice,
-            "allVaults": list(self.allVaults),
-            "vaults": self.vaults,
-            "vaultBalancesDay": self.vaultBalancesDay,
-            "vaultBalancesWeek": self.vaultBalancesWeek,
-            "vaultBalancesMonth": self.vaultBalancesMonth,
-            "vaultBalancesAllTime": self.vaultBalancesAllTime,
-            "vaultToDeposits": self.vaultToDeposits,
-            "vaultToWithdraws": self.vaultToWithdraws,
-            "vaultToUsers": self.vaultToUsers,
-            "vaultLatest": self.vaultLatest,
-            "ammPools": self.ammPools,
-            "ammEvents24h": self.ammEvents24h,
-            "ammVolume24h": self.ammVolume24h,
-            "ammHistory": self.ammHistory,
-            "last_processed_block": self.last_processed_block,
-        }
-
-    def save_to_file(self, path: str = SNAPSHOT_FILE) -> None:
-        data = self._to_snapshot_dict()
-        safe = _json_encode(data)
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(safe, f)
-        os.replace(tmp_path, path)
-
-    @classmethod
-    def load_from_file(cls, path: str = SNAPSHOT_FILE) -> State | None:
-        if not os.path.exists(path):
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        data = _json_decode(raw)
-        self = cls()
-        btc = data.get("block_time_cache", {})
-        self._bt = _BlockTimeCache()
-        self._bt._ts_by_block = btc.get("ts_by_block", {})
-        self._bt._last_head_block = btc.get("last_head_block")
-        self._bt._last_head_ts = btc.get("last_head_ts")
-
-        self._events = data.get("events", {})
-        self._created_at_block = data.get("created_at_block", {})
-
-        self.addressToMarket = data.get("addressToMarket", {})
-        self.tokenToPrice = data.get("tokenToPrice", {})
-
-        self.tokenGraph = {}
-        for mi in self.addressToMarket.values():
-            try:
-                base = mi.baseAddress.lower()
-                quote = mi.quoteAddress.lower()
-            except Exception:
-                continue
-            self.tokenGraph.setdefault(base, []).append(mi)
-            self.tokenGraph.setdefault(quote, []).append(mi)
-
-        self.vaults = data.get("vaults", {})
-        self.allVaults = set(data.get("allVaults", list(self.vaults.keys())))
-        self.vaultBalancesDay = data.get("vaultBalancesDay", {})
-        self.vaultBalancesWeek = data.get("vaultBalancesWeek", {})
-        self.vaultBalancesMonth = data.get("vaultBalancesMonth", {})
-        self.vaultBalancesAllTime = data.get("vaultBalancesAllTime", {})
-        self.vaultToDeposits = data.get("vaultToDeposits", {})
-        self.vaultToWithdraws = data.get("vaultToWithdraws", {})
-        self.vaultToUsers = data.get("vaultToUsers", {})
-        self.vaultLatest = data.get("vaultLatest", {})
-
-        self.ammPools = data.get("ammPools", {})
-        self.ammEvents24h = data.get("ammEvents24h", {})
-        self.ammVolume24h = data.get("ammVolume24h", {})
-        self.ammHistory = data.get("ammHistory", {})
-
-        self.last_processed_block = data.get("last_processed_block")
-
-        return self
-
+    # debugging
     def seed_single_market(self) -> None:
         m = {
             "id": "0xA4dCef430fc8056713e6865fe64b6150e541Ef23",
@@ -321,19 +126,11 @@ class State:
                     reserveBase=0,
                     tvlUsd=Decimal(0),
                     volume24hUsd=Decimal(0),
+                    created=time.time()
                 )
 
-    def block_ts(self, block: int) -> int:
-        t = self._bt.ts(block)
-        if t is not None:
-            return t
-        return self._bt._last_head_ts or 0
-
-    def head_block_and_ts(self) -> tuple[int | None, int | None]:
-        return self._bt._last_head_block, self._bt._last_head_ts
-
     # market creation, prices
-    def apply_market_created(self, ev: models.MarketInfo, _log_addr: str) -> None:
+    def apply_market_created(self, ev: models.MarketInfo, ts: int, _log_addr: str) -> None:
         if not ev.isCanonical:
             return
 
@@ -343,6 +140,7 @@ class State:
 
         self.addressToMarket[market] = ev
 
+        # create amm pool
         if int(ev.marketType) not in (0, 1):
             if market not in self.ammPools:
                 fee_bps = 25
@@ -362,29 +160,45 @@ class State:
                     reserveBase=0,
                     tvlUsd=Decimal(0),
                     volume24hUsd=Decimal(0),
+                    created=ts,
                 )
                 self.ammEvents24h[market] = deque()
                 self.ammVolume24h[market] = 0.0
                 self.ammHistory[market] = []
 
+        # default a market price so it dont crash
         try:
             if getattr(ev, "price", None) is None:
                 ev.price = Decimal(0)
         except Exception:
             pass
+       
+        # attempt to link to launchpad token if this market was created from a migration
+        lp = self.launchpad_tokens.get(base)
+        if lp and lp.migrated:
+            if not lp.market:
+                lp.market = market
+            self.launchpad_market_to_token[market] = base
 
-        lst_base = self.tokenGraph.setdefault(base, [])
-        lst_base.append(ev)
+        add_to_graph = True
+        if lp and not lp.migrated:
+            add_to_graph = False
 
-        lst_quote = self.tokenGraph.setdefault(quote, [])
-        lst_quote.append(ev)
+        # token graph
+        if add_to_graph:
+            lst_base = self.tokenGraph.setdefault(base, [])
+            lst_base.append(ev)
 
-    def apply_trade(self, ev: models.Trade, _log_addr: str) -> None:
+            lst_quote = self.tokenGraph.setdefault(quote, [])
+            lst_quote.append(ev)
+
+    def apply_trade(self, ev: models.Trade, blk: int, ts: int, _log_addr: str) -> None:
         market = ev.market.lower()
         mi = self.addressToMarket.get(market)
         if mi is None:
             return
 
+        # update market price
         try:
             pf = int(mi.quoteDecimals) + int(mi.scaleFactor) - int(mi.baseDecimals)
             if pf < 0:
@@ -397,6 +211,105 @@ class State:
                 mi.price = Decimal(ev.end_price) / (Decimal(10) ** pf)
             except Exception:
                 return
+            
+        # check for launchpad token linked to market (below here is launchpad stats)
+        token_addr = self.launchpad_market_to_token.get(market)
+        if not token_addr:
+            return
+        
+        base = mi.baseAddress.lower()
+        quote = mi.quoteAddress.lower()
+        
+        if base != token_addr or quote != "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701":
+            return
+        
+        user = ev.user.lower()
+        is_buy = bool(ev.is_buy)
+        amount_in = int(ev.amount_in or 0)
+        amount_out = int(ev.amount_out or 0)
+        if amount_in <= 0 and amount_out <= 0:
+            return
+        
+        if is_buy:
+            native_amt = amount_in
+            token_amt = amount_out
+            token_is_buy = True
+        else:
+            native_amt = amount_out
+            token_amt = amount_in
+            token_is_buy = False
+            
+        if native_amt <= 0 or token_amt <= 0:
+            return
+        
+        # check launchpad token itself (this shouldnt hit)
+        lp = self.launchpad_tokens.get(token_addr)
+        if lp is None:
+            print("[State] Error: Normal Trade emitted for nonexistant launchpad token")
+        
+        # update latest price in mon/token
+        try:
+            price_native = Decimal(native_amt) / Decimal(token_amt)
+        except Exception:
+            price_native = Decimal(0)
+        lp.last_price_native = price_native
+        
+        if (not lp.approaching_75) and lp.last_price_native >= 18_750:
+            lp.approaching_75 = True
+            lp.approaching_75_block = blk
+            lp.approaching_75_at = ts
+        elif ( lp.approaching_75) and lp.last_price_native < 18_750:
+            lp.approaching_75 = False
+            lp.approaching_75_block = 0
+            lp.approaching_75_at = 0
+        
+        # per-token aggregate stats
+        lp.native_volume += native_amt
+        lp.token_volume += token_amt
+        lp.tx_count += 1
+        if token_is_buy:
+            lp.buy_count += 1
+        else:
+            lp.sell_count += 1
+        
+        # usd volume (all-time), no fee increment here
+        mon_price = self.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
+        if mon_price > 0:
+            volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
+            lp.volume_usd += volume_usd_trade
+        
+        # per-user and per-token position
+        lu = self.launchpad_users.get(user)
+        if lu is None:
+            lu = models.LaunchpadUser(address=user)
+            self.launchpad_users[user] = lu
+        lu.total_trades += 1
+        key = (user, token_addr)
+        pos = self.launchpad_positions.get(key)
+        if pos is None:
+            pos = models.LaunchpadPosition(user=user, token=token_addr)
+            self.launchpad_positions[key] = pos
+
+        pos.trade_count += 1
+        if token_is_buy:
+            pos.buy_count += 1
+            pos.token_bought += token_amt
+            pos.native_spent += native_amt
+            pos.balance_token += token_amt
+        else:
+            pos.sell_count += 1
+            pos.token_sold += token_amt
+            pos.native_received += native_amt
+            pos.balance_token -= token_amt
+            if pos.balance_token < 0:
+                pos.balance_token = 0
+        
+        old_realized = pos.realized_pnl_native
+        realized_native = pos.native_received - pos.native_spent
+        pos.realized_pnl_native = Decimal(realized_native)
+        
+        delta = pos.realized_pnl_native - old_realized
+        lu.total_realized_pnl_native += delta
 
     def sweep(self) -> None:
         root = "0xf817257fed379853cde0fa4f97ab987181b1e5ea"
@@ -715,31 +628,11 @@ class State:
         pool.volume24hUsd = Decimal(total)
 
     # launchpad
-        def apply_token_created(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
-        """
-        handle launchpad TokenCreated events.
-
-        expected ev shape (from parse_token_created):
-
-        {
-            "token": str,
-            "creator": str,
-            "name": str,
-            "symbol": str,
-            "metadata_cid": str,
-            "description": str,
-            "social1": str,
-            "social2": str,
-            "social3": str,
-            "social4": str,
-            # optional:
-            # "source": int  # 0 = own router, 1 = nad.fun, 2 = printr
-        }
-        """
-        token = ev.get("token", "").lower()
+    def apply_token_created(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+        token = ev.get("token","").lower()
         if not token:
             return
-
+        
         creator = ev.get("creator", "").lower()
         name = ev.get("name", "")
         symbol = ev.get("symbol", "")
@@ -750,11 +643,11 @@ class State:
         social3 = ev.get("social3", "")
         social4 = ev.get("social4", "")
         source = int(ev.get("source", 0))
-
-        existing = self.launchpad_tokens.get(token)
-
-        if existing is None:
-            # create a fresh token record from metadata
+        
+        lp = self.launchpad_tokens.get(token)
+        if lp is not None:
+            return
+        else:
             lp = models.LaunchpadToken(
                 token=token,
                 creator=creator,
@@ -767,117 +660,75 @@ class State:
                 social3=social3,
                 social4=social4,
             )
-            # fill non-init fields
-            if hasattr(lp, "created_block"):
-                lp.created_block = blk
-            if hasattr(lp, "source"):
-                lp.source = source
+            lp.created_block = blk
+            lp.created_at = ts
+            lp.source = source
             self.launchpad_tokens[token] = lp
-        else:
-            # backfill any missing metadata; do NOT overwrite non-empty values
-            if not getattr(existing, "creator", "") and creator:
-                existing.creator = creator
-            if not getattr(existing, "name", "") and name:
-                existing.name = name
-            if not getattr(existing, "symbol", "") and symbol:
-                existing.symbol = symbol
-            if not getattr(existing, "metadata_cid", "") and metadata_cid:
-                existing.metadata_cid = metadata_cid
-            if not getattr(existing, "description", "") and description:
-                existing.description = description
-            if not getattr(existing, "social1", "") and social1:
-                existing.social1 = social1
-            if not getattr(existing, "social2", "") and social2:
-                existing.social2 = social2
-            if not getattr(existing, "social3", "") and social3:
-                existing.social3 = social3
-            if not getattr(existing, "social4", "") and social4:
-                existing.social4 = social4
-
-            if hasattr(existing, "created_block") and getattr(existing, "created_block", 0) == 0:
-                existing.created_block = blk
-            if hasattr(existing, "source") and getattr(existing, "source", 0) == 0:
-                existing.source = source
-
-        # cache block timestamp in case we need it later for time-based analytics
-        if ts:
-            self._bt.note(blk, int(ts))
-
-
-    def apply_launchpad_trade(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
-        """
-        handle LaunchpadTrade events (both from our router and future integrations).
-
-        expected ev shape (from parse_launchpad_trade):
-
-        {
-            "token": str,
-            "user": str,
-            "is_buy": bool,
-            "amount_in": int,
-            "amount_out": int,
-            "native_reserve": int,
-            "token_reserve": int,
-            # optional:
-            # "source": int  # if you ever need per-trade source
-        }
-        """
+        
+        if creator:
+            u = self.launchpad_users.get(creator)
+            if u is None:
+                u = models.LaunchpadUser(address=creator)
+                self.launchpad_users[creator] = u
+            u.tokens_created += 1
+            
+    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
         token = ev.get("token", "").lower()
         user = ev.get("user", "").lower()
         if not token or not user:
             return
-
+        
         is_buy = bool(ev.get("is_buy", False))
         amount_in = int(ev.get("amount_in", 0) or 0)
         amount_out = int(ev.get("amount_out", 0) or 0)
-
-        # normalize direction:
-        # - native = what the user pays on buy, what they receive on sell
-        # - token_amt = what the user receives on buy, what they pay on sell
+        if amount_in <= 0 and amount_out <= 0:
+            return
+        
         native_amt = amount_in if is_buy else amount_out
         token_amt = amount_out if is_buy else amount_in
-
-        if token_amt > 0:
-            try:
-                price = Decimal(native_amt) / Decimal(token_amt)
-            except Exception:
-                price = Decimal(0)
-        else:
-            price = Decimal(0)
-
-        # ensure token record exists; if token_created fired already, this won't overwrite metadata
+        
+        if native_amt <= 0 or token_amt <= 0:
+            return
+        
         lp = self.launchpad_tokens.get(token)
         if lp is None:
-            lp = models.LaunchpadToken(
-                token=token,
-                creator="",
-                name="",
-                symbol="",
-                metadata_cid="",
-                description="",
-                social1="",
-                social2="",
-                social3="",
-                social4="",
-            )
-            if hasattr(lp, "created_block"):
-                lp.created_block = blk
-            self.launchpad_tokens[token] = lp
+            return
+        
+        try:
+            price_native = Decimal(native_amt) / Decimal(token_amt)
+        except Exception:
+            price_native = Decimal(0)
+        lp.last_price_native = price_native
+        
+        if (not lp.approaching_75) and lp.last_price_native >= 18_750:
+            lp.approaching_75 = True
+            lp.approaching_75_block = blk
+            lp.approaching_75_at = ts
+        elif ( lp.approaching_75) and lp.last_price_native < 18_750:
+            lp.approaching_75 = False
+            lp.approaching_75_block = 0
+            lp.approaching_75_at = 0
+        
+        lp.native_volume += native_amt
+        lp.token_volume += token_amt
+        lp.tx_count += 1
+        if is_buy:
+            lp.buy_count += 1
+        else:
+            lp.sell_count += 1
 
-        # update last seen price
-        if hasattr(lp, "last_price_native"):
-            lp.last_price_native = price
+        mon_price = self.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
+        if mon_price > 0:
+            volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
+            lp.volume_usd += volume_usd_trade
+            lp.fees_usd += volume_usd_trade * Decimal("0.01")
 
-        # you can later add more per-token aggregates here (volumes, fees, tx counts, etc.)
-
-        # ensure user record
         lu = self.launchpad_users.get(user)
         if lu is None:
             lu = models.LaunchpadUser(address=user)
             self.launchpad_users[user] = lu
         lu.total_trades += 1
 
-        # per-user, per-token position
         key = (user, token)
         pos = self.launchpad_positions.get(key)
         if pos is None:
@@ -898,13 +749,14 @@ class State:
             if pos.balance_token < 0:
                 pos.balance_token = 0
 
-        # pnl logic will be added later; for now we leave realized_pnl_native untouched
+        old_realized = pos.realized_pnl_native
+        realized_native = pos.native_received - pos.native_spent
+        pos.realized_pnl_native = Decimal(realized_native)
 
-        if ts:
-            self._bt.note(blk, int(ts))
+        delta = pos.realized_pnl_native - old_realized
+        lu.total_realized_pnl_native += delta
 
-
-    def apply_migrated(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+    def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> None:
         token = ev.get("token", "").lower()
         if not token:
             return
@@ -912,11 +764,15 @@ class State:
         lp = self.launchpad_tokens.get(token)
         if lp is None:
             return
-        
-        if hasattr(lp, "migrated"):
-            lp.migrated = True
-        if hasattr(lp, "migrated_block") and getattr(lp, "migrated_block", 0) == 0:
-            lp.migrated_block = blk
 
-        if ts:
-            self._bt.note(blk, int(ts))
+        lp.migrated = True
+        lp.migrated_block = blk
+        lp.migrated_at = ts
+
+        creator = lp.creator.lower() if lp.creator else ""
+        if creator:
+            u = self.launchpad_users.get(creator)
+            if u is None:
+                u = models.LaunchpadUser(address=creator)
+                self.launchpad_users[creator] = u
+            u.tokens_graduated += 1

@@ -45,7 +45,11 @@ class Sequencer:
             self._next_block += 1
 
     def _process_block(self, blk: int, logs: List[dict]):
-        counts = {"MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0, "LT": 0, "TC": 0}
+        counts = {
+            "MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0,
+            "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0,
+            "LT": 0, "TC": 0, "MG": 0,
+        }
         seen = set()
 
         for log in logs:
@@ -69,11 +73,11 @@ class Sequencer:
 
             if tag == "MC":
                 ev = self._to_market_created(parsed)
-                self._state.apply_market_created(ev, log["address"].lower())
+                self._state.apply_market_created(ev, blk_ts, log["address"].lower())
                 
             elif tag == "TR":
                 ev = self._to_trade(parsed, blk)
-                self._state.apply_trade(ev, log["address"].lower())
+                self._state.apply_trade(ev, blk, blk_ts, log["address"].lower())
                 
             elif tag == "VD":
                 ev = self._to_vault_deployed(parsed, blk_ts)
@@ -108,14 +112,20 @@ class Sequencer:
                 self._state.apply_amm_sync(blk, parsed, blk_ts)
 
             elif tag == "LT":
-                ev = self._to_launchpad_trade(parsed, blk)
-                self._state.apply_launchpad_trade(ev, log["address"].lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, log["address"].lower())
 
             elif tag == "TC":
-                ev = self._to_token_created(parsed, blk)
-                self._state.apply_token_created(ev, log["address"].lower())
+                self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
 
-        print(f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']}")
+            elif tag == "MG":
+                self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
+
+        print(
+            f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} "
+            f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
+            f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
+            f"SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']} MG {counts['MG']}"
+        )
         
     @staticmethod
     def _to_market_created(d: dict) -> models.MarketInfo:
@@ -134,7 +144,7 @@ class Sequencer:
             baseName=d.get("baseName", ""),
             marketId=int(d.get("marketId", 0)),
             marketType=int(d.get("marketType", 0)),
-            scaleFactor=int(d.get("scaleFactor,") or d.get("scaleFactor", 0)),
+            scaleFactor=int(d.get("scaleFactor", 0)),
             tickSize=int(d.get("tickSize", 0)),
             maxPrice=int(d.get("maxPrice", 0)),
             minSize=int(d.get("minSize", 0)),
@@ -211,25 +221,4 @@ class Sequencer:
             hash=(txh or "").lower(),
         )
         
-    @staticmethod
-    def _to_launchpad_trade(d: dict, blk: int) -> models.LaunchpadTrade:
-        return models.LaunchpadTrade(
-            block_number=blk,
-            token=d.get("token", d.get("caller","")).lower(),
-            user=d.get("user","").lower(),
-            is_buy=bool(d["is_buy"]) if "is_buy" in d else bool(d.get("side", 0)),
-            amount_in=int(d.get("amount_in", 0)),
-            amount_out=int(d.get("amount_out", 0)),
-            native_reserve=int(d.get("native_reserve", 0)),
-            token_reserve=int(d.get("token_reserve", 0)),
-        )
-
-    @staticmethod
-    def _to_token_created(d: dict, blk: int) -> models.TokenCreated:
-        return models.TokenCreated(
-            block_number=blk,
-            token=d.get("token", d.get("caller","")).lower(),
-            creator=d.get("creator","").lower(),
-        )
-
 SEQUENCER = Sequencer(_st.State())
