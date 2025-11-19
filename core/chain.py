@@ -26,6 +26,7 @@ EVENT_SIGS = {
         
     "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
     "0xc367a2f5396f96d105baaaa90fe29b1bb18ef54c712964410d02451e67c19d3e": "LT",
+    "0xa2e7361c23d7820040603b83c0cd3f494d377bac69736377d75bb56c651a5098": "MG",
 }
 TOPICS = list(EVENT_SIGS.keys())
 PARSERS = {
@@ -40,6 +41,7 @@ PARSERS = {
     "SYNC": amm.parse_sync,
     "LT": lp.parse_launchpad_trade,
     "TC": lp.parse_token_created,
+    "MG": lp.parse_migrated,
 }
 WS_URL = "wss://testnet-rpc.monad.xyz"
 
