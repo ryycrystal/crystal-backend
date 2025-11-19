@@ -128,6 +128,7 @@ class AMMPool:
     volume24hUsd: Decimal = Decimal(0)
     fees24hUsd: Decimal = Decimal(0)
     apy24h: Decimal = Decimal(0)
+    created: int = 0
 
 @dataclass(slots=True)
 class LaunchpadToken:
@@ -142,19 +143,31 @@ class LaunchpadToken:
     social3: str
     social4: str
     created_block: int = 0
+    created_at: int = 0
     migrated: bool = False
     migrated_block: int = 0
+    migrated_at: int = 0
     market: str = ""
-    source: int = 0
+    source: int = 0 # 0 is our launchpad, 1 is nadfun, 2 is printr
     last_price_native: Decimal = Decimal(0)
+    native_volume: int = 0
+    token_volume: int = 0
+    volume_usd: Decimal = Decimal(0)
+    fees_usd: Decimal = Decimal(0)
+    buy_count: int = 0
+    sell_count: int = 0
+    tx_count: int = 0
+    approaching_75: bool = False
+    approaching_75_block: int = 0
+    approaching_75_at: int = 0
 
 @dataclass(slots=True)
 class LaunchpadUser:
     address: str
+    tokens_created: int = 0
+    tokens_graduated: int = 0
     total_realized_pnl_native: Decimal = Decimal(0)
     total_trades: int = 0
-    tokens_created: int
-    tokens_graduated: 0
 
 @dataclass(slots=True)
 class LaunchpadPosition:

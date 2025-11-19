@@ -134,22 +134,67 @@ app.include_router(x_router)
 def health() -> Dict[str, Any]:
     return {"ok": True}
 
-@app.get("/stats/{token}")
-def stats_for_token(token: str) -> Dict[str, Dict[str, Any]]:
-    snap = SEQUENCER._state.snapshot(token.lower())
-    return {LABEL[h]: snap[h] for h in INTERVALS}
 
-@app.get("/stats")
-def stats_batch(tokens: List[str] = Query(...)) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for t in tokens:
-        snap = SEQUENCER._state.snapshot(t.lower())
-        out[t.lower()] = {LABEL[h]: snap[h] for h in INTERVALS}
-    return out
+@app.get("/debug/token-to-price")
+def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
+    st = SEQUENCER._state
+    out: Dict[str, Any] = {}
 
-@app.get("/debug/tokens")
-def debug_tokens() -> Dict[str, int]:
-    return SEQUENCER._state.debug_tokens()
+    for addr, decv in st.tokenToPrice.items():
+        try:
+            out[addr.lower()] = str(decv) if as_strings else float(decv)
+        except Exception:
+            out[addr.lower()] = str(decv)
+
+    return {
+        "ok": True,
+        "count": len(out),
+        "prices": out,
+    }
+
+@app.get("/debug/markets")
+def debug_markets() -> Dict[str, Any]:
+    st = SEQUENCER._state
+
+    def serialize_market(mi: Any) -> Dict[str, Any]:
+        if isinstance(mi, dict):
+            out: Dict[str, Any] = {}
+            for k, v in mi.items():
+                if isinstance(v, Decimal):
+                    out[k] = float(v)
+                else:
+                    out[k] = v
+            return out
+
+        try:
+            data = asdict(mi)
+        except TypeError:
+            data = {
+                k: getattr(mi, k)
+                for k in dir(mi)
+                if not k.startswith("_") and not callable(getattr(mi, k))
+            }
+
+        for k, v in list(data.items()):
+            if isinstance(v, Decimal):
+                data[k] = float(v)
+
+        return data
+
+    token_graph_out: Dict[str, List[Dict[str, Any]]] = {}
+    for token, markets in st.tokenGraph.items():
+        token_graph_out[token.lower()] = [serialize_market(m) for m in markets]
+
+    markets_out: Dict[str, Dict[str, Any]] = {}
+    for addr, mi in st.addressToMarket.items():
+        markets_out[addr.lower()] = serialize_market(mi)
+
+    return {
+        "ok": True,
+        "tokenGraph": token_graph_out,
+        "markets": markets_out,
+    }
+
 
 @app.get("/vaults/{address}/{user}/{timeframe}")
 def vault_combined(
@@ -322,66 +367,6 @@ def list_vaults(
         "vaults": rows[:limit],
     }
 
-@app.get("/debug/token-to-price")
-def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
-    st = SEQUENCER._state
-    out: Dict[str, Any] = {}
-
-    for addr, decv in st.tokenToPrice.items():
-        try:
-            out[addr.lower()] = str(decv) if as_strings else float(decv)
-        except Exception:
-            out[addr.lower()] = str(decv)
-
-    return {
-        "ok": True,
-        "count": len(out),
-        "prices": out,
-    }
-
-@app.get("/debug/markets")
-def debug_markets() -> Dict[str, Any]:
-    st = SEQUENCER._state
-
-    def serialize_market(mi: Any) -> Dict[str, Any]:
-        if isinstance(mi, dict):
-            out: Dict[str, Any] = {}
-            for k, v in mi.items():
-                if isinstance(v, Decimal):
-                    out[k] = float(v)
-                else:
-                    out[k] = v
-            return out
-
-        try:
-            data = asdict(mi)
-        except TypeError:
-            data = {
-                k: getattr(mi, k)
-                for k in dir(mi)
-                if not k.startswith("_") and not callable(getattr(mi, k))
-            }
-
-        for k, v in list(data.items()):
-            if isinstance(v, Decimal):
-                data[k] = float(v)
-
-        return data
-
-    token_graph_out: Dict[str, List[Dict[str, Any]]] = {}
-    for token, markets in st.tokenGraph.items():
-        token_graph_out[token.lower()] = [serialize_market(m) for m in markets]
-
-    markets_out: Dict[str, Dict[str, Any]] = {}
-    for addr, mi in st.addressToMarket.items():
-        markets_out[addr.lower()] = serialize_market(mi)
-
-    return {
-        "ok": True,
-        "tokenGraph": token_graph_out,
-        "markets": markets_out,
-    }
-
 @app.get("/vaults/{address}/{timeframe}")
 def vault_chart_only(
     address: str,
@@ -403,6 +388,7 @@ def vault_chart_only(
             "series": series,
         },
     }
+    
     
 @app.get("/pools/list")
 def list_pools():
@@ -472,4 +458,104 @@ def get_pool(address: str):
         "apy24h": float(pool.apy24h),
         "apy24hPercent": apy_percent,
         "apyHistory": history,
+    }
+
+
+def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
+    state = SEQUENCER._state
+    token_addr = token_addr.lower()
+
+    pos_list = [
+        pos
+        for (user, tkn), pos in state.launchpad_positions.items()
+        if tkn == token_addr and pos.balance_token > 0
+    ]
+    holder_count = len(pos_list)
+    pos_list.sort(key=lambda p: p.balance_token, reverse=True)
+    top10_holding = sum(p.balance_token for p in pos_list[:10])
+
+    dev_holding = 0
+    lt = state.launchpad_tokens.get(token_addr)
+    if lt is not None and lt.creator:
+        dev_pos = state.launchpad_positions.get((lt.creator.lower(), token_addr))
+        if dev_pos:
+            dev_holding = dev_pos.balance_token
+
+    return holder_count, dev_holding, top10_holding
+
+def _serialize_token(token_addr: str) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    lt = state.launchpad_tokens.get(token_addr.lower())
+    if lt is None:
+        return {}
+
+    holders, dev_holding, top10_holding = _holders_for_token(lt.token)
+
+    marketcap_native_raw: Decimal = lt.last_price_native
+
+    tx_buy = lt.buy_count
+    tx_sell = lt.sell_count
+    tx_total = lt.tx_count or (tx_buy + tx_sell)
+
+    return {
+        "token": lt.token,
+        "symbol": lt.symbol,
+        "name": lt.name,
+        "created_ts": lt.created_at,
+        "creator": lt.creator,
+        "metadata_cid": lt.metadata_cid,
+        "source": lt.source,
+        "holders": holders,
+        "developer_holding": str(dev_holding),
+        "top10_holding": str(top10_holding),
+        "native_volume": str(lt.native_volume),
+        "token_volume": str(lt.token_volume),
+        "volume_usd": str(lt.volume_usd),
+        "fees_usd": str(lt.fees_usd),
+        "marketcap_native_raw": str(marketcap_native_raw),
+        "tx": {
+            "buy": tx_buy,
+            "sell": tx_sell,
+            "total": tx_total,
+        },
+
+        "migrated": lt.migrated,
+        "migrated_block": lt.migrated_block,
+        "migrated_at": lt.migrated_at,
+
+        "approaching_75": lt.approaching_75,
+        "approaching_75_block": lt.approaching_75_block,
+        "approaching_75_at": lt.approaching_75_at,
+    }
+
+@app.get("/tokens")
+def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
+    state = SEQUENCER._state
+
+    all_tokens = list(state.launchpad_tokens.values())
+
+    recent_created = sorted(
+        all_tokens,
+        key=lambda t: (t.created_at or 0, t.created_block or 0),
+        reverse=True,
+    )[:30]
+
+    approaching = [t for t in all_tokens if t.approaching_75]
+    recent_approaching = sorted(
+        approaching,
+        key=lambda t: (t.approaching_75_at or 0, t.approaching_75_block or 0),
+        reverse=True,
+    )[:30]
+
+    graduated = [t for t in all_tokens if t.migrated]
+    recent_graduated = sorted(
+        graduated,
+        key=lambda t: (t.migrated_at or 0, t.migrated_block or 0),
+        reverse=True,
+    )[:30]
+
+    return {
+        "recent_created": [_serialize_token(t.token) for t in recent_created],
+        "recent_approaching": [_serialize_token(t.token) for t in recent_approaching],
+        "recent_graduated": [_serialize_token(t.token) for t in recent_graduated],
     }

@@ -134,8 +134,6 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
             if sid == heads_sub:
                 blk = int(res["number"], 16)
-                ts = int(res["timestamp"], 16)
-                SEQUENCER._state._bt.note(blk, ts)
 
                 if last_head_num is not None:
                     for key in event_counts:
@@ -220,10 +218,7 @@ async def vault_sampler(state: _st.State):
                 blk_hex = head_res[0]["result"]
                 blk_num = int(blk_hex, 16)
 
-                ts = state.block_ts(blk_num)
-                if ts == 0:
-                    _, hts = state.head_block_and_ts()
-                    ts = int(hts or int(time.time()))
+                ts = int(time.time())
 
                 calls = []
                 order = []
@@ -296,8 +291,7 @@ async def vault_sampler(state: _st.State):
                         _prune_by_age(month, ts, 30 * 24 * 3600)
 
             else:
-                _, hts = state.head_block_and_ts()
-                ts = int(hts or int(time.time()))
+                ts = int(time.time())
 
             for market, pool in state.ammPools.items():
                 tvl = float(pool.tvlUsd)
