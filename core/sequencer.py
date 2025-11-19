@@ -4,7 +4,6 @@ from collections import defaultdict
 from typing import Dict, List, Callable, Optional
 
 from core import chain as h
-import modules.launchpad as lp
 import models
 import state as _st
 
@@ -49,6 +48,7 @@ class Sequencer:
             "MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0,
             "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0,
             "LT": 0, "TC": 0, "MG": 0,
+            "NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0
         }
         seen = set()
 
@@ -70,6 +70,8 @@ class Sequencer:
                 counts[tag] += 1
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
+            
+            print("parsed", tag, parsed)
 
             if tag == "MC":
                 ev = self._to_market_created(parsed)
@@ -111,20 +113,21 @@ class Sequencer:
             elif tag == "SYNC":
                 self._state.apply_amm_sync(blk, parsed, blk_ts)
 
-            elif tag == "LT":
+            elif tag in ("LT", "NFB", "NFS"):
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, log["address"].lower())
 
-            elif tag == "TC":
+            elif tag in ("TC", "NFC"):
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
 
-            elif tag == "MG":
+            elif tag in ("MG", "NFT"):
                 self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
 
         print(
             f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} "
             f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
             f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
-            f"SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']} MG {counts['MG']}"
+            f"SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
+            f"NFC {counts['NFC']} NFB {counts['NFB']} NFS {counts['NFS']} NFT {counts['NFT']}"
         )
         
     @staticmethod
