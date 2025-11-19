@@ -672,6 +672,9 @@ class State:
             lp.created_at = ts
             lp.source = source
             self.launchpad_tokens[token] = lp
+            
+            if (source == 1):
+                lp.last_price_native = ev.get("last_price_native", Decimal("0.00008387696"))
         
         if creator:
             u = self.launchpad_users.get(creator)
@@ -681,6 +684,8 @@ class State:
             u.tokens_created += 1
             
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
+        print(ev)
+        
         token = ev.get("token", "").lower()
         user = ev.get("user", "").lower()
         if not token or not user:
@@ -700,12 +705,17 @@ class State:
         
         lp = self.launchpad_tokens.get(token)
         if lp is None:
+            print("not a token", self.launchpad_tokens)
             return
         
         try:
             price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
         except Exception:
             price_native = Decimal(0)
+            
+        if lp.source == 1:
+            price_native = price_native * Decimal("0.05")
+    
         lp.last_price_native = price_native
         
         if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
