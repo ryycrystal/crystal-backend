@@ -60,9 +60,23 @@ async def _gap_worker(event_counts):
                 resp = await h.ack(gap_ws, rid)
 
             for log in resp.get("result", []):
-                tag = h.EVENT_SIGS.get(log["topics"][0].lower())
-                if tag:
-                    SEQUENCER.add_log(log)
+                topics = log.get("topics") or []
+                if not topics:
+                    continue
+                
+                tag = h.EVENT_SIGS.get(topics[0].lower())
+                if not tag:
+                    continue
+                
+                if tag != "TF":
+                    addr = log.get("address", "").lower()
+                    if addr not in h.ADDRS:
+                        continue
+                    
+                if tag in event_counts:
+                    event_counts[tag] += 1
+
+                SEQUENCER.add_log(log)
 
             for blk in range(blk_start, blk_end + 1):
                 SEQUENCER.note_block(blk)
@@ -70,7 +84,7 @@ async def _gap_worker(event_counts):
         except RuntimeError as e:
             err = e.args[0]
             if isinstance(err, dict) and err.get("error", {}).get("code") == -32007:
-                print("[RL] hit provider cap, retrying after 1 s")
+                print("[RL] Hit provider cap, retrying")
 
                 for blk in range(blk_start, blk_end + 1):
                     _add_missing(blk)
@@ -98,7 +112,9 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 "method": "eth_subscribe",
                 "params": [
                     "logs",
-                    {"address": h.ADDRS, "topics": [h.TOPICS]},
+                    {
+                        "topics": [h.TOPICS]
+                    },
                 ],
             })
         )
@@ -157,10 +173,22 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 continue
 
             if sid == logs_sub:
-                tag = h.EVENT_SIGS.get(res["topics"][0].lower())
-                if tag:
+                topics = res.get("topics") or []
+                if not topics:
+                    continue
+
+                tag = h.EVENT_SIGS.get(topics[0].lower())
+                if not tag:
+                    continue
+
+                if tag != "TF":
+                    addr = res.get("address", "").lower()
+                    if addr not in h.ADDRS:
+                        continue
+
+                if tag in event_counts:
                     event_counts[tag] += 1
-                
+
                 SEQUENCER.add_log(res)
 
         return last_head_num

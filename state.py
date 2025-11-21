@@ -287,14 +287,10 @@ class State:
             pos.buy_count += 1
             pos.token_bought += token_amt
             pos.native_spent += native_amt
-            pos.balance_token += token_amt
         else:
             pos.sell_count += 1
             pos.token_sold += token_amt
             pos.native_received += native_amt
-            pos.balance_token -= token_amt
-            if pos.balance_token < 0:
-                pos.balance_token = 0
         
         old_realized = pos.realized_pnl_native
         realized_native = pos.native_received - pos.native_spent
@@ -758,14 +754,10 @@ class State:
             pos.buy_count += 1
             pos.token_bought += token_amt
             pos.native_spent += native_amt
-            pos.balance_token += token_amt
         else:
             pos.sell_count += 1
             pos.token_sold += token_amt
             pos.native_received += native_amt
-            pos.balance_token -= token_amt
-            if pos.balance_token < 0:
-                pos.balance_token = 0
 
         old_realized = pos.realized_pnl_native
         realized_native = pos.native_received - pos.native_spent
@@ -810,3 +802,36 @@ class State:
                 u = models.LaunchpadUser(address=creator)
                 self.launchpad_users[creator] = u
             u.tokens_graduated += 1
+
+    def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
+        token = (ev.get("token") or "").lower()
+        if not token:
+            return
+
+        if token not in self.launchpad_tokens:
+            return
+
+        amount = int(ev.get("amount", 0) or 0)
+        if amount <= 0:
+            return
+
+        from_addr = (ev.get("from") or "").lower()
+        to_addr = (ev.get("to") or "").lower()
+
+        zero = "0x" + "0" * 40
+
+        def adjust(user: str, delta: int) -> None:
+            if not user or user == zero:
+                return
+            
+            key = (user, token)
+            pos = self.launchpad_positions.get(key)
+            if pos is None:
+                pos = models.LaunchpadPosition(user=user, token=token)
+                self.launchpad_positions[key] = pos
+            pos.balance_token += delta
+            if pos.balance_token < 0:
+                pos.balance_token = 0
+
+        adjust(from_addr, -amount)
+        adjust(to_addr, amount)
