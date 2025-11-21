@@ -118,7 +118,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 if time.monotonic() - last_head_ts > HEAD_TIMEOUT:
                     print("[wd] no newHeads, forcing reconnect and backfill", flush=True)
                     if last_head_num is not None:
-                        await backfill.backfill(last_head_num + 1, BACKFILL_BATCH)
+                        await backfill.backfill(last_head_num, BACKFILL_BATCH)
                     await ws.close()
                     return
 
