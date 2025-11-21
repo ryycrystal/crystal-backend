@@ -45,10 +45,28 @@ class Sequencer:
 
     def _process_block(self, blk: int, logs: List[dict]):
         counts = {
-            "MC": 0, "TR": 0, "VD": 0, "VDP": 0, "VWD": 0,
-            "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "SYNC": 0,
-            "LT": 0, "TC": 0, "MG": 0,
-            "NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0
+            "MC": 0, 
+            "TR": 0, 
+            
+            "VD": 0, 
+            "VDP": 0, 
+            "VWD": 0,
+            "VLOCK": 0, 
+            "VUNLOCK": 0, 
+            "VCLOSE": 0, 
+            
+            "SYNC": 0,
+            
+            "LT": 0, 
+            "TC": 0, 
+            "MG": 0,
+            
+            "NFC": 0, 
+            "NFB": 0, 
+            "NFS": 0, 
+            "NFT": 0,
+            
+            "TF": 0,
         }
         seen = set()
 
@@ -121,13 +139,18 @@ class Sequencer:
 
             elif tag in ("MG", "NFT"):
                 self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
+                
+            elif tag == "TF":
+                if parsed is not None:
+                    self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
         print(
             f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} "
             f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
             f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
             f"SYNC {counts['SYNC']} TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
-            f"NFC {counts['NFC']} NFB {counts['NFB']} NFS {counts['NFS']} NFT {counts['NFT']}"
+            f"NFC {counts['NFC']} NFB {counts['NFB']} NFS {counts['NFS']} NFT {counts['NFT']} "
+            f"TF {counts['TF']}"
         )
         
     @staticmethod

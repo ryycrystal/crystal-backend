@@ -7,6 +7,24 @@ import modules.nadfun as n
 
 decimal.getcontext().prec = 50
 
+def parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
+    from_addr = lp.to_addr(tops[1]) if len(tops) > 1 else "0x" + "0" * 40
+    to_addr = lp.to_addr(tops[2]) if len(tops) > 2 else "0x" + "0" * 40
+
+    amount = 0
+    if data_no0x:
+        try:
+            amount = int(data_no0x[:64], 16)
+        except ValueError:
+            amount = 0
+
+    return {
+        "token": addr.lower(),
+        "from": from_addr.lower(),
+        "to": to_addr.lower(),
+        "amount": amount,
+    }
+
 CONTRACTS = {
     "ROUTER": "0xed8FeB0b185bf7842F46Ed0Ee4DBD0A13F68E3C7",
     "VAULTS": "0x9FbbC911E84b78cb40439DF7d7065Eb1b68b527D",
@@ -35,6 +53,8 @@ EVENT_SIGS = {
     "0x0eb25df0e2137de8ce042eeaf39080d25f0c8d451372c99db69a4c0a298d0fa1": "NFS",
     "0xfd4bb47bd45abdbdb2ecd61052c9571773f9cde876e2a7745f488c20b30ab10a": "NFSYNC",
     "0xa1cae252e597e19f398a442722a17a17e62d17f9d4f3656786e18aabcd428908": "NFT",
+    
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
 }
 TOPICS = list(EVENT_SIGS.keys())
 PARSERS = {
@@ -55,6 +75,7 @@ PARSERS = {
     "NFS": n.parse_nadfun_sell,
     "NFSYNC": n.parse_nadfun_sync,
     "NFT": n.parse_nadfun_graduated,
+    "TF": parse_transfer,
 }
 WS_URL = "wss://testnet-rpc.monad.xyz"
 
