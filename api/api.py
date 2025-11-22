@@ -1096,29 +1096,6 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="launchpad token not found")
 
     trades = state.launchpad_trades.get(token_addr, [])
-    if not trades:
-        out: Dict[str, Any] = {"type": "stats", "token": token_addr}
-        for suffix in ("5m", "1h", "6h", "24h"):
-            out[f"volume_token_{suffix}"] = 0
-            out[f"volume_native_{suffix}"] = 0
-            out[f"volume_usd_{suffix}"] = 0
-            out[f"buy_volume_token_{suffix}"] = 0
-            out[f"buy_volume_native_{suffix}"] = 0
-            out[f"buy_volume_usd_{suffix}"] = 0
-            out[f"sell_volume_token_{suffix}"] = 0
-            out[f"sell_volume_native_{suffix}"] = 0
-            out[f"sell_volume_usd_{suffix}"] = 0
-            out[f"net_volume_usd_{suffix}"] = 0
-            out[f"buy_tx_count_{suffix}"] = 0
-            out[f"sell_tx_count_{suffix}"] = 0
-            out[f"start_price_native_{suffix}"] = 0
-            out[f"last_price_native_{suffix}"] = 0
-            out[f"change_pct_{suffix}"] = 0.0
-        return out
-
-    mon_price = state.tokenToPrice.get(
-        "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
-    )
 
     windows: Dict[str, int] = {
         "5m": 5 * 60,
@@ -1130,42 +1107,44 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     buckets: Dict[str, Dict[str, Any]] = {}
     for label in windows.keys():
         buckets[label] = {
-            "volume_token": Decimal(0),
             "volume_native": Decimal(0),
-            "volume_usd": Decimal(0),
-            "buy_volume_token": Decimal(0),
             "buy_volume_native": Decimal(0),
-            "buy_volume_usd": Decimal(0),
-            "sell_volume_token": Decimal(0),
             "sell_volume_native": Decimal(0),
-            "sell_volume_usd": Decimal(0),
-            "buy_cnt": 0,
-            "sell_cnt": 0,
+            "buy_tx_count": 0,
+            "sell_tx_count": 0,
             "start_price_native": None,
             "last_price_native": None,
         }
 
+    out: Dict[str, Any] = {
+        "type": "stats",
+        "token": token_addr,
+    }
+
+    if not trades:
+        for label in windows.keys():
+            suffix = label
+            out[f"volume_native_{suffix}"] = 0
+            out[f"buy_volume_native_{suffix}"] = 0
+            out[f"sell_volume_native_{suffix}"] = 0
+            out[f"buy_tx_count_{suffix}"] = 0
+            out[f"sell_tx_count_{suffix}"] = 0
+            out[f"change_pct_{suffix}"] = 0.0
+        return out
+
     now_ts = int(time.time())
     max_window = max(windows.values())
 
-    trades_sorted = sorted(trades, key=lambda t: int(t.timestamp), reverse=True)
+    trades_sorted = sorted(trades, key=lambda t: int(t.timestamp))
 
     for tr in trades_sorted:
         ts = int(tr.timestamp)
         age = now_ts - ts
         if age > max_window:
-            break
+            continue
 
-        native_amount_wad = Decimal(int(tr.native_amount))
-        token_amount_wad = Decimal(int(tr.token_amount))
-        usd_amount_wad = (
-            native_amount_wad * mon_price if mon_price > 0 else Decimal(0)
-        )
-
-        try:
-            price_native_wad = Decimal(int(tr.price_native))
-        except Exception:
-            price_native_wad = None
+        native_amount = Decimal(str(getattr(tr, "native_amount", 0)))
+        price_native = Decimal(str(getattr(tr, "price_native", 0)))
 
         for label, secs in windows.items():
             if age > secs:
@@ -1173,65 +1152,40 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
 
             b = buckets[label]
 
-            b["volume_token"] += token_amount_wad
-            b["volume_native"] += native_amount_wad
-            b["volume_usd"] += usd_amount_wad
-
+            b["volume_native"] += native_amount
             if tr.is_buy:
-                b["buy_volume_token"] += token_amount_wad
-                b["buy_volume_native"] += native_amount_wad
-                b["buy_volume_usd"] += usd_amount_wad
-                b["buy_cnt"] += 1
+                b["buy_volume_native"] += native_amount
+                b["buy_tx_count"] += 1
             else:
-                b["sell_volume_token"] += token_amount_wad
-                b["sell_volume_native"] += native_amount_wad
-                b["sell_volume_usd"] += usd_amount_wad
-                b["sell_cnt"] += 1
+                b["sell_volume_native"] += native_amount
+                b["sell_tx_count"] += 1
 
-            if price_native_wad is not None:
-                if b["last_price_native"] is None:
-                    b["last_price_native"] = price_native_wad
-                b["start_price_native"] = price_native_wad
-
-    out: Dict[str, Any] = {
-        "type": "stats",
-        "token": token_addr,
-    }
+            if b["start_price_native"] is None:
+                b["start_price_native"] = price_native
+            b["last_price_native"] = price_native
 
     for label, b in buckets.items():
-        buy_usd = b["buy_volume_usd"]
-        sell_usd = b["sell_volume_usd"]
-        net_usd = buy_usd - sell_usd
-
         suffix = label
 
-        out[f"volume_token_{suffix}"] = int(b["volume_token"])
-        out[f"volume_native_{suffix}"] = int(b["volume_native"])
-        out[f"volume_usd_{suffix}"] = int(b["volume_usd"])
+        volume_native = b["volume_native"]
+        buy_volume_native = b["buy_volume_native"]
+        sell_volume_native = b["sell_volume_native"]
+        buy_tx_count = b["buy_tx_count"]
+        sell_tx_count = b["sell_tx_count"]
 
-        out[f"buy_volume_token_{suffix}"] = int(b["buy_volume_token"])
-        out[f"buy_volume_native_{suffix}"] = int(b["buy_volume_native"])
-        out[f"buy_volume_usd_{suffix}"] = int(b["buy_volume_usd"])
+        start_price = b["start_price_native"]
+        last_price = b["last_price_native"]
 
-        out[f"sell_volume_token_{suffix}"] = int(b["sell_volume_token"])
-        out[f"sell_volume_native_{suffix}"] = int(b["sell_volume_native"])
-        out[f"sell_volume_usd_{suffix}"] = int(b["sell_volume_usd"])
-
-        out[f"net_volume_usd_{suffix}"] = int(net_usd)
-
-        out[f"buy_tx_count_{suffix}"] = int(b["buy_cnt"])
-        out[f"sell_tx_count_{suffix}"] = int(b["sell_cnt"])
-
-        start_p = b["start_price_native"] or Decimal(0)
-        last_p = b["last_price_native"] or Decimal(0)
-
-        out[f"start_price_native_{suffix}"] = int(start_p)
-        out[f"last_price_native_{suffix}"] = int(last_p)
-
-        if start_p > 0:
-            change_pct = (last_p - start_p) * Decimal(100) / start_p
-            out[f"change_pct_{suffix}"] = float(change_pct)
+        if start_price is not None and start_price != 0:
+            change_pct = float((last_price - start_price) / start_price * Decimal(100))
         else:
-            out[f"change_pct_{suffix}"] = 0.0
+            change_pct = 0.0
+
+        out[f"volume_native_{suffix}"] = float(volume_native)
+        out[f"buy_volume_native_{suffix}"] = float(buy_volume_native)
+        out[f"sell_volume_native_{suffix}"] = float(sell_volume_native)
+        out[f"buy_tx_count_{suffix}"] = int(buy_tx_count)
+        out[f"sell_tx_count_{suffix}"] = int(sell_tx_count)
+        out[f"change_pct_{suffix}"] = change_pct
 
     return out
