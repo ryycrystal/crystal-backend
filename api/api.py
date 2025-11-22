@@ -1085,3 +1085,116 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
         "summary": summary,
         "positions": positions,
     }
+
+@app.get("/stats/{token_addr}")
+def token_stats(token_addr: str) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    token_addr = token_addr.lower()
+
+    lp = state.launchpad_tokens.get(token_addr)
+    if lp is None:
+        raise HTTPException(status_code=404, detail="launchpad token not found")
+
+    trades = state.launchpad_trades.get(token_addr, [])
+    if not trades:
+        out: Dict[str, Any] = {"type": "stats", "token": token_addr}
+        for suffix in ("5m", "1h", "6h", "24h"):
+            out[f"volume_token_{suffix}"] = 0
+            out[f"volume_native_{suffix}"] = 0
+            out[f"volume_usd_{suffix}"] = 0
+            out[f"buy_volume_token_{suffix}"] = 0
+            out[f"buy_volume_native_{suffix}"] = 0
+            out[f"buy_volume_usd_{suffix}"] = 0
+            out[f"sell_volume_token_{suffix}"] = 0
+            out[f"sell_volume_native_{suffix}"] = 0
+            out[f"sell_volume_usd_{suffix}"] = 0
+            out[f"net_volume_usd_{suffix}"] = 0
+        return out
+
+    mon_price = state.tokenToPrice.get(
+        "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
+    )
+
+    windows: Dict[str, int] = {
+        "5m": 5 * 60,
+        "1h": 60 * 60,
+        "6h": 6 * 60 * 60,
+        "24h": 24 * 60 * 60,
+    }
+
+    buckets: Dict[str, Dict[str, Decimal]] = {}
+    for label in windows.keys():
+        buckets[label] = {
+            "volume_token": Decimal(0),
+            "volume_native": Decimal(0),
+            "volume_usd": Decimal(0),
+            "buy_volume_token": Decimal(0),
+            "buy_volume_native": Decimal(0),
+            "buy_volume_usd": Decimal(0),
+            "sell_volume_token": Decimal(0),
+            "sell_volume_native": Decimal(0),
+            "sell_volume_usd": Decimal(0),
+        }
+
+    now_ts = int(time.time())
+    max_window = max(windows.values())
+
+    trades_sorted = sorted(trades, key=lambda t: int(t.timestamp), reverse=True)
+
+    for tr in trades_sorted:
+        ts = int(tr.timestamp)
+        age = now_ts - ts
+        if age > max_window:
+            break
+
+        native_amount_wad = Decimal(int(tr.native_amount))
+        token_amount_wad = Decimal(int(tr.token_amount))
+        usd_amount_wad = (
+            native_amount_wad * mon_price if mon_price > 0 else Decimal(0)
+        )
+
+        for label, secs in windows.items():
+            if age > secs:
+                continue
+
+            b = buckets[label]
+            b["volume_token"] += token_amount_wad
+            b["volume_native"] += native_amount_wad
+            b["volume_usd"] += usd_amount_wad
+
+            if tr.is_buy:
+                b["buy_volume_token"] += token_amount_wad
+                b["buy_volume_native"] += native_amount_wad
+                b["buy_volume_usd"] += usd_amount_wad
+            else:
+                b["sell_volume_token"] += token_amount_wad
+                b["sell_volume_native"] += native_amount_wad
+                b["sell_volume_usd"] += usd_amount_wad
+
+    out: Dict[str, Any] = {
+        "type": "stats",
+        "token": token_addr,
+    }
+
+    for label, b in buckets.items():
+        buy_usd = b["buy_volume_usd"]
+        sell_usd = b["sell_volume_usd"]
+        net_usd = buy_usd - sell_usd
+
+        suffix = label
+
+        out[f"volume_token_{suffix}"] = int(b["volume_token"])
+        out[f"volume_native_{suffix}"] = int(b["volume_native"])
+        out[f"volume_usd_{suffix}"] = int(b["volume_usd"])
+
+        out[f"buy_volume_token_{suffix}"] = int(b["buy_volume_token"])
+        out[f"buy_volume_native_{suffix}"] = int(b["buy_volume_native"])
+        out[f"buy_volume_usd_{suffix}"] = int(b["buy_volume_usd"])
+
+        out[f"sell_volume_token_{suffix}"] = int(b["sell_volume_token"])
+        out[f"sell_volume_native_{suffix}"] = int(b["sell_volume_native"])
+        out[f"sell_volume_usd_{suffix}"] = int(b["sell_volume_usd"])
+
+        out[f"net_volume_usd_{suffix}"] = int(net_usd)
+
+    return out
