@@ -193,7 +193,7 @@ class State:
             lst_quote = self.tokenGraph.setdefault(quote, [])
             lst_quote.append(ev)
 
-    def apply_trade(self, ev: models.Trade, blk: int, ts: int, _log_addr: str) -> None:
+    def apply_trade(self, ev: models.Trade, blk: int, ts: int, txh: str, _log_addr: str) -> None:
         market = ev.market.lower()
         mi = self.addressToMarket.get(market)
         if mi is None:
@@ -310,6 +310,7 @@ class State:
                 native_amount=int(native_amt),
                 token_amount=int(token_amt),
                 price_native=lp.last_price_native,
+                txhash=txh
             )
         )
         if len(trades) > 500000:
@@ -679,9 +680,7 @@ class State:
                 self.launchpad_users[creator] = u
             u.tokens_created += 1
             
-    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
-        print(ev)
-        
+    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, _log_addr: str) -> None:  
         token = ev.get("token", "").lower()
         user = ev.get("user", "").lower()
         if not token or not user:
@@ -777,6 +776,7 @@ class State:
                 native_amount=int(native_amt),
                 token_amount=int(token_amt),
                 price_native=lp.last_price_native,
+                txhash=txh
             )
         )
         if len(trades) > 500000:
