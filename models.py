@@ -162,6 +162,7 @@ class LaunchpadToken:
     approaching_75: bool = False
     approaching_75_block: int = 0
     approaching_75_at: int = 0
+    circulating_supply: int = 0
 
 @dataclass(slots=True)
 class LaunchpadUser:

@@ -247,7 +247,7 @@ class State:
         lp = self.launchpad_tokens.get(token_addr)
         if lp is None:
             print("[State] Error: Normal Trade emitted for nonexistant launchpad token")
-        
+
         # update latest price in mon/token
         try:
             price_native = Decimal(native_amt) / Decimal(token_amt)
@@ -705,6 +705,11 @@ class State:
             print("not a token", self.launchpad_tokens)
             return
         
+        if is_buy:
+            lp.circulating_supply += token_amt / 1e18
+        else:
+            lp.circulating_supply -= token_amt / 1e18
+        
         try:
             price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
         except Exception:
@@ -712,14 +717,24 @@ class State:
             
         lp.last_price_native = price_native
         
-        if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
-            lp.approaching_75 = True
-            lp.approaching_75_block = blk
-            lp.approaching_75_at = ts
-        elif (lp.approaching_75) and ev.get("native_reserve") < 2500000000000000000000:
-            lp.approaching_75 = False
-            lp.approaching_75_block = 0
-            lp.approaching_75_at = 0
+        if lp.source == 0:
+            if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
+                lp.approaching_75 = True
+                lp.approaching_75_block = blk
+                lp.approaching_75_at = ts
+            elif (lp.approaching_75) and ev.get("native_reserve") < 2500000000000000000000:
+                lp.approaching_75 = False
+                lp.approaching_75_block = 0
+                lp.approaching_75_at = 0
+        elif lp.source == 1:
+            if (not lp.approaching_75) and lp.circulating_supply >= 594825000:
+                lp.approaching_75 = True
+                lp.approaching_75_block = blk
+                lp.approaching_75_at = ts
+            elif (lp.approaching_75) and lp.circulating_supply < 594825000:
+                lp.approaching_75 = False
+                lp.approaching_75_block = 0
+                lp.approaching_75_at = 0
         
         lp.native_volume += native_amt
         lp.token_volume += token_amt
