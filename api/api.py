@@ -716,12 +716,104 @@ def token_overview_graph(
 
     holders_list: List[Dict[str, Any]] = []
     for pos in positions_for_token:
+        balance_token = int(pos.balance_token)
+        native_spent = int(pos.native_spent)
+        native_received = int(pos.native_received)
+        realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
+
+        current_value_native = Decimal(balance_token) * last_price_native
+        unrealized_pnl_native = current_value_native
+        total_pnl_native = realized_pnl + unrealized_pnl_native
+
+        if mon_price > 0:
+            balance_usd = current_value_native * mon_price
+            total_pnl_usd = total_pnl_native * mon_price
+        else:
+            balance_usd = Decimal(0)
+            total_pnl_usd = Decimal(0)
+
         holders_list.append(
             {
                 "account": {"id": pos.user},
+                "token": token_addr,
+                "symbol": lp.symbol,
+                "name": lp.name,
+                "metadata_cid": getattr(lp, "metadata_cid", ""),
+                "balance_token": str(balance_token),
+                "balance_native": str(current_value_native),
+                "balance_usd": str(balance_usd),
+                "native_spent": str(native_spent),
+                "native_received": str(native_received),
+                "realized_pnl_native": str(realized_pnl),
+                "unrealized_pnl_native": str(unrealized_pnl_native),
+                "total_pnl_native": str(total_pnl_native),
+                "total_pnl_usd": str(total_pnl_usd),
+                "trade_count": int(getattr(pos, "trade_count", 0)),
+                "buy_count": int(getattr(pos, "buy_count", 0)),
+                "sell_count": int(getattr(pos, "sell_count", 0)),
                 "tokens": str(int(pos.balance_token)),
+                "tokenBought": str(int(getattr(pos, "token_bought", 0))),
+                "tokenSold": str(int(getattr(pos, "token_sold", 0))),
+                "nativeSpent": str(native_spent),
+                "nativeReceived": str(native_received),
             }
         )
+
+        top_traders_list: List[Dict[str, Any]] = []
+    for pos in state.launchpad_positions.values():
+        if getattr(pos, "token", token_addr) != token_addr:
+            continue
+
+        balance_token = int(pos.balance_token)
+        native_spent = int(pos.native_spent)
+        native_received = int(pos.native_received)
+        realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
+
+        current_value_native = Decimal(balance_token) * last_price_native
+        unrealized_pnl_native = current_value_native
+        total_pnl_native = realized_pnl + unrealized_pnl_native
+
+        if mon_price > 0:
+            balance_usd = current_value_native * mon_price
+            total_pnl_usd = total_pnl_native * mon_price
+        else:
+            balance_usd = Decimal(0)
+            total_pnl_usd = Decimal(0)
+
+        top_traders_list.append(
+            {
+                "account": {"id": pos.user},
+                "token": token_addr,
+                "symbol": lp.symbol,
+                "name": lp.name,
+                "metadata_cid": getattr(lp, "metadata_cid", ""),
+                "balance_token": str(balance_token),
+                "balance_native": str(current_value_native),
+                "balance_usd": str(balance_usd),
+                "native_spent": str(native_spent),
+                "native_received": str(native_received),
+                "realized_pnl_native": str(realized_pnl),
+                "unrealized_pnl_native": str(unrealized_pnl_native),
+                "total_pnl_native": str(total_pnl_native),
+                "total_pnl_usd": str(total_pnl_usd),
+                "trade_count": int(getattr(pos, "trade_count", 0)),
+                "buy_count": int(getattr(pos, "buy_count", 0)),
+                "sell_count": int(getattr(pos, "sell_count", 0)),
+                "tokens": str(int(pos.balance_token)),
+                "tokenBought": str(int(getattr(pos, "token_bought", 0))),
+                "tokenSold": str(int(getattr(pos, "token_sold", 0))),
+                "nativeSpent": str(native_spent),
+                "nativeReceived": str(native_received),
+            }
+        )
+
+    top_traders_list.sort(
+        key=lambda h: Decimal(h["total_pnl_native"])
+        if h.get("total_pnl_native") is not None
+        else Decimal(0),
+        reverse=True,
+    )
+    top_traders_list = top_traders_list[:50]
 
     recent_trades_raw = trades_sorted[-50:] if trades_sorted else []
     recent_trades_raw = list(reversed(recent_trades_raw))
@@ -800,6 +892,42 @@ def token_overview_graph(
     volume_token_str = str(int(volume_token))
     volume_usd_str = str(volume_usd)
 
+    dev_tokens_list: List[Dict[str, Any]] = []
+    if dev_addr:
+        now_ts = int(time.time())
+        cutoff_ts = now_ts - 3600
+
+        for other_token_addr, dev_lp in state.launchpad_tokens.items():
+            creator_addr = (getattr(dev_lp, "creator", "") or "").lower()
+            if creator_addr != dev_addr:
+                continue
+
+            dev_last_price_native = getattr(dev_lp, "last_price_native", Decimal(0))
+            dev_price_wad = dev_last_price_native * Decimal(1e9)
+            dev_marketcap_native = dev_last_price_native * Decimal(1e9)
+
+            trades_for_dev = state.launchpad_trades.get(other_token_addr, [])
+            vol_1h_native = 0
+            for tr in trades_for_dev:
+                if int(tr.timestamp) >= cutoff_ts:
+                    vol_1h_native += int(tr.native_amount)
+
+            dev_total_holders, _, _ = _holders_for_token(other_token_addr)
+            dev_tokens_list.append(
+                {
+                    "id": dev_lp.token,
+                    "name": dev_lp.name,
+                    "symbol": dev_lp.symbol,
+                    "metadataCID": getattr(dev_lp, "metadata_cid", ""),
+                    "lastPriceNativePerTokenWad": str(dev_price_wad),
+                    "marketcap": dev_marketcap_native,
+                    "migrated": bool(getattr(dev_lp, "migrated", False)),
+                    "volumeNative1h": str(vol_1h_native),
+                    "holders": int(dev_total_holders),
+                    "timestamp": str(int(dev_lp.created_at or 0)),
+                }
+            )
+
     return {
         "buyTxs": int(getattr(lp, "buy_count", 0)),
         "creator": {
@@ -813,6 +941,8 @@ def token_overview_graph(
         "distinctBuyers": distinct_buyers,
         "distinctSellers": distinct_sellers,
         "holders": holders_list,
+        "topTraders": top_traders_list,
+        "devTokens": dev_tokens_list,
         "id": lp.token,
         "initialSupply": str(10**18),
         "lastPriceNativePerTokenWad": str(last_price_wad),
@@ -879,13 +1009,8 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
         realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
 
         current_value_native = Decimal(balance_token) * last_price_native
-
-        total_pnl_native = realized_pnl + current_value_native + Decimal(
-            native_received - native_spent
-        )
-
-        unrealized_pnl_native = total_pnl_native - realized_pnl
-
+        unrealized_pnl_native = current_value_native
+        total_pnl_native = realized_pnl + unrealized_pnl_native
         total_value_native += current_value_native
         total_realized_pnl += realized_pnl
         total_unrealized_pnl += unrealized_pnl_native
