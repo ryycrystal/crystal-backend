@@ -741,7 +741,7 @@ def token_overview_graph(
                     "account": {"id": tr.user},
                     "amountIn": str(amount_in),
                     "amountOut": str(amount_out),
-                    "block": str(int(tr.block_number)),
+                    "block": str(int(tr.timestamp)),
                     "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-{idx}",
                     "isBuy": bool(tr.is_buy),
                     "priceNativePerTokenWad": str(tr.price_native),

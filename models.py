@@ -12,6 +12,7 @@ class LaunchpadTrade:
     native_amount: int
     token_amount: int
     price_native: Decimal
+    txhash: str
 
 @dataclass(slots=True)
 class TokenCreated:

@@ -95,7 +95,7 @@ class Sequencer:
                 
             elif tag == "TR":
                 ev = self._to_trade(parsed, blk)
-                self._state.apply_trade(ev, blk, blk_ts, log["address"].lower())
+                self._state.apply_trade(ev, blk, blk_ts, txh, log["address"].lower())
                 
             elif tag == "VD":
                 ev = self._to_vault_deployed(parsed, blk_ts)
@@ -130,7 +130,7 @@ class Sequencer:
                 self._state.apply_amm_sync(blk, parsed, blk_ts)
 
             elif tag in ("LT", "NFB", "NFS"):
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, log["address"].lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
 
             elif tag in ("TC", "NFC"):
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
