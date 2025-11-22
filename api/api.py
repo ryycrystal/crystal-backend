@@ -469,7 +469,7 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
         pos
         for (user, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 0
-        and user.lower() != "0xaD720f94689edB929D9be7613223320a0b2f260F"
+        and user.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
     ]
     holder_count = len(pos_list)
     pos_list.sort(key=lambda p: p.balance_token, reverse=True)
@@ -712,7 +712,7 @@ def token_overview_graph(
         pos
         for (uaddr, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 0
-        and uaddr.lower() != "0xaD720f94689edB929D9be7613223320a0b2f260F"
+        and uaddr.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
     ]
     positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
 
@@ -996,7 +996,7 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
     total_trades = 0
 
     for (uaddr, tkn), pos in state.launchpad_positions.items():
-        if uaddr.lower() == "0xaD720f94689edB929D9be7613223320a0b2f260F" or uaddr != user_addr:
+        if uaddr.lower() == "0xad720f94689edb929d9be7613223320a0b2f260f" or uaddr != user_addr:
             continue
 
         lp = state.launchpad_tokens.get(tkn)
