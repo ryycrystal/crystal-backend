@@ -728,7 +728,7 @@ class State:
             lp.sell_count += 1
 
         # mon_price = self.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
-        mon_price = 0.05
+        mon_price = Decimal(0.05)
         if mon_price > 0:
             volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
             lp.volume_usd += volume_usd_trade
