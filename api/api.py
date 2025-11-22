@@ -640,91 +640,22 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         reverse=True,
     )[:30]
 
-    lens_addr = "0x1b2b500a6f6C8a25Ca0436d8183Ba25C9415e28E".lower()
-
-    def _encode_get_progress(token: str) -> str:
-        # function selector for getProgress(address): keccak256("getProgress(address)")[:4]
-        selector = "aef76501"
-        t = token.lower()
-        if t.startswith("0x"):
-            t = t[2:]
-        t = t.rjust(64, "0")
-        return "0x" + selector + t
-
-    def _rpc_batch(calls: list[dict]) -> list[dict]:
-        payload = json.dumps(calls).encode()
-        req = urllib.request.Request(
-            RPC_HTTP,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
-
-    unique_tokens: list[str] = []
-    seen: set[str] = set()
-
-    for t in recent_created + recent_approaching + recent_graduated:
-        addr = (t.token or "").lower()
-        if addr and addr not in seen:
-            seen.add(addr)
-            unique_tokens.append(addr)
-
-    progress_map: Dict[str, int] = {addr: 0 for addr in unique_tokens}
-
-    if unique_tokens:
-        calls: list[dict] = []
-        rid = 1
-        for addr in unique_tokens:
-            data = _encode_get_progress(addr)
-            calls.append(
-                {
-                    "jsonrpc": "2.0",
-                    "id": rid,
-                    "method": "eth_call",
-                    "params": [
-                        {"to": lens_addr, "data": data},
-                        "latest",
-                    ],
-                }
-            )
-            rid += 1
-
-        try:
-            results = _rpc_batch(calls)
-            by_id = {row.get("id"): row for row in results if isinstance(row, dict)}
-            for idx, addr in enumerate(unique_tokens, start=1):
-                row = by_id.get(idx, {})
-                raw = row.get("result")
-                val = 0
-                if isinstance(raw, str) and raw.startswith("0x"):
-                    try:
-                        val = int(raw, 16)
-                    except Exception:
-                        val = 0
-                progress_map[addr] = val
-        except Exception:
-            pass
-
     recent_created_out: List[Dict[str, Any]] = []
     for t in recent_created:
         row = _serialize_token(t.token)
         addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
         recent_created_out.append(row)
 
     recent_approaching_out: List[Dict[str, Any]] = []
     for t in recent_approaching:
         row = _serialize_token(t.token)
         addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
         recent_approaching_out.append(row)
 
     recent_graduated_out: List[Dict[str, Any]] = []
     for t in recent_graduated:
         row = _serialize_token(t.token)
         addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
         recent_graduated_out.append(row)
 
     return {
@@ -1024,45 +955,6 @@ def token_overview_graph(
                     "timestamp": str(int(dev_lp.created_at or 0)),
                 }
             )
-
-    lens_addr = "0x1b2b500a6f6C8a25Ca0436d8183Ba25C9415e28E".lower()
-
-    def _encode_get_progress_single(tkn: str) -> str:
-        selector = "aef76501"
-        t = tkn.lower()
-        if t.startswith("0x"):
-            t = t[2:]
-        t = t.rjust(64, "0")
-        return "0x" + selector + t
-
-    graduation_bps = 0
-    try:
-        call = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_call",
-            "params": [
-                {"to": lens_addr, "data": _encode_get_progress_single(lp.token)},
-                "latest",
-            ],
-        }
-        payload = json.dumps([call]).encode()
-        req = urllib.request.Request(
-            RPC_HTTP,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            res = json.loads(resp.read().decode())
-        if res and isinstance(res, list):
-            raw = res[0].get("result")
-            if isinstance(raw, str) and raw.startswith("0x"):
-                try:
-                    graduation_bps = int(raw, 16)
-                except Exception:
-                    graduation_bps = 0
-    except Exception:
-        graduation_bps = 0
 
     return {
         "buyTxs": int(getattr(lp, "buy_count", 0)),
