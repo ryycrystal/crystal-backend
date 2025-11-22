@@ -642,23 +642,21 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     recent_created_out: List[Dict[str, Any]] = []
     for t in recent_created:
+        print(t)
         row = _serialize_token(t.token)
-        addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(t.circulating_supply / 793100000)
+        row["graduationPercentageBps"] = t.circulating_supply / 793100000
         recent_created_out.append(row)
 
     recent_approaching_out: List[Dict[str, Any]] = []
     for t in recent_approaching:
         row = _serialize_token(t.token)
-        addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(t.circulating_supply / 793100000)
+        row["graduationPercentageBps"] = t.circulating_supply / 793100000
         recent_approaching_out.append(row)
 
     recent_graduated_out: List[Dict[str, Any]] = []
     for t in recent_graduated:
         row = _serialize_token(t.token)
-        addr = (t.token or "").lower()
-        row["graduationPercentageBps"] = int(t.circulating_supply / 793100000)
+        row["graduationPercentageBps"] = t.circulating_supply / 793100000
         recent_graduated_out.append(row)
 
     return {
