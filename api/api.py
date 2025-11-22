@@ -1107,9 +1107,9 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     buckets: Dict[str, Dict[str, Any]] = {}
     for label in windows.keys():
         buckets[label] = {
-            "volume_native": Decimal(0),
-            "buy_volume_native": Decimal(0),
-            "sell_volume_native": Decimal(0),
+            "volume_usd": Decimal(0),
+            "buy_volume_usd": Decimal(0),
+            "sell_volume_usd": Decimal(0),
             "buy_tx_count": 0,
             "sell_tx_count": 0,
             "start_price_native": None,
@@ -1124,9 +1124,9 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     if not trades:
         for label in windows.keys():
             suffix = label
-            out[f"volume_native_{suffix}"] = 0
-            out[f"buy_volume_native_{suffix}"] = 0
-            out[f"sell_volume_native_{suffix}"] = 0
+            out[f"volume_usd_{suffix}"] = 0
+            out[f"buy_volume_usd_{suffix}"] = 0
+            out[f"sell_volume_usd_{suffix}"] = 0
             out[f"buy_tx_count_{suffix}"] = 0
             out[f"sell_tx_count_{suffix}"] = 0
             out[f"change_pct_{suffix}"] = 0.0
@@ -1143,7 +1143,7 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         if age > max_window:
             continue
 
-        native_amount = Decimal(str(getattr(tr, "native_amount", 0)))
+        native_amount = Decimal(str(getattr(tr, "usd_amount", 0)))
         price_native = Decimal(str(getattr(tr, "price_native", 0)))
 
         for label, secs in windows.items():
@@ -1152,12 +1152,12 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
 
             b = buckets[label]
 
-            b["volume_native"] += native_amount
+            b["volume_usd"] += native_amount
             if tr.is_buy:
-                b["buy_volume_native"] += native_amount
+                b["buy_volume_usd"] += native_amount
                 b["buy_tx_count"] += 1
             else:
-                b["sell_volume_native"] += native_amount
+                b["sell_volume_usd"] += native_amount
                 b["sell_tx_count"] += 1
 
             if b["start_price_native"] is None:
@@ -1167,12 +1167,11 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     for label, b in buckets.items():
         suffix = label
 
-        volume_native = b["volume_native"]
-        buy_volume_native = b["buy_volume_native"]
-        sell_volume_native = b["sell_volume_native"]
+        volume_native = b["volume_usd"]
+        buy_volume_native = b["buy_volume_usd"]
+        sell_volume_native = b["sell_volume_usd"]
         buy_tx_count = b["buy_tx_count"]
         sell_tx_count = b["sell_tx_count"]
-
         start_price = b["start_price_native"]
         last_price = b["last_price_native"]
 
@@ -1181,9 +1180,9 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         else:
             change_pct = 0.0
 
-        out[f"volume_native_{suffix}"] = float(volume_native)
-        out[f"buy_volume_native_{suffix}"] = float(buy_volume_native)
-        out[f"sell_volume_native_{suffix}"] = float(sell_volume_native)
+        out[f"volume_usd_{suffix}"] = float(volume_native)
+        out[f"buy_volume_usd_{suffix}"] = float(buy_volume_native)
+        out[f"sell_volume_usd_{suffix}"] = float(sell_volume_native)
         out[f"buy_tx_count_{suffix}"] = int(buy_tx_count)
         out[f"sell_tx_count_{suffix}"] = int(sell_tx_count)
         out[f"change_pct_{suffix}"] = change_pct
