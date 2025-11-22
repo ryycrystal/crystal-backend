@@ -555,7 +555,7 @@ def _build_ohlcv(
         bucket_start = (ts_tr // bucket_seconds) * bucket_seconds
 
         price_wad = tr.price_native * Decimal(1e9)
-        token_amt = int(tr.token_amount)
+        native_amt = int(tr.native_amount)
 
         b = buckets.get(bucket_start)
         if b is None:
@@ -565,7 +565,7 @@ def _build_ohlcv(
                 "high": price_wad,
                 "low": price_wad,
                 "close": price_wad,
-                "baseVolume": token_amt,
+                "quoteVolume": native_amt,
             }
             buckets[bucket_start] = b
         else:
@@ -574,7 +574,7 @@ def _build_ohlcv(
                 b["high"] = price_wad
             if price_wad < b["low"]:
                 b["low"] = price_wad
-            b["baseVolume"] += token_amt
+            b["quoteVolume"] += native_amt
 
     bucket_times = sorted(buckets.keys())
     if max_buckets is not None and max_buckets > 0:
@@ -590,7 +590,7 @@ def _build_ohlcv(
                 "high": str(int(b["high"])),
                 "low": str(int(b["low"])),
                 "close": str(int(b["close"])),
-                "baseVolume": str(int(b["baseVolume"])),
+                "quoteVolume": str(int(b["quoteVolume"])),
             }
         )
     return out
@@ -761,7 +761,7 @@ def token_overview_graph(
             }
         )
 
-        top_traders_list: List[Dict[str, Any]] = []
+    top_traders_list: List[Dict[str, Any]] = []
     for pos in state.launchpad_positions.values():
         if getattr(pos, "token", token_addr) != token_addr:
             continue
