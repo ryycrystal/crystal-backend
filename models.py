@@ -11,6 +11,7 @@ class LaunchpadTrade:
     is_buy: bool
     native_amount: int
     token_amount: int
+    usd_amount: int
     price_native: Decimal
     txhash: str
 
