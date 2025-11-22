@@ -5,6 +5,9 @@ from typing import Dict, Any, List, Deque, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import time
+import json
+import urllib.request
+from state import RPC_HTTP
 
 from core.sequencer import SEQUENCER
 from state import State
@@ -637,10 +640,97 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         reverse=True,
     )[:30]
 
+    lens_addr = "0x1b2b500a6f6C8a25Ca0436d8183Ba25C9415e28E".lower()
+
+    def _encode_get_progress(token: str) -> str:
+        # function selector for getProgress(address): keccak256("getProgress(address)")[:4]
+        selector = "aef76501"
+        t = token.lower()
+        if t.startswith("0x"):
+            t = t[2:]
+        t = t.rjust(64, "0")
+        return "0x" + selector + t
+
+    def _rpc_batch(calls: list[dict]) -> list[dict]:
+        payload = json.dumps(calls).encode()
+        req = urllib.request.Request(
+            RPC_HTTP,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+
+    unique_tokens: list[str] = []
+    seen: set[str] = set()
+
+    for t in recent_created + recent_approaching + recent_graduated:
+        addr = (t.token or "").lower()
+        if addr and addr not in seen:
+            seen.add(addr)
+            unique_tokens.append(addr)
+
+    progress_map: Dict[str, int] = {addr: 0 for addr in unique_tokens}
+
+    if unique_tokens:
+        calls: list[dict] = []
+        rid = 1
+        for addr in unique_tokens:
+            data = _encode_get_progress(addr)
+            calls.append(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "method": "eth_call",
+                    "params": [
+                        {"to": lens_addr, "data": data},
+                        "latest",
+                    ],
+                }
+            )
+            rid += 1
+
+        try:
+            results = _rpc_batch(calls)
+            by_id = {row.get("id"): row for row in results if isinstance(row, dict)}
+            for idx, addr in enumerate(unique_tokens, start=1):
+                row = by_id.get(idx, {})
+                raw = row.get("result")
+                val = 0
+                if isinstance(raw, str) and raw.startswith("0x"):
+                    try:
+                        val = int(raw, 16)
+                    except Exception:
+                        val = 0
+                progress_map[addr] = val
+        except Exception:
+            pass
+
+    recent_created_out: List[Dict[str, Any]] = []
+    for t in recent_created:
+        row = _serialize_token(t.token)
+        addr = (t.token or "").lower()
+        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
+        recent_created_out.append(row)
+
+    recent_approaching_out: List[Dict[str, Any]] = []
+    for t in recent_approaching:
+        row = _serialize_token(t.token)
+        addr = (t.token or "").lower()
+        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
+        recent_approaching_out.append(row)
+
+    recent_graduated_out: List[Dict[str, Any]] = []
+    for t in recent_graduated:
+        row = _serialize_token(t.token)
+        addr = (t.token or "").lower()
+        row["graduationPercentageBps"] = int(progress_map.get(addr, 0))
+        recent_graduated_out.append(row)
+
     return {
-        "recent_created": [_serialize_token(t.token) for t in recent_created],
-        "recent_approaching": [_serialize_token(t.token) for t in recent_approaching],
-        "recent_graduated": [_serialize_token(t.token) for t in recent_graduated],
+        "recent_created": recent_created_out,
+        "recent_approaching": recent_approaching_out,
+        "recent_graduated": recent_graduated_out,
     }
 
 @app.get("/token/{token_addr}/{chartres}")
@@ -767,7 +857,7 @@ def token_overview_graph(
     for pos in state.launchpad_positions.values():
         if getattr(pos, "token", token_addr) != token_addr:
             continue
-        
+
         if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
             continue
 
@@ -793,7 +883,7 @@ def token_overview_graph(
                 "token": token_addr,
                 "symbol": lp.symbol,
                 "name": lp.name,
-                "metadata_cid": getattr(lp, "metadata_cid", ""),
+                "metadata_cid": getattr(pos, "metadata_cid", ""),
                 "balance_token": str(balance_token),
                 "balance_native": str(current_value_native),
                 "balance_usd": str(balance_usd),
@@ -935,6 +1025,45 @@ def token_overview_graph(
                 }
             )
 
+    lens_addr = "0x1b2b500a6f6C8a25Ca0436d8183Ba25C9415e28E".lower()
+
+    def _encode_get_progress_single(tkn: str) -> str:
+        selector = "aef76501"
+        t = tkn.lower()
+        if t.startswith("0x"):
+            t = t[2:]
+        t = t.rjust(64, "0")
+        return "0x" + selector + t
+
+    graduation_bps = 0
+    try:
+        call = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [
+                {"to": lens_addr, "data": _encode_get_progress_single(lp.token)},
+                "latest",
+            ],
+        }
+        payload = json.dumps([call]).encode()
+        req = urllib.request.Request(
+            RPC_HTTP,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            res = json.loads(resp.read().decode())
+        if res and isinstance(res, list):
+            raw = res[0].get("result")
+            if isinstance(raw, str) and raw.startswith("0x"):
+                try:
+                    graduation_bps = int(raw, 16)
+                except Exception:
+                    graduation_bps = 0
+    except Exception:
+        graduation_bps = 0
+
     return {
         "buyTxs": int(getattr(lp, "buy_count", 0)),
         "creator": {
@@ -980,6 +1109,7 @@ def token_overview_graph(
         "volumeNative": volume_native_str,
         "volumeToken": volume_token_str,
         "volumeUsd": volume_usd_str,
+        "graduationPercentageBps": int(graduation_bps),
     }
 
 @app.get("/user/{user_addr}")
@@ -1247,3 +1377,4 @@ def user_volume(user_addr: str) -> Dict[str, Any]:
         "tokens_traded": len(seen_tokens),
     }
 
+# hi
