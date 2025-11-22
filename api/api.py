@@ -539,30 +539,60 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "developer_tokens_graduated": dev_tokens_graduated,
     }
 
-def _bonding_curve_percent(marketcap_native_raw: Decimal) -> float:
-    if marketcap_native_raw <= 0:
-        return 0.0
+def _build_ohlcv(
+    trades: List[models.LaunchpadTrade],
+    bucket_seconds: int,
+    max_buckets: int | None = None,
+) -> List[Dict[str, Any]]:
+    if bucket_seconds <= 0 or not trades:
+        return []
 
-    if marketcap_native_raw <= Decimal("1000"):
-        return 0.0
+    buckets: Dict[int, Dict[str, Any]] = {}
 
-    if marketcap_native_raw >= Decimal("25000"):
-        return 100.0
+    for tr in trades:
+        ts_tr = int(tr.timestamp)
+        bucket_start = (ts_tr // bucket_seconds) * bucket_seconds
 
-    x = (marketcap_native_raw - Decimal("1000")) / (Decimal("25000") - Decimal("1000"))
+        price_wad = tr.price_native * Decimal(1e9)
+        token_amt = int(tr.token_amount)
 
-    try:
-        pct = (x ** Decimal("0.3910281574334157")) * Decimal(100)
-    except Exception:
-        return 0.0
+        b = buckets.get(bucket_start)
+        if b is None:
+            b = {
+                "time": bucket_start,
+                "open": price_wad,
+                "high": price_wad,
+                "low": price_wad,
+                "close": price_wad,
+                "baseVolume": token_amt,
+            }
+            buckets[bucket_start] = b
+        else:
+            b["close"] = price_wad
+            if price_wad > b["high"]:
+                b["high"] = price_wad
+            if price_wad < b["low"]:
+                b["low"] = price_wad
+            b["baseVolume"] += token_amt
 
-    if pct < 0:
-        pct = Decimal(0)
-    if pct > 100:
-        pct = Decimal(100)
+    bucket_times = sorted(buckets.keys())
+    if max_buckets is not None and max_buckets > 0:
+        bucket_times = bucket_times[-max_buckets:]
 
-    return float(pct)
-
+    out: List[Dict[str, Any]] = []
+    for t_start in bucket_times:
+        b = buckets[t_start]
+        out.append(
+            {
+                "time": str(int(b["time"])),
+                "open": str(int(b["open"])),
+                "high": str(int(b["high"])),
+                "low": str(int(b["low"])),
+                "close": str(int(b["close"])),
+                "baseVolume": str(int(b["baseVolume"])),
+            }
+        )
+    return out
 
 @app.get("/tokens")
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
@@ -610,472 +640,317 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         "recent_graduated": [_serialize_token(t.token) for t in recent_graduated],
     }
 
-@app.get("/token/{token_addr}/{user_addr}/{timescale}/{page}")
-def token_overview(
+@app.get("/token/{token_addr}/{chartres}")
+def token_overview_graph(
     token_addr: str,
-    user_addr: str,
-    timescale: int,
-    page: int,
+    chartres: int,
+    tracked: str = Query(
+        "",
+        description="comma-separated list of addresses to track for trackedtrades",
+    ),
 ) -> Dict[str, Any]:
     state = SEQUENCER._state
     token_addr = token_addr.lower()
-    user_addr = user_addr.lower()
 
-    if timescale not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
-        raise HTTPException(status_code=400, detail="unsupported timescale")
-
-    if page < 1:
-        page = 1
+    if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+        raise HTTPException(status_code=400, detail="unsupported chart resolution")
 
     lp = state.launchpad_tokens.get(token_addr)
     if lp is None:
         raise HTTPException(status_code=404, detail="launchpad token not found")
 
-    trades = state.launchpad_trades.get(token_addr, [])
-    now_ts = int(trades[-1].timestamp) if trades else int(lp.created_at or 0) or int(time.time())
+    trades: List[models.LaunchpadTrade] = state.launchpad_trades.get(token_addr, [])
+    trades_sorted = sorted(trades, key=lambda t: int(t.timestamp))
 
-    # klines
-    candles: List[Dict[str, Any]] = []
-
-    if trades:
-        buckets: Dict[int, Dict[str, Any]] = {}
-
-        dec_zero = Decimal(0)
-
-        for tr in trades:
-            ts_tr = int(tr.timestamp)
-            bucket_start = (ts_tr // timescale) * timescale
-
-            price = tr.price_native if tr.price_native is not None else dec_zero
-
-            b = buckets.get(bucket_start)
-            if b is None:
-                b = {
-                    "t": bucket_start,
-                    "o": price,
-                    "h": price,
-                    "l": price,
-                    "c": price,
-                    "volume_native": 0,
-                    "volume_token": 0,
-                    "buy_native": 0,
-                    "sell_native": 0,
-                }
-                buckets[bucket_start] = b
-            else:
-                b["c"] = price
-                if price > b["h"]:
-                    b["h"] = price
-                if price < b["l"]:
-                    b["l"] = price
-
-            native_amt = int(tr.native_amount)
-            token_amt = int(tr.token_amount)
-            b["volume_native"] += native_amt
-            b["volume_token"] += token_amt
-            if tr.is_buy:
-                b["buy_native"] += native_amt
-            else:
-                b["sell_native"] += native_amt
-
-        bucket_times = sorted(buckets.keys())
-        bucket_times = bucket_times[-5000:]
-
-        for t_start in bucket_times:
-            b = buckets[t_start]
-            candles.append(
-                {
-                    "t": int(b["t"]),
-                    "o": str(b["o"]),
-                    "h": str(b["h"]),
-                    "l": str(b["l"]),
-                    "c": str(b["c"]),
-                    "volume_native": str(b["volume_native"]),
-                    "volume_token": str(b["volume_token"]),
-                    "buy_native": str(b["buy_native"]),
-                    "sell_native": str(b["sell_native"]),
-                }
-            )
+    if trades_sorted:
+        last_timestamp = int(trades_sorted[-1].timestamp)
     else:
-        candles = []
+        last_timestamp = int(lp.created_at or 0) or int(time.time())
 
-    # header
-    marketcap_native_raw: Decimal = lp.last_price_native * Decimal(1e9)
-    mon_price = state.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
-    marketcap_usd = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
+    buyer_addrs: set[str] = set()
+    seller_addrs: set[str] = set()
+    for tr in trades_sorted:
+        if tr.is_buy:
+            buyer_addrs.add(tr.user)
+        else:
+            seller_addrs.add(tr.user)
 
-    price_now = float(lp.last_price_native) if lp.last_price_native > 0 else 0.0
-    cutoff_24h = now_ts - 24 * 3600
-    price_before: float | None = None
-    price_after: float | None = None
+    distinct_buyers = len(buyer_addrs)
+    distinct_sellers = len(seller_addrs)
 
-    for tr in trades:
-        t_ts = int(tr.timestamp)
-        p = float(tr.price_native) if tr.price_native is not None else 0.0
-        if t_ts < cutoff_24h:
-            price_before = p
-        elif t_ts >= cutoff_24h:
-            price_after = p
-            break
+    total_holders, dev_holding, _top10 = _holders_for_token(lp.token)
 
-    if price_after is not None:
-        price_24h = price_after
-    elif price_before is not None:
-        price_24h = price_before
-    else:
-        price_24h = price_now
+    decimals = 18
 
-    if price_24h > 0:
-        change_24h_pct = (price_now - price_24h) / price_24h * 100.0
-    else:
-        change_24h_pct = 0.0
-
-    bonding_percent = _bonding_curve_percent(marketcap_native_raw)
-
-    dev_tokens_migrated = 0
+    dev_addr = (lp.creator or "").lower() if getattr(lp, "creator", None) else ""
     dev_tokens_created = 0
-    dev_addr = lp.creator.lower() if lp.creator else ""
+    dev_tokens_graduated = 0
     if dev_addr:
         dev_user = state.launchpad_users.get(dev_addr)
         if dev_user is not None:
-            dev_tokens_migrated = dev_user.tokens_graduated
-            dev_tokens_created = dev_user.tokens_created
+            dev_tokens_created = getattr(dev_user, "tokens_created", 0)
+            dev_tokens_graduated = getattr(dev_user, "tokens_graduated", 0)
 
-    # recent trades
-    recent_trades_raw = trades[-50:] if trades else []
-    recent_trades = []
-    for tr in reversed(recent_trades_raw):
-        mc_trade_native = tr.price_native * Decimal(1e9) if tr.price_native is not None else Decimal(0)
-        recent_trades.append(
+    last_price_native = getattr(lp, "last_price_native", Decimal(0))
+    last_price_wad = (last_price_native) * Decimal(1e9)
+
+    marketcap_native_raw: Decimal = last_price_native * Decimal(1e9)
+    mon_price = state.tokenToPrice.get(
+        "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
+    )
+    marketcap_usd: Decimal = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
+
+    volume_native = getattr(lp, "native_volume", 0)
+    volume_token = getattr(lp, "token_volume", 0)
+    volume_usd = getattr(lp, "volume_usd", Decimal(0))
+
+    mini_klines = _build_ohlcv(trades_sorted, bucket_seconds=3600, max_buckets=24)
+    series_klines = _build_ohlcv(trades_sorted, bucket_seconds=chartres, max_buckets=None)
+
+    positions_for_token = [
+        pos
+        for (uaddr, tkn), pos in state.launchpad_positions.items()
+        if tkn == token_addr and pos.balance_token > 0
+    ]
+    positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
+
+    holders_list: List[Dict[str, Any]] = []
+    for pos in positions_for_token:
+        holders_list.append(
             {
-                "block": int(tr.block_number),
-                "timestamp": int(tr.timestamp),
-                "user": tr.user,
-                "side": "buy" if tr.is_buy else "sell",
-                "native_amount": str(tr.native_amount),
-                "token_amount": str(tr.token_amount),
-                "marketcap_native_raw": str(mc_trade_native),
+                "account": {"id": pos.user},
+                "tokens": str(int(pos.balance_token)),
             }
         )
 
-    header = {
-        "token": lp.token,
-        "symbol": lp.symbol,
-        "name": lp.name,
-        "marketcap_native_raw": str(marketcap_native_raw),
-        "marketcap_usd": str(marketcap_usd),
-        "change_24h_pct": change_24h_pct,
-        "bonding_curve_percent": bonding_percent,
-        "developer": dev_addr,
-        "developer_tokens_created": dev_tokens_created,
-        "developer_tokens_migrated": dev_tokens_migrated,
-        "recent_trades": recent_trades,
-    }
+    recent_trades_raw = trades_sorted[-50:] if trades_sorted else []
+    recent_trades_raw = list(reversed(recent_trades_raw))
 
-    holders_count, dev_holding_tokens, top10_holding_tokens = _holders_for_token(lp.token)
-
-    # 5m, 1h, 6h, 24h volume stats
-    horizons = {
-        "5m": 5 * 60,
-        "1h": 60 * 60,
-        "6h": 6 * 60 * 60,
-        "24h": 24 * 60 * 60,
-    }
-
-    dec_1e18 = Decimal(10) ** 18
-    volume_windows: Dict[str, Dict[str, Any]] = {}
-
-    if trades and mon_price > 0:
-        for label, horizon in horizons.items():
-            cutoff = now_ts - horizon
-            buy_native = 0
-            sell_native = 0
-
-            for tr in reversed(trades):
-                t_ts = int(tr.timestamp)
-                if t_ts < cutoff:
-                    break
-                if tr.is_buy:
-                    buy_native += int(tr.native_amount)
-                else:
-                    sell_native += int(tr.native_amount)
-
-            net_native = buy_native - sell_native
-
-            buy_native_dec = Decimal(buy_native) / dec_1e18
-            sell_native_dec = Decimal(sell_native) / dec_1e18
-            net_native_dec = Decimal(net_native) / dec_1e18
-
-            buy_usd = buy_native_dec * mon_price
-            sell_usd = sell_native_dec * mon_price
-            net_usd = net_native_dec * mon_price
-
-            volume_windows[label] = {
-                "buy_native": str(buy_native),
-                "sell_native": str(sell_native),
-                "net_native": str(net_native),
-                "buy_usd": str(buy_usd),
-                "sell_usd": str(sell_usd),
-                "net_usd": str(net_usd),
-            }
-    else:
-        for label in horizons.keys():
-            volume_windows[label] = {
-                "buy_native": "0",
-                "sell_native": "0",
-                "net_native": "0",
-                "buy_usd": "0",
-                "sell_usd": "0",
-                "net_usd": "0",
-            }
-
-    # current user per token stats
-    pos = state.launchpad_positions.get((user_addr, token_addr))
-    if pos is not None:
-        user_native_spent = Decimal(pos.native_spent)
-        user_native_received = Decimal(pos.native_received)
-        user_realized_pnl = pos.realized_pnl_native
-        current_value_native = Decimal(pos.balance_token) * lp.last_price_native
-        user_token_balance = pos.balance_token
-        user_token_bought = pos.token_bought
-        user_token_sold = pos.token_sold
-    else:
-        user_native_spent = Decimal(0)
-        user_native_received = Decimal(0)
-        user_realized_pnl = Decimal(0)
-        current_value_native = Decimal(0)
-        user_token_balance = 0
-        user_token_bought = 0
-        user_token_sold = 0
-
-    token_info = {
-        "token": lp.token,
-        "metadataCID": lp.metadata_cid,
-        "developer": dev_addr,
-        "holders": holders_count,
-        "developer_holding_tokens": str(dev_holding_tokens),
-        "top10_holding_tokens": str(top10_holding_tokens),
-        "volume_windows": volume_windows,
-        "user": {
-            "address": user_addr,
-            "native_spent": str(user_native_spent),
-            "native_received": str(user_native_received),
-            "native_realized_pnl": str(user_realized_pnl),
-            "token_bought": str(user_token_bought),
-            "token_sold": str(user_token_sold),
-            "token_balance": str(user_token_balance),
-            "current_balance_native": str(current_value_native),
-        },
-    }
-
-    # similar tokens
-    def _name_similarity(a: str, b: str) -> int:
-        a = (a or "").lower()
-        b = (b or "").lower()
-        score = 0
-        for ca, cb in zip(a, b):
-            if ca == cb:
-                score += 1
-            else:
-                break
-        return score
-
-    base_name = lp.name or ""
-    similar_candidates: List[tuple[int, models.LaunchpadToken]] = []
-    for other in state.launchpad_tokens.values():
-        if other.token == token_addr:
-            continue
-        score = _name_similarity(base_name, other.name)
-        if score > 0:
-            similar_candidates.append((score, other))
-
-    similar_candidates.sort(key=lambda x: x[0], reverse=True)
-    similar_candidates = similar_candidates[:5]
-
-    similar_tokens: List[Dict[str, Any]] = []
-    for score, other in similar_candidates:
-        other_trades = state.launchpad_trades.get(other.token, [])
-        if other_trades:
-            last_tx_ts = int(other_trades[-1].timestamp)
+    trades_out: List[Dict[str, Any]] = []
+    for idx, tr in enumerate(recent_trades_raw):
+        if tr.is_buy:
+            amount_in = int(tr.native_amount)
+            amount_out = int(tr.token_amount)
         else:
-            last_tx_ts = int(other.created_at or 0)
-        seconds_since_last_tx = max(0, now_ts - last_tx_ts)
+            amount_in = int(tr.token_amount)
+            amount_out = int(tr.native_amount)
 
-        other_mc_native = other.last_price_native * Decimal(1e9)
-        other_mc_usd = other_mc_native * mon_price if mon_price > 0 else Decimal(0)
-
-        other_trades_local = other_trades
-        cutoff = now_ts - 24 * 3600
-        other_buy_native = 0
-        other_sell_native = 0
-        for tr in reversed(other_trades_local):
-            t_ts = int(tr.timestamp)
-            if t_ts < cutoff:
-                break
-            if tr.is_buy:
-                other_buy_native += int(tr.native_amount)
-            else:
-                other_sell_native += int(tr.native_amount)
-        other_net_native = other_buy_native + other_sell_native
-
-        other_buy_native_dec = Decimal(other_buy_native) / dec_1e18
-        other_sell_native_dec = Decimal(other_sell_native) / dec_1e18
-        other_net_native_dec = Decimal(other_net_native) / dec_1e18
-
-        other_buy_usd = other_buy_native_dec * mon_price
-        other_sell_usd = other_sell_native_dec * mon_price
-        other_net_usd = other_net_native_dec * mon_price
-
-        similar_tokens.append(
+        trades_out.append(
             {
-                "token": other.token,
-                "symbol": other.symbol,
-                "name": other.name,
-                "metadata_cid": other.metadata_cid,
-                "seconds_since_last_tx": seconds_since_last_tx,
-                "marketcap_native_raw": str(other_mc_native),
-                "marketcap_usd": str(other_mc_usd),
-                "volume_24h": {
-                    "buy_native": str(other_buy_native),
-                    "sell_native": str(other_sell_native),
-                    "net_native": str(other_net_native),
-                    "buy_usd": str(other_buy_usd),
-                    "sell_usd": str(other_sell_usd),
-                    "net_usd": str(other_net_usd),
-                },
+                "trade": {
+                    "account": {"id": tr.user},
+                    "amountIn": str(amount_in),
+                    "amountOut": str(amount_out),
+                    "block": str(int(tr.block_number)),
+                    "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-{idx}",
+                    "isBuy": bool(tr.is_buy),
+                    "priceNativePerTokenWad": str(tr.price_native),
+                }
             }
         )
 
-    token_info["similar_tokens"] = similar_tokens
+    tracked_addrs: set[str] = set()
+    if tracked:
+        for part in tracked.split(","):
+            a = part.strip().lower()
+            if a:
+                tracked_addrs.add(a)
 
-    # ordercenter
-    user_portfolio: List[Dict[str, Any]] = []
-    for (uaddr, tkn), pos_any in state.launchpad_positions.items():
+    tracked_trades_out: List[Dict[str, Any]] = []
+    if tracked_addrs and recent_trades_raw:
+        for idx, tr in enumerate(recent_trades_raw):
+            if tr.user.lower() not in tracked_addrs:
+                continue
+
+            if tr.is_buy:
+                amount_in = int(tr.native_amount)
+                amount_out = int(tr.token_amount)
+            else:
+                amount_in = int(tr.token_amount)
+                amount_out = int(tr.native_amount)
+
+            tracked_trades_out.append(
+                {
+                    "trade": {
+                        "account": {"id": tr.user},
+                        "amountIn": str(amount_in),
+                        "amountOut": str(amount_out),
+                        "block": str(int(tr.block_number)),
+                        "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-tracked-{idx}",
+                        "isBuy": bool(tr.is_buy),
+                        "priceNativePerTokenWad": str(tr.price_native),
+                    }
+                }
+            )
+            if len(tracked_trades_out) >= 50:
+                break
+
+    description = getattr(lp, "description", "") or ""
+    metadata_cid = getattr(lp, "metadata_cid", "") or ""
+    social1 = getattr(lp, "social1", None)
+    social2 = getattr(lp, "social2", None)
+    social3 = getattr(lp, "social3", None)
+    social4 = getattr(lp, "social4", None)
+
+    migrated = bool(getattr(lp, "migrated", False))
+    migrated_at = getattr(lp, "migrated_at", None)
+    migrated_market = getattr(lp, "market", None)
+
+    volume_native_str = str(int(volume_native))
+    volume_token_str = str(int(volume_token))
+    volume_usd_str = str(volume_usd)
+
+    return {
+        "buyTxs": int(getattr(lp, "buy_count", 0)),
+        "creator": {
+            "id": dev_addr,
+            "tokensGraduated": int(dev_tokens_graduated),
+            "tokensLaunched": int(dev_tokens_created),
+        },
+        "decimals": int(decimals),
+        "description": description,
+        "devHoldingAmount": str(int(dev_holding)),
+        "distinctBuyers": distinct_buyers,
+        "distinctSellers": distinct_sellers,
+        "holders": holders_list,
+        "id": lp.token,
+        "initialSupply": str(10**18),
+        "lastPriceNativePerTokenWad": str(last_price_wad),
+        "lastUpdatedAt": str(last_timestamp),
+        "marketcap": marketcap_native_raw,
+        "marketcap_usd": marketcap_usd,
+        "metadataCID": metadata_cid,
+        "migrated": migrated,
+        "migratedAt": migrated_at,
+        "migratedMarket": migrated_market,
+        "mini": {
+            "klines": mini_klines,
+        },
+        "name": lp.name,
+        "sellTxs": int(getattr(lp, "sell_count", 0)),
+        "series": {
+            "klines": series_klines,
+        },
+        "social1": social1,
+        "social2": social2,
+        "social3": social3,
+        "social4": social4,
+        "symbol": lp.symbol,
+        "timestamp": str(int(lp.created_at or 0)),
+        "totalHolders": int(total_holders),
+        "trackedtrades": tracked_trades_out,
+        "trades": trades_out,
+        "volumeNative": volume_native_str,
+        "volumeToken": volume_token_str,
+        "volumeUsd": volume_usd_str,
+    }
+
+@app.get("/user/{user_addr}")
+def user_portfolio(user_addr: str) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    user_addr = user_addr.lower()
+
+    mon_price = state.tokenToPrice.get(
+        "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
+    )
+
+    positions: List[Dict[str, Any]] = []
+
+    total_value_native = Decimal(0)
+    total_realized_pnl = Decimal(0)
+    total_unrealized_pnl = Decimal(0)
+    total_native_spent = 0
+    total_native_received = 0
+    total_trades = 0
+
+    for (uaddr, tkn), pos in state.launchpad_positions.items():
         if uaddr != user_addr:
             continue
-        lp_tkn = state.launchpad_tokens.get(tkn)
-        if lp_tkn is None:
+
+        lp = state.launchpad_tokens.get(tkn)
+        if lp is None:
             continue
-        value_native = Decimal(pos_any.balance_token) * lp_tkn.last_price_native
-        user_portfolio.append(
+
+        last_price_native = getattr(lp, "last_price_native", Decimal(0))
+
+        balance_token = int(pos.balance_token)
+        native_spent = int(pos.native_spent)
+        native_received = int(pos.native_received)
+        realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
+
+        current_value_native = Decimal(balance_token) * last_price_native
+
+        total_pnl_native = realized_pnl + current_value_native + Decimal(
+            native_received - native_spent
+        )
+
+        unrealized_pnl_native = total_pnl_native - realized_pnl
+
+        total_value_native += current_value_native
+        total_realized_pnl += realized_pnl
+        total_unrealized_pnl += unrealized_pnl_native
+        total_native_spent += native_spent
+        total_native_received += native_received
+        total_trades += int(getattr(pos, "trade_count", 0))
+
+        if mon_price > 0:
+            current_value_usd = current_value_native * mon_price
+            total_pnl_usd = total_pnl_native * mon_price
+        else:
+            current_value_usd = Decimal(0)
+            total_pnl_usd = Decimal(0)
+
+        positions.append(
             {
                 "token": tkn,
-                "symbol": lp_tkn.symbol,
-                "native_spent": str(pos_any.native_spent),
-                "native_received": str(pos_any.native_received),
-                "token_bought": str(pos_any.token_bought),
-                "token_sold": str(pos_any.token_sold),
-                "token_balance": str(pos_any.balance_token),
-                "current_balance_native": str(value_native),
-                "realized_pnl_native": str(pos_any.realized_pnl_native),
+                "symbol": lp.symbol,
+                "name": lp.name,
+                "metadata_cid": getattr(lp, "metadata_cid", ""),
+                "balance_token": str(balance_token),
+                "balance_native": str(current_value_native),
+                "balance_usd": str(current_value_usd),
+                "native_spent": str(native_spent),
+                "native_received": str(native_received),
+                "realized_pnl_native": str(realized_pnl),
+                "unrealized_pnl_native": str(unrealized_pnl_native),
+                "total_pnl_native": str(total_pnl_native),
+                "total_pnl_usd": str(total_pnl_usd),
+                "trade_count": int(getattr(pos, "trade_count", 0)),
+                "buy_count": int(getattr(pos, "buy_count", 0)),
+                "sell_count": int(getattr(pos, "sell_count", 0)),
             }
         )
 
-    token_positions = [
-        pos_any
-        for (uaddr, tkn), pos_any in state.launchpad_positions.items()
-        if tkn == token_addr
-    ]
-    token_positions.sort(key=lambda p: p.balance_token, reverse=True)
-    top_holders_raw = token_positions[:50]
+    positions.sort(
+        key=lambda p: Decimal(p["total_pnl_native"]) if p["total_pnl_native"] is not None else Decimal(0),
+        reverse=True,
+    )
 
-    top_holders: List[Dict[str, Any]] = []
-    for pos_any in top_holders_raw:
-        value_native = Decimal(pos_any.balance_token) * lp.last_price_native
-        top_holders.append(
-            {
-                "user": pos_any.user,
-                "token_bought": str(pos_any.token_bought),
-                "token_sold": str(pos_any.token_sold),
-                "token_balance": str(pos_any.balance_token),
-                "native_spent": str(pos_any.native_spent),
-                "native_received": str(pos_any.native_received),
-                "current_balance_native": str(value_native),
-                "realized_pnl_native": str(pos_any.realized_pnl_native),
-            }
-        )
+    if mon_price > 0:
+        total_value_usd = total_value_native * mon_price
+        total_pnl_native = total_realized_pnl + total_unrealized_pnl
+        total_pnl_usd = total_pnl_native * mon_price
+    else:
+        total_value_usd = Decimal(0)
+        total_pnl_native = total_realized_pnl + total_unrealized_pnl
+        total_pnl_usd = Decimal(0)
 
-    token_positions_by_pnl = list(token_positions)
-    token_positions_by_pnl.sort(key=lambda p: p.realized_pnl_native, reverse=True)
-    top_traders_raw = token_positions_by_pnl[:50]
-
-    top_traders: List[Dict[str, Any]] = []
-    for pos_any in top_traders_raw:
-        value_native = Decimal(pos_any.balance_token) * lp.last_price_native
-        top_traders.append(
-            {
-                "user": pos_any.user,
-                "token_bought": str(pos_any.token_bought),
-                "token_sold": str(pos_any.token_sold),
-                "token_balance": str(pos_any.balance_token),
-                "native_spent": str(pos_any.native_spent),
-                "native_received": str(pos_any.native_received),
-                "current_balance_native": str(value_native),
-                "realized_pnl_native": str(pos_any.realized_pnl_native),
-            }
-        )
-
-    dev_tokens = []
-    if dev_addr:
-        for t in state.launchpad_tokens.values():
-            if (t.creator or "").lower() == dev_addr:
-                dev_tokens.append(t)
-
-    dev_tokens.sort(key=lambda t: (int(t.created_at or 0), int(t.created_block or 0)), reverse=True)
-    recent_dev_tokens_raw = dev_tokens[:50]
-
-    recent_dev_tokens: List[Dict[str, Any]] = []
-    dev_highest_mc_token = None
-    dev_highest_mc_value = Decimal(0)
-    latest_launch_ts = 0
-
-    for t in dev_tokens:
-        mc_native = t.last_price_native * Decimal(1e9)
-        if mc_native > dev_highest_mc_value:
-            dev_highest_mc_value = mc_native
-            dev_highest_mc_token = t.token
-        if int(t.created_at or 0) > latest_launch_ts:
-            latest_launch_ts = int(t.created_at or 0)
-
-    for t in recent_dev_tokens_raw:
-        mc_native = t.last_price_native * Decimal(1e9)
-        holders_count_t, _, _ = _holders_for_token(t.token)
-        recent_dev_tokens.append(
-            {
-                "token": t.token,
-                "symbol": t.symbol,
-                "name": t.name,
-                "metadata_cid": t.metadata_cid,
-                "created_at": int(t.created_at or 0),
-                "marketcap_native_raw": str(mc_native),
-                "migrated": t.migrated,
-                "holders": holders_count_t,
-            }
-        )
-
-    ordercenter = {
-        "user_portfolio": user_portfolio,
-        "top_holders": top_holders,
-        "top_traders": top_traders,
-        "dev_tokens_recent": recent_dev_tokens,
-        "dev_summary": {
-            "developer": dev_addr,
-            "tokens_created": dev_tokens_created,
-            "tokens_migrated": dev_tokens_migrated,
-            "highest_marketcap_token": dev_highest_mc_token,
-            "highest_marketcap_native": str(dev_highest_mc_value),
-            "latest_launch_timestamp": latest_launch_ts,
-            "total_tokens_launched": len(dev_tokens),
-        },
+    summary = {
+        "user": user_addr,
+        "portfolio_value_native": str(total_value_native),
+        "portfolio_value_usd": str(total_value_usd),
+        "realized_pnl_native": str(total_realized_pnl),
+        "unrealized_pnl_native": str(total_unrealized_pnl),
+        "total_pnl_native": str(total_pnl_native),
+        "total_pnl_usd": str(total_pnl_usd),
+        "native_spent": str(total_native_spent),
+        "native_received": str(total_native_received),
+        "trade_count": int(total_trades),
+        "tokens_traded": len(positions),
     }
 
     return {
-        "token": lp.token,
         "user": user_addr,
-        "timescale": timescale,
-        "page": page,
-        "candles": candles,
-        "header": header,
-        "token_info": token_info,
-        "ordercenter": ordercenter,
+        "summary": summary,
+        "positions": positions,
     }
