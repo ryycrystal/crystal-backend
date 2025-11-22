@@ -1184,17 +1184,17 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         last_eff: Decimal | None
         if last_price is not None:
             last_eff = last_price
-        else:
+        elif prev_price is not None:
             last_eff = prev_price
+        else:
+            last_eff = INITIAL_NATIVE_PRICE
 
         if prev_price is not None:
             base_price = prev_price
-        elif start_price is not None:
-            base_price = start_price
         else:
             base_price = INITIAL_NATIVE_PRICE
 
-        if last_eff is None or base_price == 0:
+        if base_price == 0:
             change_pct = 0.0
         else:
             change_pct = float((last_eff - base_price) / base_price * Decimal(100))
