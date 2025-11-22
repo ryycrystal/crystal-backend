@@ -708,9 +708,6 @@ class State:
         except Exception:
             price_native = Decimal(0)
             
-        if lp.source == 1:
-            price_native = price_native * Decimal("0.05")
-    
         lp.last_price_native = price_native
         
         if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
@@ -730,7 +727,8 @@ class State:
         else:
             lp.sell_count += 1
 
-        mon_price = self.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
+        # mon_price = self.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
+        mon_price = 0.05
         if mon_price > 0:
             volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
             lp.volume_usd += volume_usd_trade
