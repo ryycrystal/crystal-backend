@@ -88,8 +88,6 @@ class Sequencer:
                 counts[tag] += 1
             
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
-            
-            print("parsed", tag, parsed)
 
             if tag == "MC":
                 ev = self._to_market_created(parsed)
