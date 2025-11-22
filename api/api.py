@@ -5,12 +5,9 @@ from typing import Dict, Any, List, Deque, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import time
-import json
-import urllib.request
-from state import RPC_HTTP
+import traceback
 
 from core.sequencer import SEQUENCER
-from state import State
 from api.x_api import router as x_router
 import models
 
@@ -642,7 +639,6 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     recent_created_out: List[Dict[str, Any]] = []
     for t in recent_created:
-        print(t)
         row = _serialize_token(t.token)
         row["graduationPercentageBps"] = t.circulating_supply / 793100000
         recent_created_out.append(row)
@@ -674,215 +670,182 @@ def token_overview_graph(
         description="comma-separated list of addresses to track for trackedtrades",
     ),
 ) -> Dict[str, Any]:
-    state = SEQUENCER._state
-    token_addr = token_addr.lower()
+    try:
+        state = SEQUENCER._state
+        token_addr = token_addr.lower()
 
-    if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
-        raise HTTPException(status_code=400, detail="unsupported chart resolution")
+        if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+            raise HTTPException(status_code=400, detail="unsupported chart resolution")
 
-    lp = state.launchpad_tokens.get(token_addr)
-    if lp is None:
-        raise HTTPException(status_code=404, detail="launchpad token not found")
+        lp = state.launchpad_tokens.get(token_addr)
+        if lp is None:
+            raise HTTPException(status_code=404, detail="launchpad token not found")
 
-    trades: List[models.LaunchpadTrade] = state.launchpad_trades.get(token_addr, [])
-    trades_sorted = sorted(trades, key=lambda t: int(t.timestamp))
+        trades: List[models.LaunchpadTrade] = state.launchpad_trades.get(token_addr, [])
+        trades_sorted = sorted(trades, key=lambda t: int(t.timestamp))
 
-    if trades_sorted:
-        last_timestamp = int(trades_sorted[-1].timestamp)
-    else:
-        last_timestamp = int(lp.created_at or 0) or int(time.time())
-
-    buyer_addrs: set[str] = set()
-    seller_addrs: set[str] = set()
-    for tr in trades_sorted:
-        if tr.is_buy:
-            buyer_addrs.add(tr.user)
+        if trades_sorted:
+            last_timestamp = int(trades_sorted[-1].timestamp)
         else:
-            seller_addrs.add(tr.user)
+            last_timestamp = int(lp.created_at or 0) or int(time.time())
 
-    distinct_buyers = len(buyer_addrs)
-    distinct_sellers = len(seller_addrs)
+        buyer_addrs: set[str] = set()
+        seller_addrs: set[str] = set()
+        for tr in trades_sorted:
+            if tr.is_buy:
+                buyer_addrs.add(tr.user)
+            else:
+                seller_addrs.add(tr.user)
 
-    total_holders, dev_holding, _top10 = _holders_for_token(lp.token)
+        distinct_buyers = len(buyer_addrs)
+        distinct_sellers = len(seller_addrs)
 
-    decimals = 18
+        total_holders, dev_holding, _top10 = _holders_for_token(lp.token)
 
-    dev_addr = (lp.creator or "").lower() if getattr(lp, "creator", None) else ""
-    dev_tokens_created = 0
-    dev_tokens_graduated = 0
-    if dev_addr:
-        dev_user = state.launchpad_users.get(dev_addr)
-        if dev_user is not None:
-            dev_tokens_created = getattr(dev_user, "tokens_created", 0)
-            dev_tokens_graduated = getattr(dev_user, "tokens_graduated", 0)
+        decimals = 18
 
-    last_price_native = getattr(lp, "last_price_native", Decimal(0))
-    last_price_wad = (last_price_native) * Decimal(1e9)
+        dev_addr = (lp.creator or "").lower() if getattr(lp, "creator", None) else ""
+        dev_tokens_created = 0
+        dev_tokens_graduated = 0
+        if dev_addr:
+            dev_user = state.launchpad_users.get(dev_addr)
+            if dev_user is not None:
+                dev_tokens_created = getattr(dev_user, "tokens_created", 0)
+                dev_tokens_graduated = getattr(dev_user, "tokens_graduated", 0)
 
-    marketcap_native_raw: Decimal = last_price_native * Decimal(1e9)
-    mon_price = state.tokenToPrice.get(
-        "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
-    )
-    marketcap_usd: Decimal = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
+        last_price_native = getattr(lp, "last_price_native", Decimal(0))
+        last_price_wad = (last_price_native) * Decimal(1e9)
 
-    volume_native = getattr(lp, "native_volume", 0)
-    volume_token = getattr(lp, "token_volume", 0)
-    volume_usd = getattr(lp, "volume_usd", Decimal(0))
-
-    mini_klines = _build_ohlcv(trades_sorted, bucket_seconds=3600, max_buckets=24)
-    series_klines = _build_ohlcv(trades_sorted, bucket_seconds=chartres, max_buckets=None)
-
-    positions_for_token = [
-        pos
-        for (uaddr, tkn), pos in state.launchpad_positions.items()
-        if tkn == token_addr and pos.balance_token > 0
-        and uaddr.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
-    ]
-    positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
-
-    holders_list: List[Dict[str, Any]] = []
-    for pos in positions_for_token:
-        balance_token = int(pos.balance_token)
-        native_spent = int(pos.native_spent)
-        native_received = int(pos.native_received)
-        realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
-
-        current_value_native = Decimal(balance_token) * last_price_native
-        unrealized_pnl_native = current_value_native
-        total_pnl_native = realized_pnl + unrealized_pnl_native
-
-        if mon_price > 0:
-            balance_usd = current_value_native * mon_price
-            total_pnl_usd = total_pnl_native * mon_price
-        else:
-            balance_usd = Decimal(0)
-            total_pnl_usd = Decimal(0)
-
-        holders_list.append(
-            {
-                "account": {"id": pos.user},
-                "token": token_addr,
-                "symbol": lp.symbol,
-                "name": lp.name,
-                "metadata_cid": getattr(lp, "metadata_cid", ""),
-                "balance_token": str(balance_token),
-                "balance_native": str(current_value_native),
-                "balance_usd": str(balance_usd),
-                "native_spent": str(native_spent),
-                "native_received": str(native_received),
-                "realized_pnl_native": str(realized_pnl),
-                "unrealized_pnl_native": str(unrealized_pnl_native),
-                "total_pnl_native": str(total_pnl_native),
-                "total_pnl_usd": str(total_pnl_usd),
-                "trade_count": int(getattr(pos, "trade_count", 0)),
-                "buy_count": int(getattr(pos, "buy_count", 0)),
-                "sell_count": int(getattr(pos, "sell_count", 0)),
-                "tokens": str(int(pos.balance_token)),
-                "tokenBought": str(int(getattr(pos, "token_bought", 0))),
-                "tokenSold": str(int(getattr(pos, "token_sold", 0))),
-                "nativeSpent": str(native_spent),
-                "nativeReceived": str(native_received),
-            }
+        marketcap_native_raw: Decimal = last_price_native * Decimal(1e9)
+        mon_price = state.tokenToPrice.get(
+            "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0)
         )
+        marketcap_usd: Decimal = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
 
-    top_traders_list: List[Dict[str, Any]] = []
-    for pos in state.launchpad_positions.values():
-        if getattr(pos, "token", token_addr) != token_addr:
-            continue
+        volume_native = getattr(lp, "native_volume", 0)
+        volume_token = getattr(lp, "token_volume", 0)
+        volume_usd = getattr(lp, "volume_usd", Decimal(0))
 
-        if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
-            continue
+        mini_klines = _build_ohlcv(trades_sorted, bucket_seconds=3600, max_buckets=24)
+        series_klines = _build_ohlcv(trades_sorted, bucket_seconds=chartres, max_buckets=None)
 
-        balance_token = int(pos.balance_token)
-        native_spent = int(pos.native_spent)
-        native_received = int(pos.native_received)
-        realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
+        positions_for_token = [
+            pos
+            for (uaddr, tkn), pos in state.launchpad_positions.items()
+            if tkn == token_addr and pos.balance_token > 0
+            and uaddr.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
+        ]
+        positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
 
-        current_value_native = Decimal(balance_token) * last_price_native
-        unrealized_pnl_native = current_value_native
-        total_pnl_native = realized_pnl + unrealized_pnl_native
+        holders_list: List[Dict[str, Any]] = []
+        for pos in positions_for_token:
+            balance_token = int(pos.balance_token)
+            native_spent = int(pos.native_spent)
+            native_received = int(pos.native_received)
+            realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
 
-        if mon_price > 0:
-            balance_usd = current_value_native * mon_price
-            total_pnl_usd = total_pnl_native * mon_price
-        else:
-            balance_usd = Decimal(0)
-            total_pnl_usd = Decimal(0)
+            current_value_native = Decimal(balance_token) * last_price_native
+            unrealized_pnl_native = current_value_native
+            total_pnl_native = realized_pnl + unrealized_pnl_native
 
-        top_traders_list.append(
-            {
-                "account": {"id": pos.user},
-                "token": token_addr,
-                "symbol": lp.symbol,
-                "name": lp.name,
-                "metadata_cid": getattr(pos, "metadata_cid", ""),
-                "balance_token": str(balance_token),
-                "balance_native": str(current_value_native),
-                "balance_usd": str(balance_usd),
-                "native_spent": str(native_spent),
-                "native_received": str(native_received),
-                "realized_pnl_native": str(realized_pnl),
-                "unrealized_pnl_native": str(unrealized_pnl_native),
-                "total_pnl_native": str(total_pnl_native),
-                "total_pnl_usd": str(total_pnl_usd),
-                "trade_count": int(getattr(pos, "trade_count", 0)),
-                "buy_count": int(getattr(pos, "buy_count", 0)),
-                "sell_count": int(getattr(pos, "sell_count", 0)),
-                "tokens": str(int(pos.balance_token)),
-                "tokenBought": str(int(getattr(pos, "token_bought", 0))),
-                "tokenSold": str(int(getattr(pos, "token_sold", 0))),
-                "nativeSpent": str(native_spent),
-                "nativeReceived": str(native_received),
-            }
-        )
+            if mon_price > 0:
+                balance_usd = current_value_native * mon_price
+                total_pnl_usd = total_pnl_native * mon_price
+            else:
+                balance_usd = Decimal(0)
+                total_pnl_usd = Decimal(0)
 
-    top_traders_list.sort(
-        key=lambda h: Decimal(h["total_pnl_native"])
-        if h.get("total_pnl_native") is not None
-        else Decimal(0),
-        reverse=True,
-    )
-    top_traders_list = top_traders_list[:50]
-
-    recent_trades_raw = trades_sorted[-50:] if trades_sorted else []
-    recent_trades_raw = list(reversed(recent_trades_raw))
-
-    trades_out: List[Dict[str, Any]] = []
-    for idx, tr in enumerate(recent_trades_raw):
-        if tr.is_buy:
-            amount_in = int(tr.native_amount)
-            amount_out = int(tr.token_amount)
-        else:
-            amount_in = int(tr.token_amount)
-            amount_out = int(tr.native_amount)
-
-        trades_out.append(
-            {
-                "trade": {
-                    "account": {"id": tr.user},
-                    "amountIn": str(amount_in),
-                    "amountOut": str(amount_out),
-                    "block": str(int(tr.timestamp)),
-                    "id": tr.txhash,
-                    "isBuy": bool(tr.is_buy),
-                    "priceNativePerTokenWad": str(tr.price_native),
+            holders_list.append(
+                {
+                    "account": {"id": pos.user},
+                    "token": token_addr,
+                    "symbol": lp.symbol,
+                    "name": lp.name,
+                    "metadata_cid": getattr(lp, "metadata_cid", ""),
+                    "balance_token": str(balance_token),
+                    "balance_native": str(current_value_native),
+                    "balance_usd": str(balance_usd),
+                    "native_spent": str(native_spent),
+                    "native_received": str(native_received),
+                    "realized_pnl_native": str(realized_pnl),
+                    "unrealized_pnl_native": str(unrealized_pnl_native),
+                    "total_pnl_native": str(total_pnl_native),
+                    "total_pnl_usd": str(total_pnl_usd),
+                    "trade_count": int(getattr(pos, "trade_count", 0)),
+                    "buy_count": int(getattr(pos, "buy_count", 0)),
+                    "sell_count": int(getattr(pos, "sell_count", 0)),
+                    "tokens": str(int(pos.balance_token)),
+                    "tokenBought": str(int(getattr(pos, "token_bought", 0))),
+                    "tokenSold": str(int(getattr(pos, "token_sold", 0))),
+                    "nativeSpent": str(native_spent),
+                    "nativeReceived": str(native_received),
                 }
-            }
-        )
+            )
 
-    tracked_addrs: set[str] = set()
-    if tracked:
-        for part in tracked.split(","):
-            a = part.strip().lower()
-            if a:
-                tracked_addrs.add(a)
-
-    tracked_trades_out: List[Dict[str, Any]] = []
-    if tracked_addrs and recent_trades_raw:
-        for idx, tr in enumerate(recent_trades_raw):
-            if tr.user.lower() not in tracked_addrs:
+        top_traders_list: List[Dict[str, Any]] = []
+        for pos in state.launchpad_positions.values():
+            if getattr(pos, "token", token_addr) != token_addr:
                 continue
 
+            if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
+                continue
+
+            balance_token = int(pos.balance_token)
+            native_spent = int(pos.native_spent)
+            native_received = int(pos.native_received)
+            realized_pnl = getattr(pos, "realized_pnl_native", Decimal(0))
+
+            current_value_native = Decimal(balance_token) * last_price_native
+            unrealized_pnl_native = current_value_native
+            total_pnl_native = realized_pnl + unrealized_pnl_native
+
+            if mon_price > 0:
+                balance_usd = current_value_native * mon_price
+                total_pnl_usd = total_pnl_native * mon_price
+            else:
+                balance_usd = Decimal(0)
+                total_pnl_usd = Decimal(0)
+
+            top_traders_list.append(
+                {
+                    "account": {"id": pos.user},
+                    "token": token_addr,
+                    "symbol": lp.symbol,
+                    "name": lp.name,
+                    "metadata_cid": getattr(pos, "metadata_cid", ""),
+                    "balance_token": str(balance_token),
+                    "balance_native": str(current_value_native),
+                    "balance_usd": str(balance_usd),
+                    "native_spent": str(native_spent),
+                    "native_received": str(native_received),
+                    "realized_pnl_native": str(realized_pnl),
+                    "unrealized_pnl_native": str(unrealized_pnl_native),
+                    "total_pnl_native": str(total_pnl_native),
+                    "total_pnl_usd": str(total_pnl_usd),
+                    "trade_count": int(getattr(pos, "trade_count", 0)),
+                    "buy_count": int(getattr(pos, "buy_count", 0)),
+                    "sell_count": int(getattr(pos, "sell_count", 0)),
+                    "tokens": str(int(pos.balance_token)),
+                    "tokenBought": str(int(getattr(pos, "token_bought", 0))),
+                    "tokenSold": str(int(getattr(pos, "token_sold", 0))),
+                    "nativeSpent": str(native_spent),
+                    "nativeReceived": str(native_received),
+                }
+            )
+
+        top_traders_list.sort(
+            key=lambda h: Decimal(h["total_pnl_native"])
+            if h.get("total_pnl_native") is not None
+            else Decimal(0),
+            reverse=True,
+        )
+        top_traders_list = top_traders_list[:50]
+
+        recent_trades_raw = trades_sorted[-50:] if trades_sorted else []
+        recent_trades_raw = list(reversed(recent_trades_raw))
+
+        trades_out: List[Dict[str, Any]] = []
+        for idx, tr in enumerate(recent_trades_raw):
             if tr.is_buy:
                 amount_in = int(tr.native_amount)
                 amount_out = int(tr.token_amount)
@@ -890,121 +853,161 @@ def token_overview_graph(
                 amount_in = int(tr.token_amount)
                 amount_out = int(tr.native_amount)
 
-            tracked_trades_out.append(
+            trades_out.append(
                 {
                     "trade": {
                         "account": {"id": tr.user},
                         "amountIn": str(amount_in),
                         "amountOut": str(amount_out),
-                        "block": str(int(tr.block_number)),
-                        "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-tracked-{idx}",
+                        "block": str(int(tr.timestamp)),
+                        "id": tr.txhash,
                         "isBuy": bool(tr.is_buy),
                         "priceNativePerTokenWad": str(tr.price_native),
                     }
                 }
             )
-            if len(tracked_trades_out) >= 50:
-                break
 
-    description = getattr(lp, "description", "") or ""
-    metadata_cid = getattr(lp, "metadata_cid", "") or ""
-    social1 = getattr(lp, "social1", None)
-    social2 = getattr(lp, "social2", None)
-    social3 = getattr(lp, "social3", None)
-    social4 = getattr(lp, "social4", None)
+        tracked_addrs: set[str] = set()
+        if tracked:
+            for part in tracked.split(","):
+                a = part.strip().lower()
+                if a:
+                    tracked_addrs.add(a)
 
-    migrated = bool(getattr(lp, "migrated", False))
-    migrated_at = getattr(lp, "migrated_at", None)
-    migrated_market = getattr(lp, "market", None)
+        tracked_trades_out: List[Dict[str, Any]] = []
+        if tracked_addrs and recent_trades_raw:
+            for idx, tr in enumerate(recent_trades_raw):
+                if tr.user.lower() not in tracked_addrs:
+                    continue
 
-    volume_native_str = str(int(volume_native))
-    volume_token_str = str(int(volume_token))
-    volume_usd_str = str(volume_usd)
+                if tr.is_buy:
+                    amount_in = int(tr.native_amount)
+                    amount_out = int(tr.token_amount)
+                else:
+                    amount_in = int(tr.token_amount)
+                    amount_out = int(tr.native_amount)
 
-    dev_tokens_list: List[Dict[str, Any]] = []
-    if dev_addr:
-        now_ts = int(time.time())
-        cutoff_ts = now_ts - 3600
+                tracked_trades_out.append(
+                    {
+                        "trade": {
+                            "account": {"id": tr.user},
+                            "amountIn": str(amount_in),
+                            "amountOut": str(amount_out),
+                            "block": str(int(tr.block_number)),
+                            "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-tracked-{idx}",
+                            "isBuy": bool(tr.is_buy),
+                            "priceNativePerTokenWad": str(tr.price_native),
+                        }
+                    }
+                )
+                if len(tracked_trades_out) >= 50:
+                    break
 
-        for other_token_addr, dev_lp in state.launchpad_tokens.items():
-            creator_addr = (getattr(dev_lp, "creator", "") or "").lower()
-            if creator_addr != dev_addr:
-                continue
+        description = getattr(lp, "description", "") or ""
+        metadata_cid = getattr(lp, "metadata_cid", "") or ""
+        social1 = getattr(lp, "social1", None)
+        social2 = getattr(lp, "social2", None)
+        social3 = getattr(lp, "social3", None)
+        social4 = getattr(lp, "social4", None)
 
-            dev_last_price_native = getattr(dev_lp, "last_price_native", Decimal(0))
-            dev_price_wad = dev_last_price_native * Decimal(1e9)
-            dev_marketcap_native = dev_last_price_native * Decimal(1e9)
+        migrated = bool(getattr(lp, "migrated", False))
+        migrated_at = getattr(lp, "migrated_at", None)
+        migrated_market = getattr(lp, "market", None)
 
-            trades_for_dev = state.launchpad_trades.get(other_token_addr, [])
-            vol_1h_native = 0
-            for tr in trades_for_dev:
-                if int(tr.timestamp) >= cutoff_ts:
-                    vol_1h_native += int(tr.native_amount)
+        volume_native_str = str(int(volume_native))
+        volume_token_str = str(int(volume_token))
+        volume_usd_str = str(volume_usd)
 
-            dev_total_holders, _, _ = _holders_for_token(other_token_addr)
-            dev_tokens_list.append(
-                {
-                    "id": dev_lp.token,
-                    "name": dev_lp.name,
-                    "symbol": dev_lp.symbol,
-                    "metadataCID": getattr(dev_lp, "metadata_cid", ""),
-                    "lastPriceNativePerTokenWad": str(dev_price_wad),
-                    "marketcap": dev_marketcap_native,
-                    "migrated": bool(getattr(dev_lp, "migrated", False)),
-                    "volumeNative1h": str(vol_1h_native),
-                    "holders": int(dev_total_holders),
-                    "timestamp": str(int(dev_lp.created_at or 0)),
-                }
-            )
+        dev_tokens_list: List[Dict[str, Any]] = []
+        if dev_addr:
+            now_ts = int(time.time())
+            cutoff_ts = now_ts - 3600
 
-    return {
-        "buyTxs": int(getattr(lp, "buy_count", 0)),
-        "creator": {
-            "id": dev_addr,
-            "tokensGraduated": int(dev_tokens_graduated),
-            "tokensLaunched": int(dev_tokens_created),
-        },
-        "decimals": int(decimals),
-        "description": description,
-        "devHoldingAmount": str(int(dev_holding)),
-        "distinctBuyers": distinct_buyers,
-        "distinctSellers": distinct_sellers,
-        "holders": holders_list,
-        "topTraders": top_traders_list,
-        "devTokens": dev_tokens_list,
-        "id": lp.token,
-        "initialSupply": str(10**18),
-        "lastPriceNativePerTokenWad": str(last_price_wad),
-        "lastUpdatedAt": str(last_timestamp),
-        "marketcap": marketcap_native_raw,
-        "marketcap_usd": marketcap_usd,
-        "metadataCID": metadata_cid,
-        "migrated": migrated,
-        "migratedAt": migrated_at,
-        "migratedMarket": migrated_market,
-        "mini": {
-            "klines": mini_klines,
-        },
-        "name": lp.name,
-        "sellTxs": int(getattr(lp, "sell_count", 0)),
-        "series": {
-            "klines": series_klines,
-        },
-        "social1": social1,
-        "social2": social2,
-        "social3": social3,
-        "social4": social4,
-        "symbol": lp.symbol,
-        "timestamp": str(int(lp.created_at or 0)),
-        "totalHolders": int(total_holders),
-        "trackedtrades": tracked_trades_out,
-        "trades": trades_out,
-        "volumeNative": volume_native_str,
-        "volumeToken": volume_token_str,
-        "volumeUsd": volume_usd_str,
-        "graduationPercentageBps": int(graduation_bps),
-    }
+            for other_token_addr, dev_lp in state.launchpad_tokens.items():
+                creator_addr = (getattr(dev_lp, "creator", "") or "").lower()
+                if creator_addr != dev_addr:
+                    continue
 
+                dev_last_price_native = getattr(dev_lp, "last_price_native", Decimal(0))
+                dev_price_wad = dev_last_price_native * Decimal(1e9)
+                dev_marketcap_native = dev_last_price_native * Decimal(1e9)
+
+                trades_for_dev = state.launchpad_trades.get(other_token_addr, [])
+                vol_1h_native = 0
+                for tr in trades_for_dev:
+                    if int(tr.timestamp) >= cutoff_ts:
+                        vol_1h_native += int(tr.native_amount)
+
+                dev_total_holders, _, _ = _holders_for_token(other_token_addr)
+                dev_tokens_list.append(
+                    {
+                        "id": dev_lp.token,
+                        "name": dev_lp.name,
+                        "symbol": dev_lp.symbol,
+                        "metadataCID": getattr(dev_lp, "metadata_cid", ""),
+                        "lastPriceNativePerTokenWad": str(dev_price_wad),
+                        "marketcap": dev_marketcap_native,
+                        "migrated": bool(getattr(dev_lp, "migrated", False)),
+                        "volumeNative1h": str(vol_1h_native),
+                        "holders": int(dev_total_holders),
+                        "timestamp": str(int(dev_lp.created_at or 0)),
+                    }
+                )
+        
+        graduation_bps = getattr(lp, "circulating_supply", 0) / 793100000
+
+        return {
+            "buyTxs": int(getattr(lp, "buy_count", 0)),
+            "creator": {
+                "id": dev_addr,
+                "tokensGraduated": int(dev_tokens_graduated),
+                "tokensLaunched": int(dev_tokens_created),
+            },
+            "decimals": int(decimals),
+            "description": description,
+            "devHoldingAmount": str(int(dev_holding)),
+            "distinctBuyers": distinct_buyers,
+            "distinctSellers": distinct_sellers,
+            "holders": holders_list,
+            "topTraders": top_traders_list,
+            "devTokens": dev_tokens_list,
+            "id": lp.token,
+            "initialSupply": str(10**18),
+            "lastPriceNativePerTokenWad": str(last_price_wad),
+            "lastUpdatedAt": str(last_timestamp),
+            "marketcap": marketcap_native_raw,
+            "marketcap_usd": marketcap_usd,
+            "metadataCID": metadata_cid,
+            "migrated": migrated,
+            "migratedAt": migrated_at,
+            "migratedMarket": migrated_market,
+            "mini": {
+                "klines": mini_klines,
+            },
+            "name": lp.name,
+            "sellTxs": int(getattr(lp, "sell_count", 0)),
+            "series": {
+                "klines": series_klines,
+            },
+            "social1": social1,
+            "social2": social2,
+            "social3": social3,
+            "social4": social4,
+            "symbol": lp.symbol,
+            "timestamp": str(int(lp.created_at or 0)),
+            "totalHolders": int(total_holders),
+            "trackedtrades": tracked_trades_out,
+            "trades": trades_out,
+            "volumeNative": volume_native_str,
+            "volumeToken": volume_token_str,
+            "volumeUsd": volume_usd_str,
+            "graduationPercentageBps": int(graduation_bps),
+        }
+    except Exception:
+        print(f"[token_overview_graph] error token={token_addr}")
+        traceback.print_exc()
+        raise
+    
 @app.get("/user/{user_addr}")
 def user_portfolio(user_addr: str) -> Dict[str, Any]:
     state = SEQUENCER._state
