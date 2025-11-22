@@ -1109,6 +1109,11 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
             out[f"sell_volume_native_{suffix}"] = 0
             out[f"sell_volume_usd_{suffix}"] = 0
             out[f"net_volume_usd_{suffix}"] = 0
+            out[f"buy_tx_count_{suffix}"] = 0
+            out[f"sell_tx_count_{suffix}"] = 0
+            out[f"start_price_native_{suffix}"] = 0
+            out[f"last_price_native_{suffix}"] = 0
+            out[f"change_pct_{suffix}"] = 0.0
         return out
 
     mon_price = state.tokenToPrice.get(
@@ -1122,7 +1127,7 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         "24h": 24 * 60 * 60,
     }
 
-    buckets: Dict[str, Dict[str, Decimal]] = {}
+    buckets: Dict[str, Dict[str, Any]] = {}
     for label in windows.keys():
         buckets[label] = {
             "volume_token": Decimal(0),
@@ -1134,6 +1139,10 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
             "sell_volume_token": Decimal(0),
             "sell_volume_native": Decimal(0),
             "sell_volume_usd": Decimal(0),
+            "buy_cnt": 0,
+            "sell_cnt": 0,
+            "start_price_native": None,
+            "last_price_native": None,
         }
 
     now_ts = int(time.time())
@@ -1153,11 +1162,17 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
             native_amount_wad * mon_price if mon_price > 0 else Decimal(0)
         )
 
+        try:
+            price_native_wad = Decimal(int(tr.price_native))
+        except Exception:
+            price_native_wad = None
+
         for label, secs in windows.items():
             if age > secs:
                 continue
 
             b = buckets[label]
+
             b["volume_token"] += token_amount_wad
             b["volume_native"] += native_amount_wad
             b["volume_usd"] += usd_amount_wad
@@ -1166,10 +1181,17 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
                 b["buy_volume_token"] += token_amount_wad
                 b["buy_volume_native"] += native_amount_wad
                 b["buy_volume_usd"] += usd_amount_wad
+                b["buy_cnt"] += 1
             else:
                 b["sell_volume_token"] += token_amount_wad
                 b["sell_volume_native"] += native_amount_wad
                 b["sell_volume_usd"] += usd_amount_wad
+                b["sell_cnt"] += 1
+
+            if price_native_wad is not None:
+                if b["last_price_native"] is None:
+                    b["last_price_native"] = price_native_wad
+                b["start_price_native"] = price_native_wad
 
     out: Dict[str, Any] = {
         "type": "stats",
@@ -1196,5 +1218,20 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         out[f"sell_volume_usd_{suffix}"] = int(b["sell_volume_usd"])
 
         out[f"net_volume_usd_{suffix}"] = int(net_usd)
+
+        out[f"buy_tx_count_{suffix}"] = int(b["buy_cnt"])
+        out[f"sell_tx_count_{suffix}"] = int(b["sell_cnt"])
+
+        start_p = b["start_price_native"] or Decimal(0)
+        last_p = b["last_price_native"] or Decimal(0)
+
+        out[f"start_price_native_{suffix}"] = int(start_p)
+        out[f"last_price_native_{suffix}"] = int(last_p)
+
+        if start_p > 0:
+            change_pct = (last_p - start_p) * Decimal(100) / start_p
+            out[f"change_pct_{suffix}"] = float(change_pct)
+        else:
+            out[f"change_pct_{suffix}"] = 0.0
 
     return out
