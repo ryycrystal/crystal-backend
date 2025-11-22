@@ -18,6 +18,7 @@ _TIMEFRAME_SEC = {
     4: 10 * 365 * 86400,
 }
 
+# helpers
 def _pick_effective_step(age_sec: int, requested_window: int) -> int:
     window = min(max(0, age_sec), max(0, requested_window))
     if window >= 30 * 86400 and age_sec >= 30 * 86400:
@@ -121,6 +122,141 @@ def _build_history(v: models.Vault, timeframe: int, limit: int) -> Tuple[Dict[st
     series = {"tvl": tvl_series, "pnl": pnl_series}
     return info, series
 
+def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
+    state = SEQUENCER._state
+    token_addr = token_addr.lower()
+
+    pos_list = [
+        pos
+        for (user, tkn), pos in state.launchpad_positions.items()
+        if tkn == token_addr and pos.balance_token > 0
+        and user.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
+    ]
+    holder_count = len(pos_list)
+    pos_list.sort(key=lambda p: p.balance_token, reverse=True)
+    top10_holding = sum(p.balance_token for p in pos_list[:10])
+
+    dev_holding = 0
+    lt = state.launchpad_tokens.get(token_addr)
+    if lt is not None and lt.creator:
+        dev_pos = state.launchpad_positions.get((lt.creator.lower(), token_addr))
+        if dev_pos:
+            dev_holding = dev_pos.balance_token
+
+    return holder_count, dev_holding, top10_holding
+
+def _serialize_token(token_addr: str) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    lt = state.launchpad_tokens.get(token_addr.lower())
+    if lt is None:
+        return {}
+
+    holders, dev_holding, top10_holding = _holders_for_token(lt.token)
+
+    marketcap_native_raw: Decimal = lt.last_price_native * Decimal(1e9)
+    marketcap_usd: Decimal = marketcap_native_raw * state.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
+
+    tx_buy = lt.buy_count
+    tx_sell = lt.sell_count
+    tx_total = lt.tx_count or (tx_buy + tx_sell)
+    
+    dev_tokens_created = 0
+    dev_tokens_graduated = 0
+    if lt.creator:
+        dev_user = state.launchpad_users.get(lt.creator.lower())
+        if dev_user is not None:
+            dev_tokens_created = dev_user.tokens_created
+            dev_tokens_graduated = dev_user.tokens_graduated
+
+    return {
+        "token": lt.token,
+        "symbol": lt.symbol,
+        "name": lt.name,
+        "created_ts": lt.created_at,
+        "creator": lt.creator,
+        "metadata_cid": lt.metadata_cid,
+        "source": lt.source,
+        "holders": holders,
+        "developer_holding": str(dev_holding),
+        "top10_holding": str(top10_holding),
+        "native_volume": str(lt.native_volume),
+        "token_volume": str(lt.token_volume),
+        "volume_usd": str(lt.volume_usd),
+        "fees_usd": str(lt.fees_usd),
+        "marketcap_native_raw": str(marketcap_native_raw),
+        "marketcap_usd": str(marketcap_usd),
+        "tx": {
+            "buy": tx_buy,
+            "sell": tx_sell,
+            "total": tx_total,
+        },
+
+        "migrated": lt.migrated,
+        "migrated_block": lt.migrated_block,
+        "migrated_at": lt.migrated_at,
+        "approaching_75": lt.approaching_75,
+        "approaching_75_block": lt.approaching_75_block,
+        "approaching_75_at": lt.approaching_75_at,
+        "developer_tokens_created": dev_tokens_created,
+        "developer_tokens_graduated": dev_tokens_graduated,
+    }
+
+def _build_ohlcv(
+    trades: List[models.LaunchpadTrade],
+    bucket_seconds: int,
+    max_buckets: int | None = None,
+) -> List[Dict[str, Any]]:
+    if bucket_seconds <= 0 or not trades:
+        return []
+
+    buckets: Dict[int, Dict[str, Any]] = {}
+
+    for tr in trades:
+        ts_tr = int(tr.timestamp)
+        bucket_start = (ts_tr // bucket_seconds) * bucket_seconds
+
+        price_wad = tr.price_native * Decimal(1e9)
+        native_amt = int(tr.native_amount)
+
+        b = buckets.get(bucket_start)
+        if b is None:
+            b = {
+                "time": bucket_start,
+                "open": price_wad,
+                "high": price_wad,
+                "low": price_wad,
+                "close": price_wad,
+                "quoteVolume": native_amt,
+            }
+            buckets[bucket_start] = b
+        else:
+            b["close"] = price_wad
+            if price_wad > b["high"]:
+                b["high"] = price_wad
+            if price_wad < b["low"]:
+                b["low"] = price_wad
+            b["quoteVolume"] += native_amt
+
+    bucket_times = sorted(buckets.keys())
+    if max_buckets is not None and max_buckets > 0:
+        bucket_times = bucket_times[-max_buckets:]
+
+    out: List[Dict[str, Any]] = []
+    for t_start in bucket_times:
+        b = buckets[t_start]
+        out.append(
+            {
+                "time": str(int(b["time"])),
+                "open": str(int(b["open"])),
+                "high": str(int(b["high"])),
+                "low": str(int(b["low"])),
+                "close": str(int(b["close"])),
+                "quoteVolume": str(int(b["quoteVolume"])),
+            }
+        )
+    return out
+
+
 app = FastAPI(title="backend", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -134,7 +270,7 @@ app.include_router(x_router)
 def health() -> Dict[str, Any]:
     return {"ok": True}
 
-
+# markets/prices
 @app.get("/debug/token-to-price")
 def token_to_price(as_strings: bool = Query(False)) -> Dict[str, Any]:
     st = SEQUENCER._state
@@ -195,7 +331,7 @@ def debug_markets() -> Dict[str, Any]:
         "markets": markets_out,
     }
 
-
+# vaults
 @app.get("/vaults/{address}/{user}/{timeframe}")
 def vault_combined(
     address: str,
@@ -389,7 +525,7 @@ def vault_chart_only(
         },
     }
     
-    
+# amm lp
 @app.get("/pools/list")
 def list_pools():
     state = SEQUENCER._state
@@ -460,141 +596,7 @@ def get_pool(address: str):
         "apyHistory": history,
     }
 
-
-def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
-    state = SEQUENCER._state
-    token_addr = token_addr.lower()
-
-    pos_list = [
-        pos
-        for (user, tkn), pos in state.launchpad_positions.items()
-        if tkn == token_addr and pos.balance_token > 0
-        and user.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
-    ]
-    holder_count = len(pos_list)
-    pos_list.sort(key=lambda p: p.balance_token, reverse=True)
-    top10_holding = sum(p.balance_token for p in pos_list[:10])
-
-    dev_holding = 0
-    lt = state.launchpad_tokens.get(token_addr)
-    if lt is not None and lt.creator:
-        dev_pos = state.launchpad_positions.get((lt.creator.lower(), token_addr))
-        if dev_pos:
-            dev_holding = dev_pos.balance_token
-
-    return holder_count, dev_holding, top10_holding
-
-def _serialize_token(token_addr: str) -> Dict[str, Any]:
-    state = SEQUENCER._state
-    lt = state.launchpad_tokens.get(token_addr.lower())
-    if lt is None:
-        return {}
-
-    holders, dev_holding, top10_holding = _holders_for_token(lt.token)
-
-    marketcap_native_raw: Decimal = lt.last_price_native * Decimal(1e9)
-    marketcap_usd: Decimal = marketcap_native_raw * state.tokenToPrice.get("0x760afe86e5de5fa0ee542fc7b7b713e1c5425701", Decimal(0))
-
-    tx_buy = lt.buy_count
-    tx_sell = lt.sell_count
-    tx_total = lt.tx_count or (tx_buy + tx_sell)
-    
-    dev_tokens_created = 0
-    dev_tokens_graduated = 0
-    if lt.creator:
-        dev_user = state.launchpad_users.get(lt.creator.lower())
-        if dev_user is not None:
-            dev_tokens_created = dev_user.tokens_created
-            dev_tokens_graduated = dev_user.tokens_graduated
-
-    return {
-        "token": lt.token,
-        "symbol": lt.symbol,
-        "name": lt.name,
-        "created_ts": lt.created_at,
-        "creator": lt.creator,
-        "metadata_cid": lt.metadata_cid,
-        "source": lt.source,
-        "holders": holders,
-        "developer_holding": str(dev_holding),
-        "top10_holding": str(top10_holding),
-        "native_volume": str(lt.native_volume),
-        "token_volume": str(lt.token_volume),
-        "volume_usd": str(lt.volume_usd),
-        "fees_usd": str(lt.fees_usd),
-        "marketcap_native_raw": str(marketcap_native_raw),
-        "marketcap_usd": str(marketcap_usd),
-        "tx": {
-            "buy": tx_buy,
-            "sell": tx_sell,
-            "total": tx_total,
-        },
-
-        "migrated": lt.migrated,
-        "migrated_block": lt.migrated_block,
-        "migrated_at": lt.migrated_at,
-        "approaching_75": lt.approaching_75,
-        "approaching_75_block": lt.approaching_75_block,
-        "approaching_75_at": lt.approaching_75_at,
-        "developer_tokens_created": dev_tokens_created,
-        "developer_tokens_graduated": dev_tokens_graduated,
-    }
-
-def _build_ohlcv(
-    trades: List[models.LaunchpadTrade],
-    bucket_seconds: int,
-    max_buckets: int | None = None,
-) -> List[Dict[str, Any]]:
-    if bucket_seconds <= 0 or not trades:
-        return []
-
-    buckets: Dict[int, Dict[str, Any]] = {}
-
-    for tr in trades:
-        ts_tr = int(tr.timestamp)
-        bucket_start = (ts_tr // bucket_seconds) * bucket_seconds
-
-        price_wad = tr.price_native * Decimal(1e9)
-        native_amt = int(tr.native_amount)
-
-        b = buckets.get(bucket_start)
-        if b is None:
-            b = {
-                "time": bucket_start,
-                "open": price_wad,
-                "high": price_wad,
-                "low": price_wad,
-                "close": price_wad,
-                "quoteVolume": native_amt,
-            }
-            buckets[bucket_start] = b
-        else:
-            b["close"] = price_wad
-            if price_wad > b["high"]:
-                b["high"] = price_wad
-            if price_wad < b["low"]:
-                b["low"] = price_wad
-            b["quoteVolume"] += native_amt
-
-    bucket_times = sorted(buckets.keys())
-    if max_buckets is not None and max_buckets > 0:
-        bucket_times = bucket_times[-max_buckets:]
-
-    out: List[Dict[str, Any]] = []
-    for t_start in bucket_times:
-        b = buckets[t_start]
-        out.append(
-            {
-                "time": str(int(b["time"])),
-                "open": str(int(b["open"])),
-                "high": str(int(b["high"])),
-                "low": str(int(b["low"])),
-                "close": str(int(b["close"])),
-                "quoteVolume": str(int(b["quoteVolume"])),
-            }
-        )
-    return out
-
+# terminal
 @app.get("/tokens")
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     state = SEQUENCER._state
@@ -1210,3 +1212,38 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         out[f"change_pct_{suffix}"] = change_pct
 
     return out
+
+# bz
+@app.get("/volume/{user_addr}")
+def user_volume(user_addr: str) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    user_addr = user_addr.lower()
+
+    total_native_volume = 0
+    total_trades = 0
+
+    seen_tokens: set[str] = set()
+
+    for (uaddr, tkn), pos in state.launchpad_positions.items():
+        if uaddr.lower() != user_addr:
+            continue
+
+        native_spent = int(getattr(pos, "native_spent", 0))
+        native_received = int(getattr(pos, "native_received", 0))
+        trade_count = int(getattr(pos, "trade_count", 0))
+
+        total_native_volume += native_spent + native_received
+        total_trades += trade_count
+
+        if trade_count > 0 and tkn not in seen_tokens:
+            seen_tokens.add(tkn)
+
+    total_native_volume_dec = Decimal(total_native_volume)
+
+    return {
+        "user": user_addr,
+        "volume_native": str(total_native_volume_dec),
+        "trade_count": int(total_trades),
+        "tokens_traded": len(seen_tokens),
+    }
+
