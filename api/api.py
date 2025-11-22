@@ -469,6 +469,7 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
         pos
         for (user, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 0
+        and user.lower() != "0xaD720f94689edB929D9be7613223320a0b2f260F"
     ]
     holder_count = len(pos_list)
     pos_list.sort(key=lambda p: p.balance_token, reverse=True)
@@ -711,6 +712,7 @@ def token_overview_graph(
         pos
         for (uaddr, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 0
+        and uaddr.lower() != "0xaD720f94689edB929D9be7613223320a0b2f260F"
     ]
     positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
 
@@ -834,7 +836,7 @@ def token_overview_graph(
                     "amountIn": str(amount_in),
                     "amountOut": str(amount_out),
                     "block": str(int(tr.timestamp)),
-                    "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-{idx}",
+                    "id": tr.txhash,
                     "isBuy": bool(tr.is_buy),
                     "priceNativePerTokenWad": str(tr.price_native),
                 }
@@ -994,7 +996,7 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
     total_trades = 0
 
     for (uaddr, tkn), pos in state.launchpad_positions.items():
-        if uaddr != user_addr:
+        if uaddr.lower() == "0xaD720f94689edB929D9be7613223320a0b2f260F" or uaddr != user_addr:
             continue
 
         lp = state.launchpad_tokens.get(tkn)
@@ -1002,6 +1004,8 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
             continue
 
         last_price_native = getattr(lp, "last_price_native", Decimal(0))
+        token_bought = int(getattr(pos, "token_bought", 0))
+        token_sold = int(getattr(pos, "token_sold", 0))
 
         balance_token = int(pos.balance_token)
         native_spent = int(pos.native_spent)
@@ -1043,6 +1047,8 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
                 "trade_count": int(getattr(pos, "trade_count", 0)),
                 "buy_count": int(getattr(pos, "buy_count", 0)),
                 "sell_count": int(getattr(pos, "sell_count", 0)),
+                "token_bought": str(token_bought),
+                "token_sold": str(token_sold),
             }
         )
 
