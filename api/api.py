@@ -1112,6 +1112,7 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
             "sell_volume_usd": Decimal(0),
             "buy_tx_count": 0,
             "sell_tx_count": 0,
+            "prev_price_native": None,
             "start_price_native": None,
             "last_price_native": None,
         }
@@ -1124,65 +1125,83 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     if not trades:
         for label in windows.keys():
             suffix = label
-            out[f"volume_usd_{suffix}"] = 0
-            out[f"buy_volume_usd_{suffix}"] = 0
-            out[f"sell_volume_usd_{suffix}"] = 0
+            out[f"volume_usd_{suffix}"] = 0.0
+            out[f"buy_volume_usd_{suffix}"] = 0.0
+            out[f"sell_volume_usd_{suffix}"] = 0.0
             out[f"buy_tx_count_{suffix}"] = 0
             out[f"sell_tx_count_{suffix}"] = 0
             out[f"change_pct_{suffix}"] = 0.0
         return out
 
     now_ts = int(time.time())
-    max_window = max(windows.values())
 
     trades_sorted = sorted(trades, key=lambda t: int(t.timestamp))
 
     for tr in trades_sorted:
         ts = int(tr.timestamp)
-        age = now_ts - ts
-        if age > max_window:
-            continue
-
-        native_amount = Decimal(str(getattr(tr, "usd_amount", 0)))
         price_native = Decimal(str(getattr(tr, "price_native", 0)))
+        usd_amount = Decimal(str(getattr(tr, "usd_amount", 0)))
 
         for label, secs in windows.items():
-            if age > secs:
+            start_ts = now_ts - secs
+
+            if ts <= start_ts:
+                buckets[label]["prev_price_native"] = price_native
+                continue
+
+            if ts > now_ts:
                 continue
 
             b = buckets[label]
+            b["volume_usd"] += usd_amount
 
-            b["volume_usd"] += native_amount
             if tr.is_buy:
-                b["buy_volume_usd"] += native_amount
+                b["buy_volume_usd"] += usd_amount
                 b["buy_tx_count"] += 1
             else:
-                b["sell_volume_usd"] += native_amount
+                b["sell_volume_usd"] += usd_amount
                 b["sell_tx_count"] += 1
 
             if b["start_price_native"] is None:
                 b["start_price_native"] = price_native
             b["last_price_native"] = price_native
 
+    INITIAL_NATIVE_PRICE = Decimal("0.00008387696")
+
     for label, b in buckets.items():
         suffix = label
 
-        volume_native = b["volume_usd"]
-        buy_volume_native = b["buy_volume_usd"]
-        sell_volume_native = b["sell_volume_usd"]
+        volume_usd = b["volume_usd"]
+        buy_volume_usd = b["buy_volume_usd"]
+        sell_volume_usd = b["sell_volume_usd"]
         buy_tx_count = b["buy_tx_count"]
         sell_tx_count = b["sell_tx_count"]
+
+        prev_price = b["prev_price_native"]
         start_price = b["start_price_native"]
         last_price = b["last_price_native"]
 
-        if start_price is not None and start_price != 0:
-            change_pct = float((last_price - start_price) / start_price * Decimal(100))
+        last_eff: Decimal | None
+        if last_price is not None:
+            last_eff = last_price
         else:
-            change_pct = 0.0
+            last_eff = prev_price
 
-        out[f"volume_usd_{suffix}"] = float(volume_native)
-        out[f"buy_volume_usd_{suffix}"] = float(buy_volume_native)
-        out[f"sell_volume_usd_{suffix}"] = float(sell_volume_native)
+        if prev_price is not None:
+            base_price = prev_price
+        elif start_price is not None:
+            base_price = start_price
+        else:
+            base_price = INITIAL_NATIVE_PRICE
+
+        if last_eff is None or base_price == 0:
+            change_pct = 0.0
+        else:
+            change_pct = float((last_eff - base_price) / base_price * Decimal(100))
+
+        out[f"volume_usd_{suffix}"] = float(volume_usd)
+        out[f"buy_volume_usd_{suffix}"] = float(buy_volume_usd)
+        out[f"sell_volume_usd_{suffix}"] = float(sell_volume_usd)
         out[f"buy_tx_count_{suffix}"] = int(buy_tx_count)
         out[f"sell_tx_count_{suffix}"] = int(sell_tx_count)
         out[f"change_pct_{suffix}"] = change_pct
