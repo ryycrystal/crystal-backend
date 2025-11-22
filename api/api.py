@@ -765,6 +765,9 @@ def token_overview_graph(
     for pos in state.launchpad_positions.values():
         if getattr(pos, "token", token_addr) != token_addr:
             continue
+        
+        if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
+            continue
 
         balance_token = int(pos.balance_token)
         native_spent = int(pos.native_spent)
