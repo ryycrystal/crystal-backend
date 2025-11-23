@@ -67,6 +67,8 @@ class Sequencer:
             "NFT": 0,
             
             "TF": 0,
+
+            "V3SWAP": 0,
         }
         seen = set()
 
@@ -136,11 +138,17 @@ class Sequencer:
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
 
             elif tag in ("MG", "NFT"):
-                self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
+                pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
+                if pool:
+                    if pool.lower() not in h.ADDRS:
+                        h.ADDRS.append(pool.lower())
                 
             elif tag == "TF":
                 if parsed is not None:
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
+
+            elif tag == "V3_SWAP":
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
 
         print(
             f"[SQ] {blk}: MC {counts['MC']} TR {counts['TR']} "

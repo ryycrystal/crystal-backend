@@ -1,14 +1,13 @@
 from __future__ import annotations
-from dataclasses import is_dataclass, asdict
-from typing import Dict, Deque, List, Tuple, Set
+from typing import Dict, Deque, List, Set
 from collections import deque
 from decimal import Decimal, getcontext
 import json
 import urllib.request
 import time
 import models
-import os
-import sys
+
+from state import RPC_HTTP
 
 getcontext().prec = 50
 
@@ -16,6 +15,16 @@ INTERVALS = (300, 3600, 21600, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
+
+def _rpc_batch_state(calls: list[dict]) -> list[dict]:
+    payload = json.dumps(calls).encode()
+    req = urllib.request.Request(
+        RPC_HTTP,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
 
 class State:
     def __init__(self) -> None:
@@ -49,6 +58,10 @@ class State:
         self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {}
         self.launchpad_market_to_token: Dict[str, str] = {}
         self.launchpad_trades: Dict[str, List[models.LaunchpadTrade]] = {}
+
+        # graduated launchpad
+        self.v3_pools: Dict[str, models.PoolInfo] = {}
+        self.token_to_v3_pool: Dict[str, str] = {}      
 
         if True:
             self.seed_single_market()
@@ -683,58 +696,123 @@ class State:
             u.tokens_created += 1
             
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, _log_addr: str) -> None:  
-        token = ev.get("token", "").lower()
-        user = ev.get("user", "").lower()
-        if not token or not user:
-            return
-        
-        is_buy = bool(ev.get("is_buy", False))
-        amount_in = int(ev.get("amount_in", 0) or 0)
-        amount_out = int(ev.get("amount_out", 0) or 0)
-        if amount_in <= 0 and amount_out <= 0:
-            return
-        
-        native_amt = amount_in if is_buy else amount_out
-        token_amt = amount_out if is_buy else amount_in
-        
-        if native_amt <= 0 or token_amt <= 0:
-            return
-        
+        is_v3_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
+        if not is_v3_swap:
+            token = ev.get("token", "").lower()
+            user = ev.get("user", "").lower()
+            if not token or not user:
+                return
+            
+            is_buy = bool(ev.get("is_buy", False))
+            amount_in = int(ev.get("amount_in", 0) or 0)
+            amount_out = int(ev.get("amount_out", 0) or 0)
+            if amount_in <= 0 and amount_out <= 0:
+                return
+            
+            native_amt = amount_in if is_buy else amount_out
+            token_amt = amount_out if is_buy else amount_in
+            
+            if native_amt <= 0 or token_amt <= 0:
+                return
+            
+            try:
+                price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
+            except Exception:
+                try:
+                    price_native = Decimal(native_amt) / Decimal(token_amt)
+                except Exception:
+                    price_native = Decimal(0)
+        else:
+            pool_addr = (ev.get("pool") or "").lower()
+            pi = self.v3_pools.get(pool_addr)
+            if pi is None:
+                return
+
+            token = (pi.token or "").lower()
+            user = (ev.get("user") or "").lower()
+
+            if not token or not user:
+                return
+
+            try:
+                amount0 = int(ev.get("amount0") or 0)
+                amount1 = int(ev.get("amount1") or 0)
+            except Exception:
+                return
+
+            if amount0 == 0 and amount1 == 0:
+                return
+
+            if pi.token_is_0:
+                token_delta = amount0
+                native_delta = amount1
+            else:
+                token_delta = amount1
+                native_delta = amount0
+
+            if native_delta == 0 or token_delta == 0:
+                return
+
+            is_buy = native_delta > 0
+
+            if is_buy:
+                native_amt = native_delta
+                token_amt = -token_delta
+            else:
+                native_amt = -native_delta
+                token_amt = token_delta
+
+            if native_amt <= 0 or token_amt <= 0:
+                return
+
+            is_buy_flag = is_buy
+            amount_in = native_amt if is_buy_flag else token_amt
+            amount_out = token_amt if is_buy_flag else native_amt
+
+            price_raw = ev.get("sqrt_price_x96") or 0
+            try:
+                sqrt_p = Decimal(int(price_raw))
+                ratio = (sqrt_p * sqrt_p) / (Decimal(2) ** 192)
+                if ratio <= 0:
+                    price_native = Decimal(0)
+                else:
+                    if pi.token_is_0:
+                        price_native = ratio
+                    else:
+                        price_native = Decimal(1) / ratio
+            except Exception:
+                price_native = Decimal(0)
+
         lp = self.launchpad_tokens.get(token)
         if lp is None:
-            print("not a token", self.launchpad_tokens)
             return
         
-        if is_buy:
-            lp.circulating_supply += token_amt / 1e18
-        else:
-            lp.circulating_supply -= token_amt / 1e18
-        
-        try:
-            price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
-        except Exception:
-            price_native = Decimal(0)
-            
         lp.last_price_native = price_native
+            
+        if not is_v3_swap:
+            if is_buy:
+                lp.circulating_supply += token_amt / 1e18
+            else:
+                lp.circulating_supply -= token_amt / 1e18
         
-        if lp.source == 0:
-            if (not lp.approaching_75) and ev.get("native_reserve") >= 2500000000000000000000:
-                lp.approaching_75 = True
-                lp.approaching_75_block = blk
-                lp.approaching_75_at = ts
-            elif (lp.approaching_75) and ev.get("native_reserve") < 2500000000000000000000:
-                lp.approaching_75 = False
-                lp.approaching_75_block = 0
-                lp.approaching_75_at = 0
-        elif lp.source == 1:
-            if (not lp.approaching_75) and lp.circulating_supply >= 594825000:
-                lp.approaching_75 = True
-                lp.approaching_75_block = blk
-                lp.approaching_75_at = ts
-            elif (lp.approaching_75) and lp.circulating_supply < 594825000:
-                lp.approaching_75 = False
-                lp.approaching_75_block = 0
-                lp.approaching_75_at = 0
+            if lp.source == 0:
+                if (not lp.approaching_75) and ev.get("native_reserve") >= 2_500_000_000_000_000_000_000:
+                    lp.approaching_75 = True
+                    lp.approaching_75_block = blk
+                    lp.approaching_75_at = ts
+                elif (lp.approaching_75) and ev.get("native_reserve") < 2_500_000_000_000_000_000_000:
+                    lp.approaching_75 = False
+                    lp.approaching_75_block = 0
+                    lp.approaching_75_at = 0
+            elif lp.source == 1:
+                if (not lp.approaching_75) and lp.circulating_supply >= 594_825_000:
+                    lp.approaching_75 = True
+                    lp.approaching_75_block = blk
+                    lp.approaching_75_at = ts
+                elif (lp.approaching_75) and lp.circulating_supply < 594_825_000:
+                    lp.approaching_75 = False
+                    lp.approaching_75_block = 0
+                    lp.approaching_75_at = 0
         
         lp.native_volume += native_amt
         lp.token_volume += token_amt
@@ -798,18 +876,34 @@ class State:
         if len(trades) > 500000:
             trades[:] = trades[-500000:]
 
-    def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> None:
-        token = ev.get("token", "").lower()
+    def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> str | None:
+        token = (ev.get("token") or "").lower()
         if not token:
-            return
+            return None
 
         lp = self.launchpad_tokens.get(token)
         if lp is None:
-            return
+            return None
 
         lp.migrated = True
         lp.migrated_block = blk
         lp.migrated_at = ts
+
+        pool = (ev.get("pool") or "").lower()
+
+        if pool and pool not in self.v3_pools:
+            wmon = "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701".lower()
+
+            if token != wmon:
+                token_is_0 = token < wmon
+
+                self.v3_pools[pool] = models.PoolInfo(
+                    pool=pool,
+                    token=token,
+                    wmon=wmon,
+                    token_is_0=token_is_0,
+                )
+                self.token_to_v3_pool[token] = pool
 
         creator = lp.creator.lower() if lp.creator else ""
         if creator:
@@ -818,6 +912,8 @@ class State:
                 u = models.LaunchpadUser(address=creator)
                 self.launchpad_users[creator] = u
             u.tokens_graduated += 1
+
+        return pool or None
 
     def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
         token = (ev.get("token") or "").lower()

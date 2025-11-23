@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
@@ -87,6 +89,59 @@ def parse_token_created(addr, tops, data):
 
 def parse_migrated(addr, tops, data):
     token = to_addr(tops[1]).lower()
+    pool = to_addr(tops[2]).lower()
     return {
         "token": token,
+        "pool": pool,
+    }
+
+
+def _int256_from_hex(x: str) -> int:
+    if x.startswith("0x"):
+        x = x[2:]
+    if not x:
+        return 0
+    n = int(x, 16)
+    if n >= 2**255:
+        n -= 2**256
+    return n
+
+
+def parse_v3_trade(addr, tops, data):
+    pool = addr.lower()
+    sender = to_addr(tops[1]).lower() if len(tops) > 1 else ""
+    recipient = to_addr(tops[2]).lower() if len(tops) > 2 else ""
+
+    if isinstance(data, str) and data.startswith("0x"):
+        hex_data = data[2:]
+    else:
+        hex_data = data
+
+    words = list(chunks(hex_data, 64))
+
+    if len(words) < 5:
+        return {
+            "pool": pool,
+            "sender": sender,
+            "user": recipient,
+            "amount0": 0,
+            "amount1": 0,
+            "sqrt_price_x96": 0,
+        }
+
+    amount0 = _int256_from_hex(words[0])
+    amount1 = _int256_from_hex(words[1])
+
+    try:
+        sqrt_price_x96 = int(words[2], 16)
+    except Exception:
+        sqrt_price_x96 = 0
+
+    return {
+        "pool": pool,
+        "sender": sender,
+        "user": recipient,
+        "amount0": amount0,
+        "amount1": amount1,
+        "sqrt_price_x96": sqrt_price_x96,
     }

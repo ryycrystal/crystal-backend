@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import Dict, Any
 
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
