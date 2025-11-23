@@ -1,14 +1,22 @@
-from decimal import Decimal
-
+# 32-byte word or hex string into a 0x-prefixed address
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
-
+# yield s in fixed-size n-character chunks (used for 32-byte words)
 def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
-
-def parse_launchpad_trade(addr, tops, data):
+# LaunchpadTrade(
+#   address indexed token, 
+#   address indexed user, 
+#   bool isBuy, 
+#   uint256 amountIn, 
+#   uint256 amountOut, 
+#   uint256 virtualNativeReserve, 
+#   uint256 virtualTokenReserve
+# );
+# into a flat dict for state.apply_launchpad_trade
+def parse_launchpad_trade(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     user = to_addr(tops[2]).lower()
 
@@ -30,8 +38,20 @@ def parse_launchpad_trade(addr, tops, data):
         "token_reserve": token_reserve,
     }
 
-
-def parse_token_created(addr, tops, data):
+# TokenCreated(
+#   address indexed token, 
+#   address indexed creator, 
+#   string name, 
+#   string symbol, 
+#   string metadataCID, 
+#   string description, 
+#   string social1, 
+#   string social2, 
+#   string social3, 
+#   string social4
+# );
+# into a flat dict for state.apply_token_created
+def parse_token_created(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     creator = to_addr(tops[2]).lower()
 
@@ -86,62 +106,10 @@ def parse_token_created(addr, tops, data):
         "source": 0,
     }
 
-
-def parse_migrated(addr, tops, data):
+# Migrated(address indexed token);
+# for state.apply_migrated
+def parse_migrated(_addr, tops, _data):
     token = to_addr(tops[1]).lower()
-    pool = to_addr(tops[2]).lower()
     return {
-        "token": token,
-        "pool": pool,
-    }
-
-
-def _int256_from_hex(x: str) -> int:
-    if x.startswith("0x"):
-        x = x[2:]
-    if not x:
-        return 0
-    n = int(x, 16)
-    if n >= 2**255:
-        n -= 2**256
-    return n
-
-
-def parse_v3_trade(addr, tops, data):
-    pool = addr.lower()
-    sender = to_addr(tops[1]).lower() if len(tops) > 1 else ""
-    recipient = to_addr(tops[2]).lower() if len(tops) > 2 else ""
-
-    if isinstance(data, str) and data.startswith("0x"):
-        hex_data = data[2:]
-    else:
-        hex_data = data
-
-    words = list(chunks(hex_data, 64))
-
-    if len(words) < 5:
-        return {
-            "pool": pool,
-            "sender": sender,
-            "user": recipient,
-            "amount0": 0,
-            "amount1": 0,
-            "sqrt_price_x96": 0,
-        }
-
-    amount0 = _int256_from_hex(words[0])
-    amount1 = _int256_from_hex(words[1])
-
-    try:
-        sqrt_price_x96 = int(words[2], 16)
-    except Exception:
-        sqrt_price_x96 = 0
-
-    return {
-        "pool": pool,
-        "sender": sender,
-        "user": recipient,
-        "amount0": amount0,
-        "amount1": amount1,
-        "sqrt_price_x96": sqrt_price_x96,
+        "token": token
     }

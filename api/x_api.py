@@ -2,15 +2,11 @@ from __future__ import annotations
 import os
 import time
 import json
+import httpx
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-
-try:
-    import httpx
-except Exception:
-    httpx = None
 
 router = APIRouter()
 
@@ -28,8 +24,10 @@ def _cache_get(key: str) -> Optional[Any]:
         return None
     return item["data"]
 
+
 def _cache_set(key: str, data: Any) -> None:
     CACHE[key] = {"data": data, "exp": int(time.time() * 1000) + CACHE_TTL_MS}
+
 
 def _respond(payload: Any, status: int = 200) -> JSONResponse:
     return JSONResponse(
@@ -41,6 +39,7 @@ def _respond(payload: Any, status: int = 200) -> JSONResponse:
             "Cache-Control": "max-age=900, public",
         },
     )
+
 
 def _normalize_verified_type(a: dict | None) -> Optional[str]:
     if not a:
@@ -56,6 +55,7 @@ def _normalize_verified_type(a: dict | None) -> Optional[str]:
         return "blue"
     return None
 
+
 def _compute_verified_flag(a: dict | None) -> bool:
     if not a:
         return False
@@ -65,6 +65,7 @@ def _compute_verified_flag(a: dict | None) -> bool:
         or str(a.get("verifiedType") or "").lower() == "business"
         or (a.get("affiliatesHighlightedLabel") or {}).get("label", {}).get("user_label_type") == "BusinessLabel"
     )
+
 
 def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
     s = (input_s or "").strip()
@@ -100,6 +101,7 @@ def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
     except Exception:
         return None
 
+
 async def _fetch_with_retry(url: str, headers: Dict[str, str], retries: int = 1) -> Tuple[int, str]:
     if not httpx:
         raise RuntimeError("httpx not installed; add `httpx` to requirements.txt")
@@ -110,9 +112,11 @@ async def _fetch_with_retry(url: str, headers: Dict[str, str], retries: int = 1)
             return await _fetch_with_retry(url, headers, retries - 1)
         return r.status_code, r.text
 
+
 async def asyncio_sleep(sec: float) -> None:
     import asyncio
     await asyncio.sleep(sec)
+
 
 @router.post("/x")
 async def x_post(req: Request):
@@ -121,6 +125,7 @@ async def x_post(req: Request):
         CACHE.clear()
         return _respond({"message": "Backend CACHE cleared ✅"})
     return _respond({"error": "Missing ?clear=1 param"}, 400)
+
 
 @router.get("/x")
 async def x_get(req: Request):

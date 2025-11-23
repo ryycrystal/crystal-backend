@@ -9,6 +9,8 @@ from core import chain as h
 from core.sequencer import SEQUENCER
 from state import RPC_HTTP
 
+# parse cli arguments for the backfiller process
+# returns an argparse namespace with start_block and batch size
 def parse_args():
     parser = argparse.ArgumentParser(description="backfiller")
     parser.add_argument(
@@ -24,13 +26,15 @@ def parse_args():
     )
     return parser.parse_args()
 
-
+# batch json rpc call over plain http to RPC_HTTP
+# used for header seeding
 def _rpc_batch_http(calls: list[dict]) -> list[dict]:
     payload = json.dumps(calls).encode()
     req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode())
 
+# gets current chainhead block number
 async def get_head(ws) -> int:
     rid = str(uuid.uuid4())
     await h.rate_gate()
@@ -47,7 +51,8 @@ async def get_head(ws) -> int:
     resp = await h.ack(ws, rid)
     return int(resp["result"], 16)
 
-
+# fetch logs for a block range [frm, to] over websocket using eth_getLogs
+# filters by the tracked addresses and topics from core.chain
 async def fetch_logs(ws, frm: int, to: int):
     rid = str(uuid.uuid4())
     await h.rate_gate()
@@ -71,11 +76,12 @@ async def fetch_logs(ws, frm: int, to: int):
     resp = await h.ack(ws, rid)
     return resp["result"]
 
-
+# backfill block timestamps into state using eth_getBlockByNumber
+# so sequencer knows block time for any block in [frm, to]
 def seed_headers_http(frm: int, to: int) -> None:
     calls = []
     rid = 1
-    for b in range(frm, to + 1, start=1):
+    for b in range(frm, to + 1):
         calls.append(
             {
                 "jsonrpc": "2.0",
@@ -96,7 +102,10 @@ def seed_headers_http(frm: int, to: int) -> None:
         ts = int(res["timestamp"], 16)
         SEQUENCER._state._bt.note(blk, ts)
         
-        
+# main backfill loop
+# walks from start_block up to current head in batches
+# seeds headers and replaying logs into the sequencer in order
+# returns the last processed block.     
 async def backfill(start_block: int, batch: int) -> int:
     async with websockets.connect(h.WS_URL) as ws:
         head_snapshot = await get_head(ws)
@@ -134,8 +143,3 @@ async def backfill(start_block: int, batch: int) -> int:
 
         print(f"[Backfill] complete, last processed = {last_processed}")
         return last_processed
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    asyncio.run(backfill(args.start_block, args.batch))
