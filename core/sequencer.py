@@ -96,7 +96,7 @@ class Sequencer:
                 if parsed is not None:
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
-            elif tag == "V3_SWAP": # graduated nadfun v3 pool trade
+            elif tag == "V3SWAP": # graduated nadfun v3 pool trade
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
 
         print(
