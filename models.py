@@ -48,6 +48,7 @@ class LaunchpadToken:
     approaching_75_block: int = 0
     approaching_75_at: int = 0
     circulating_supply: int = 0
+    snipers: int = 0
 
 # summary of user
 @dataclass(slots=True)

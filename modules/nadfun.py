@@ -289,7 +289,7 @@ def parse_v3_trade(addr, tops, data):
     else:
         hex_data = data
 
-    words = list(_chunks(hex_data, 64))
+    words = list(_chunks(hex_data, 64)) 
 
     if len(words) < 5:
         return {

@@ -18,6 +18,7 @@ class State:
         self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {} # [userAddress, tokenAddress] -> LaunchpadPosition
         self.launchpad_market_to_token: Dict[str, str] = {} # market/pool -> tokenAddress
         self.launchpad_trades: Dict[str, List[models.LaunchpadTrade]] = {} # tokenAddress -> LaunchpadTrade[]
+        self.launchpad_snipers: Dict[str, set[str]] = {} # tokenAddress -> Set(userAddress)
 
         # graduated launchpad
         self.v3_pools: Dict[str, models.PoolInfo] = {} # poolAddress -> PoolInfo
@@ -169,6 +170,18 @@ class State:
         lp.last_price_native = price_native
             
         if not is_v3_swap:
+            if is_buy and blk <= lp.created_block + 4:
+                creator_addr = (lp.creator or "").lower()
+                user_addr = user.lower()
+                if user_addr and user_addr != creator_addr:
+                    s = self.launchpad_snipers.get(token)
+                    if s is None:
+                        s = set()
+                        self.launchpad_snipers[token] = s
+                    if user_addr not in s:
+                        s.add(user_addr)
+                        lp.snipers += 1
+
             if is_buy:
                 lp.circulating_supply += token_amt / 1e18
             else:

@@ -88,6 +88,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "approaching_75_at": lt.approaching_75_at,
         "developer_tokens_created": dev_tokens_created,
         "developer_tokens_graduated": dev_tokens_graduated,
+        "snipers": lt.snipers,
     }
 
 def _build_ohlcv(
@@ -455,8 +456,8 @@ def token_overview_graph(
                             "account": {"id": tr.user},
                             "amountIn": str(amount_in),
                             "amountOut": str(amount_out),
-                            "block": str(int(tr.block_number)),
-                            "id": f"{lp.token}-{int(tr.block_number)}-{int(tr.timestamp)}-tracked-{idx}",
+                            "block": str(int(tr.timestamp)),
+                            "id": tr.txhash,
                             "isBuy": bool(tr.is_buy),
                             "priceNativePerTokenWad": str(tr.price_native),
                         }
@@ -551,6 +552,7 @@ def token_overview_graph(
             "series": {
                 "klines": series_klines,
             },
+            "snipers": int(getattr(lp, "snipers", 0)),
             "social1": social1,
             "social2": social2,
             "social3": social3,
