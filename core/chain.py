@@ -44,7 +44,7 @@ PARSERS = {
     "NFS": n.parse_nadfun_sell,
     "NFSYNC": n.parse_nadfun_sync,
     "NFT": n.parse_nadfun_graduated,
-    "V3SWAP": lp.parse_v3_trade,
+    "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
 }
 WS_URL = "wss://testnet-rpc.monad.xyz"
