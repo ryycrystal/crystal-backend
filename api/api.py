@@ -56,6 +56,13 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         if dev_user is not None:
             dev_tokens_created = dev_user.tokens_created
             dev_tokens_graduated = dev_user.tokens_graduated
+    
+    sniper_set = state.launchpad_snipers.get(lt.token.lower(), set())
+    snipers_view = {
+        "count": int(getattr(lt, "snipers", len(sniper_set))),
+        "addresses": sorted(list(sniper_set)),
+    }
+
 
     return {
         "token": lt.token,
@@ -79,7 +86,6 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
             "sell": tx_sell,
             "total": tx_total,
         },
-
         "migrated": lt.migrated,
         "migrated_block": lt.migrated_block,
         "migrated_at": lt.migrated_at,
@@ -88,7 +94,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "approaching_75_at": lt.approaching_75_at,
         "developer_tokens_created": dev_tokens_created,
         "developer_tokens_graduated": dev_tokens_graduated,
-        "snipers": lt.snipers,
+        "snipers": snipers_view,
     }
 
 def _build_ohlcv(
@@ -408,7 +414,7 @@ def token_overview_graph(
         recent_trades_raw = list(reversed(recent_trades_raw))
 
         trades_out: List[Dict[str, Any]] = []
-        for idx, tr in enumerate(recent_trades_raw):
+        for __build_class__, tr in enumerate(recent_trades_raw):
             if tr.is_buy:
                 amount_in = int(tr.native_amount)
                 amount_out = int(tr.token_amount)
@@ -439,7 +445,7 @@ def token_overview_graph(
 
         tracked_trades_out: List[Dict[str, Any]] = []
         if tracked_addrs and recent_trades_raw:
-            for idx, tr in enumerate(recent_trades_raw):
+            for _, tr in enumerate(recent_trades_raw):
                 if tr.user.lower() not in tracked_addrs:
                     continue
 
@@ -519,6 +525,12 @@ def token_overview_graph(
         
         graduation_bps = getattr(lp, "circulating_supply", 0) / 793100000
 
+        sniper_set = state.launchpad_snipers.get(lp.token.lower(), set())
+        snipers_view = {
+            "count": int(getattr(lp, "snipers", len(sniper_set))),
+            "addresses": sorted(list(sniper_set)),
+        }
+        
         return {
             "buyTxs": int(getattr(lp, "buy_count", 0)),
             "creator": {
@@ -552,7 +564,7 @@ def token_overview_graph(
             "series": {
                 "klines": series_klines,
             },
-            "snipers": int(getattr(lp, "snipers", 0)),
+            "snipers": snipers_view,
             "social1": social1,
             "social2": social2,
             "social3": social3,

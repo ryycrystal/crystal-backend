@@ -48,7 +48,7 @@ PARSERS = {
     "TF": _parse_transfer,
 }
 WS_URL = "wss://testnet-rpc.monad.xyz"
-_RPC_MAX_RPS = 20
+_RPC_MAX_RPS = 5
 _last_rpc_ts = 0.0
 _rpc_lock = asyncio.Lock()
 
