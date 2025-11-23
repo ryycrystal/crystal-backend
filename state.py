@@ -7,24 +7,12 @@ import urllib.request
 import time
 import models
 
-from state import RPC_HTTP
-
 getcontext().prec = 50
 
 INTERVALS = (300, 3600, 21600, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = "https://testnet-rpc.monad.xyz"
-
-def _rpc_batch_state(calls: list[dict]) -> list[dict]:
-    payload = json.dumps(calls).encode()
-    req = urllib.request.Request(
-        RPC_HTTP,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode())
 
 class State:
     def __init__(self) -> None:
