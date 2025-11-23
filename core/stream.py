@@ -1,33 +1,24 @@
-import json, asyncio, time, uuid, sys, websockets, urllib.request
+import json, asyncio, time, uuid, websockets
 from collections import deque
-from decimal import Decimal
 
 from core import chain as h
-import backfill
-from state import RPC_HTTP
-import state as _st
-
 from core.sequencer import SEQUENCER
 
-HEAD_TIMEOUT = 60.0
+import backfill
+
+HEAD_TIMEOUT = 60.0 # if >60s w/o new head block we start reconnect + backfill
 BACKFILL_BATCH = 100
 
-missing_blocks: deque[int] = deque()
-missing_set: set[int] = set()
+missing_blocks: deque[int] = deque() # queue of blocks that need backfilling
+missing_set: set[int] = set() # so we dont backfill the same block twice
 
-def _rpc_batch(calls: list[dict]) -> list[dict]:
-    payload = json.dumps(calls).encode()
-    req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode())
-    
-    
+# enqueue a block into missing queue
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
         missing_set.add(blk)
 
-
+# background worker that replays logs for missing block ranges and feeds them to the sequencer
 async def _gap_worker(event_counts):
     while True:
         if not missing_blocks:
@@ -43,6 +34,7 @@ async def _gap_worker(event_counts):
             missing_set.discard(missing_blocks.popleft())
 
         try:
+            # actual fetching
             async with websockets.connect(h.WS_URL) as gap_ws:
                 rid = str(uuid.uuid4())
                 await h.rate_gate()
@@ -59,6 +51,7 @@ async def _gap_worker(event_counts):
                 }))
                 resp = await h.ack(gap_ws, rid)
 
+            # handing logs to sequencer
             for log in resp.get("result", []):
                 topics = log.get("topics") or []
                 if not topics:
@@ -92,7 +85,7 @@ async def _gap_worker(event_counts):
             else:
                 raise
 
-
+# one websocket session to subscribe to heads + logs, feed sequencer, handle head gaps and watchdog
 async def _stream_once(prev_last_head: int | None) -> int | None:
     connect_kwargs = dict(
         ping_interval=20,
@@ -127,6 +120,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         last_head_num = prev_last_head
         first_head_seen = False
 
+        # used to find a stalled head stream (basically if the ws dies or wifi or sm dies) and triggers backfill
         async def watchdog():
             nonlocal last_head_ts, last_head_num
             while True:
@@ -148,6 +142,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
             sid = msg["params"]["subscription"]
             res = msg["params"]["result"]
 
+            # head stream update
             if sid == heads_sub:
                 blk = int(res["number"], 16)
 
@@ -172,6 +167,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 last_head_num = blk
                 continue
 
+            # sequencer feeding
             if sid == logs_sub:
                 topics = res.get("topics") or []
                 if not topics:
@@ -193,7 +189,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
         return last_head_num
 
-
+# main loop w/optional initial backfill or live stream
 async def stream_logs(start_block: int | None = None):
     last_seen = None
     delay = 0.5
@@ -211,141 +207,7 @@ async def stream_logs(start_block: int | None = None):
             last_seen = await _stream_once(last_seen)
             delay = 0.5
         except Exception as e:
-            print(f"[ws] dropped {e!r}", flush=True)
+            print(f"[WS] dropped {e!r}", flush=True)
 
         await asyncio.sleep(delay)
         delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
-
-
-def _dec_pow(n: int) -> Decimal:
-    try:
-        return Decimal(10) ** int(n or 0)
-    except Exception:
-        return Decimal(1)
-
-def _prune_by_age(dq: deque, now_ts: int, horizon: int) -> None:
-    cutoff = max(0, int(now_ts) - int(horizon))
-    while dq and int(dq[0].get("timestamp", 0)) < cutoff:
-        dq.popleft()
-
-async def vault_sampler(state: _st.State):
-    rid = 100000
-    while True:
-        try:
-            state.sweep()
-
-            if state.vaults:
-                head_res = _rpc_batch([{
-                    "jsonrpc": "2.0",
-                    "id": rid,
-                    "method": "eth_blockNumber",
-                    "params": [],
-                }])
-                rid += 1
-
-                blk_hex = head_res[0]["result"]
-                blk_num = int(blk_hex, 16)
-
-                ts = int(time.time())
-
-                calls = []
-                order = []
-                for vaddr in list(state.vaults.keys()):
-                    order.append(vaddr)
-                    calls.append({
-                        "jsonrpc": "2.0",
-                        "id": rid,
-                        "method": "eth_call",
-                        "params": [
-                            {"to": vaddr, "data": "0x00113e08"},
-                            blk_hex,
-                        ],
-                    })
-                    rid += 1
-
-                if calls:
-                    results = _rpc_batch(calls)
-
-                    for i, vaddr in enumerate(order):
-                        row = results[i] if i < len(results) else {}
-                        ret = row.get("result")
-                        if not isinstance(ret, str) or len(ret) < 2:
-                            continue
-
-                        s = ret[2:].rjust(64 * 4, "0")
-                        try:
-                            quote_bal = int(s[128:192], 16)
-                            base_bal = int(s[192:256], 16)
-                        except Exception:
-                            continue
-
-                        v = state.vaults.get(vaddr)
-                        if not v:
-                            continue
-
-                        qd = int(getattr(v, "quoteDecimals", 0) or 0)
-                        bd = int(getattr(v, "baseDecimals", 0) or 0)
-                        qaddr = getattr(v, "quote", "").lower()
-                        baddr = getattr(v, "base", "").lower()
-
-                        pq = state.tokenToPrice.get(qaddr, Decimal(0))
-                        pb = state.tokenToPrice.get(baddr, Decimal(0))
-
-                        q_units = Decimal(quote_bal) / _dec_pow(qd)
-                        b_units = Decimal(base_bal) / _dec_pow(bd)
-                        tvl_usd = (q_units * pq) + (b_units * pb)
-                        usd_value = float(tvl_usd) if tvl_usd.is_finite() else 0.0
-
-                        snap = {
-                            "block": int(blk_num),
-                            "timestamp": int(ts),
-                            "quoteBalance": int(quote_bal),
-                            "baseBalance": int(base_bal),
-                            "usdValue": usd_value,
-                        }
-
-                        day = state.vaultBalancesDay.setdefault(vaddr, deque())
-                        week = state.vaultBalancesWeek.setdefault(vaddr, deque())
-                        month = state.vaultBalancesMonth.setdefault(vaddr, deque())
-                        alltm = state.vaultBalancesAllTime.setdefault(vaddr, deque())
-
-                        day.append(snap)
-                        week.append(snap)
-                        month.append(snap)
-                        alltm.append(snap)
-
-                        _prune_by_age(day, ts, 24 * 3600)
-                        _prune_by_age(week, ts, 7 * 24 * 3600)
-                        _prune_by_age(month, ts, 30 * 24 * 3600)
-
-            else:
-                ts = int(time.time())
-
-            for market, pool in state.ammPools.items():
-                tvl = float(pool.tvlUsd)
-                vol_24h = float(pool.volume24hUsd)
-
-                fee_rate = float(pool.feeBps) / 10_000.0
-                fees_24h = vol_24h * fee_rate
-                pool.fees24hUsd = Decimal(fees_24h)
-
-                if tvl > 0.0 and fees_24h > 0.0:
-                    r_day = fees_24h / tvl
-                    apy = (1.0 + r_day) ** 365 - 1.0
-                    pool.apy24h = Decimal(apy)
-
-                    hist = state.ammHistory.setdefault(market, [])
-                    hist.append({"timestamp": int(ts), "apy": float(apy)})
-                    if len(hist) > 200:
-                        hist[:] = hist[-200:]
-                else:
-                    pool.apy24h = Decimal(0)
-
-        except Exception as e:
-            print(f"[SAMPLER][error] {e!r}")
-
-        await asyncio.sleep(15)
-
-if __name__ == "__main__":
-    blk = int(sys.argv[1], 0) if len(sys.argv) > 1 else None
-    asyncio.run(stream_logs(blk))

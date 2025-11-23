@@ -3,4 +3,3 @@ uvicorn
 websockets
 httpx
 dataclasses
-eth_abi
