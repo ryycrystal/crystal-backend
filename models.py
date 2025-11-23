@@ -185,3 +185,10 @@ class LaunchpadPosition:
     trade_count: int = 0
     buy_count: int = 0
     sell_count: int = 0
+
+@dataclass(slots=True)
+class PoolInfo:
+    pool: str
+    token_addr: str
+    native_addr: str
+    token_is_0: bool
