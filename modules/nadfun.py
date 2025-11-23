@@ -118,7 +118,7 @@ def parse_nadfun_token_created(
     metadata_cid = image_uri or token_uri or ""
 
     try:
-        last_price_native = Decimal("4500") / Decimal("1073000191")
+        last_price_native = Decimal("90000") / Decimal("1073000191")
     except Exception:
         last_price_native = Decimal(0)
 
