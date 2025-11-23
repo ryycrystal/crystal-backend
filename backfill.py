@@ -76,32 +76,6 @@ async def fetch_logs(ws, frm: int, to: int):
     resp = await h.ack(ws, rid)
     return resp["result"]
 
-# backfill block timestamps into state using eth_getBlockByNumber
-# so sequencer knows block time for any block in [frm, to]
-def seed_headers_http(frm: int, to: int) -> None:
-    calls = []
-    rid = 1
-    for b in range(frm, to + 1):
-        calls.append(
-            {
-                "jsonrpc": "2.0",
-                "id": rid,
-                "method": "eth_getBlockByNumber",
-                "params": [hex(b), False],
-            }
-        )
-        rid += 1
-
-    results = _rpc_batch_http(calls)
-    by_id = {row["id"]: row for row in results if "id" in row}
-    for i, b in enumerate(range(frm, to + 1), start=1):
-        res = by_id.get(i, {}).get("result")
-        if not res:
-            continue
-        blk = int(res["number"], 16)
-        ts = int(res["timestamp"], 16)
-        SEQUENCER._state._bt.note(blk, ts)
-        
 # main backfill loop
 # walks from start_block up to current head in batches
 # seeds headers and replaying logs into the sequencer in order
@@ -121,11 +95,6 @@ async def backfill(start_block: int, batch: int) -> int:
                 if current_head >= chunk_end:
                     break
                 await asyncio.sleep(0.5)
-                
-            try:
-                seed_headers_http(chunk_start, chunk_end)
-            except Exception:
-                pass
 
             logs = await fetch_logs(ws, chunk_start, chunk_end)
 

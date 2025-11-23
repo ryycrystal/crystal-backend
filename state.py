@@ -108,7 +108,7 @@ class State:
             if pi is None:
                 return
 
-            token = (pi.token or "").lower()
+            token = (pi.token_addr or "").lower()
             user = (ev.get("user") or "").lower()
 
             if not token or not user:
