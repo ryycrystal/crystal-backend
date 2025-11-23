@@ -278,8 +278,8 @@ class State:
 
                 self.v3_pools[pool] = models.PoolInfo(
                     pool=pool,
-                    token=token,
-                    wmon=wmon,
+                    token_addr=token,
+                    native_addr=wmon,
                     token_is_0=token_is_0,
                 )
                 self.token_to_v3_pool[token] = pool
