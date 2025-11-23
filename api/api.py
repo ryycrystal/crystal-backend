@@ -836,3 +836,67 @@ def user_volume(user_addr: str) -> Dict[str, Any]:
     }
 
 # hi
+@app.get("/search/query")
+def search_tokens(
+    query: str = Query(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="search string for token name, symbol, or address",
+    ),
+    limit: int = Query(20, ge=1, le=100),
+) -> Dict[str, Any]:
+    state = SEQUENCER._state
+    q = query.strip().lower()
+    if not q:
+        raise HTTPException(status_code=400, detail="empty query")
+
+    scored: List[tuple[int, models.LaunchpadToken]] = []
+
+    for lt in state.launchpad_tokens.values():
+        name = (lt.name or "").lower()
+        symbol = (lt.symbol or "").lower()
+        addr = (lt.token or "").lower()
+
+        score = 0
+
+        if q == symbol:
+            score += 100
+        if q == name:
+            score += 90
+        if q == addr:
+            score += 80
+
+        if symbol.startswith(q):
+            score += 60
+        if name.startswith(q):
+            score += 50
+        if addr.startswith(q):
+            score += 40
+
+        if q in symbol:
+            score += 30
+        if q in name:
+            score += 20
+        if q in addr:
+            score += 10
+
+        if score > 0:
+            scored.append((score, lt))
+
+    scored.sort(
+        key=lambda item: (item[0], getattr(item[1], "created_at", 0)),
+        reverse=True,
+    )
+
+    results: List[Dict[str, Any]] = []
+    for score, lt in scored[:limit]:
+        row = _serialize_token(lt.token)
+        row["search_score"] = score
+        results.append(row)
+
+    return {
+        "query": query,
+        "count": len(results),
+        "results": results,
+    }
