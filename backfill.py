@@ -82,7 +82,7 @@ async def fetch_logs(ws, frm: int, to: int):
 async def backfill(start_block: int, batch: int) -> int:
     async with websockets.connect(h.WS_URL) as ws:
         head_snapshot = await get_head(ws)
-        print(f"[Backfill] init chain head = {head_snapshot}")
+        print(f"[Backfill] Init chain head = {head_snapshot}")
 
         last_processed = start_block - 1
 
