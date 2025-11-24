@@ -97,6 +97,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "developer_tokens_created": dev_tokens_created,
         "developer_tokens_graduated": dev_tokens_graduated,
         "snipers": snipers_view,
+        "market": lt.market,
     }
 
 def _build_ohlcv(
@@ -555,6 +556,7 @@ def token_overview_graph(
             "initialSupply": str(10**18),
             "lastPriceNativePerTokenWad": str(last_price_wad),
             "lastUpdatedAt": str(last_timestamp),
+            "market": lp.market,
             "marketcap": marketcap_native_raw,
             "marketcap_usd": marketcap_usd,
             "metadataCID": metadata_cid,
