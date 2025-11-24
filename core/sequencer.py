@@ -49,8 +49,8 @@ class Sequencer:
 
     # per block, build transfer chains keyed by (tx_hash, token), for each txfer next[from] = to, prev[to] = from
     # so for a given (tx, token) we follow buy is pool -> ... -> user using next, sell is user -> ... -> pool using prev
-    def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict[str, dict[str, str]]]:
-        transfer_maps: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
+    def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict[str, dict[str, set[str]]]]:
+        transfer_maps: dict[tuple[str, str], dict[str, dict[str, set[str]]]] = {}
 
         for log in logs:
             topics = log.get("topics") or []
@@ -76,8 +76,11 @@ class Sequencer:
 
             key = (txh, token)
             maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}})
-            maps["next"][from_addr] = to_addr
-            maps["prev"][to_addr] = from_addr
+            next_map: dict[str, set[str]] = maps["next"]
+            prev_map: dict[str, set[str]] = maps["prev"]
+
+            next_map.setdefault(from_addr, set()).add(to_addr)
+            prev_map.setdefault(to_addr, set()).add(from_addr)
 
         return transfer_maps
 
@@ -87,7 +90,7 @@ class Sequencer:
         txh: str,
         parsed: dict,
         pool_addr: str,
-        transfer_maps: dict[tuple[str, str], dict[str, dict[str, str]]],
+        transfer_maps: dict[tuple[str, str], dict[str, dict[str, set[str]]]],
     ) -> str:
         pool = (pool_addr or "").lower()
 
@@ -95,43 +98,76 @@ class Sequencer:
         if not token:
             pi = self._state.v3_pools.get(pool)
             if pi is None or not getattr(pi, "token_addr", None):
-                
                 return (parsed.get("user") or "").lower()
             token = (pi.token_addr or "").lower()
 
         key = (txh.lower(), token)
         maps = transfer_maps.get(key)
-
         if not maps:
             return (parsed.get("user") or "").lower()
 
-        next_map = maps["next"]
-        prev_map = maps["prev"]
+        next_map: dict[str, set[str]] = maps["next"]
+        prev_map: dict[str, set[str]] = maps["prev"]
 
-        addr = pool
-        hops = 0
+        component: set[str] = set()
+        queue: list[str] = [pool]
+        max_nodes = 16
 
-        if pool in next_map and pool not in prev_map:
-            while addr in next_map:
-                nxt = next_map[addr]
-                if not nxt or nxt == addr:
-                    break
-                addr = nxt.lower()
-                hops += 1
-        elif pool in prev_map and pool not in next_map:
-            while addr in prev_map:
-                prv = prev_map[addr]
-                if not prv or prv == addr:
-                    break
-                addr = prv.lower()
-                hops += 1
+        while queue and len(component) < max_nodes:
+            addr = queue.pop()
+            if addr in component:
+                continue
+            component.add(addr)
+
+            for nb in next_map.get(addr, ()):
+                if nb not in component:
+                    queue.append(nb)
+            for nb in prev_map.get(addr, ()):
+                if nb not in component:
+                    queue.append(nb)
+
+        if pool not in component or len(component) == 1:
+            return (parsed.get("user") or "").lower()
+
+        in_deg: dict[str, int] = {a: 0 for a in component}
+        out_deg: dict[str, int] = {a: 0 for a in component}
+
+        for a in component:
+            outs = next_map.get(a, set())
+            outs_in_comp = [b for b in outs if b in component]
+            out_deg[a] = len(outs_in_comp)
+            for b in outs_in_comp:
+                in_deg[b] += 1
+
+        is_buy = parsed.get("is_buy")
+        if is_buy is None:
+            pool_out = out_deg.get(pool, 0)
+            pool_in = in_deg.get(pool, 0)
+            if pool_out > 0 and pool_in == 0:
+                is_buy = True
+            elif pool_in > 0 and pool_out == 0:
+                is_buy = False
+
+        candidate: str | None = None
+        if is_buy:
+            for addr in component:
+                if out_deg.get(addr, 0) == 0 and in_deg.get(addr, 0) > 0:
+                    if candidate is not None and candidate != addr:
+                        candidate = None
+                        break
+                    candidate = addr
         else:
+            for addr in component:
+                if in_deg.get(addr, 0) == 0 and out_deg.get(addr, 0) > 0:
+                    if candidate is not None and candidate != addr:
+                        candidate = None
+                        break
+                    candidate = addr
+
+        if not candidate or candidate == pool:
             return (parsed.get("user") or "").lower()
 
-        if addr == pool or not addr:
-            return (parsed.get("user") or "").lower()
-
-        return addr
+        return candidate
 
     # actual processing (parsing, route to state handlers, apply changes)
     def _process_block(self, blk: int, logs: List[dict]):

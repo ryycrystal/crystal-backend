@@ -35,7 +35,7 @@ async def _gap_worker(event_counts):
 
         try:
             # actual fetching
-            async with websockets.connect(h.WS_URL) as gap_ws:
+            async with websockets.connect(h.WS_URL, max_size=None) as gap_ws:
                 rid = str(uuid.uuid4())
                 await h.rate_gate()
                 await gap_ws.send(json.dumps({
@@ -93,6 +93,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         close_timeout=5,
         max_queue=None,
         open_timeout=10,
+        max_size=None,
     )
     async with websockets.connect(h.WS_URL, **connect_kwargs) as ws:
         await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}))
