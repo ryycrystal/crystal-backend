@@ -47,6 +47,89 @@ class Sequencer:
                     print(f"[SQ] Persist Error: {e!r}")
             self._next_block += 1
 
+    # per block, build transfer chains keyed by (tx_hash, token), for each txfer next[from] = to, prev[to] = from
+    # so for a given (tx, token) we follow buy is pool -> ... -> user using next, sell is user -> ... -> pool using prev
+    def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict[str, dict[str, str]]]:
+        transfer_maps: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
+
+        for log in logs:
+            topics = log.get("topics") or []
+            if not topics:
+                continue
+
+            tag = h.EVENT_SIGS.get(topics[0].lower())
+            if tag != "TF":
+                continue
+
+            data_no0x = (log.get("data") or "")[2:]
+            parsed = h.PARSERS[tag](log.get("address", "").lower(), topics, data_no0x)
+            if parsed is None:
+                continue
+
+            token = (parsed.get("token") or "").lower()
+            from_addr = (parsed.get("from") or "").lower()
+            to_addr = (parsed.get("to") or "").lower()
+            txh = (log.get("transactionHash") or "").lower()
+
+            if not token or not from_addr or not to_addr or not txh:
+                continue
+
+            key = (txh, token)
+            maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}})
+            maps["next"][from_addr] = to_addr
+            maps["prev"][to_addr] = from_addr
+
+        return transfer_maps
+
+    # for a given trade event and transfer chains, find the true user
+    def _resolve_trade_user(
+        self,
+        txh: str,
+        parsed: dict,
+        pool_addr: str,
+        transfer_maps: dict[tuple[str, str], dict[str, dict[str, str]]],
+    ) -> str:
+        token = (parsed.get("token") or "").lower()
+        if not token:
+            return (parsed.get("user") or "").lower()
+
+        key = (txh.lower(), token)
+        maps = transfer_maps.get(key)
+        if not maps:
+            return (parsed.get("user") or "").lower()
+
+        next_map = maps["next"]
+        prev_map = maps["prev"]
+        is_buy = bool(parsed.get("is_buy"))
+        pool = pool_addr.lower()
+
+        addr = pool
+        max_hops = 8
+        hops = 0
+
+        if is_buy:
+            # pool -> ... -> user
+            while addr in next_map and hops < max_hops:
+                nxt = next_map[addr]
+                if not nxt or nxt == addr:
+                    break
+                addr = nxt.lower()
+                hops += 1
+        else:
+            # user -> ... -> pool, walk backwards from pool
+            while addr in prev_map and hops < max_hops:
+                prv = prev_map[addr]
+                if not prv or prv == addr:
+                    break
+                addr = prv.lower()
+                hops += 1
+
+        # if we somehow never moved, fall back to event user
+        if addr == pool or not addr:
+            return (parsed.get("user") or "").lower()
+
+        return addr
+
     # actual processing (parsing, route to state handlers, apply changes)
     def _process_block(self, blk: int, logs: List[dict]):
         counts = {           
@@ -58,6 +141,8 @@ class Sequencer:
             "V3SWAP": 0,
         }
         seen = set()
+
+        transfer_maps = self._build_transfer_maps(logs)
 
         for log in logs:
             # log metadata
@@ -84,7 +169,17 @@ class Sequencer:
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
 
             elif tag in ("LT", "NFB", "NFS"): # launchpadtrade or nadfun buy/sell
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
+                real_user = self._resolve_trade_user(
+                    txh,
+                    parsed,
+                    log.get("address", "").lower(),
+                    transfer_maps,
+                )
+                if real_user:
+                    parsed = dict(parsed)
+                    parsed["user"] = real_user
+
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
 
             elif tag in ("MG", "NFT"): # migration or nadfun graduation
                 pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
@@ -93,16 +188,26 @@ class Sequencer:
                         h.ADDRS.append(pool.lower())
                 
             elif tag == "TF": # txfer
-                print("tf")
                 if parsed is not None:
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
             elif tag == "V3SWAP": # graduated nadfun v3 pool trade
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
+                real_user = self._resolve_trade_user(
+                    txh,
+                    parsed,
+                    log.get("address", "").lower(),
+                    transfer_maps,
+                )
+                if real_user:
+                    parsed = dict(parsed)
+                    parsed["user"] = real_user
 
-        # print(
-        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        # )
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
+
+
+        print(
+            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        )
 
 SEQUENCER = Sequencer(_st.State())

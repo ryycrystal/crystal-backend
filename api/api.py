@@ -19,7 +19,7 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
     pos_list = [
         pos
         for (user, tkn), pos in state.launchpad_positions.items()
-        if tkn == token_addr and pos.balance_token > 1_000_000
+        if tkn == token_addr and pos.balance_token > 100
         and user.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
         and user.lower() not in h.ADDRS
     ]
