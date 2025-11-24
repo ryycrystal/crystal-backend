@@ -3,7 +3,7 @@ from typing import Dict, List
 from decimal import Decimal, getcontext
 import models
 
-getcontext().prec = 50
+getcontext().prec = 100
 
 INTERVALS = (300, 3600, 21600, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
