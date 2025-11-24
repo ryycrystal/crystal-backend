@@ -286,6 +286,8 @@ class State:
         if pool and pool not in self.v3_pools:
             wmon = "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701".lower()
 
+            lp.market = pool
+
             if token != wmon:
                 token_is_0 = token < wmon
 
