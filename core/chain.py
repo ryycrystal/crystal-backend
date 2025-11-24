@@ -24,7 +24,7 @@ def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
     }
 
 CONTRACTS = {
-    "NADFUN": "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7",
+    "NADFUN": "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
 EVENT_SIGS = {   
