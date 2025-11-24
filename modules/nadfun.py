@@ -6,6 +6,8 @@ from typing import Dict, Optional
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
+decimal.getcontext().prec = 100
+
 # pending nadfun sync snapshots keyed by token address bc they emit it seperately
 _PENDING_SYNC: Dict[str, dict] = {}
 

@@ -2,7 +2,7 @@ import json, decimal, asyncio, time
 import modules.launchpad as lp
 import modules.nadfun as n
 
-decimal.getcontext().prec = 50
+decimal.getcontext().prec = 100
 
 # transfer parser idk where else to put ts
 def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
