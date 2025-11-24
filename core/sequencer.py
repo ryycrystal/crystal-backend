@@ -99,7 +99,6 @@ class Sequencer:
 
             elif tag == "V3SWAP": # graduated nadfun v3 pool trade
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
-                print("parsed", parsed)
 
         print(
             f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "

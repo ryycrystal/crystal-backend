@@ -280,7 +280,6 @@ def parse_nadfun_graduated(
 # parses uniswap v3-style Swap event into a dict consumable by state.apply_launchpad_trade (slightly diff shape)
 # amount0 and amount1 are signed deltas, sqrt_price_x96 is the new sqrt price
 def parse_v3_trade(addr, tops, data):
-    print(addr, tops, data)
     pool = addr.lower()
     sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""
     recipient = _to_addr(tops[2]).lower() if len(tops) > 2 else ""
