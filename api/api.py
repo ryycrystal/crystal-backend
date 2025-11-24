@@ -7,6 +7,7 @@ import time
 import traceback
 
 from core.sequencer import SEQUENCER
+from core import chain as h
 from api.x_api import router as x_router
 import models
 
@@ -20,6 +21,7 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
         for (user, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 0
         and user.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
+        and user.lower() not in h.ADDRS
     ]
     holder_count = len(pos_list)
     pos_list.sort(key=lambda p: p.balance_token, reverse=True)
@@ -303,6 +305,7 @@ def token_overview_graph(
             for (uaddr, tkn), pos in state.launchpad_positions.items()
             if tkn == token_addr and pos.balance_token > 0
             and uaddr.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
+            and uaddr.lower() not in h.ADDRS
         ]
         positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
 
@@ -357,6 +360,8 @@ def token_overview_graph(
                 continue
 
             if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
+                continue
+            if getattr(pos, "user", "").lower() in h.ADDRS:
                 continue
 
             balance_token = int(pos.balance_token)
