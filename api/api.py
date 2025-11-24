@@ -1,5 +1,5 @@
 from __future__ import annotations
-from decimal import Decimal
+from decimal import Decimal, getcontext
 from typing import Dict, Any, List, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +11,7 @@ from core import chain as h
 from api.x_api import router as x_router
 import models
 
-decimal.getcontext().prec = 100
+getcontext().prec = 100
 
 # helpers
 def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
