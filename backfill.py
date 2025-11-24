@@ -80,7 +80,7 @@ async def fetch_logs(ws, frm: int, to: int):
 # seeds headers and replaying logs into the sequencer in order
 # returns the last processed block.     
 async def backfill(start_block: int, batch: int) -> int:
-    async with websockets.connect(h.WS_URL) as ws:
+    async with websockets.connect(h.WS_URL, max_size=None) as ws:
         head_snapshot = await get_head(ws)
         print(f"[Backfill] Init chain head = {head_snapshot}")
 
