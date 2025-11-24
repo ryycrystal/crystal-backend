@@ -65,7 +65,10 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "addresses": sorted(list(sniper_set)),
     }
 
-
+    social1 = getattr(lt, "social1", None)
+    social2 = getattr(lt, "social2", None)
+    social3 = getattr(lt, "social3", None)
+    social4 = getattr(lt, "social4", None)
     return {
         "token": lt.token,
         "symbol": lt.symbol,
@@ -96,6 +99,10 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "approaching_75_at": lt.approaching_75_at,
         "developer_tokens_created": dev_tokens_created,
         "developer_tokens_graduated": dev_tokens_graduated,
+        "social1": social1,
+        "social2": social2,
+        "social3": social3,
+        "social4": social4,
         "snipers": snipers_view,
         "market": lt.market,
     }
