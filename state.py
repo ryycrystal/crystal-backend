@@ -8,7 +8,7 @@ getcontext().prec = 50
 INTERVALS = (300, 3600, 21600, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
-RPC_HTTP = "https://testnet-rpc.monad.xyz"
+RPC_HTTP = "https://rpc.monad.xyz"
 
 class State:
     def __init__(self) -> None:

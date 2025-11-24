@@ -47,7 +47,7 @@ PARSERS = {
     "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
 }
-WS_URL = "wss://testnet-rpc.monad.xyz"
+WS_URL = "wss://rpc-mainnet.monadinfra.com"
 _RPC_MAX_RPS = 20
 _last_rpc_ts = 0.0
 _rpc_lock = asyncio.Lock()
