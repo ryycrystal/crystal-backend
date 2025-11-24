@@ -89,42 +89,45 @@ class Sequencer:
         pool_addr: str,
         transfer_maps: dict[tuple[str, str], dict[str, dict[str, str]]],
     ) -> str:
+        pool = (pool_addr or "").lower()
+
         token = (parsed.get("token") or "").lower()
         if not token:
-            return (parsed.get("user") or "").lower()
+            pi = self._state.v3_pools.get(pool)
+            if pi is None or not getattr(pi, "token_addr", None):
+                
+                return (parsed.get("user") or "").lower()
+            token = (pi.token_addr or "").lower()
 
         key = (txh.lower(), token)
         maps = transfer_maps.get(key)
+
         if not maps:
             return (parsed.get("user") or "").lower()
 
         next_map = maps["next"]
         prev_map = maps["prev"]
-        is_buy = bool(parsed.get("is_buy"))
-        pool = pool_addr.lower()
 
         addr = pool
-        max_hops = 8
         hops = 0
 
-        if is_buy:
-            # pool -> ... -> user
-            while addr in next_map and hops < max_hops:
+        if pool in next_map and pool not in prev_map:
+            while addr in next_map:
                 nxt = next_map[addr]
                 if not nxt or nxt == addr:
                     break
                 addr = nxt.lower()
                 hops += 1
-        else:
-            # user -> ... -> pool, walk backwards from pool
-            while addr in prev_map and hops < max_hops:
+        elif pool in prev_map and pool not in next_map:
+            while addr in prev_map:
                 prv = prev_map[addr]
                 if not prv or prv == addr:
                     break
                 addr = prv.lower()
                 hops += 1
+        else:
+            return (parsed.get("user") or "").lower()
 
-        # if we somehow never moved, fall back to event user
         if addr == pool or not addr:
             return (parsed.get("user") or "").lower()
 
@@ -204,10 +207,9 @@ class Sequencer:
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
 
-
-        print(
-            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        )
+        # print(
+        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        # )
 
 SEQUENCER = Sequencer(_st.State())
