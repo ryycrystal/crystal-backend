@@ -305,10 +305,9 @@ def token_overview_graph(
             for (uaddr, tkn), pos in state.launchpad_positions.items()
             if tkn == token_addr and pos.balance_token > 0
             and uaddr.lower() != "0xad720f94689edb929d9be7613223320a0b2f260f"
-            and uaddr.lower() not in h.ADDRS
         ]
+        print(token_addr, state.launchpad_positions.items())
         positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
-
         holders_list: List[Dict[str, Any]] = []
         for pos in positions_for_token:
             balance_token = int(pos.balance_token)
@@ -362,6 +361,7 @@ def token_overview_graph(
             if getattr(pos, "user", "").lower() == "0xad720f94689edb929d9be7613223320a0b2f260f":
                 continue
             if getattr(pos, "user", "").lower() in h.ADDRS:
+                print("skip", getattr(pos, "user"))
                 continue
 
             balance_token = int(pos.balance_token)

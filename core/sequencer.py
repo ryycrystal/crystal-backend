@@ -91,18 +91,18 @@ class Sequencer:
                 if pool:
                     if pool.lower() not in h.ADDRS:
                         h.ADDRS.append(pool.lower())
-                        print(h.ADDRS)
                 
             elif tag == "TF": # txfer
+                print("tf")
                 if parsed is not None:
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
             elif tag == "V3SWAP": # graduated nadfun v3 pool trade
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log["address"].lower())
 
-        print(
-            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        )
+        # print(
+        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        # )
 
 SEQUENCER = Sequencer(_st.State())

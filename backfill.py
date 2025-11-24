@@ -66,7 +66,6 @@ async def fetch_logs(ws, frm: int, to: int):
                     {
                         "fromBlock": hex(frm),
                         "toBlock": hex(to),
-                        "address": h.ADDRS,
                         "topics": [h.TOPICS],
                     }
                 ],
