@@ -20,7 +20,7 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
         pos
         for (user, tkn), pos in state.launchpad_positions.items()
         if tkn == token_addr and pos.balance_token > 100
-        and user.lower() != "0x713B2e4F9DA6e03779d5040d676187a076C1b7F7".lower()
+        and user.lower() != "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower()
         and user.lower() not in h.ADDRS
     ]
     holder_count = len(pos_list)
@@ -305,7 +305,7 @@ def token_overview_graph(
             pos
             for (uaddr, tkn), pos in state.launchpad_positions.items()
             if tkn == token_addr and pos.balance_token > 0
-            and uaddr.lower() != "0x713B2e4F9DA6e03779d5040d676187a076C1b7F7".lower()
+            and uaddr.lower() != "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower()
             and uaddr.lower() not in h.ADDRS
         ]
         positions_for_token.sort(key=lambda p: p.balance_token, reverse=True)
@@ -360,7 +360,7 @@ def token_overview_graph(
             if getattr(pos, "token", token_addr) != token_addr:
                 continue
 
-            if getattr(pos, "user", "").lower() == "0x713B2e4F9DA6e03779d5040d676187a076C1b7F7".lower():
+            if getattr(pos, "user", "").lower() == "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower():
                 continue
             if getattr(pos, "user", "").lower() in h.ADDRS:
                 continue
@@ -609,7 +609,7 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
     total_trades = 0
 
     for (uaddr, tkn), pos in state.launchpad_positions.items():
-        if uaddr.lower() == "0x713B2e4F9DA6e03779d5040d676187a076C1b7F7".lower() or uaddr != user_addr:
+        if uaddr.lower() == "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower() or uaddr != user_addr:
             continue
 
         lp = state.launchpad_tokens.get(tkn)
