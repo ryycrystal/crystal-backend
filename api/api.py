@@ -18,9 +18,11 @@ def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
     state = SEQUENCER._state
     token_addr = token_addr.lower()
 
+    positions_items = list(state.launchpad_positions.items())
+
     pos_list = [
         pos
-        for (user, tkn), pos in state.launchpad_positions.items()
+        for (user, tkn), pos in positions_items
         if tkn == token_addr and pos.balance_token > 100
         and user.lower() != "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower()
         and user.lower() not in h.ADDRS
@@ -310,9 +312,11 @@ def token_overview_graph(
         mini_klines = _build_ohlcv(trades_sorted, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv(trades_sorted, bucket_seconds=chartres, max_buckets=None)
 
+        positions_items = list(state.launchpad_positions.items())
+
         positions_for_token = [
             pos
-            for (uaddr, tkn), pos in state.launchpad_positions.items()
+            for (uaddr, tkn), pos in positions_items
             if tkn == token_addr and pos.balance_token > 0
             and uaddr.lower() != "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower()
             and uaddr.lower() not in h.ADDRS
@@ -365,7 +369,8 @@ def token_overview_graph(
             )
 
         top_traders_list: List[Dict[str, Any]] = []
-        for pos in state.launchpad_positions.values():
+        positions_list = list(state.launchpad_positions.values())
+        for pos in positions_list:
             if getattr(pos, "token", token_addr) != token_addr:
                 continue
 
@@ -507,7 +512,9 @@ def token_overview_graph(
             now_ts = int(time.time())
             cutoff_ts = now_ts - 3600
 
-            for other_token_addr, dev_lp in state.launchpad_tokens.items():
+            tokens_items = list(state.launchpad_tokens.items())
+
+            for other_token_addr, dev_lp in tokens_items:
                 creator_addr = (getattr(dev_lp, "creator", "") or "").lower()
                 if creator_addr != dev_addr:
                     continue
@@ -617,7 +624,9 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
     total_native_received = 0
     total_trades = 0
 
-    for (uaddr, tkn), pos in state.launchpad_positions.items():
+    positions_list = list(state.launchpad_positions.items())
+
+    for (uaddr, tkn), pos in positions_list:
         if uaddr.lower() == "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower() or uaddr != user_addr:
             continue
 
@@ -842,7 +851,9 @@ def user_volume(user_addr: str) -> Dict[str, Any]:
 
     seen_tokens: set[str] = set()
 
-    for (uaddr, tkn), pos in state.launchpad_positions.items():
+    positions_items = list(state.launchpad_positions.items())
+
+    for (uaddr, tkn), pos in positions_items:
         if uaddr.lower() != user_addr:
             continue
 
@@ -882,8 +893,9 @@ def search_tokens(
         raise HTTPException(status_code=400, detail="empty query")
 
     scored: List[tuple[int, models.LaunchpadToken]] = []
+    tokens_values = list(state.launchpad_tokens.values())
 
-    for lt in state.launchpad_tokens.values():
+    for lt in tokens_values:
         name = (lt.name or "").lower()
         symbol = (lt.symbol or "").lower()
         addr = (lt.token or "").lower()
