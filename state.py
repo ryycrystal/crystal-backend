@@ -151,15 +151,15 @@ class State:
 
             price_raw = ev.get("sqrt_price_x96") or 0
             try:
-                sqrt_p = Decimal(int(price_raw))
-                ratio = (sqrt_p * sqrt_p) / (Decimal(2) ** 192)
+                sqrt_p = Decimal(price_raw)
+
+                base = sqrt_p / (Decimal(2) ** 96)
+                ratio = base * base
+
                 if ratio <= 0:
                     price_native = Decimal(0)
                 else:
-                    if pi.token_is_0:
-                        price_native = ratio
-                    else:
-                        price_native = Decimal(1) / ratio
+                    price_native = ratio if pi.token_is_0 else Decimal(1) / ratio
             except Exception:
                 price_native = Decimal(0)
 
