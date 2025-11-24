@@ -11,6 +11,8 @@ from core import chain as h
 from api.x_api import router as x_router
 import models
 
+decimal.getcontext().prec = 100
+
 # helpers
 def _holders_for_token(token_addr: str) -> Tuple[int, int, int]:
     state = SEQUENCER._state
