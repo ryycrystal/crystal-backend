@@ -145,7 +145,17 @@ class Sequencer:
         }
         seen = set()
 
-        transfer_maps = self._build_transfer_maps(logs)
+        has_trades = False
+        for log in logs:
+            topics = log.get("topics") or []
+            if not topics:
+                continue
+            tag = h.EVENT_SIGS.get(topics[0].lower())
+            if tag in ("LT", "NFB", "NFS", "V3SWAP"):
+                has_trades = True
+                break
+
+        transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
         for log in logs:
             # log metadata
@@ -207,9 +217,9 @@ class Sequencer:
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
 
-        # print(
-        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        # )
+        print(
+            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        )
 
 SEQUENCER = Sequencer(_st.State())
