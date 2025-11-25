@@ -14,6 +14,8 @@ async def _boot_streamer() -> None:
     storage.init_pool()
     storage.init_db()
     
+    await asyncio.sleep(0)
+    
     SEQUENCER.set_on_block(storage.record_block_processed)
     
     last_blk = storage.get_last_processed_block()

@@ -78,6 +78,13 @@ def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
 # schema initialization
 def init_db() -> None:
     with db_cursor() as cur:
+        # extensions
+        cur.execute(
+            """
+            CREATE EXTENSION IF NOT EXISTS pg_trgm;
+            """
+        )
+        
         # processed blocks history
         cur.execute(
             """
@@ -183,6 +190,27 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_tokens_migrated_at 
             ON launchpad_tokens (migrated, migrated_at DESC); 
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_name_trgm
+            ON launchpad_tokens
+            USING gin (name gin_trgm_ops);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_symbol_trgm
+            ON launchpad_tokens
+            USING gin (symbol gin_trgm_ops);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_token_trgm
+            ON launchpad_tokens
+            USING gin (token gin_trgm_ops);
             """
         )
         
@@ -776,3 +804,54 @@ def upsert_pool(
             ),
         )
         
+# api helpers
+def search_tokens(query: str, limit: int = 20):
+    q = query.lower()
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                token,
+                name,
+                symbol,
+                created_at,
+                (
+                    CASE WHEN symbol = %s THEN 100 ELSE 0 END +
+                    CASE WHEN name = %s THEN 90 ELSE 0 END +
+                    CASE WHEN token = %s THEN 80 ELSE 0 END +
+
+                    CASE WHEN symbol ILIKE %s THEN 60 ELSE 0 END +
+                    CASE WHEN name ILIKE %s THEN 50 ELSE 0 END +
+                    CASE WHEN token ILIKE %s THEN 40 ELSE 0 END +
+
+                    CASE WHEN symbol ILIKE %s THEN 30 ELSE 0 END +
+                    CASE WHEN name ILIKE %s THEN 20 ELSE 0 END +
+                    CASE WHEN token ILIKE %s THEN 10 ELSE 0 END +
+
+                    similarity(symbol, %s) * 10 +
+                    similarity(name, %s) * 10 +
+                    similarity(token, %s) * 10
+                ) AS score
+            FROM launchpad_tokens
+            WHERE
+                symbol ILIKE %s OR
+                name ILIKE %s OR
+                token ILIKE %s OR
+                similarity(symbol, %s) > 0.1 OR
+                similarity(name, %s) > 0.1 OR
+                similarity(token, %s) > 0.1
+            ORDER BY score DESC, created_at DESC
+            LIMIT %s;
+            """,
+            (
+                q, q, q,
+                q + "%", q + "%", q + "%", 
+                "%" + q + "%", "%" + q + "%", "%" + q + "%",
+                q, q, q,
+                "%" + q + "%", "%" + q + "%", "%" + q + "%",
+                q, q, q,
+                limit,
+            ),
+        )
+        return cur.fetchall()
