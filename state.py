@@ -210,6 +210,7 @@ class State:
                         if user_addr not in s:
                             s.add(user_addr)
                             lp.snipers += 1
+                            storage.add_sniper_address(token, user_addr)
 
                 if is_buy:
                     lp.circulating_supply += token_amt / 1e18
@@ -275,8 +276,8 @@ class State:
             realized_native = pos.native_received - pos.native_spent
             pos.realized_pnl_native = Decimal(realized_native)
 
-            delta = pos.realized_pnl_native - old_realized
-            lu.total_realized_pnl_native += delta
+            delta_realized = pos.realized_pnl_native - old_realized
+            lu.total_realized_pnl_native += delta_realized
             
             trades = self.launchpad_trades.setdefault(token, [])
             usd_amount = Decimal(native_amt) * Decimal(0.05)
@@ -294,6 +295,10 @@ class State:
                     txhash=txh
                 )
             )
+            
+            if len(trades) > 50000:
+                trades[:] = trades[-50000:]
+                
             storage.insert_trade(
                 block_number=blk,
                 log_index=log_idx,
@@ -307,9 +312,57 @@ class State:
                 price_native=lp.last_price_native,
                 txhash=txh,
             )
+            storage.update_token_after_trade(
+                token=token,
+                last_price_native=lp.last_price_native,
+                native_volume=int(lp.native_volume),
+                token_volume=int(lp.token_volume),
+                volume_usd=lp.volume_usd,
+                fees_usd=lp.fees_usd,
+                buy_count=lp.buy_count,
+                sell_count=lp.sell_count,
+                tx_count=lp.tx_count,
+                circulating_supply=lp.circulating_supply,
+                approaching_75=lp.approaching_75,
+                approaching_75_block=lp.approaching_75_block,
+                approaching_75_at=lp.approaching_75_at,
+                snipers_count=lp.snipers,
+            )
+            storage.update_user_on_trade(
+                address=user,
+                native_amount=int(native_amt),
+                realized_delta=delta_realized,
+            )
             
-            if len(trades) > 50000:
-                trades[:] = trades[-50000:]
+            balance_token = int(pos.balance_token)
+            unrealized_pnl_native = Decimal(balance_token) * lp.last_price_native
+            total_pnl_native = pos.realized_pnl_native + unrealized_pnl_native
+            
+            storage.upsert_position(
+                user_address=user,
+                token=token,
+                token_bought=int(pos.token_bought),
+                token_sold=int(pos.token_sold),
+                native_spent=int(pos.native_spent),
+                native_received=int(pos.native_received),
+                balance_token=balance_token,
+                realized_pnl_native=pos.realized_pnl_native,
+                unrealized_pnl_native=unrealized_pnl_native,
+                total_pnl_native=total_pnl_native,
+                trade_count=pos.trade_count,
+                buy_count=pos.buy_count,
+                sell_count=pos.sell_count,
+            )
+            
+            for bucket_seconds in INTERVALS:
+                bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
+                storage.upsert_ohlcv(
+                    token=token,
+                    resolution_sec=bucket_seconds,
+                    bucket_start=bucket_start,
+                    price_native=lp.last_price_native,
+                    native_amount=int(native_amt),
+                )
 
     # applies graduation/migration
     def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> str | None:
