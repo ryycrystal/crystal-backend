@@ -18,6 +18,17 @@ getcontext().prec = 100
 
 log = logging.getLogger("api")
 
+if not log.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+
+log.setLevel(logging.INFO)
+log.propagate = False
+
 AGGREGATOR_ADDR = "0x7193e46d4a812c8990f96a6e9c1f1ed338b2a6b7".lower()
 EXCLUDED_INTERNAL_ADDRS = {a.lower() for a in getattr(h, "ADDRS", [])} | {AGGREGATOR_ADDR}
 
@@ -302,6 +313,7 @@ app.include_router(x_router)
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    log.info("health endpoint hit")
     return {"ok": True}
 
 
