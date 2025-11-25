@@ -285,7 +285,7 @@ class State:
         pool = (ev.get("pool") or "").lower()
 
         if pool and pool not in self.v3_pools:
-            wmon = "0x760afe86e5de5fa0ee542fc7b7b713e1c5425701".lower()
+            wmon = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A".lower()
 
             lp.market = pool
 
