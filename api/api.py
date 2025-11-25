@@ -5,6 +5,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 import time
+import logging
 import traceback
 import core.storage as storage
 
@@ -14,6 +15,8 @@ from api.x_api import router as x_router
 from core.storage import db_cursor
 
 getcontext().prec = 100
+
+log = logging.getLogger("api")
 
 AGGREGATOR_ADDR = "0x7193e46d4a812c8990f96a6e9c1f1ed338b2a6b7".lower()
 EXCLUDED_INTERNAL_ADDRS = {a.lower() for a in getattr(h, "ADDRS", [])} | {AGGREGATOR_ADDR}
@@ -309,6 +312,8 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     if cached is not None:
         return cached
     
+    t0 = time.time()
+    
     recent_created_out: List[Dict[str, Any]] = []
     recent_approaching_out: List[Dict[str, Any]] = []
     recent_graduated_out: List[Dict[str, Any]] = []
@@ -402,6 +407,9 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         "recent_graduated": recent_graduated_out,
     }
     
+    dt = (time.time() - t0) * 1000
+    log.info("token_list dt_ms=%.1f", dt)
+    
     cache.set(cache_key, result, ttl_seconds=1)
     return result
 
@@ -419,6 +427,8 @@ def token_overview_graph(
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
+    
+    t0 = time.time()
     
     try:
         if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
@@ -968,6 +978,9 @@ def token_overview_graph(
         print(f"[token_overview_graph] error token={token_addr}")
         traceback.print_exc()
         raise
+    finally:
+        dt = (time.time() - t0) * 1000
+        log.info("token_overview_graph token=%s chartres=%s dt_ms=%.1f", token_addr, chartres, dt)
 
 
 @app.get("/user/{user_addr}")
