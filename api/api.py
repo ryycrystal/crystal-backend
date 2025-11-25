@@ -3,6 +3,7 @@ from decimal import Decimal, getcontext
 from typing import Dict, Any, List, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import time
 import traceback
 
@@ -168,6 +169,7 @@ def _build_ohlcv(
 
 
 app = FastAPI(title="backend", version="0.1.0")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Dict, List
 from decimal import Decimal, getcontext
 import models
+import core.storage as storage
 import threading
 
 getcontext().prec = 100
@@ -69,7 +70,27 @@ class State:
                 self.launchpad_tokens[token] = lp
                 
                 if (source == 1):
-                    lp.last_price_native = ev.get("last_price_native", Decimal("0.00008387696"))
+                    lp.last_price_native = ev.get(
+                        "last_price_native", 
+                        Decimal("0.00008387696")
+                    )
+                
+            storage.upsert_token_created(
+                token=token,
+                creator=creator,
+                name=name,
+                symbol=symbol,
+                metadata_cid=metadata_cid,
+                description=description,
+                social1=social1,
+                social2=social2,
+                social3=social3,
+                social4=social4,
+                source=source,
+                created_block=blk,
+                created_at=ts,
+                last_price_native=lp.last_price_native,
+            )
             
             if creator:
                 u = self.launchpad_users.get(creator)
@@ -77,9 +98,11 @@ class State:
                     u = models.LaunchpadUser(address=creator)
                     self.launchpad_users[creator] = u
                 u.tokens_created += 1
+                
+                storage.increment_user_tokens_created(creator)
 
     # applies a trade       
-    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, _log_addr: str) -> None:
+    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str) -> None:
         with self._lock:
             is_v3_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
             if not is_v3_swap:
@@ -256,6 +279,7 @@ class State:
             lu.total_realized_pnl_native += delta
             
             trades = self.launchpad_trades.setdefault(token, [])
+            usd_amount = Decimal(native_amt) * Decimal(0.05)
             trades.append(
                 models.LaunchpadTrade(
                     block_number=blk,
@@ -265,13 +289,27 @@ class State:
                     is_buy=is_buy,
                     native_amount=int(native_amt),
                     token_amount=int(token_amt),
-                    usd_amount=Decimal(native_amt) * Decimal(0.05),
+                    usd_amount=usd_amount,
                     price_native=lp.last_price_native,
                     txhash=txh
                 )
             )
-            if len(trades) > 500000:
-                trades[:] = trades[-500000:]
+            storage.insert_trade(
+                block_number=blk,
+                log_index=log_idx,
+                timestamp=ts,
+                token=token,
+                user_address=user,
+                is_buy=is_buy,
+                native_amount=int(native_amt),
+                token_amount=int(token_amt),
+                usd_amount=usd_amount,
+                price_native=lp.last_price_native,
+                txhash=txh,
+            )
+            
+            if len(trades) > 50000:
+                trades[:] = trades[-50000:]
 
     # applies graduation/migration
     def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> str | None:
@@ -305,6 +343,20 @@ class State:
                         token_is_0=token_is_0,
                     )
                     self.token_to_v3_pool[token] = pool
+                    
+                    storage.upsert_pool(
+                        pool=pool,
+                        token_addr=token,
+                        native_addr=wmon,
+                        token_is_0=token_is_0,
+                    )
+                    
+            storage.mark_token_migrated(
+                token=token,
+                migrated_block=blk,
+                migrated_at=ts,
+                pool=pool or None,
+            )
 
             creator = lp.creator.lower() if lp.creator else ""
             if creator:
@@ -313,6 +365,8 @@ class State:
                     u = models.LaunchpadUser(address=creator)
                     self.launchpad_users[creator] = u
                 u.tokens_graduated += 1
+                
+                storage.increment_user_tokens_graduated(creator)
 
             return pool or None
 

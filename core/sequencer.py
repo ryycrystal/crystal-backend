@@ -228,7 +228,7 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
 
             elif tag in ("MG", "NFT"): # migration or nadfun graduation
                 pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
@@ -251,7 +251,7 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, log.get("address", "").lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
 
         print(
             f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
