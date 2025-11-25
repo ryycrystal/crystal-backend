@@ -9,6 +9,7 @@ import traceback
 import core.storage as storage
 
 from core import chain as h
+from core import cache
 from api.x_api import router as x_router
 from core.storage import db_cursor
 
@@ -303,6 +304,11 @@ def health() -> Dict[str, Any]:
 
 @app.get("/tokens")
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
+    cache_key = "tokens:v1"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
     recent_created_out: List[Dict[str, Any]] = []
     recent_approaching_out: List[Dict[str, Any]] = []
     recent_graduated_out: List[Dict[str, Any]] = []
@@ -390,11 +396,14 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         row["graduationPercentageBps"] = graduation_bps
         recent_created_out.append(row)
 
-    return {
+    result = {
         "recent_created": recent_created_out,
         "recent_approaching": recent_approaching_out,
         "recent_graduated": recent_graduated_out,
     }
+    
+    cache.set(cache_key, result, ttl_seconds=1)
+    return result
 
 
 @app.get("/token/{token_addr}/{chartres}")
@@ -406,6 +415,11 @@ def token_overview_graph(
         description="comma-separated list of addresses to track for trackedtrades",
     ),
 ) -> Dict[str, Any]:
+    cache_key = f"token_overview:v1:{token_addr.lower()}:{chartres}:{tracked or '-'}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
     try:
         if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
             raise HTTPException(status_code=400)
@@ -898,7 +912,7 @@ def token_overview_graph(
             "addresses": sorted(list({a.lower() for a in sniper_addresses})),
         }
 
-        return {
+        result = {
             "buyTxs": int(buy_count or 0),
             "creator": {
                 "id": creator,
@@ -947,6 +961,9 @@ def token_overview_graph(
             "volumeUsd": volume_usd_str,
             "graduationPercentageBps": graduation_bps,
         }
+        
+        cache.set(cache_key, result, ttl_seconds=1)
+        return result
     except Exception:
         print(f"[token_overview_graph] error token={token_addr}")
         traceback.print_exc()
