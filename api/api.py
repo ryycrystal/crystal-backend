@@ -1249,23 +1249,38 @@ def user_volume(user_addr: str) -> Dict[str, Any]:
 
 @app.get("/search/query")
 def search_tokens_api(
-    query: str = Query(..., min_length=1, max_length=64),
+    query: str = Query(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="search string for token name, symbol, or address",
+    ),
     limit: int = Query(20, ge=1, le=100),
-):
-    rows = storage.search_tokens(query, limit)
+) -> Dict[str, Any]:
+    q = query.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="empty query")
 
-    out = []
-    for token, name, symbol, created_at, score in rows:
-        out.append({
-            "token": token,
-            "name": name,
-            "symbol": symbol,
-            "created_at": created_at,
-            "score": float(score),
-        })
+    rows = storage.search_tokens(q, limit)
+
+    results: List[Dict[str, Any]] = []
+
+    for token, circ_supply, _score in rows:
+        token_addr = (token or "").lower()
+        if not token_addr:
+            continue
+
+        row = _serialize_token(token_addr)
+        if not row:
+            continue
+
+        graduation_bps = (circ_supply or 0) / 793100000
+        row["graduationPercentageBps"] = graduation_bps
+
+        results.append(row)
 
     return {
         "query": query,
-        "count": len(out),
-        "results": out,
+        "count": len(results),
+        "results": results,
     }

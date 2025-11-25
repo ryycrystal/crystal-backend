@@ -806,28 +806,31 @@ def upsert_pool(
         
 # api helpers
 def search_tokens(query: str, limit: int = 20):
-    q = query.lower()
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+
+    prefix = q + "%"
+    contains = "%" + q + "%"
 
     with db_cursor() as cur:
         cur.execute(
             """
             SELECT
                 token,
-                name,
-                symbol,
-                created_at,
+                circulating_supply,
                 (
-                    CASE WHEN symbol = %s THEN 100 ELSE 0 END +
-                    CASE WHEN name = %s THEN 90 ELSE 0 END +
-                    CASE WHEN token = %s THEN 80 ELSE 0 END +
+                    CASE WHEN LOWER(symbol) = %s THEN 100 ELSE 0 END +
+                    CASE WHEN LOWER(name) = %s THEN 90 ELSE 0 END +
+                    CASE WHEN LOWER(token) = %s THEN 80 ELSE 0 END +
 
-                    CASE WHEN symbol ILIKE %s THEN 60 ELSE 0 END +
-                    CASE WHEN name ILIKE %s THEN 50 ELSE 0 END +
-                    CASE WHEN token ILIKE %s THEN 40 ELSE 0 END +
+                    CASE WHEN LOWER(symbol) LIKE %s THEN 60 ELSE 0 END +
+                    CASE WHEN LOWER(name) LIKE %s THEN 50 ELSE 0 END +
+                    CASE WHEN LOWER(token) LIKE %s THEN 40 ELSE 0 END +
 
-                    CASE WHEN symbol ILIKE %s THEN 30 ELSE 0 END +
-                    CASE WHEN name ILIKE %s THEN 20 ELSE 0 END +
-                    CASE WHEN token ILIKE %s THEN 10 ELSE 0 END +
+                    CASE WHEN LOWER(symbol) LIKE %s THEN 30 ELSE 0 END +
+                    CASE WHEN LOWER(name) LIKE %s THEN 20 ELSE 0 END +
+                    CASE WHEN LOWER(token) LIKE %s THEN 10 ELSE 0 END +
 
                     similarity(symbol, %s) * 10 +
                     similarity(name, %s) * 10 +
@@ -846,10 +849,10 @@ def search_tokens(query: str, limit: int = 20):
             """,
             (
                 q, q, q,
-                q + "%", q + "%", q + "%", 
-                "%" + q + "%", "%" + q + "%", "%" + q + "%",
+                prefix, prefix, prefix,
+                contains, contains, contains,
                 q, q, q,
-                "%" + q + "%", "%" + q + "%", "%" + q + "%",
+                contains, contains, contains,
                 q, q, q,
                 limit,
             ),
