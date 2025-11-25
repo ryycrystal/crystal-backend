@@ -7,7 +7,7 @@ import threading
 
 getcontext().prec = 100
 
-INTERVALS = (300, 3600, 21600, 86400)
+INTERVALS = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = "https://rpc.monad.xyz"
