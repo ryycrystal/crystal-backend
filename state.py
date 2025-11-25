@@ -359,3 +359,7 @@ class State:
     def snapshot_token_values(self) -> list[models.LaunchpadToken]:
         with self._lock:
             return list(self.launchpad_tokens.values())
+        
+    def snapshot_token_items(self) -> list[tuple[str, models.LaunchpadToken]]:
+        with self._lock:
+            return list(self.launchpad_tokens.items())

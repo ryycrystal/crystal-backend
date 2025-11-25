@@ -369,7 +369,7 @@ def token_overview_graph(
             )
 
         top_traders_list: List[Dict[str, Any]] = []
-        positions_list = state.snapshot_positions_items()
+        positions_list = [p for (_, _), p in state.snapshot_positions_items()]
         for pos in positions_list:
             if getattr(pos, "token", token_addr) != token_addr:
                 continue
@@ -512,7 +512,7 @@ def token_overview_graph(
             now_ts = int(time.time())
             cutoff_ts = now_ts - 3600
 
-            tokens_items = state.snapshot_token_values()
+            tokens_items = state.snapshot_token_items()
 
             for other_token_addr, dev_lp in tokens_items:
                 creator_addr = (getattr(dev_lp, "creator", "") or "").lower()
