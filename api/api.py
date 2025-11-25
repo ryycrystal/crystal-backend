@@ -369,16 +369,18 @@ def token_overview_graph(
             )
 
         top_traders_list: List[Dict[str, Any]] = []
-        positions_list = [p for (_, _), p in state.snapshot_positions_items()]
-        for pos in positions_list:
-            if getattr(pos, "token", token_addr) != token_addr:
+        positions_items_for_token = state.snapshot_positions_items()
+
+        for (_, tkn), pos in positions_items_for_token:
+            if tkn != token_addr:
                 continue
 
-            if getattr(pos, "user", "").lower() == "0x7193E46d4a812c8990F96A6E9c1f1ed338b2a6b7".lower():
+            user_lower = getattr(pos, "user", "").lower()
+            if user_lower == "0x7193e46d4a812c8990f96a6e9c1f1ed338b2a6b7".lower():
                 continue
-            if getattr(pos, "user", "").lower() in h.ADDRS:
+            if user_lower in h.ADDRS:
                 continue
-
+            
             balance_token = int(pos.balance_token)
             native_spent = int(pos.native_spent)
             native_received = int(pos.native_received)
@@ -537,7 +539,7 @@ def token_overview_graph(
                         "symbol": dev_lp.symbol,
                         "metadataCID": getattr(dev_lp, "metadata_cid", ""),
                         "lastPriceNativePerTokenWad": str(dev_price_wad),
-                        "marketcap": dev_marketcap_native,
+                        "marketcap": str(dev_marketcap_native),
                         "migrated": bool(getattr(dev_lp, "migrated", False)),
                         "volumeNative1h": str(vol_1h_native),
                         "holders": int(dev_total_holders),
