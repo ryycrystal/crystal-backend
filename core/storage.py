@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Optional, Iterator
 from contextlib import contextmanager
+from decimal import Decimal
 
 import os
 import threading
@@ -356,7 +357,7 @@ def get_last_processed_block() -> Optional[str]:
     last = row[0]
     return int(last) if last is not None else None
 
-# tradehistory helpers
+# trade helpers
 def insert_trade(
     *,
     block_number: int,
@@ -404,7 +405,218 @@ def insert_trade(
                 txhash,
             ),
         )
+
+def update_token_after_trade(
+    *,
+    token: str,
+    last_price_native,
+    native_volume,
+    token_volume,
+    volume_usd,
+    fees_usd,
+    buy_count: int,
+    sell_count: int,
+    tx_count: int,
+    circulating_supply,
+    approaching_75: bool,
+    approaching_75_block: int,
+    approaching_75_at: int,
+    snipers_count: int,
+) -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE launchpad_tokens
+            SET
+                last_price_native = %s,
+                native_volume = %s,
+                token_volume = %s,
+                volume_usd = %s,
+                fees_usd = %s,
+                buy_count = %s,
+                sell_count = %s,
+                tx_count = %s,
+                circulating_supply = %s,
+                approaching_75 = %s,
+                approaching_75_block = %s,
+                approaching_75_at = %s,
+                snipers_count = %s
+            WHERE token = %s;
+            """,
+            (
+                last_price_native,
+                int(native_volume),
+                int(token_volume),
+                volume_usd,
+                fees_usd,
+                int(buy_count),
+                int(sell_count),
+                int(tx_count),
+                circulating_supply,
+                bool(approaching_75),
+                int(approaching_75_block) if approaching_75_block is not None else None,
+                int(approaching_75_at) if approaching_75_at is not None else None,
+                int(snipers_count),
+                token.lower(),
+            ),
+        )
+
+def update_user_on_trade(
+    *,
+    address: str,
+    native_amount: int,
+    realized_delta,
+) -> None:
+    addr = address.lower()
+    if not addr:
+        return
     
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_users (
+                address,
+                total_native_volume,
+                total_realized_pnl_native,
+                total_trades
+            )
+            VALUES (%s, %s, %s, 1)
+            ON CONFLICT (address) DO UPDATE
+            SET
+                total_native_volume = launchpad_users.total_native_volume + EXCLUDED.total_native_volume,
+                total_realized_pnl_native = launchpad_users.total_realized_pnl_native + EXCLUDED.total_realized_pnl_native,
+                total_trades = launchpad_users.total_trades + EXCLUDED.total_trades;
+            """,
+            (
+                addr,
+                int(abs(native_amount)),
+                realized_delta,
+            ),
+        )
+
+def upsert_position(
+    *,
+    user_address: str,
+    token: str,
+    token_bought: int,
+    token_sold: int,
+    native_spent: int,
+    native_received: int,
+    balance_token: int,
+    realized_pnl_native,
+    unrealized_pnl_native,
+    total_pnl_native,
+    trade_count: int,
+    buy_count: int,
+    sell_count: int, 
+) -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_positions (
+                user_address,
+                token,
+                token_bought,
+                token_sold,
+                native_spent,
+                native_received,
+                balance_token,
+                realized_pnl_native,
+                unrealized_pnl_native,
+                total_pnl_native,
+                trade_count,
+                buy_count,
+                sell_count
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_address, token) DO UPDATE
+            SET
+                token_bought = EXCLUDED.token_bought,
+                token_sold = EXCLUDED.token_sold,
+                native_spent = EXCLUDED.native_spent,
+                native_received = EXCLUDED.native_received,
+                balance_token = EXCLUDED.balance_token,
+                realized_pnl_native = EXCLUDED.realized_pnl_native,
+                unrealized_pnl_native = EXCLUDED.unrealized_pnl_native,
+                total_pnl_native = EXCLUDED.total_pnl_native,
+                trade_count = EXCLUDED.trade_count,
+                buy_count = EXCLUDED.buy_count,
+                sell_count = EXCLUDED.sell_count;
+            """,
+            (
+                user_address.lower(),
+                token.lower(),
+                int(token_bought),
+                int(token_sold),
+                int(native_spent),
+                int(native_received),
+                int(balance_token),
+                realized_pnl_native,
+                unrealized_pnl_native,
+                total_pnl_native,
+                int(trade_count),
+                int(buy_count),
+                int(sell_count),
+            ),
+        )
+
+def upsert_ohlcv(
+    *,
+    token: str,
+    resolution_sec: int,
+    bucket_start: int,
+    price_native,
+    native_amount: int,
+) -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_ohlcv (
+                token,
+                resolution_sec,
+                bucket_start,
+                open_price,
+                high_price,
+                low_price,
+                close_price,
+                quote_volume
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE
+            SET
+                high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
+                low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
+                close_price = EXCLUDED.close_price,
+                quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume;
+            """,
+            (
+                token.lower(),
+                int(resolution_sec),
+                int(bucket_start),
+                price_native,
+                price_native,
+                price_native,
+                price_native,
+                int(abs(native_amount)),
+            ),
+        )
+        
+def add_sniper_address(token: str, user_address: str) -> None:
+    tok = token.lower()
+    addr = user_address.lower()
+    if not tok or not addr:
+        return
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_snipers (token, user_address)
+            VALUES (%s, %s)
+            ON CONFLICT (token, user_address) DO NOTHING;
+            """,
+            (tok, addr),
+        )
+
 # tokens/pools   
 def upsert_token_created(
     *,
