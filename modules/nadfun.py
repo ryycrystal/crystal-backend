@@ -114,8 +114,13 @@ def parse_nadfun_token_created(
             website = meta.get("website", "") or ""
             twitter = meta.get("twitter", "") or ""
             telegram = meta.get("telegram", "") or ""
-        except (URLError, HTTPError, ValueError, json.JSONDecodeError):
+        except Exception as e:
+            print(f"[NADFUN] Metadata fetch failed for {token_uri}: {e!r}")
             image_uri = ""
+            description = description or ""
+            website = website or ""
+            twitter = twitter or ""
+            telegram = telegram or ""
 
     metadata_cid = image_uri or token_uri or ""
 
