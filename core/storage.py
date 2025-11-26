@@ -11,7 +11,7 @@ from psycopg2.pool import ThreadedConnectionPool
 
 _DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL", "postgresql://postgres:ShIsCu2024;1@localhost:5432/postgres")
 _DB_MIN_CONN: int = 1
-_DB_MAX_CONN: int = 10
+_DB_MAX_CONN: int = 75
 
 _POOL: Optional[ThreadedConnectionPool] = None
 _POOL_LOCK = threading.Lock()
