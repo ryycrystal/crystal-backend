@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List
+from typing import Dict
 from decimal import Decimal, getcontext
 import models
 import core.storage as storage
@@ -16,17 +16,114 @@ class State:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         
+        self.mon_price_usd = Decimal("0.03")
+        
         # launchpad
         self.launchpad_tokens: Dict[str, models.LaunchpadToken] = {} # tokenAddress -> LaunchpadToken
-        self.launchpad_users: Dict[str, models.LaunchpadUser] = {} # userAddress -> LaunchpadUser
-        self.launchpad_positions: Dict[tuple[str, str], models.LaunchpadPosition] = {} # [userAddress, tokenAddress] -> LaunchpadPosition
         self.launchpad_market_to_token: Dict[str, str] = {} # market/pool -> tokenAddress
-        self.launchpad_trades: Dict[str, List[models.LaunchpadTrade]] = {} # tokenAddress -> LaunchpadTrade[]
-        self.launchpad_snipers: Dict[str, set[str]] = {} # tokenAddress -> Set(userAddress)
 
         # graduated launchpad
         self.v3_pools: Dict[str, models.PoolInfo] = {} # poolAddress -> PoolInfo
         self.token_to_v3_pool: Dict[str, str] = {} # tokenAddress -> poolAddress
+        
+    # oracle
+    def set_mon_price_usd(self, price) -> None:
+        with self._lock:
+            try:
+                self.mon_price_usd = Decimal(price)
+            except Exception:
+                pass
+        
+    # reconstruction
+    def rebuild_from_db(self) -> None:
+        with self._lock:
+            self.launchpad_tokens.clear()
+            self.launchpad_market_to_token.clear()
+            self.v3_pools.clear()
+            self.token_to_v3_pool.clear()
+
+            token_rows = storage.load_tokens_for_state()
+            for row in token_rows:
+                (
+                    token,
+                    creator,
+                    name,
+                    symbol,
+                    metadata_cid,
+                    description,
+                    social1,
+                    social2,
+                    social3,
+                    social4,
+                    source,
+                    created_block,
+                    created_at,
+                    migrated,
+                    migrated_block,
+                    migrated_at,
+                    market,
+                    last_price_native,
+                    native_volume,
+                    token_volume,
+                    volume_usd,
+                    fees_usd,
+                    buy_count,
+                    sell_count,
+                    tx_count,
+                    circulating_supply,
+                    snipers_count,
+                    approaching_75,
+                    approaching_75_block,
+                    approaching_75_at,
+                ) = row
+
+                lp = models.LaunchpadToken(
+                    token=token,
+                    creator=creator,
+                    name=name,
+                    symbol=symbol,
+                    metadata_cid=metadata_cid,
+                    description=description,
+                    social1=social1,
+                    social2=social2,
+                    social3=social3,
+                    social4=social4,
+                    source=int(source),
+                    created_block=int(created_block),
+                    created_at=int(created_at),
+                    migrated=bool(migrated),
+                    migrated_block=int(migrated_block) if migrated_block is not None else None,
+                    migrated_at=int(migrated_at) if migrated_at is not None else None,
+                    market=market,
+                    last_price_native=Decimal(last_price_native),
+                    native_volume=int(native_volume),
+                    token_volume=int(token_volume),
+                    volume_usd=Decimal(volume_usd),
+                    fees_usd=Decimal(fees_usd),
+                    buy_count=int(buy_count),
+                    sell_count=int(sell_count),
+                    tx_count=int(tx_count),
+                    circulating_supply=int(circulating_supply),
+                    snipers=int(snipers_count),
+                    approaching_75=bool(approaching_75),
+                    approaching_75_block=int(approaching_75_block) if approaching_75_block is not None else 0,
+                    approaching_75_at=int(approaching_75_at) if approaching_75_at is not None else 0,
+                )
+
+                self.launchpad_tokens[token.lower()] = lp
+                if market:
+                    self.launchpad_market_to_token[market.lower()] = token.lower()
+
+            pool_rows = storage.load_all_pools()
+            for pool, token_addr, native_addr, token_is_0 in pool_rows:
+                pi = models.PoolInfo(
+                    pool=pool.lower(),
+                    token_addr=token_addr.lower(),
+                    native_addr=native_addr.lower(),
+                    token_is_0=bool(token_is_0),
+                )
+                self.v3_pools[pi.pool] = pi
+                self.token_to_v3_pool[pi.token_addr] = pi.pool
 
     # launchpad
 
@@ -92,13 +189,7 @@ class State:
                 last_price_native=lp.last_price_native,
             )
             
-            if creator:
-                u = self.launchpad_users.get(creator)
-                if u is None:
-                    u = models.LaunchpadUser(address=creator)
-                    self.launchpad_users[creator] = u
-                u.tokens_created += 1
-                
+            if creator:                
                 storage.increment_user_tokens_created(creator)
 
     # applies a trade       
@@ -203,14 +294,9 @@ class State:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
-                        s = self.launchpad_snipers.get(token)
-                        if s is None:
-                            s = set()
-                            self.launchpad_snipers[token] = s
-                        if user_addr not in s:
-                            s.add(user_addr)
+                        inserted = storage.add_sniper_address(token, user_addr)
+                        if inserted:
                             lp.snipers += 1
-                            storage.add_sniper_address(token, user_addr)
 
                 if is_buy:
                     lp.circulating_supply += token_amt / 1e18
@@ -244,60 +330,34 @@ class State:
             else:
                 lp.sell_count += 1
 
-            mon_price = Decimal(0.05)
+            mon_price = self.mon_price_usd
             if mon_price > 0:
                 volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
                 lp.volume_usd += volume_usd_trade
                 lp.fees_usd += volume_usd_trade * Decimal("0.01")
 
-            lu = self.launchpad_users.get(user)
-            if lu is None:
-                lu = models.LaunchpadUser(address=user)
-                self.launchpad_users[user] = lu
-            lu.total_trades += 1
-
-            key = (user, token)
-            pos = self.launchpad_positions.get(key)
-            if pos is None:
-                pos = models.LaunchpadPosition(user=user, token=token)
-                self.launchpad_positions[key] = pos
-
-            pos.trade_count += 1
             if is_buy:
-                pos.buy_count += 1
-                pos.token_bought += token_amt
-                pos.native_spent += native_amt
+                token_bought_delta = int(token_amt)
+                token_sold_delta = 0
+                native_spent_delta = int(native_amt)
+                native_received_delta = 0
+                balance_token_delta = int(token_amt)
+                realized_delta = Decimal(-native_amt)
+                buy_count_delta = 1
+                sell_count_delta = 0
             else:
-                pos.sell_count += 1
-                pos.token_sold += token_amt
-                pos.native_received += native_amt
+                token_bought_delta = 0
+                token_sold_delta = int(token_amt)
+                native_spent_delta = 0
+                native_received_delta = int(native_amt)
+                balance_token_delta = -int(token_amt)
+                realized_delta = Decimal(native_amt)
+                buy_count_delta = 0
+                sell_count_delta = 1
 
-            old_realized = pos.realized_pnl_native
-            realized_native = pos.native_received - pos.native_spent
-            pos.realized_pnl_native = Decimal(realized_native)
-
-            delta_realized = pos.realized_pnl_native - old_realized
-            lu.total_realized_pnl_native += delta_realized
+            trade_count_delta = 1
             
-            trades = self.launchpad_trades.setdefault(token, [])
             usd_amount = Decimal(native_amt) * Decimal(0.05)
-            trades.append(
-                models.LaunchpadTrade(
-                    block_number=blk,
-                    timestamp=int(ts),
-                    token=token,
-                    user=user,
-                    is_buy=is_buy,
-                    native_amount=int(native_amt),
-                    token_amount=int(token_amt),
-                    usd_amount=usd_amount,
-                    price_native=lp.last_price_native,
-                    txhash=txh
-                )
-            )
-            
-            if len(trades) > 50000:
-                trades[:] = trades[-50000:]
                 
             storage.insert_trade(
                 block_number=blk,
@@ -331,27 +391,22 @@ class State:
             storage.update_user_on_trade(
                 address=user,
                 native_amount=int(native_amt),
-                realized_delta=delta_realized,
+                realized_delta=realized_delta,
             )
-            
-            balance_token = int(pos.balance_token)
-            unrealized_pnl_native = Decimal(balance_token) * lp.last_price_native
-            total_pnl_native = pos.realized_pnl_native + unrealized_pnl_native
             
             storage.upsert_position(
                 user_address=user,
                 token=token,
-                token_bought=int(pos.token_bought),
-                token_sold=int(pos.token_sold),
-                native_spent=int(pos.native_spent),
-                native_received=int(pos.native_received),
-                balance_token=balance_token,
-                realized_pnl_native=pos.realized_pnl_native,
-                unrealized_pnl_native=unrealized_pnl_native,
-                total_pnl_native=total_pnl_native,
-                trade_count=pos.trade_count,
-                buy_count=pos.buy_count,
-                sell_count=pos.sell_count,
+                token_bought_delta=token_bought_delta,
+                token_sold_delta=token_sold_delta,
+                native_spent_delta=native_spent_delta,
+                native_received_delta=native_received_delta,
+                balance_token_delta=balance_token_delta,
+                realized_pnl_delta=realized_delta,
+                trade_count_delta=trade_count_delta,
+                buy_count_delta=buy_count_delta,
+                sell_count_delta=sell_count_delta,
+                last_price_native=lp.last_price_native,
             )
             
             for bucket_seconds in INTERVALS:
@@ -412,13 +467,7 @@ class State:
             )
 
             creator = lp.creator.lower() if lp.creator else ""
-            if creator:
-                u = self.launchpad_users.get(creator)
-                if u is None:
-                    u = models.LaunchpadUser(address=creator)
-                    self.launchpad_users[creator] = u
-                u.tokens_graduated += 1
-                
+            if creator:               
                 storage.increment_user_tokens_graduated(creator)
 
             return pool or None
@@ -430,7 +479,8 @@ class State:
             if not token:
                 return
 
-            if token not in self.launchpad_tokens:
+            lp = self.launchpad_tokens.get(token)
+            if lp is None:
                 return
 
             amount = int(ev.get("amount", 0) or 0)
@@ -443,30 +493,24 @@ class State:
             zero = "0x" + "0" * 40
 
             def adjust(user: str, delta: int) -> None:
-                if not user or user == zero:
+                addr = (user or "").lower()
+                if not addr or addr == zero or delta == 0:
                     return
-                
-                key = (user, token)
-                pos = self.launchpad_positions.get(key)
-                if pos is None:
-                    pos = models.LaunchpadPosition(user=user, token=token)
-                    self.launchpad_positions[key] = pos
-                pos.balance_token += delta
-                if pos.balance_token < 0:
-                    pos.balance_token = 0
+
+                storage.upsert_position(
+                    user_address=addr,
+                    token=token,
+                    token_bought_delta=0,
+                    token_sold_delta=0,
+                    native_spent_delta=0,
+                    native_received_delta=0,
+                    balance_token_delta=int(delta),
+                    realized_pnl_delta=Decimal(0),
+                    trade_count_delta=0,
+                    buy_count_delta=0,
+                    sell_count_delta=0,
+                    last_price_native=lp.last_price_native,
+                )
 
             adjust(from_addr, -amount)
             adjust(to_addr, amount)
-        
-    # snapshots safe
-    def snapshot_positions_items(self) -> list[tuple[tuple[str, str], models.LaunchpadPosition]]:
-        with self._lock:
-            return list(self.launchpad_positions.items())
-    
-    def snapshot_token_values(self) -> list[models.LaunchpadToken]:
-        with self._lock:
-            return list(self.launchpad_tokens.values())
-        
-    def snapshot_token_items(self) -> list[tuple[str, models.LaunchpadToken]]:
-        with self._lock:
-            return list(self.launchpad_tokens.items())

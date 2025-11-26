@@ -7,6 +7,7 @@ import urllib.request
 
 from core import chain as h
 from core.sequencer import SEQUENCER
+from core import oracle
 from state import RPC_HTTP
 
 # parse cli arguments for the backfiller process
@@ -82,7 +83,7 @@ async def fetch_logs(ws, frm: int, to: int):
 async def backfill(start_block: int, batch: int) -> int:
     async with websockets.connect(h.WS_URL, max_size=None) as ws:
         head_snapshot = await get_head(ws)
-        print(f"[Backfill] Init chain head = {head_snapshot}")
+        print(f"[Backfill] CH @ Init = {head_snapshot}")
 
         last_processed = start_block - 1
 
@@ -94,6 +95,13 @@ async def backfill(start_block: int, batch: int) -> int:
                 if current_head >= chunk_end:
                     break
                 await asyncio.sleep(0.5)
+                
+            try:
+                price = oracle.fetch_mon_price(chunk_start)
+                SEQUENCER._state.set_mon_price_usd(price)
+                print(f"[Backfill] Batch {chunk_start}-{chunk_end} MON={price}")
+            except Exception as e:
+                print(f"[Backfill] Oracle Error: {e!r}")
 
             logs = await fetch_logs(ws, chunk_start, chunk_end)
 
@@ -109,5 +117,5 @@ async def backfill(start_block: int, batch: int) -> int:
 
             last_processed = chunk_end
 
-        print(f"[Backfill] complete, last processed = {last_processed}")
+        print(f"[Backfill] Complete, LP = {last_processed}")
         return last_processed
