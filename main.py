@@ -25,6 +25,8 @@ async def _boot_streamer() -> None:
     storage.init_pool()
     storage.init_db()
     
+    SEQUENCER.set_on_block(storage.record_block_processed)
+    
     SEQUENCER._state.rebuild_from_db()
     
     last_blk = storage.get_last_processed_block()
