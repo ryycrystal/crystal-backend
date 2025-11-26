@@ -10,7 +10,6 @@ import traceback
 import core.storage as storage
 
 from core import chain as h
-from core import cache
 from api.x_api import router as x_router
 from core.storage import db_cursor
 
@@ -318,12 +317,7 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/tokens")
-def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
-    cache_key = "tokens:v1"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    
+def list_tokens() -> Dict[str, List[Dict[str, Any]]]:   
     t0 = time.time()
     
     recent_created_out: List[Dict[str, Any]] = []
@@ -422,7 +416,6 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     dt = (time.time() - t0) * 1000
     log.info("token_list dt_ms=%.1f", dt)
     
-    cache.set(cache_key, result, ttl_seconds=1)
     return result
 
 
@@ -434,12 +427,7 @@ def token_overview_graph(
         "",
         description="comma-separated list of addresses to track for trackedtrades",
     ),
-) -> Dict[str, Any]:
-    cache_key = f"token_overview:v1:{token_addr.lower()}:{chartres}:{tracked or '-'}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    
+) -> Dict[str, Any]:    
     t0 = time.time()
     
     try:
@@ -984,7 +972,6 @@ def token_overview_graph(
             "graduationPercentageBps": graduation_bps,
         }
         
-        cache.set(cache_key, result, ttl_seconds=1)
         return result
     except Exception:
         print(f"[token_overview_graph] error token={token_addr}")

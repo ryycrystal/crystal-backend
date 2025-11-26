@@ -526,18 +526,35 @@ def upsert_position(
     *,
     user_address: str,
     token: str,
-    token_bought: int,
-    token_sold: int,
-    native_spent: int,
-    native_received: int,
-    balance_token: int,
-    realized_pnl_native,
-    unrealized_pnl_native,
-    total_pnl_native,
-    trade_count: int,
-    buy_count: int,
-    sell_count: int, 
+    token_bought_delta: int,
+    token_sold_delta: int,
+    native_spent_delta: int,
+    native_received_delta: int,
+    balance_token_delta: int,
+    realized_pnl_delta,
+    trade_count_delta: int,
+    buy_count_delta: int,
+    sell_count_delta: int,
+    last_price_native,
 ) -> None:
+    addr = user_address.lower()
+    tok = token.lower()
+    if not addr or not tok:
+        return
+
+    tb = int(token_bought_delta)
+    ts = int(token_sold_delta)
+    ns = int(native_spent_delta)
+    nr = int(native_received_delta)
+    bd = int(balance_token_delta)
+    tc = int(trade_count_delta)
+    bc = int(buy_count_delta)
+    sc = int(sell_count_delta)
+
+    balance_insert = max(bd, 0)
+    unrealized_insert = Decimal(balance_insert) * Decimal(last_price_native)
+    total_insert = Decimal(realized_pnl_delta) + unrealized_insert
+
     with db_cursor() as cur:
         cur.execute(
             """
@@ -559,32 +576,36 @@ def upsert_position(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_address, token) DO UPDATE
             SET
-                token_bought = EXCLUDED.token_bought,
-                token_sold = EXCLUDED.token_sold,
-                native_spent = EXCLUDED.native_spent,
-                native_received = EXCLUDED.native_received,
-                balance_token = EXCLUDED.balance_token,
-                realized_pnl_native = EXCLUDED.realized_pnl_native,
-                unrealized_pnl_native = EXCLUDED.unrealized_pnl_native,
-                total_pnl_native = EXCLUDED.total_pnl_native,
-                trade_count = EXCLUDED.trade_count,
-                buy_count = EXCLUDED.buy_count,
-                sell_count = EXCLUDED.sell_count;
+                token_bought = launchpad_positions.token_bought + EXCLUDED.token_bought,
+                token_sold = launchpad_positions.token_sold + EXCLUDED.token_sold,
+                native_spent = launchpad_positions.native_spent + EXCLUDED.native_spent,
+                native_received = launchpad_positions.native_received + EXCLUDED.native_received,
+                balance_token = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0),
+                realized_pnl_native = launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native,
+                trade_count = launchpad_positions.trade_count + EXCLUDED.trade_count,
+                buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
+                sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
+                unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s,
+                total_pnl_native = (
+                    launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
+                ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s;
             """,
             (
-                user_address.lower(),
-                token.lower(),
-                int(token_bought),
-                int(token_sold),
-                int(native_spent),
-                int(native_received),
-                int(balance_token),
-                realized_pnl_native,
-                unrealized_pnl_native,
-                total_pnl_native,
-                int(trade_count),
-                int(buy_count),
-                int(sell_count),
+                addr,
+                tok,
+                tb,
+                ts,
+                ns,
+                nr,
+                bd,
+                realized_pnl_delta,
+                unrealized_insert,
+                total_insert,
+                tc,
+                bc,
+                sc,
+                last_price_native,
+                last_price_native,
             ),
         )
 
@@ -629,11 +650,11 @@ def upsert_ohlcv(
             ),
         )
         
-def add_sniper_address(token: str, user_address: str) -> None:
+def add_sniper_address(token: str, user_address: str) -> bool:
     tok = token.lower()
     addr = user_address.lower()
     if not tok or not addr:
-        return
+        return False
 
     with db_cursor() as cur:
         cur.execute(
@@ -644,6 +665,17 @@ def add_sniper_address(token: str, user_address: str) -> None:
             """,
             (tok, addr),
         )
+        inserted = cur.rowcount == 1
+        if inserted:
+            cur.execute(
+                """
+                UPDATE launchpad_tokens
+                SET snipers_count = snipers_count + 1
+                WHERE token = %s;
+                """,
+                (tok,),
+            )
+    return inserted
 
 # tokens/pools   
 def upsert_token_created(
@@ -803,6 +835,55 @@ def upsert_pool(
                 bool(token_is_0),
             ),
         )
+
+# reload/state reconstruction      
+def load_all_pools():
+    with db_cursor() as cur:
+        cur.execute("""
+            SELECT pool, token_addr, native_addr, token_is_0
+            FROM launchpad_pools
+        """)
+        return cur.fetchall()
+    
+def load_tokens_for_state():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                token,
+                creator,
+                name,
+                symbol,
+                metadata_cid,
+                description,
+                social1,
+                social2,
+                social3,
+                social4,
+                source,
+                created_block,
+                created_at,
+                migrated,
+                migrated_block,
+                migrated_at,
+                market,
+                last_price_native,
+                native_volume,
+                token_volume,
+                volume_usd,
+                fees_usd,
+                buy_count,
+                sell_count,
+                tx_count,
+                circulating_supply,
+                snipers_count,
+                approaching_75,
+                approaching_75_block,
+                approaching_75_at
+            FROM launchpad_tokens
+            """
+        )
+        return cur.fetchall()
         
 # api helpers
 def search_tokens(query: str, limit: int = 20):
