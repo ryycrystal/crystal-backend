@@ -110,6 +110,20 @@ async def backfill(start_block: int, batch: int) -> int:
                 tag = h.EVENT_SIGS.get(raw["topics"][0].lower())
                 if tag:
                     counts[tag] += 1
+
+                addr = raw.get("address", "").lower()
+
+                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                    if addr != h.CONTRACTS["NADFUN"].lower():
+                        continue
+
+                elif tag == "V3SWAP":
+                    if addr not in h.ADDRS:
+                        continue
+
+                elif tag == "TF":
+                    pass
+                
                 SEQUENCER.add_log(raw)
 
             for blk in range(chunk_start, chunk_end + 1):

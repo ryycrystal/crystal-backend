@@ -4,6 +4,7 @@ from decimal import Decimal, getcontext
 import models
 import core.storage as storage
 import threading
+from core import chain as h
 
 getcontext().prec = 100
 
@@ -128,8 +129,11 @@ class State:
     # launchpad
 
     # apply token creation
-    def apply_token_created(self, blk: int, ev: dict, ts: int, _log_addr: str) -> None:
+    def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str) -> None:
         with self._lock:
+            if log_addr.lower() != h.CONTRACTS["NADFUN"].lower():
+                return
+            
             token = ev.get("token","").lower()
             if not token:
                 return
@@ -420,8 +424,11 @@ class State:
                 )
 
     # applies graduation/migration
-    def apply_migrated(self, blk: int, ts: int, ev: dict, _log_addr: str) -> str | None:
+    def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str) -> str | None:
         with self._lock:
+            if log_addr.lower() != h.CONTRACTS["NADFUN"].lower():
+                return None
+            
             token = (ev.get("token") or "").lower()
             if not token:
                 return None

@@ -45,7 +45,6 @@ async def _gap_worker(event_counts):
                     "params": [{
                         "fromBlock": hex(blk_start),
                         "toBlock": hex(blk_end),
-                        "address": h.ADDRS,
                         "topics": [h.TOPICS],
                     }],
                 }))
@@ -60,11 +59,22 @@ async def _gap_worker(event_counts):
                 tag = h.EVENT_SIGS.get(topics[0].lower())
                 if not tag:
                     continue
-                
-                if tag != "TF":
-                    addr = log.get("address", "").lower()
+
+                addr = log.get("address", "").lower()
+
+                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                    if addr != h.CONTRACTS["NADFUN"].lower():
+                        continue
+
+                elif tag == "V3SWAP":
                     if addr not in h.ADDRS:
                         continue
+
+                elif tag == "TF":
+                    pass
+
+                else:
+                    continue
                     
                 if tag in event_counts:
                     event_counts[tag] += 1
@@ -178,10 +188,21 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 if not tag:
                     continue
 
-                if tag != "TF":
-                    addr = res.get("address", "").lower()
+                addr = res.get("address", "").lower()
+
+                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                    if addr != h.CONTRACTS["NADFUN"].lower():
+                        continue
+
+                elif tag == "V3SWAP":
                     if addr not in h.ADDRS:
                         continue
+
+                elif tag == "TF":
+                    pass
+
+                else:
+                    continue
 
                 if tag in event_counts:
                     event_counts[tag] += 1
