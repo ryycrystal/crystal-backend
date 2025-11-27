@@ -49,7 +49,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
             """
             SELECT user_address, balance_token
             FROM launchpad_positions
-            WHERE token = %s AND balance_token > 100
+            WHERE token = %s AND balance_token > 1
             """,
             (token_addr,),
         )
@@ -62,7 +62,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
 
         if ua == creator_addr:
             dev_holding = bal
-            continue
+            
         if ua in excluded:
             continue
 
