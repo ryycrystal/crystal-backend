@@ -29,11 +29,16 @@ log.setLevel(logging.INFO)
 log.propagate = False
 
 AGGREGATOR_ADDR = "0x7193e46d4a812c8990f96a6e9c1f1ed338b2a6b7".lower()
-EXCLUDED_INTERNAL_ADDRS = {a.lower() for a in getattr(h, "ADDRS", [])} | {AGGREGATOR_ADDR}
+
+def _internal_addrs() -> set[str]:
+    base = {AGGREGATOR_ADDR}
+    base.update(a.lower() for a in getattr(h, "ADDRS", []))
+    return base
 
 def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
+    excluded = _internal_addrs()
 
     holder_count = 0
     top10_holding = 0
@@ -58,7 +63,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
         if ua == creator_addr:
             dev_holding = bal
             continue
-        if ua in EXCLUDED_INTERNAL_ADDRS:
+        if ua in excluded:
             continue
 
         filtered_balances.append(bal)
@@ -429,6 +434,7 @@ def token_overview_graph(
     ),
 ) -> Dict[str, Any]:    
     t0 = time.time()
+    excluded = _internal_addrs()
     
     try:
         if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
@@ -526,7 +532,7 @@ def token_overview_graph(
                 FROM launchpad_positions
                 WHERE token = %s AND user_address <> ALL(%s)
                 """,
-                (token_addr, list(EXCLUDED_INTERNAL_ADDRS)),
+                (token_addr, list(excluded)),
             )
             buyers_sellers = cur.fetchone()
 
@@ -586,8 +592,9 @@ def token_overview_graph(
                 FROM launchpad_positions
                 WHERE token = %s AND balance_token > 0 AND user_address <> ALL(%s)
                 ORDER BY balance_token DESC
+                LIMIT 50
                 """,
-                (token_addr, list(EXCLUDED_INTERNAL_ADDRS)),
+                (token_addr, list(excluded)),
             )
             pos_rows = cur.fetchall()
 
@@ -671,7 +678,7 @@ def token_overview_graph(
                 ORDER BY total_pnl_native DESC
                 LIMIT 50
                 """,
-                (token_addr, list(EXCLUDED_INTERNAL_ADDRS)),
+                (token_addr, list(excluded)),
             )
             trader_rows = cur.fetchall()
 
@@ -1284,7 +1291,7 @@ def search_tokens_api(
         max_length=64,
         description="search string for token name, symbol, or address",
     ),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(10, ge=1, le=10),
 ) -> Dict[str, Any]:
     q = query.strip()
     if not q:

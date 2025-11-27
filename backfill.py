@@ -81,55 +81,65 @@ async def fetch_logs(ws, frm: int, to: int):
 # seeds headers and replaying logs into the sequencer in order
 # returns the last processed block.     
 async def backfill(start_block: int, batch: int) -> int:
-    async with websockets.connect(h.WS_URL, max_size=None) as ws:
-        head_snapshot = await get_head(ws)
-        print(f"[Backfill] CH @ Init = {head_snapshot}")
+    while True:
+        try:
+            async with websockets.connect(h.WS_URL, max_size=None) as ws:
+                head_snapshot = await get_head(ws)
+                print(f"[Backfill] CH @ Init = {head_snapshot}")
 
-        last_processed = start_block - 1
+                last_processed = start_block - 1
 
-        for chunk_start in range(start_block, head_snapshot + 1, batch):
-            chunk_end = min(chunk_start + batch - 1, head_snapshot)
+                for chunk_start in range(start_block, head_snapshot + 1, batch):
+                    chunk_end = min(chunk_start + batch - 1, head_snapshot)
 
-            while True:
-                current_head = await get_head(ws)
-                if current_head >= chunk_end:
-                    break
-                await asyncio.sleep(0.5)
-                
-            try:
-                price = oracle.fetch_mon_price(chunk_start)
-                SEQUENCER._state.set_mon_price_usd(price)
-                print(f"[Backfill] Batch {chunk_start}-{chunk_end} MON={price}")
-            except Exception as e:
-                print(f"[Backfill] Oracle Error: {e!r}")
+                    while True:
+                        current_head = await get_head(ws)
+                        if current_head >= chunk_end:
+                            break
+                        await asyncio.sleep(0.5)
+                        
+                    try:
+                        price = oracle.fetch_mon_price(chunk_start)
+                        SEQUENCER._state.set_mon_price_usd(price)
+                        print(f"[Backfill] Batch {chunk_start}-{chunk_end} MON={price}")
+                    except Exception as e:
+                        print(f"[Backfill] Oracle Error: {e!r}")
 
-            logs = await fetch_logs(ws, chunk_start, chunk_end)
+                    logs = await fetch_logs(ws, chunk_start, chunk_end)
 
-            counts = {v: 0 for v in h.EVENT_SIGS.values()}
-            for raw in logs:
-                tag = h.EVENT_SIGS.get(raw["topics"][0].lower())
-                if tag:
-                    counts[tag] += 1
+                    counts = {v: 0 for v in h.EVENT_SIGS.values()}
+                    for raw in logs:
+                        tag = h.EVENT_SIGS.get(raw["topics"][0].lower())
+                        if tag:
+                            counts[tag] += 1
+                        else:
+                            continue
 
-                addr = raw.get("address", "").lower()
+                        addr = raw.get("address", "").lower()
 
-                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                    if addr != h.CONTRACTS["NADFUN"].lower():
-                        continue
+                        if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                            if addr != h.CONTRACTS["NADFUN"].lower():
+                                continue
 
-                elif tag == "V3SWAP":
-                    if addr not in h.ADDRS:
-                        continue
+                        elif tag == "V3SWAP":
+                            pass
 
-                elif tag == "TF":
-                    pass
-                
-                SEQUENCER.add_log(raw)
+                        elif tag == "TF":
+                            pass
+                        
+                        SEQUENCER.add_log(raw)
 
-            for blk in range(chunk_start, chunk_end + 1):
-                SEQUENCER.note_block(blk)
+                    for blk in range(chunk_start, chunk_end + 1):
+                        SEQUENCER.note_block(blk)
 
-            last_processed = chunk_end
+                    last_processed = chunk_end
 
-        print(f"[Backfill] Complete, LP = {last_processed}")
-        return last_processed
+                print(f"[Backfill] Complete, LP = {last_processed}")
+                return last_processed
+            
+        except TimeoutError as e:
+            print(f"[Backfill] WS connect timeout {e!r}, retrying in 5s", flush=True)
+            await asyncio.sleep(5.0)
+        except Exception as e:
+            print(f"[Backfill] Fatal Error {e!r}", flush=True)
+            raise

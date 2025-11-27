@@ -125,6 +125,9 @@ class State:
                 )
                 self.v3_pools[pi.pool] = pi
                 self.token_to_v3_pool[pi.token_addr] = pi.pool
+                
+                if pool.lower() not in h.ADDRS:
+                    h.ADDRS.append(pool.lower())
 
     # launchpad
 
@@ -294,7 +297,7 @@ class State:
             lp.last_price_native = price_native
                 
             if not is_v3_swap:
-                if is_buy and blk <= lp.created_block + 4:
+                if is_buy and blk <= lp.created_block + 10:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
@@ -345,7 +348,7 @@ class State:
                 token_sold_delta = 0
                 native_spent_delta = int(native_amt)
                 native_received_delta = 0
-                balance_token_delta = int(token_amt)
+                balance_token_delta = 0
                 realized_delta = Decimal(-native_amt)
                 buy_count_delta = 1
                 sell_count_delta = 0
@@ -354,7 +357,7 @@ class State:
                 token_sold_delta = int(token_amt)
                 native_spent_delta = 0
                 native_received_delta = int(native_amt)
-                balance_token_delta = -int(token_amt)
+                balance_token_delta = 0
                 realized_delta = Decimal(native_amt)
                 buy_count_delta = 0
                 sell_count_delta = 1
@@ -498,10 +501,13 @@ class State:
             to_addr = (ev.get("to") or "").lower()
 
             zero = "0x" + "0" * 40
+            internal = {a.lower() for a in getattr(h, "ADDRS", [])}
 
             def adjust(user: str, delta: int) -> None:
                 addr = (user or "").lower()
                 if not addr or addr == zero or delta == 0:
+                    return
+                if addr in internal:
                     return
 
                 storage.upsert_position(

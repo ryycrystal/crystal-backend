@@ -51,7 +51,7 @@ async def _gap_worker(event_counts):
                 resp = await h.ack(gap_ws, rid)
 
             # handing logs to sequencer
-            for log in resp.get("result", []):
+            for log in resp.get("result", []):                
                 topics = log.get("topics") or []
                 if not topics:
                     continue
@@ -67,8 +67,7 @@ async def _gap_worker(event_counts):
                         continue
 
                 elif tag == "V3SWAP":
-                    if addr not in h.ADDRS:
-                        continue
+                    pass
 
                 elif tag == "TF":
                     pass
@@ -83,6 +82,12 @@ async def _gap_worker(event_counts):
 
             for blk in range(blk_start, blk_end + 1):
                 SEQUENCER.note_block(blk)
+                
+        except TimeoutError:
+            print(f"[Backfill] WS connect timeout for range {blk_start}-{blk_end}, retrying", flush=True)
+            for blk in range(blk_start, blk_end + 1):
+                _add_missing(blk)
+            await asyncio.sleep(5.0)
 
         except RuntimeError as e:
             err = e.args[0]
@@ -94,6 +99,13 @@ async def _gap_worker(event_counts):
                 await asyncio.sleep(1.0)
             else:
                 raise
+            
+        except Exception as e:
+            print(f"[Backfill] Fatal Error for range {blk_start}-{blk_end}: {e!r}, retrying", flush=True)
+            for blk in range(blk_start, blk_end + 1):
+                _add_missing(blk)
+            await asyncio.sleep(5.0)
+
 
 # one websocket session to subscribe to heads + logs, feed sequencer, handle head gaps and watchdog
 async def _stream_once(prev_last_head: int | None) -> int | None:
@@ -102,7 +114,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         ping_timeout=20,
         close_timeout=5,
         max_queue=None,
-        open_timeout=10,
+        open_timeout=30,
         max_size=None,
     )
     async with websockets.connect(h.WS_URL, **connect_kwargs) as ws:
@@ -137,9 +149,14 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
             while True:
                 await asyncio.sleep(0.5)
                 if time.monotonic() - last_head_ts > HEAD_TIMEOUT:
-                    print("[wd] no newHeads, forcing reconnect and backfill", flush=True)
+                    print("[WS] No newHeads, forcing reconnect and backfill", flush=True)
                     if last_head_num is not None:
-                        await backfill.backfill(last_head_num, BACKFILL_BATCH)
+                        try:
+                            await backfill.backfill(last_head_num, BACKFILL_BATCH)
+                        except TimeoutError as e:
+                            print(f"[WS] Backfill WS timeout {e!r}, skipping backfill", flush=True)
+                        except Exception as e:
+                            print(f"[WS] Backfill Failed {e!r}", flush=True)
                     await ws.close()
                     return
 
@@ -195,8 +212,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                         continue
 
                 elif tag == "V3SWAP":
-                    if addr not in h.ADDRS:
-                        continue
+                    pass
 
                 elif tag == "TF":
                     pass
