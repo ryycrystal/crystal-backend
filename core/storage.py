@@ -360,6 +360,17 @@ def init_db() -> None:
             ON launchpad_snipers (user_address); 
             """
         )
+        
+        # mon price
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS launchpad_meta
+            (
+                key   TEXT PRIMARY KEY,
+                value NUMERIC(50, 18) NOT NULL
+            );
+            """
+        )
 
 # block helpers
 def record_block_processed(block_number: int) -> None:
@@ -939,3 +950,28 @@ def search_tokens(query: str, limit: int = 20):
             ),
         )
         return cur.fetchall()
+    
+def set_mon_price_usd(value) -> None:
+    val = Decimal(value)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_meta (key, value)
+            VALUES ('mon_price_usd', %s)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value;
+            """,
+            (val,),
+        )
+
+def get_mon_price_usd():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT value
+            FROM launchpad_meta
+            WHERE key = 'mon_price_usd';
+            """
+        )
+        row = cur.fetchone()
+    return row[0] if row else None

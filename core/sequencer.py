@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Dict, List, Callable, Optional
 
 from core import chain as h
+from core import oracle
 import state as _st
 
 # facilitates the processing of logs into state, in the right order
@@ -241,6 +242,11 @@ class Sequencer:
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
             elif tag == "V3SWAP": # graduated nadfun v3 pool trade
+                pool_addr = (log.get("address") or "").lower()
+                if pool_addr == "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower():
+                    px = oracle.mon_price_from_v3swap(parsed)
+                    self._state.set_mon_price_usd(px)
+                        
                 real_user = self._resolve_trade_user(
                     txh,
                     parsed,
@@ -253,9 +259,9 @@ class Sequencer:
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
 
-        print(
-            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        )
+        # print(
+        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        # )
 
 SEQUENCER = Sequencer(_st.State())
