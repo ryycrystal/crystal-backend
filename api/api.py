@@ -8,7 +8,6 @@ import time
 import logging
 import traceback
 import core.storage as storage
-
 from core import chain as h
 from api.x_api import router as x_router
 from core.storage import db_cursor
@@ -170,7 +169,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
     snipers_count = snipers_count or 0
 
     marketcap_native_raw = last_price_native * Decimal(1e9)
-    marketcap_usd = marketcap_native_raw * Decimal(0.05)
+    marketcap_usd = marketcap_native_raw * _mon_price_usd()
 
     dev_tokens_created = 0
     dev_tokens_graduated = 0
@@ -521,7 +520,7 @@ def token_overview_graph(
 
         creator = (creator or "").lower()
         last_price_native = last_price_native or Decimal(0)
-        mon_price = Decimal(0.05)
+        mon_price = _mon_price_usd()
 
         with db_cursor() as cur:
             cur.execute(
@@ -992,7 +991,7 @@ def token_overview_graph(
 @app.get("/user/{user_addr}")
 def user_portfolio(user_addr: str) -> Dict[str, Any]:
     user_addr = user_addr.lower()
-    mon_price = Decimal(0.05)
+    mon_price = _mon_price_usd()
 
     positions: List[Dict[str, Any]] = []
 
@@ -1320,3 +1319,21 @@ def search_tokens_api(
         "count": len(results),
         "results": results,
     }
+
+
+def _mon_price_usd() -> Decimal:
+    try:
+        px = storage.get_mon_price_usd()
+        if px is None:
+            return Decimal("0.03")
+        px_dec = Decimal(px)
+        if px_dec <= 0:
+            return Decimal("0.03")
+        return px_dec
+    except Exception:
+        return Decimal("0.03")
+
+
+@app.get("/debug/mon_price")
+def get_mon_price() -> Decimal:
+    return(_mon_price_usd())

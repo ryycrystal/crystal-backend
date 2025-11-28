@@ -17,8 +17,6 @@ class State:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         
-        self.mon_price_usd = Decimal("0.03")
-        
         # launchpad
         self.launchpad_tokens: Dict[str, models.LaunchpadToken] = {} # tokenAddress -> LaunchpadToken
         self.launchpad_market_to_token: Dict[str, str] = {} # market/pool -> tokenAddress
@@ -27,13 +25,24 @@ class State:
         self.v3_pools: Dict[str, models.PoolInfo] = {} # poolAddress -> PoolInfo
         self.token_to_v3_pool: Dict[str, str] = {} # tokenAddress -> poolAddress
         
+        self.mon_price_usd = Decimal("0.03")
+        
     # oracle
-    def set_mon_price_usd(self, price) -> None:
-        with self._lock:
-            try:
-                self.mon_price_usd = Decimal(price)
-            except Exception:
-                pass
+    def set_mon_price_usd(self, value) -> None:
+        try:
+            px = Decimal(value)
+        except Exception:
+            return
+
+        if px <= 0:
+            return
+
+        self.mon_price_usd = px
+
+        try:
+            storage.set_mon_price_usd(px)
+        except Exception as e:
+            print(f"[State] failed to persist mon_price_usd: {e!r}")
         
     # reconstruction
     def rebuild_from_db(self) -> None:
@@ -128,6 +137,14 @@ class State:
                 
                 if pool.lower() not in h.ADDRS:
                     h.ADDRS.append(pool.lower())
+                    
+            try:
+                stored = storage.get_mon_price_usd()
+                if stored is not None and stored > 0:
+                    self.mon_price_usd = Decimal(stored)
+            except Exception as e:
+                print(f"[State] Failed to load MON price from DB: {e!r}")
+                
 
     # launchpad
 

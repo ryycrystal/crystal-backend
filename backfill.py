@@ -3,12 +3,9 @@ import asyncio
 import argparse
 import uuid
 import websockets
-import urllib.request
 
 from core import chain as h
 from core.sequencer import SEQUENCER
-from core import oracle
-from state import RPC_HTTP
 
 # parse cli arguments for the backfiller process
 # returns an argparse namespace with start_block and batch size
@@ -26,14 +23,6 @@ def parse_args():
         help="blocks per eth_getLogs query (keep < 100)",
     )
     return parser.parse_args()
-
-# batch json rpc call over plain http to RPC_HTTP
-# used for header seeding
-def _rpc_batch_http(calls: list[dict]) -> list[dict]:
-    payload = json.dumps(calls).encode()
-    req = urllib.request.Request(RPC_HTTP, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
 
 # gets current chainhead block number
 async def get_head(ws) -> int:
@@ -97,13 +86,6 @@ async def backfill(start_block: int, batch: int) -> int:
                         if current_head >= chunk_end:
                             break
                         await asyncio.sleep(0.5)
-                        
-                    try:
-                        price = oracle.fetch_mon_price(chunk_start)
-                        SEQUENCER._state.set_mon_price_usd(price)
-                        print(f"[Backfill] Batch {chunk_start}-{chunk_end} MON={price}")
-                    except Exception as e:
-                        print(f"[Backfill] Oracle Error: {e!r}")
 
                     logs = await fetch_logs(ws, chunk_start, chunk_end)
 
