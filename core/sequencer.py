@@ -80,8 +80,8 @@ class Sequencer:
             next_map: dict[str, set[str]] = maps["next"]
             prev_map: dict[str, set[str]] = maps["prev"]
 
-            next_map.setdefault(from_addr, set()).add(to_addr)
-            prev_map.setdefault(to_addr, set()).add(from_addr)
+            next_map.setdefault(from_addr, {})[to_addr] = parsed.get("amount") or 0
+            prev_map.setdefault(to_addr, {})[from_addr] = parsed.get("amount") or 0
 
         return transfer_maps
 
@@ -149,26 +149,35 @@ class Sequencer:
             elif pool_in > 0 and pool_out == 0:
                 is_buy = False
 
-        candidate: str | None = None
+        cands = []
         if is_buy:
             for addr in component:
                 if out_deg.get(addr, 0) == 0 and in_deg.get(addr, 0) > 0:
-                    if candidate is not None and candidate != addr:
-                        candidate = None
-                        break
-                    candidate = addr
+                    cands.append(addr)
         else:
             for addr in component:
                 if in_deg.get(addr, 0) == 0 and out_deg.get(addr, 0) > 0:
-                    if candidate is not None and candidate != addr:
-                        candidate = None
-                        break
-                    candidate = addr
+                    cands.append(addr)
 
-        if not candidate or candidate == pool:
+        if not cands:
             return (parsed.get("user") or "").lower()
 
-        return candidate
+        if len(cands) == 1:
+            cand = cands[0]
+            return cand if cand != pool else (parsed.get("user") or "").lower()
+
+        flow = {}
+        for a in cands:
+            ins = sum(prev_map.get(a, {}).values())
+            outs = sum(next_map.get(a, {}).values())
+            flow[a] = abs(ins - outs)
+
+        cand = max(flow, key=flow.get)
+
+        if cand == pool:
+            return (parsed.get("user") or "").lower()
+
+        return cand
 
     # actual processing (parsing, route to state handlers, apply changes)
     def _process_block(self, blk: int, logs: List[dict]):
@@ -259,9 +268,9 @@ class Sequencer:
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
 
-        # print(
-        #     f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-        #     f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
-        # )
+        print(
+            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+        )
 
 SEQUENCER = Sequencer(_st.State())

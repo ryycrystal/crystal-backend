@@ -39,10 +39,6 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
     creator_addr = (creator or "").lower()
     excluded = _internal_addrs()
 
-    holder_count = 0
-    top10_holding = 0
-    dev_holding = 0
-    
     with db_cursor() as cur:
         cur.execute(
             """
@@ -54,22 +50,22 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
         )
         rows = cur.fetchall()
 
-    filtered_balances: List[int] = []
-    for user_address, balance_token in rows:
-        ua = (user_address or "").lower()
-        bal = int(balance_token or 0)
+    dev_holding = 0
+    filtered: List[int] = []
+
+    for ua, bal in rows:
+        ua = ua.lower()
+        bal = int(bal or 0)
 
         if ua == creator_addr:
             dev_holding = bal
-            
-        if ua in excluded:
-            continue
 
-        filtered_balances.append(bal)
+        if ua not in excluded:
+            filtered.append(bal)
 
-    holder_count = len(filtered_balances)
-    filtered_balances.sort(reverse=True)
-    top10_holding = sum(filtered_balances[:10])
+    filtered.sort(reverse=True)
+    holder_count = len(filtered)
+    top10_holding = sum(filtered[:10])
 
     return holder_count, dev_holding, top10_holding
 
@@ -118,7 +114,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         )
         row = cur.fetchone()
 
-    if row is None:
+    if not row:
         return {}
 
     (
@@ -158,15 +154,15 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
     holders, dev_holding, top10_holding = _holders_for_token(token, creator)
 
     last_price_native = last_price_native or Decimal(0)
-    native_volume = native_volume or 0
-    token_volume = token_volume or 0
+    native_volume = int(native_volume or 0)
+    token_volume = int(token_volume or 0)
     volume_usd = volume_usd or Decimal(0)
     fees_usd = fees_usd or Decimal(0)
-    buy_count = buy_count or 0
-    sell_count = sell_count or 0
-    tx_count = tx_count or (buy_count + sell_count)
-    circulating_supply = circulating_supply or 0
-    snipers_count = snipers_count or 0
+    buy_count = int(buy_count or 0)
+    sell_count = int(sell_count or 0)
+    tx_count = int(tx_count or (buy_count + sell_count))
+    circulating_supply = int(circulating_supply or 0)
+    snipers_count = int(snipers_count or 0)
 
     marketcap_native_raw = last_price_native * Decimal(1e9)
     marketcap_usd = marketcap_native_raw * _mon_price_usd()
@@ -184,29 +180,45 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
                 """,
                 (creator.lower(),),
             )
-            row_user = cur.fetchone()
-        if row_user is not None:
-            dev_tokens_created = row_user[0] or 0
-            dev_tokens_graduated = row_user[1] or 0
+            r = cur.fetchone()
+        if r:
+            dev_tokens_created = r[0] or 0
+            dev_tokens_graduated = r[1] or 0
 
-    sniper_addresses: List[str] = []
     with db_cursor() as cur:
         cur.execute(
             """
             SELECT user_address
             FROM launchpad_snipers
-            WHERE token = %s
+            WHERE LOWER(token) = %s
             """,
-            (token.lower(),),
+            (token_addr,),
         )
         sniper_rows = cur.fetchall()
-    for (addr,) in sniper_rows:
-        if addr:
-            sniper_addresses.append(addr)
+
+    sniper_addrs = [a[0].lower() for a in sniper_rows if a[0]]
+    sniper_count = snipers_count if snipers_count else len(sniper_addrs)
+
+    sniper_balance = 0
+    if sniper_addrs:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(balance_token), 0)
+                FROM launchpad_positions
+                WHERE token = %s AND user_address = ANY(%s)
+                """,
+                (token_addr, sniper_addrs),
+            )
+            sb_row = cur.fetchone()
+        sniper_balance = int(sb_row[0] or 0)
+
+    sniper_share = float(Decimal(sniper_balance) / Decimal(1_000_000_000)) if sniper_balance > 0 else 0.0
 
     snipers_view = {
-        "count": int(snipers_count),
-        "addresses": sorted(list({a.lower() for a in sniper_addresses})),
+        "count": sniper_count,
+        "addresses": sorted(sniper_addrs),
+        "holdingShare": sniper_share,
     }
 
     return {
@@ -218,18 +230,18 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "metadata_cid": metadata_cid,
         "source": int(source or 0),
         "holders": holders,
-        "developer_holding": str(int(dev_holding)),
-        "top10_holding": str(int(top10_holding)),
-        "native_volume": str(int(native_volume)),
-        "token_volume": str(int(token_volume)),
+        "developer_holding": str(dev_holding),
+        "top10_holding": str(top10_holding),
+        "native_volume": str(native_volume),
+        "token_volume": str(token_volume),
         "volume_usd": str(volume_usd),
         "fees_usd": str(fees_usd),
         "marketcap_native_raw": str(marketcap_native_raw),
         "marketcap_usd": str(marketcap_usd),
         "tx": {
-            "buy": int(buy_count),
-            "sell": int(sell_count),
-            "total": int(tx_count),
+            "buy": buy_count,
+            "sell": sell_count,
+            "total": tx_count,
         },
         "migrated": bool(migrated),
         "migrated_block": migrated_block,
@@ -237,8 +249,8 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "approaching_75": bool(approaching_75),
         "approaching_75_block": approaching_75_block,
         "approaching_75_at": approaching_75_at,
-        "developer_tokens_created": int(dev_tokens_created),
-        "developer_tokens_graduated": int(dev_tokens_graduated),
+        "developer_tokens_created": dev_tokens_created,
+        "developer_tokens_graduated": dev_tokens_graduated,
         "social1": social1,
         "social2": social2,
         "social3": social3,
@@ -321,9 +333,9 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/tokens")
-def list_tokens() -> Dict[str, List[Dict[str, Any]]]:   
+def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     t0 = time.time()
-    
+
     recent_created_out: List[Dict[str, Any]] = []
     recent_approaching_out: List[Dict[str, Any]] = []
     recent_graduated_out: List[Dict[str, Any]] = []
@@ -344,8 +356,7 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     for token, circ in grad_rows:
         row = _serialize_token(token)
-        graduation_bps = (circ or 0) / 793100000
-        row["graduationPercentageBps"] = graduation_bps
+        row["graduationPercentageBps"] = (circ or 0) / 793100000
         recent_graduated_out.append(row)
 
     with db_cursor() as cur:
@@ -354,8 +365,10 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
                 """
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
-                WHERE approaching_75 = TRUE AND token <> ALL(%s)
-                ORDER BY approaching_75_at DESC NULLS LAST, approaching_75_block DESC NULLS LAST
+                WHERE approaching_75 = TRUE
+                AND migrated = FALSE
+                AND token <> ALL(%s)
+                ORDER BY (circulating_supply::numeric / 793100000) DESC
                 LIMIT 30
                 """,
                 (list(graduated_ids),),
@@ -366,7 +379,8 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE approaching_75 = TRUE
-                ORDER BY approaching_75_at DESC NULLS LAST, approaching_75_block DESC NULLS LAST
+                AND migrated = FALSE
+                ORDER BY (circulating_supply::numeric / 793100000) DESC
                 LIMIT 30
                 """
             )
@@ -376,8 +390,7 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     for token, circ in appr_rows:
         row = _serialize_token(token)
-        graduation_bps = (circ or 0) / 793100000
-        row["graduationPercentageBps"] = graduation_bps
+        row["graduationPercentageBps"] = (circ or 0) / 793100000
         recent_approaching_out.append(row)
 
     excluded_ids = graduated_ids | approaching_ids
@@ -407,8 +420,7 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     for token, circ in created_rows:
         row = _serialize_token(token)
-        graduation_bps = (circ or 0) / 793100000
-        row["graduationPercentageBps"] = graduation_bps
+        row["graduationPercentageBps"] = (circ or 0) / 793100000
         recent_created_out.append(row)
 
     result = {
@@ -416,10 +428,10 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
         "recent_approaching": recent_approaching_out,
         "recent_graduated": recent_graduated_out,
     }
-    
+
     dt = (time.time() - t0) * 1000
     log.info("token_list dt_ms=%.1f", dt)
-    
+
     return result
 
 
@@ -742,6 +754,7 @@ def token_overview_graph(
             cur.execute(
                 """
                 SELECT
+                    log_index,
                     timestamp,
                     user_address,
                     is_buy,
@@ -761,7 +774,7 @@ def token_overview_graph(
         recent_trades_raw = trade_rows
         trades_out: List[Dict[str, Any]] = []
 
-        for ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash in recent_trades_raw:
+        for log_index, ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash in recent_trades_raw:
             is_buy_flag = bool(is_buy)
             native_amount = int(native_amount or 0)
             token_amount = int(token_amount or 0)
@@ -780,7 +793,7 @@ def token_overview_graph(
                         "amountIn": str(amount_in),
                         "amountOut": str(amount_out),
                         "block": str(int(ts_tr)),
-                        "id": txhash,
+                        "id": f"{txhash}-{log_index}",
                         "isBuy": is_buy_flag,
                         "priceNativePerTokenWad": str(price_native or Decimal(0)),
                     }
@@ -796,7 +809,7 @@ def token_overview_graph(
 
         tracked_trades_out: List[Dict[str, Any]] = []
         if tracked_addrs and recent_trades_raw:
-            for ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash in recent_trades_raw:
+            for log_index, ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash in recent_trades_raw:
                 if user_address.lower() not in tracked_addrs:
                     continue
 
@@ -818,7 +831,7 @@ def token_overview_graph(
                             "amountIn": str(amount_in),
                             "amountOut": str(amount_out),
                             "block": str(int(ts_tr)),
-                            "id": txhash,
+                            "id": f"{txhash}-{log_index}",
                             "isBuy": is_buy_flag,
                             "priceNativePerTokenWad": str(price_native or Decimal(0)),
                         }
@@ -828,7 +841,7 @@ def token_overview_graph(
                     break
 
         if trade_rows:
-            last_timestamp = int(trade_rows[0][0])
+            last_timestamp = int(trade_rows[0][1])
         else:
             last_timestamp = int(created_at or 0) or int(time.time())
 
@@ -914,7 +927,7 @@ def token_overview_graph(
                 """
                 SELECT user_address
                 FROM launchpad_snipers
-                WHERE token = %s
+                WHERE LOWER(token) = %s
                 """,
                 (token_addr,),
             )
@@ -923,11 +936,28 @@ def token_overview_graph(
             if addr:
                 sniper_addresses.append(addr)
 
+        sniper_balance = 0
+        if sniper_addresses:
+            with db_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(balance_token), 0)
+                    FROM launchpad_positions
+                    WHERE token = %s AND user_address = ANY(%s)
+                    """,
+                    (token_addr, sniper_addresses),
+                )
+                sb_row = cur.fetchone()
+            sniper_balance = int(sb_row[0] or 0)
+
+        sniper_share = float(Decimal(sniper_balance) / Decimal(1_000_000_000)) if sniper_balance > 0 else 0.0
+
         snipers_view = {
             "count": int(snipers_count or len(sniper_addresses)),
-            "addresses": sorted(list({a.lower() for a in sniper_addresses})),
+            "addresses": sorted(list({a for a in sniper_addresses})),
+            "holdingShare": sniper_share,
         }
-
+        
         result = {
             "buyTxs": int(buy_count or 0),
             "creator": {
@@ -1240,6 +1270,121 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         out[f"change_pct_{suffix}"] = change_pct
 
     return out
+
+
+@app.get("/trades/{addresses}")
+def trades_for_addresses(addresses: str) -> Dict[str, Any]:
+    addrs = {a.strip().lower() for a in addresses.split(",") if a.strip()}
+    if not addrs:
+        raise HTTPException(status_code=400, detail="no addresses provided")
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                log_index,
+                timestamp,
+                user_address,
+                is_buy,
+                native_amount,
+                token_amount,
+                price_native,
+                txhash,
+                token
+            FROM launchpad_trades
+            WHERE user_address = ANY(%s)
+            ORDER BY timestamp DESC
+            LIMIT 50
+            """,
+            (list(addrs),),
+        )
+        rows = cur.fetchall()
+
+    out: List[Dict[str, Any]] = []
+
+    for log_index, ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash, token in rows:
+        is_buy_flag = bool(is_buy)
+        native_amount = int(native_amount or 0)
+        token_amount = int(token_amount or 0)
+
+        if is_buy_flag:
+            amount_in = native_amount
+            amount_out = token_amount
+        else:
+            amount_in = token_amount
+            amount_out = native_amount
+
+        out.append(
+            {
+                "trade": {
+                    "account": {"id": user_address},
+                    "token": token,
+                    "amountIn": str(amount_in),
+                    "amountOut": str(amount_out),
+                    "block": str(int(ts_tr)),
+                    "id": f"{txhash}-{log_index}",
+                    "isBuy": is_buy_flag,
+                    "priceNativePerTokenWad": str(price_native or Decimal(0)),
+                }
+            }
+        )
+
+    return {
+        "addresses": list(addrs),
+        "count": len(out),
+        "trades": out,
+    }
+
+
+@app.get("/chart/{token_addr}/{chartres}")
+def chart_only(
+    token_addr: str,
+    chartres: int,
+) -> Dict[str, Any]:
+    token_addr = token_addr.lower()
+
+    if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+        raise HTTPException(status_code=400)
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT bucket_start, open_price, high_price, low_price, close_price, quote_volume
+            FROM launchpad_ohlcv
+            WHERE token = %s AND resolution_sec = %s
+            ORDER BY bucket_start DESC
+            LIMIT 1000
+            """,
+            (token_addr, chartres),
+        )
+        rows = cur.fetchall()
+
+    rows.reverse()
+
+    out = []
+    for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
+        open_wad = (open_p or Decimal(0)) * Decimal(1e9)
+        high_wad = (high_p or Decimal(0)) * Decimal(1e9)
+        low_wad = (low_p or Decimal(0)) * Decimal(1e9)
+        close_wad = (close_p or Decimal(0)) * Decimal(1e9)
+        quote_volume = int(qv or 0)
+
+        out.append(
+            {
+                "time": str(int(bucket_start)),
+                "open": str(int(open_wad)),
+                "high": str(int(high_wad)),
+                "low": str(int(low_wad)),
+                "close": str(int(close_wad)),
+                "quoteVolume": str(quote_volume),
+            }
+        )
+
+    return {
+        "token": token_addr,
+        "resolution": chartres,
+        "klines": out,
+    }
 
 
 @app.get("/volume/{user_addr}")
