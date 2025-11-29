@@ -314,7 +314,7 @@ class State:
             lp.last_price_native = price_native
                 
             if not is_v3_swap:
-                if is_buy and blk <= lp.created_block + 100:
+                if is_buy and blk <= lp.created_block + 10:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
