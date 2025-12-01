@@ -261,7 +261,7 @@ class Sequencer:
         if debug:
             print(f"[DEBUG] tx={txh[:10]}... pool={pool[:10]}... is_buy={is_buy}")
             for t in ordered:
-                print(f"[DEBUG]   [{t['log_idx']}] {t['from'][:10]}... -> {t['to'][:10]}... amt={t['amount']}")
+                print(f"[DEBUG] [{t['log_idx']}] {t['from'][:10]}... -> {t['to'][:10]}... amt={t['amount']}")
 
         zero_addr = "0x" + "0" * 40
 
@@ -398,7 +398,6 @@ class Sequencer:
     ) -> None:
         counts = {"NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0}
 
-        # Create batch accumulator for entire chunk
         batch = BatchAccumulator()
 
         for blk in range(chunk_start, chunk_end + 1):
@@ -414,7 +413,6 @@ class Sequencer:
                 except Exception as e:
                     print(f"[SQ] on_block error: {e!r}")
 
-        # Flush all accumulated writes at once
         batch.flush(cur)
 
         self._next_block = chunk_end + 1
