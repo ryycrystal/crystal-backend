@@ -6,8 +6,8 @@ from core.sequencer import SEQUENCER
 
 import backfill
 
-HEAD_TIMEOUT = 60.0 # if >60s w/o new head block we start reconnect + backfill
-BACKFILL_BATCH = 50  # some RPCs limit to <100 blocks per getLogs
+HEAD_TIMEOUT = 60.0
+BACKFILL_BATCH = 100
 
 missing_blocks: deque[int] = deque() # queue of blocks that need backfilling
 missing_set: set[int] = set() # so we dont backfill the same block twice

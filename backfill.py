@@ -206,9 +206,8 @@ async def backfill(start_block: int, batch: int) -> int:
                                 if addr != h.CONTRACTS["NADFUN"].lower():
                                     continue
                             elif tag == "V3SWAP":
-                                pass  # V3 swaps from graduated pools
+                                pass
                             elif tag == "TF":
-                                # Only include transfers of tokens we're tracking
                                 if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
                                     continue
                             else:
