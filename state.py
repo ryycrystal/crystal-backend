@@ -146,7 +146,16 @@ class State:
                     self.mon_price_usd = Decimal(stored)
             except Exception as e:
                 print(f"[State] Failed to load MON price from DB: {e!r}")
-                
+
+    def reset_for_reindex(self) -> None:
+        with self._lock:
+            self.launchpad_tokens.clear()
+            self.launchpad_market_to_token.clear()
+            self.v3_pools.clear()
+            self.token_to_v3_pool.clear()
+
+            self.rebuild_from_db()
+            print(f"[State] Reset for reindex: {len(self.launchpad_tokens)} tokens, {len(self.v3_pools)} pools")
 
     # launchpad
 
