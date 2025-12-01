@@ -5,8 +5,8 @@ from core.sequencer import SEQUENCER
 import core.storage as storage
 import backfill
 
-REINDEX = False 
-REINDEX_FROM_BLOCK = 37709836
+REINDEX = True 
+REINDEX_FROM_BLOCK = 38681528
 REINDEX_BATCH = 100
 
 
@@ -32,7 +32,7 @@ async def main() -> None:
     else:
         last_blk = storage.get_last_processed_block()
         if last_blk is None:
-            last_blk = 39283271
+            last_blk = 37709836
         start_blk = last_blk + 1
 
     print(f"[IDX] Starting from block {start_blk}", flush=True)
