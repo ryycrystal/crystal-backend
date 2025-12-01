@@ -1,11 +1,129 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 from typing import Dict, List, Callable, Optional
 
 from core import chain as h
 from core import oracle
+from core.storage import db_cursor
+import core.storage as storage
 import state as _st
+
+class BatchAccumulator:
+    def __init__(self):
+        self.trades: list[tuple] = []
+        self.token_updates: dict[str, dict] = {}  # token -> final state
+        self.user_updates: dict[str, dict] = {}  # addr -> {native_volume_delta, realized_delta, trade_count_delta}
+        self.position_updates: dict[tuple[str, str], dict] = {}  # (user, token) -> deltas
+        self.ohlcv_data: list[tuple] = []  # (token, resolution_sec, bucket_start, price_native, native_amount)
+        self.snipers: list[tuple[str, str]] = []  # (token, user)
+
+    def add_trade(
+        self,
+        block_number: int,
+        log_index: int,
+        timestamp: int,
+        token: str,
+        user_address: str,
+        is_buy: bool,
+        native_amount: int,
+        token_amount: int,
+        usd_amount,
+        price_native,
+        txhash: str,
+    ):
+        self.trades.append((
+            int(block_number),
+            int(log_index),
+            int(timestamp),
+            token,
+            user_address,
+            bool(is_buy),
+            int(native_amount),
+            int(token_amount),
+            usd_amount,
+            price_native,
+            txhash,
+        ))
+
+    def set_token_state(self, token: str, state_dict: dict):
+        self.token_updates[token.lower()] = state_dict
+
+    def add_user_delta(self, address: str, native_amount: int, realized_delta, trade_count_delta: int = 1):
+        addr = address.lower()
+        if addr not in self.user_updates:
+            self.user_updates[addr] = {
+                "native_volume_delta": 0,
+                "realized_delta": Decimal(0),
+                "trade_count_delta": 0,
+            }
+        u = self.user_updates[addr]
+        u["native_volume_delta"] += int(abs(native_amount))
+        u["realized_delta"] += Decimal(realized_delta)
+        u["trade_count_delta"] += trade_count_delta
+
+    def add_position_delta(
+        self,
+        user_address: str,
+        token: str,
+        token_bought_delta: int,
+        token_sold_delta: int,
+        native_spent_delta: int,
+        native_received_delta: int,
+        balance_token_delta: int,
+        realized_pnl_delta,
+        trade_count_delta: int,
+        buy_count_delta: int,
+        sell_count_delta: int,
+        last_price_native,
+    ):
+        key = (user_address.lower(), token.lower())
+        if key not in self.position_updates:
+            self.position_updates[key] = {
+                "token_bought_delta": 0,
+                "token_sold_delta": 0,
+                "native_spent_delta": 0,
+                "native_received_delta": 0,
+                "balance_token_delta": 0,
+                "realized_pnl_delta": Decimal(0),
+                "trade_count_delta": 0,
+                "buy_count_delta": 0,
+                "sell_count_delta": 0,
+                "last_price_native": Decimal(0),
+            }
+        p = self.position_updates[key]
+        p["token_bought_delta"] += int(token_bought_delta)
+        p["token_sold_delta"] += int(token_sold_delta)
+        p["native_spent_delta"] += int(native_spent_delta)
+        p["native_received_delta"] += int(native_received_delta)
+        p["balance_token_delta"] += int(balance_token_delta)
+        p["realized_pnl_delta"] += Decimal(realized_pnl_delta)
+        p["trade_count_delta"] += int(trade_count_delta)
+        p["buy_count_delta"] += int(buy_count_delta)
+        p["sell_count_delta"] += int(sell_count_delta)
+        p["last_price_native"] = last_price_native
+
+    def add_ohlcv(self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int):
+        self.ohlcv_data.append((token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount)))
+
+    def add_sniper(self, token: str, user: str):
+        self.snipers.append((token.lower(), user.lower()))
+
+    def flush(self, cur):
+        storage.insert_trades_batch(self.trades, cur)
+        storage.update_tokens_batch(self.token_updates, cur)
+        storage.update_users_batch(self.user_updates, cur)
+        storage.upsert_positions_batch(self.position_updates, cur)
+        storage.upsert_ohlcv_batch(self.ohlcv_data, cur)
+        storage.add_snipers_batch(self.snipers, cur)
+
+        self.trades.clear()
+        self.token_updates.clear()
+        self.user_updates.clear()
+        self.position_updates.clear()
+        self.ohlcv_data.clear()
+        self.snipers.clear()
 
 # facilitates the processing of logs into state, in the right order
 class Sequencer:
@@ -50,8 +168,9 @@ class Sequencer:
 
     # per block, build transfer chains keyed by (tx_hash, token), for each txfer next[from] = to, prev[to] = from
     # so for a given (tx, token) we follow buy is pool -> ... -> user using next, sell is user -> ... -> pool using prev
-    def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict[str, dict[str, set[str]]]]:
-        transfer_maps: dict[tuple[str, str], dict[str, dict[str, set[str]]]] = {}
+    # also tracks ordered list of transfers for simpler first/last lookup
+    def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
+        transfer_maps: dict[tuple[str, str], dict] = {}
 
         for log in logs:
             topics = log.get("topics") or []
@@ -71,17 +190,29 @@ class Sequencer:
             from_addr = (parsed.get("from") or "").lower()
             to_addr = (parsed.get("to") or "").lower()
             txh = (log.get("transactionHash") or "").lower()
+            li = log.get("logIndex")
+            log_idx = int(li, 16) if isinstance(li, str) else int(li or 0)
 
             if not token or not from_addr or not to_addr or not txh:
                 continue
 
             key = (txh, token)
-            maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}})
+            maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}, "ordered": []})
             next_map: dict[str, set[str]] = maps["next"]
             prev_map: dict[str, set[str]] = maps["prev"]
 
             next_map.setdefault(from_addr, {})[to_addr] = parsed.get("amount") or 0
             prev_map.setdefault(to_addr, {})[from_addr] = parsed.get("amount") or 0
+
+            maps["ordered"].append({
+                "log_idx": log_idx,
+                "from": from_addr,
+                "to": to_addr,
+                "amount": parsed.get("amount") or 0,
+            })
+
+        for key, maps in transfer_maps.items():
+            maps["ordered"].sort(key=lambda x: x["log_idx"])
 
         return transfer_maps
 
@@ -91,100 +222,78 @@ class Sequencer:
         txh: str,
         parsed: dict,
         pool_addr: str,
-        transfer_maps: dict[tuple[str, str], dict[str, dict[str, set[str]]]],
+        transfer_maps: dict[tuple[str, str], dict],
+        debug: bool = False,
     ) -> str:
         pool = (pool_addr or "").lower()
+        fallback_user = (parsed.get("user") or "").lower()
 
         token = (parsed.get("token") or "").lower()
         if not token:
             pi = self._state.v3_pools.get(pool)
             if pi is None or not getattr(pi, "token_addr", None):
-                return (parsed.get("user") or "").lower()
+                return fallback_user
             token = (pi.token_addr or "").lower()
 
         key = (txh.lower(), token)
         maps = transfer_maps.get(key)
         if not maps:
-            return (parsed.get("user") or "").lower()
+            if debug:
+                print(f"[DEBUG] No transfer maps for tx={txh[:10]}... token={token[:10]}...")
+            return fallback_user
 
-        next_map: dict[str, set[str]] = maps["next"]
-        prev_map: dict[str, set[str]] = maps["prev"]
-
-        component: set[str] = set()
-        queue: list[str] = [pool]
-        max_nodes = 16
-
-        while queue and len(component) < max_nodes:
-            addr = queue.pop()
-            if addr in component:
-                continue
-            component.add(addr)
-
-            for nb in next_map.get(addr, ()):
-                if nb not in component:
-                    queue.append(nb)
-            for nb in prev_map.get(addr, ()):
-                if nb not in component:
-                    queue.append(nb)
-
-        if pool not in component or len(component) == 1:
-            return (parsed.get("user") or "").lower()
-
-        in_deg: dict[str, int] = {a: 0 for a in component}
-        out_deg: dict[str, int] = {a: 0 for a in component}
-
-        for a in component:
-            outs = next_map.get(a, set())
-            outs_in_comp = [b for b in outs if b in component]
-            out_deg[a] = len(outs_in_comp)
-            for b in outs_in_comp:
-                in_deg[b] += 1
+        ordered = maps.get("ordered", [])
+        if not ordered:
+            if debug:
+                print(f"[DEBUG] No ordered transfers")
+            return fallback_user
 
         is_buy = parsed.get("is_buy")
+
         if is_buy is None:
-            pool_out = out_deg.get(pool, 0)
-            pool_in = in_deg.get(pool, 0)
-            if pool_out > 0 and pool_in == 0:
+            pool_sends = any(t["from"] == pool for t in ordered)
+            pool_receives = any(t["to"] == pool for t in ordered)
+            if pool_sends and not pool_receives:
                 is_buy = True
-            elif pool_in > 0 and pool_out == 0:
+            elif pool_receives and not pool_sends:
                 is_buy = False
 
-        cands = []
+        if debug:
+            print(f"[DEBUG] tx={txh[:10]}... pool={pool[:10]}... is_buy={is_buy}")
+            for t in ordered:
+                print(f"[DEBUG]   [{t['log_idx']}] {t['from'][:10]}... -> {t['to'][:10]}... amt={t['amount']}")
+
+        zero_addr = "0x" + "0" * 40
+
         if is_buy:
-            for addr in component:
-                if out_deg.get(addr, 0) == 0 and in_deg.get(addr, 0) > 0:
-                    cands.append(addr)
-        else:
-            for addr in component:
-                if in_deg.get(addr, 0) == 0 and out_deg.get(addr, 0) > 0:
-                    cands.append(addr)
+            for t in reversed(ordered):
+                to_addr = t["to"]
+                if to_addr != pool and to_addr != zero_addr:
+                    if debug:
+                        print(f"[DEBUG] Buy: using last recipient {to_addr[:10]}...")
+                    return to_addr
+        elif is_buy is False:
+            for t in ordered:
+                from_addr = t["from"]
+                if from_addr != pool and from_addr != zero_addr:
+                    if debug:
+                        print(f"[DEBUG] Sell: using first sender {from_addr[:10]}...")
+                    return from_addr
 
-        if not cands:
-            return (parsed.get("user") or "").lower()
+        if debug:
+            print(f"[DEBUG] Could not resolve, returning fallback {fallback_user[:10]}...")
 
-        if len(cands) == 1:
-            cand = cands[0]
-            return cand if cand != pool else (parsed.get("user") or "").lower()
-
-        flow = {}
-        for a in cands:
-            ins = sum(prev_map.get(a, {}).values())
-            outs = sum(next_map.get(a, {}).values())
-            flow[a] = abs(ins - outs)
-
-        cand = max(flow, key=flow.get)
-
-        if cand == pool:
-            return (parsed.get("user") or "").lower()
-
-        return cand
+        return fallback_user
 
     # actual processing (parsing, route to state handlers, apply changes)
-    def _process_block(self, blk: int, logs: List[dict]):
-        counts = {           
-            "NFC": 0, 
-            "NFB": 0, 
-            "NFS": 0, 
+    # if cur is provided, uses that cursor (no commit)
+    # if counts_out is provided, accumulates into it instead of printing
+    # if batch is provided, accumulates writes instead of executing immediately
+    def _process_block(self, blk: int, logs: List[dict], cur=None, counts_out: dict = None, batch: BatchAccumulator = None):
+        counts = counts_out if counts_out is not None else {
+            "NFC": 0,
+            "NFB": 0,
+            "NFS": 0,
             "NFT": 0,
             "TF": 0,
             "V3SWAP": 0,
@@ -201,17 +310,28 @@ class Sequencer:
                 has_trades = True
                 break
 
+        if cur is None:
+            with db_cursor() as cur:
+                self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+        else:
+            self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+
+        if counts_out is None:
+            print(
+                f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+                f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+            )
+
+    def _process_block_inner(self, blk: int, logs: List[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None):
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
         for log in logs:
-            # log metadata
             blk_ts = int(log.get("blockTimestamp"), 16)
             txh = log.get("transactionHash")
             li = log.get("logIndex")
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
             uid = (txh, lii)
-            
-            # deduplication cuz for some reason we had duplicates
+
             if uid in seen:
                 continue
             seen.add(uid)
@@ -221,13 +341,13 @@ class Sequencer:
                 continue
             if tag in counts:
                 counts[tag] += 1
-            
+
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
 
-            if tag in ("TC", "NFC"): # tokencreated/nadfun create
-                self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower())
+            if tag in ("TC", "NFC"):
+                self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower(), cur=cur, batch=batch)
 
-            elif tag in ("LT", "NFB", "NFS"): # launchpadtrade or nadfun buy/sell
+            elif tag in ("LT", "NFB", "NFS"):
                 real_user = self._resolve_trade_user(
                     txh,
                     parsed,
@@ -238,24 +358,24 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
 
-            elif tag in ("MG", "NFT"): # migration or nadfun graduation
-                pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower())
+            elif tag in ("MG", "NFT"):
+                pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
                 if pool:
                     if pool.lower() not in h.ADDRS:
                         h.ADDRS.append(pool.lower())
-                
-            elif tag == "TF": # txfer
-                if parsed is not None:
-                    self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower())
 
-            elif tag == "V3SWAP": # graduated nadfun v3 pool trade
+            elif tag == "TF":
+                if parsed is not None:
+                    self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "V3SWAP":
                 pool_addr = (log.get("address") or "").lower()
                 if pool_addr == "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower():
                     px = oracle.mon_price_from_v3swap(parsed)
                     self._state.set_mon_price_usd(px)
-                        
+
                 real_user = self._resolve_trade_user(
                     txh,
                     parsed,
@@ -266,11 +386,42 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower())
+                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
+
+    # batch processes multiple blocks with a shared cursor (one commit for entire batch)
+    def process_chunk(
+        self,
+        chunk_start: int,
+        chunk_end: int,
+        logs_by_block: dict[int, list[dict]],
+        cur,
+    ) -> None:
+        counts = {"NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0}
+
+        # Create batch accumulator for entire chunk
+        batch = BatchAccumulator()
+
+        for blk in range(chunk_start, chunk_end + 1):
+            logs = logs_by_block.get(blk, [])
+            self._process_block(blk, logs, cur=cur, counts_out=counts, batch=batch)
+
+            self._logs_by_block.pop(blk, None)
+            self._ready_blocks.discard(blk)
+
+            if self._on_block:
+                try:
+                    self._on_block(blk)
+                except Exception as e:
+                    print(f"[SQ] on_block error: {e!r}")
+
+        # Flush all accumulated writes at once
+        batch.flush(cur)
+
+        self._next_block = chunk_end + 1
 
         print(
-            f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+            f"[SQ] {chunk_start}-{chunk_end}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} "
+            f"NFB {counts['NFB']} NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']}"
         )
 
 SEQUENCER = Sequencer(_st.State())

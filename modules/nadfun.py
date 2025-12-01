@@ -1,15 +1,69 @@
 from __future__ import annotations
 
-import json
+import asyncio
+import time
 from decimal import Decimal, getcontext
 from typing import Dict, Optional
-from urllib.request import urlopen
-from urllib.error import URLError, HTTPError
+from urllib.parse import urlparse
+
+import httpx
 
 getcontext().prec = 100
 
-# pending nadfun sync snapshots keyed by token address bc they emit it seperately
 _PENDING_SYNC: Dict[str, dict] = {}
+_FAILED_HOSTS: Dict[str, float] = {}
+METADATA_QUEUE: list[tuple[str, str]] = []
+_METADATA_CLIENT: httpx.AsyncClient | None = None
+
+async def _get_metadata_client() -> httpx.AsyncClient:
+    global _METADATA_CLIENT
+    if _METADATA_CLIENT is None:
+        _METADATA_CLIENT = httpx.AsyncClient(timeout=2.0)
+    return _METADATA_CLIENT
+
+async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
+    try:
+        host = urlparse(token_uri).netloc
+    except Exception:
+        host = ""
+
+    if host and host in _FAILED_HOSTS:
+        if time.monotonic() - _FAILED_HOSTS[host] < 60:
+            return None
+        else:
+            del _FAILED_HOSTS[host]
+
+    try:
+        client = await _get_metadata_client()
+        resp = await client.get(token_uri)
+        resp.raise_for_status()
+        meta = resp.json()
+        return {
+            "token": token,
+            "name": meta.get("name", ""),
+            "symbol": meta.get("symbol", ""),
+            "description": meta.get("description", ""),
+            "image_uri": meta.get("image_uri", ""),
+            "website": meta.get("website", ""),
+            "twitter": meta.get("twitter", ""),
+            "telegram": meta.get("telegram", ""),
+        }
+    except Exception as e:
+        if host:
+            _FAILED_HOSTS[host] = time.monotonic()
+        return None
+
+async def process_metadata_queue() -> list[dict]:
+    if not METADATA_QUEUE:
+        return []
+
+    queue = METADATA_QUEUE.copy()
+    METADATA_QUEUE.clear()
+
+    tasks = [fetch_metadata_single(token, uri) for token, uri in queue]
+    results = await asyncio.gather(*tasks)
+
+    return [r for r in results if r is not None]
 
 # 32-byte word or hex string into a 0x-prefixed address
 def _to_addr(w) -> str:
@@ -101,26 +155,8 @@ def parse_nadfun_token_created(
     twitter: str = ""
     telegram: str = ""
 
-    if token_uri:
-        try:
-            with urlopen(token_uri, timeout=5) as resp:
-                raw = resp.read()
-            meta = json.loads(raw.decode("utf-8"))
-
-            name = meta.get("name", name) or name
-            symbol = meta.get("symbol", symbol) or symbol
-            description = meta.get("description", "") or ""
-            image_uri = meta.get("image_uri", "") or ""
-            website = meta.get("website", "") or ""
-            twitter = meta.get("twitter", "") or ""
-            telegram = meta.get("telegram", "") or ""
-        except Exception as e:
-            print(f"[NADFUN] Metadata fetch failed for {token_uri}: {e!r}")
-            image_uri = ""
-            description = description or ""
-            website = website or ""
-            twitter = twitter or ""
-            telegram = telegram or ""
+    if token_uri and token:
+        METADATA_QUEUE.append((token, token_uri))
 
     metadata_cid = image_uri or token_uri or ""
 

@@ -70,11 +70,13 @@ async def _gap_worker(event_counts):
                     pass
 
                 elif tag == "TF":
-                    pass
+                    # Only include transfers of tokens we're tracking
+                    if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
+                        continue
 
                 else:
                     continue
-                    
+
                 if tag in event_counts:
                     event_counts[tag] += 1
 
@@ -215,7 +217,8 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                     pass
 
                 elif tag == "TF":
-                    pass
+                    if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
+                        continue
 
                 else:
                     continue

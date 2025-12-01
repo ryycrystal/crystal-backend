@@ -6,6 +6,8 @@ import core.storage as storage
 import threading
 from core import chain as h
 
+import psycopg2
+
 getcontext().prec = 100
 
 INTERVALS = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
@@ -149,7 +151,7 @@ class State:
     # launchpad
 
     # apply token creation
-    def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str) -> None:
+    def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             if log_addr.lower() != h.CONTRACTS["NADFUN"].lower():
                 return
@@ -211,13 +213,14 @@ class State:
                 created_block=blk,
                 created_at=ts,
                 last_price_native=lp.last_price_native,
+                cur=cur
             )
             
             if creator:                
-                storage.increment_user_tokens_created(creator)
+                storage.increment_user_tokens_created(creator, cur=cur)
 
-    # applies a trade       
-    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str) -> None:
+    # applies a trade
+    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             is_v3_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
             if not is_v3_swap:
@@ -318,9 +321,13 @@ class State:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
-                        inserted = storage.add_sniper_address(token, user_addr)
-                        if inserted:
-                            lp.snipers += 1
+                        if batch is not None:
+                            batch.add_sniper(token, user_addr)
+                            lp.snipers += 1  # approximate count for batch mode
+                        else:
+                            inserted = storage.add_sniper_address(token, user_addr, cur=cur)
+                            if inserted:
+                                lp.snipers += 1
 
                 if is_buy:
                     lp.circulating_supply += token_amt / 1e18
@@ -382,69 +389,124 @@ class State:
             trade_count_delta = 1
             
             usd_amount = Decimal(native_amt) * Decimal(0.05)
-                
-            storage.insert_trade(
-                block_number=blk,
-                log_index=log_idx,
-                timestamp=ts,
-                token=token,
-                user_address=user,
-                is_buy=is_buy,
-                native_amount=int(native_amt),
-                token_amount=int(token_amt),
-                usd_amount=usd_amount,
-                price_native=lp.last_price_native,
-                txhash=txh,
-            )
-            storage.update_token_after_trade(
-                token=token,
-                last_price_native=lp.last_price_native,
-                native_volume=int(lp.native_volume),
-                token_volume=int(lp.token_volume),
-                volume_usd=lp.volume_usd,
-                fees_usd=lp.fees_usd,
-                buy_count=lp.buy_count,
-                sell_count=lp.sell_count,
-                tx_count=lp.tx_count,
-                circulating_supply=lp.circulating_supply,
-                approaching_75=lp.approaching_75,
-                approaching_75_block=lp.approaching_75_block,
-                approaching_75_at=lp.approaching_75_at,
-                snipers_count=lp.snipers,
-            )
-            storage.update_user_on_trade(
-                address=user,
-                native_amount=int(native_amt),
-                realized_delta=realized_delta,
-            )
-            
-            storage.upsert_position(
-                user_address=user,
-                token=token,
-                token_bought_delta=token_bought_delta,
-                token_sold_delta=token_sold_delta,
-                native_spent_delta=native_spent_delta,
-                native_received_delta=native_received_delta,
-                balance_token_delta=balance_token_delta,
-                realized_pnl_delta=realized_delta,
-                trade_count_delta=trade_count_delta,
-                buy_count_delta=buy_count_delta,
-                sell_count_delta=sell_count_delta,
-                last_price_native=lp.last_price_native,
-            )
-            
-            for bucket_seconds in INTERVALS:
-                bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
-                storage.upsert_ohlcv(
+
+            if batch is not None:
+                # Batch mode: accumulate writes
+                batch.add_trade(
+                    block_number=blk,
+                    log_index=log_idx,
+                    timestamp=ts,
                     token=token,
-                    resolution_sec=bucket_seconds,
-                    bucket_start=bucket_start,
-                    price_native=lp.last_price_native,
+                    user_address=user,
+                    is_buy=is_buy,
                     native_amount=int(native_amt),
+                    token_amount=int(token_amt),
+                    usd_amount=usd_amount,
+                    price_native=lp.last_price_native,
+                    txhash=txh,
+                )
+                batch.set_token_state(token, {
+                    "last_price_native": lp.last_price_native,
+                    "native_volume": int(lp.native_volume),
+                    "token_volume": int(lp.token_volume),
+                    "volume_usd": lp.volume_usd,
+                    "fees_usd": lp.fees_usd,
+                    "buy_count": lp.buy_count,
+                    "sell_count": lp.sell_count,
+                    "tx_count": lp.tx_count,
+                    "circulating_supply": lp.circulating_supply,
+                    "approaching_75": lp.approaching_75,
+                    "approaching_75_block": lp.approaching_75_block,
+                    "approaching_75_at": lp.approaching_75_at,
+                    "snipers_count": lp.snipers,
+                })
+                batch.add_user_delta(user, int(native_amt), realized_delta)
+                batch.add_position_delta(
+                    user_address=user,
+                    token=token,
+                    token_bought_delta=token_bought_delta,
+                    token_sold_delta=token_sold_delta,
+                    native_spent_delta=native_spent_delta,
+                    native_received_delta=native_received_delta,
+                    balance_token_delta=balance_token_delta,
+                    realized_pnl_delta=realized_delta,
+                    trade_count_delta=trade_count_delta,
+                    buy_count_delta=buy_count_delta,
+                    sell_count_delta=sell_count_delta,
+                    last_price_native=lp.last_price_native,
+                )
+                for bucket_seconds in INTERVALS:
+                    bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
+                    batch.add_ohlcv(token, bucket_seconds, bucket_start, lp.last_price_native, int(native_amt))
+            else:
+                # Direct mode: execute writes immediately
+                storage.insert_trade(
+                    block_number=blk,
+                    log_index=log_idx,
+                    timestamp=ts,
+                    token=token,
+                    user_address=user,
+                    is_buy=is_buy,
+                    native_amount=int(native_amt),
+                    token_amount=int(token_amt),
+                    usd_amount=usd_amount,
+                    price_native=lp.last_price_native,
+                    txhash=txh,
+                    cur=cur,
+                )
+                storage.update_token_after_trade(
+                    token=token,
+                    last_price_native=lp.last_price_native,
+                    native_volume=int(lp.native_volume),
+                    token_volume=int(lp.token_volume),
+                    volume_usd=lp.volume_usd,
+                    fees_usd=lp.fees_usd,
+                    buy_count=lp.buy_count,
+                    sell_count=lp.sell_count,
+                    tx_count=lp.tx_count,
+                    circulating_supply=lp.circulating_supply,
+                    approaching_75=lp.approaching_75,
+                    approaching_75_block=lp.approaching_75_block,
+                    approaching_75_at=lp.approaching_75_at,
+                    snipers_count=lp.snipers,
+                    cur=cur,
+                )
+                storage.update_user_on_trade(
+                    address=user,
+                    native_amount=int(native_amt),
+                    realized_delta=realized_delta,
+                    cur=cur,
                 )
 
+                storage.upsert_position(
+                    user_address=user,
+                    token=token,
+                    token_bought_delta=token_bought_delta,
+                    token_sold_delta=token_sold_delta,
+                    native_spent_delta=native_spent_delta,
+                    native_received_delta=native_received_delta,
+                    balance_token_delta=balance_token_delta,
+                    realized_pnl_delta=realized_delta,
+                    trade_count_delta=trade_count_delta,
+                    buy_count_delta=buy_count_delta,
+                    sell_count_delta=sell_count_delta,
+                    last_price_native=lp.last_price_native,
+                    cur=cur,
+                )
+
+                for bucket_seconds in INTERVALS:
+                    bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
+                    storage.upsert_ohlcv(
+                        token=token,
+                        resolution_sec=bucket_seconds,
+                        bucket_start=bucket_start,
+                        price_native=lp.last_price_native,
+                        native_amount=int(native_amt),
+                        cur=cur,
+                    )
+
     # applies graduation/migration
-    def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str) -> str | None:
+    def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> str | None:
         with self._lock:
             if log_addr.lower() != h.CONTRACTS["NADFUN"].lower():
                 return None
@@ -462,7 +524,7 @@ class State:
             lp.migrated_at = ts
 
             pool = (ev.get("pool") or "").lower()
-
+            
             if pool and pool not in self.v3_pools:
                 wmon = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A".lower()
 
@@ -484,6 +546,7 @@ class State:
                         token_addr=token,
                         native_addr=wmon,
                         token_is_0=token_is_0,
+                        cur=cur,
                     )
                     
             storage.mark_token_migrated(
@@ -491,16 +554,20 @@ class State:
                 migrated_block=blk,
                 migrated_at=ts,
                 pool=pool or None,
+                cur=cur,
             )
+            
+            if pool:
+                storage.clear_position(user_address=pool, token=token, cur=cur)
 
             creator = lp.creator.lower() if lp.creator else ""
             if creator:               
-                storage.increment_user_tokens_graduated(creator)
+                storage.increment_user_tokens_graduated(creator, cur=cur)
 
-            return pool or None
+        return pool or None
 
     # keeps track of txfers for balances
-    def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str) -> None:
+    def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             token = (ev.get("token") or "").lower()
             if not token:
@@ -527,20 +594,37 @@ class State:
                 if addr in internal:
                     return
 
-                storage.upsert_position(
-                    user_address=addr,
-                    token=token,
-                    token_bought_delta=0,
-                    token_sold_delta=0,
-                    native_spent_delta=0,
-                    native_received_delta=0,
-                    balance_token_delta=int(delta),
-                    realized_pnl_delta=Decimal(0),
-                    trade_count_delta=0,
-                    buy_count_delta=0,
-                    sell_count_delta=0,
-                    last_price_native=lp.last_price_native,
-                )
+                if batch is not None:
+                    batch.add_position_delta(
+                        user_address=addr,
+                        token=token,
+                        token_bought_delta=0,
+                        token_sold_delta=0,
+                        native_spent_delta=0,
+                        native_received_delta=0,
+                        balance_token_delta=int(delta),
+                        realized_pnl_delta=Decimal(0),
+                        trade_count_delta=0,
+                        buy_count_delta=0,
+                        sell_count_delta=0,
+                        last_price_native=lp.last_price_native,
+                    )
+                else:
+                    storage.upsert_position(
+                        user_address=addr,
+                        token=token,
+                        token_bought_delta=0,
+                        token_sold_delta=0,
+                        native_spent_delta=0,
+                        native_received_delta=0,
+                        balance_token_delta=int(delta),
+                        realized_pnl_delta=Decimal(0),
+                        trade_count_delta=0,
+                        buy_count_delta=0,
+                        sell_count_delta=0,
+                        last_price_native=lp.last_price_native,
+                        cur=cur,
+                    )
 
             adjust(from_addr, -amount)
             adjust(to_addr, amount)

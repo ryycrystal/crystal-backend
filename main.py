@@ -10,7 +10,6 @@ app: FastAPI = api_app
 @app.on_event("startup")
 async def _startup() -> None:
     storage.init_pool()
-    storage.init_db()
 
 
 @app.on_event("shutdown")
