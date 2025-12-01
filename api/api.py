@@ -1616,3 +1616,11 @@ def _mon_price_usd() -> Decimal:
 @app.get("/debug/mon_price")
 def get_mon_price() -> Decimal:
     return(_mon_price_usd())
+
+
+@app.get("/sync")
+def get_sync_status() -> Dict[str, Any]:
+    last_block = storage.get_last_processed_block()
+    return {
+        "last_block": last_block,
+    }
