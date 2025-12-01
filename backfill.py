@@ -16,6 +16,70 @@ async def _process_metadata_background():
     except Exception as e:
         print(f"[Backfill] Metadata background error: {e!r}")
 
+
+def reindex(start_block: int, batch: int) -> int:
+    print(f"[Reindex] Starting reindex from block {start_block}")
+
+    min_cached, max_cached = storage.get_cached_block_range()
+    if min_cached is None:
+        return start_block - 1
+
+    if start_block < min_cached:
+        start_block = min_cached
+
+    with storage.db_cursor() as cur:
+        storage.clear_derived_state_from_block(start_block, cur)
+
+    SEQUENCER._state.reset_for_reindex()
+
+    last_processed = start_block - 1
+
+    for chunk_start in range(start_block, max_cached + 1, batch):
+        chunk_end = min(chunk_start + batch - 1, max_cached)
+
+        with storage.db_cursor() as cur:
+            cached = storage.get_block_logs_range(chunk_start, chunk_end, cur=cur)
+
+            filtered_logs: dict[int, list[dict]] = {}
+            for blk in range(chunk_start, chunk_end + 1):
+                logs_for_blk = cached.get(blk, [])
+                filtered = []
+
+                for raw in logs_for_blk:
+                    topics = raw.get("topics") or []
+                    if not topics:
+                        continue
+
+                    tag = h.EVENT_SIGS.get(topics[0].lower())
+                    if not tag:
+                        continue
+
+                    addr = raw.get("address", "").lower()
+
+                    if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                        if addr != h.CONTRACTS["NADFUN"].lower():
+                            continue
+                    elif tag == "V3SWAP":
+                        pass
+                    elif tag == "TF":
+                        if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
+                            continue
+                    else:
+                        continue
+
+                    filtered.append(raw)
+
+                filtered_logs[blk] = filtered
+
+            SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
+
+        last_processed = chunk_end
+        if chunk_end % 1000 < batch:
+            print(f"[Reindex] Processed up to block {chunk_end}")
+
+    print(f"[Reindex] Complete, last processed = {last_processed}")
+    return last_processed
+
 # parse cli arguments for the backfiller process
 # returns an argparse namespace with start_block and batch size
 def parse_args():
@@ -30,6 +94,11 @@ def parse_args():
         type=int,
         default=100,
         help="blocks per eth_getLogs query (keep < 100)",
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="reprocess from cached logs only (no RPC), clears derived state from start_block",
     )
     return parser.parse_args()
 

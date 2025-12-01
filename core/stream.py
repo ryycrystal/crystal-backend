@@ -7,7 +7,7 @@ from core.sequencer import SEQUENCER
 import backfill
 
 HEAD_TIMEOUT = 60.0 # if >60s w/o new head block we start reconnect + backfill
-BACKFILL_BATCH = 100
+BACKFILL_BATCH = 50  # some RPCs limit to <100 blocks per getLogs
 
 missing_blocks: deque[int] = deque() # queue of blocks that need backfilling
 missing_set: set[int] = set() # so we dont backfill the same block twice
@@ -93,12 +93,18 @@ async def _gap_worker(event_counts):
 
         except RuntimeError as e:
             err = e.args[0]
-            if isinstance(err, dict) and err.get("error", {}).get("code") == -32007:
-                print("[RL] Hit provider cap, retrying")
+            err_code = err.get("error", {}).get("code") if isinstance(err, dict) else None
 
+            if err_code == -32007:
+                print("[RL] Hit provider cap, retrying")
                 for blk in range(blk_start, blk_end + 1):
                     _add_missing(blk)
                 await asyncio.sleep(1.0)
+            elif err_code == -32602:
+                print(f"[Gap] Block range {blk_start}-{blk_end} too large, splitting")
+                for blk in range(blk_start, blk_end + 1):
+                    _add_missing(blk)
+                await asyncio.sleep(0.5)
             else:
                 raise
             
