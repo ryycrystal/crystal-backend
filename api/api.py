@@ -262,6 +262,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "social4": social4,
         "snipers": snipers_view,
         "market": market,
+        "circulating_supply": str(int(circulating_supply or 0)),
     }
 
 
@@ -860,11 +861,20 @@ def token_overview_graph(
         volume_usd_str = str(volume_usd_val)
 
         dev_tokens_list: List[Dict[str, Any]] = []
+        dev_tokens_total = 0
         if creator:
             now_ts = int(time.time())
             cutoff_ts = now_ts - 3600
 
             with db_cursor() as cur:
+                # Get total count of dev tokens
+                cur.execute(
+                    "SELECT COUNT(*) FROM launchpad_tokens WHERE creator = %s",
+                    (creator,),
+                )
+                dev_tokens_total = cur.fetchone()[0] or 0
+
+                # Get 50 newest dev tokens
                 cur.execute(
                     """
                     SELECT
@@ -877,6 +887,8 @@ def token_overview_graph(
                         created_at
                     FROM launchpad_tokens
                     WHERE creator = %s
+                    ORDER BY created_at DESC NULLS LAST
+                    LIMIT 50
                     """,
                     (creator,),
                 )
@@ -978,6 +990,7 @@ def token_overview_graph(
             "holders": holders_list,
             "topTraders": top_traders_list,
             "devTokens": dev_tokens_list,
+            "devTokensTotal": dev_tokens_total,
             "id": token_addr,
             "initialSupply": str(10**18),
             "lastPriceNativePerTokenWad": str(last_price_wad),
@@ -1011,6 +1024,7 @@ def token_overview_graph(
             "volumeToken": volume_token_str,
             "volumeUsd": volume_usd_str,
             "graduationPercentageBps": graduation_bps,
+            "circulating_supply": str(int(circulating_supply or 0)),
         }
         
         return result
@@ -1440,17 +1454,132 @@ def search_tokens_api(
         max_length=64,
         description="search string for token name, symbol, or address",
     ),
-    limit: int = Query(10, ge=1, le=10),
+    sort: str = Query(
+        None,
+        description="optional sort: 'mc', 'volume_1h', 'volume_24h', 'recent', 'holders'",
+    ),
 ) -> Dict[str, Any]:
     q = query.strip()
     if not q:
         raise HTTPException(status_code=400, detail="empty query")
 
-    rows = storage.search_tokens(q, limit)
+    if sort is None:
+        rows = storage.search_tokens(q, limit=50)
+        results: List[Dict[str, Any]] = []
 
-    results: List[Dict[str, Any]] = []
+        for token, circ_supply, _score in rows:
+            token_addr = (token or "").lower()
+            if not token_addr:
+                continue
 
-    for token, circ_supply, _score in rows:
+            row = _serialize_token(token_addr)
+            if not row:
+                continue
+
+            graduation_bps = (circ_supply or 0) / 793100000
+            row["graduationPercentageBps"] = graduation_bps
+            results.append(row)
+
+        return {
+            "query": query,
+            "sort": None,
+            "count": len(results),
+            "results": results,
+        }
+
+    rows = storage.search_tokens(q, limit=1000)
+    token_addrs = [(token or "").lower() for token, _, _ in rows if token]
+
+    if not token_addrs:
+        return {
+            "query": query,
+            "sort": sort,
+            "count": 0,
+            "results": [],
+        }
+
+    now_ts = int(time.time())
+
+    with db_cursor() as cur:
+        if sort == "mc":
+            cur.execute(
+                """
+                SELECT token, last_price_native, circulating_supply
+                FROM launchpad_tokens
+                WHERE token = ANY(%s)
+                ORDER BY last_price_native DESC NULLS LAST
+                LIMIT 50
+                """,
+                (token_addrs,),
+            )
+        elif sort == "recent":
+            cur.execute(
+                """
+                SELECT token, last_price_native, circulating_supply
+                FROM launchpad_tokens
+                WHERE token = ANY(%s)
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 50
+                """,
+                (token_addrs,),
+            )
+        elif sort == "volume_1h":
+            cutoff_1h = now_ts - 3600
+            cur.execute(
+                """
+                SELECT t.token, t.last_price_native, t.circulating_supply
+                FROM launchpad_tokens t
+                LEFT JOIN LATERAL (
+                    SELECT COALESCE(SUM(native_amount), 0) as vol
+                    FROM launchpad_trades
+                    WHERE token = t.token AND timestamp >= %s
+                ) tr ON true
+                WHERE t.token = ANY(%s)
+                ORDER BY tr.vol DESC NULLS LAST
+                LIMIT 50
+                """,
+                (cutoff_1h, token_addrs),
+            )
+        elif sort == "volume_24h":
+            cutoff_24h = now_ts - 86400
+            cur.execute(
+                """
+                SELECT t.token, t.last_price_native, t.circulating_supply
+                FROM launchpad_tokens t
+                LEFT JOIN LATERAL (
+                    SELECT COALESCE(SUM(native_amount), 0) as vol
+                    FROM launchpad_trades
+                    WHERE token = t.token AND timestamp >= %s
+                ) tr ON true
+                WHERE t.token = ANY(%s)
+                ORDER BY tr.vol DESC NULLS LAST
+                LIMIT 50
+                """,
+                (cutoff_24h, token_addrs),
+            )
+        elif sort == "holders":
+            cur.execute(
+                """
+                SELECT t.token, t.last_price_native, t.circulating_supply
+                FROM launchpad_tokens t
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) as cnt
+                    FROM launchpad_positions
+                    WHERE token = t.token AND balance_token > 1
+                ) p ON true
+                WHERE t.token = ANY(%s)
+                ORDER BY p.cnt DESC NULLS LAST
+                LIMIT 50
+                """,
+                (token_addrs,),
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"invalid sort: {sort}. Use 'mc', 'volume_1h', 'volume_24h', 'recent', or 'holders'")
+
+        sorted_rows = cur.fetchall()
+
+    results = []
+    for token, _price, circ_supply in sorted_rows:
         token_addr = (token or "").lower()
         if not token_addr:
             continue
@@ -1461,11 +1590,11 @@ def search_tokens_api(
 
         graduation_bps = (circ_supply or 0) / 793100000
         row["graduationPercentageBps"] = graduation_bps
-
         results.append(row)
 
     return {
         "query": query,
+        "sort": sort,
         "count": len(results),
         "results": results,
     }
