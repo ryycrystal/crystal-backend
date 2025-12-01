@@ -27,11 +27,16 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 log.propagate = False
 
-AGGREGATOR_ADDR = "0x7193e46d4a812c8990f96a6e9c1f1ed338b2a6b7".lower()
+AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
 
 def _internal_addrs() -> set[str]:
-    base = {AGGREGATOR_ADDR}
+    base: set[str] = {AGGREGATOR_ADDR}
     base.update(a.lower() for a in getattr(h, "ADDRS", []))
+
+    for pool, _, _, _ in storage.load_all_pools():
+        if pool:
+            base.add(pool.lower())
+
     return base
 
 def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int]:

@@ -3,7 +3,6 @@ import asyncio
 from core.stream import stream_logs
 from core.sequencer import SEQUENCER
 import core.storage as storage
-from core import oracle
 
 
 async def main() -> None:
