@@ -32,7 +32,7 @@ async def main() -> None:
     else:
         last_blk = storage.get_last_processed_block()
         if last_blk is None:
-            last_blk = 37709836
+            last_blk = 39283271
         start_blk = last_blk + 1
 
     print(f"[IDX] Starting from block {start_blk}", flush=True)

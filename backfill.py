@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 import httpx
+import traceback
 
 from core import chain as h
 import core.storage as storage
@@ -232,4 +233,5 @@ async def backfill(start_block: int, batch: int) -> int:
 
         except Exception as e:
             print(f"[Backfill] Fatal Error {e!r}", flush=True)
+            traceback.print_exc()
             await asyncio.sleep(5.0)
