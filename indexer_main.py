@@ -19,7 +19,6 @@ async def main() -> None:
 
     SEQUENCER._state.rebuild_from_db()
 
-    # Start metadata worker early so it runs during reindex too
     await nadfun.start_metadata_worker(storage)
 
     if REINDEX:
@@ -29,7 +28,7 @@ async def main() -> None:
             start = min_cached if min_cached else 37709836
 
         print(f"[IDX] Reindex from block {start}", flush=True)
-        last = backfill.reindex(start, REINDEX_BATCH)
+        last = await backfill.reindex(start, REINDEX_BATCH)
         print(f"[IDX] Reindex complete at block {last}", flush=True)
 
         start_blk = last + 1

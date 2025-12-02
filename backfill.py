@@ -18,7 +18,7 @@ async def _process_metadata_background():
         print(f"[Backfill] Metadata background error: {e!r}")
 
 
-def reindex(start_block: int, batch: int) -> int:
+async def reindex(start_block: int, batch: int) -> int:
     print(f"[Reindex] Starting reindex from block {start_block}")
 
     min_cached, max_cached = storage.get_cached_block_range()
@@ -77,6 +77,8 @@ def reindex(start_block: int, batch: int) -> int:
         last_processed = chunk_end
         if chunk_end % 1000 < batch:
             print(f"[Reindex] Processed up to block {chunk_end}")
+
+        await asyncio.sleep(0)
 
     print(f"[Reindex] Complete, last processed = {last_processed}")
     return last_processed
