@@ -65,6 +65,35 @@ async def process_metadata_queue() -> list[dict]:
 
     return [r for r in results if r is not None]
 
+
+_METADATA_WORKER_RUNNING = False
+
+async def start_metadata_worker(storage_module) -> None:
+    global _METADATA_WORKER_RUNNING
+    if _METADATA_WORKER_RUNNING:
+        return
+    _METADATA_WORKER_RUNNING = True
+
+    async def worker():
+        while True:
+            try:
+                qlen = len(METADATA_QUEUE)
+                if qlen > 0:
+                    print(f"[Metadata] Processing {qlen} items...")
+                    results = await process_metadata_queue()
+                    if results:
+                        print(f"[Metadata] Got {len(results)} results, saving...")
+                        storage_module.update_token_metadata_batch(results)
+                    await asyncio.sleep(0.1)
+                else:
+                    await asyncio.sleep(1.0)
+            except Exception as e:
+                print(f"[Metadata] Worker error: {e!r}")
+                await asyncio.sleep(2.0)
+
+    asyncio.create_task(worker())
+    print("[Metadata] Background worker started")
+
 # 32-byte word or hex string into a 0x-prefixed address
 def _to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
@@ -157,6 +186,7 @@ def parse_nadfun_token_created(
 
     if token_uri and token:
         METADATA_QUEUE.append((token, token_uri))
+        print(f"[Metadata] Queued {token[:10]}... queue size={len(METADATA_QUEUE)}")
 
     metadata_cid = image_uri or token_uri or ""
 
