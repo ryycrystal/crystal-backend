@@ -74,6 +74,8 @@ async def reindex(start_block: int, batch: int) -> int:
 
             SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
 
+        asyncio.create_task(_process_metadata_background())
+
         last_processed = chunk_end
         if chunk_end % 1000 < batch:
             print(f"[Reindex] Processed up to block {chunk_end}")
