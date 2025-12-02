@@ -4,8 +4,9 @@ from core.stream import stream_logs
 from core.sequencer import SEQUENCER
 import core.storage as storage
 import backfill
+from modules import nadfun
 
-REINDEX = True 
+REINDEX = True
 REINDEX_FROM_BLOCK = 37709836
 REINDEX_BATCH = 100
 
@@ -17,6 +18,9 @@ async def main() -> None:
     SEQUENCER.set_on_block(storage.record_block_processed)
 
     SEQUENCER._state.rebuild_from_db()
+
+    # Start metadata worker early so it runs during reindex too
+    await nadfun.start_metadata_worker(storage)
 
     if REINDEX:
         start = REINDEX_FROM_BLOCK
