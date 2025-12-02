@@ -6,7 +6,7 @@ import core.storage as storage
 import backfill
 
 REINDEX = True 
-REINDEX_FROM_BLOCK = 38681528
+REINDEX_FROM_BLOCK = 37709836
 REINDEX_BATCH = 100
 
 
