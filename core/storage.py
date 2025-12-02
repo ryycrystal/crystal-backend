@@ -1665,81 +1665,15 @@ def clear_derived_state_from_block(start_block: int, cur=None) -> None:
 
 
 def _clear_derived_state_impl(start_block: int, cur) -> None:
-    cur.execute(
-        "DELETE FROM launchpad_trades WHERE block_number >= %s",
-        (start_block,),
-    )
-    print(f"[Reindex] Cleared trades from block {start_block}")
-
+    cur.execute("DELETE FROM launchpad_trades")
     cur.execute("DELETE FROM launchpad_ohlcv")
-    print(f"[Reindex] Cleared OHLCV data")
-
     cur.execute("DELETE FROM launchpad_positions")
-    print(f"[Reindex] Cleared positions")
-
     cur.execute("DELETE FROM launchpad_snipers")
-    print(f"[Reindex] Cleared snipers")
-
-    cur.execute(
-        """
-        UPDATE launchpad_users SET
-            total_native_volume = 0,
-            total_realized_pnl_native = 0,
-            total_trades = 0
-        """
-    )
-    print(f"[Reindex] Reset user stats")
-
-    cur.execute(
-        """
-        UPDATE launchpad_tokens SET
-            last_price_native = 0,
-            native_volume = 0,
-            token_volume = 0,
-            volume_usd = 0,
-            fees_usd = 0,
-            buy_count = 0,
-            sell_count = 0,
-            tx_count = 0,
-            circulating_supply = 0,
-            snipers_count = 0,
-            approaching_75 = false,
-            approaching_75_block = NULL,
-            approaching_75_at = NULL
-        WHERE created_block >= %s
-        """,
-        (start_block,),
-    )
-    print(f"[Reindex] Reset token stats for tokens created from block {start_block}")
-
-    cur.execute(
-        """
-        UPDATE launchpad_tokens SET
-            last_price_native = 0,
-            native_volume = 0,
-            token_volume = 0,
-            volume_usd = 0,
-            fees_usd = 0,
-            buy_count = 0,
-            sell_count = 0,
-            tx_count = 0,
-            circulating_supply = 0,
-            snipers_count = 0,
-            approaching_75 = false,
-            approaching_75_block = NULL,
-            approaching_75_at = NULL
-        """
-    )
-    print(f"[Reindex] Reset all token trading stats")
-
+    cur.execute("DELETE FROM launchpad_users")
+    cur.execute("DELETE FROM launchpad_tokens")
+    cur.execute("DELETE FROM launchpad_pools")
     cur.execute("DELETE FROM launchpad_daily_pnl")
-    print(f"[Reindex] Cleared daily PnL")
-
-    cur.execute(
-        "DELETE FROM launchpad_blocks WHERE number >= %s",
-        (start_block,),
-    )
-    print(f"[Reindex] Cleared processed block markers from {start_block}")
+    cur.execute("DELETE FROM launchpad_blocks")
 
 
 def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
