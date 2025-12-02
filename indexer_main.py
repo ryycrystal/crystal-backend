@@ -5,7 +5,7 @@ from core.sequencer import SEQUENCER
 import core.storage as storage
 import backfill
 
-REINDEX = True
+REINDEX = False
 REINDEX_FROM_BLOCK = 37709836
 REINDEX_BATCH = 100
 
