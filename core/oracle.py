@@ -16,7 +16,9 @@ def mon_price_from_v3swap(ev: Dict[str, Any]) -> Optional[Decimal]:
         mon_amount = int(ev.get("amount0") or 0)
         usd_amount = int(ev.get("amount1") or 0)
     except (TypeError, ValueError):
-        print("error")
         return None
 
-    return(-usd_amount * 10 ** 18 / (mon_amount * 10 ** 6))
+    if mon_amount == 0:
+        return None
+
+    return Decimal(-usd_amount * 10 ** 18) / Decimal(mon_amount * 10 ** 6)

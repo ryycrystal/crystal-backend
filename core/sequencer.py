@@ -374,7 +374,8 @@ class Sequencer:
                 pool_addr = (log.get("address") or "").lower()
                 if pool_addr == "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower():
                     px = oracle.mon_price_from_v3swap(parsed)
-                    self._state.set_mon_price_usd(px)
+                    if px is not None:
+                        self._state.set_mon_price_usd(px)
 
                 real_user = self._resolve_trade_user(
                     txh,
