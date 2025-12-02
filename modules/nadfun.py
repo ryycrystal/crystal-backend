@@ -188,7 +188,7 @@ def parse_nadfun_token_created(
         METADATA_QUEUE.append((token, token_uri))
         print(f"[Metadata] Queued {token[:10]}... queue size={len(METADATA_QUEUE)}")
 
-    metadata_cid = image_uri or token_uri or ""
+    metadata_cid = ""  # Will be populated by metadata fetch with actual image_uri
 
     try:
         last_price_native = Decimal("90000") / Decimal("1073000191")
