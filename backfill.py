@@ -18,6 +18,23 @@ async def _process_metadata_background():
         print(f"[Backfill] Metadata background error: {e!r}")
 
 
+async def _process_metadata_batch_for_resync() -> int:
+    """Process queued metadata with high throughput during resync.
+
+    Returns count of successfully fetched metadata.
+    """
+    qlen = len(nadfun.METADATA_QUEUE)
+    if qlen == 0:
+        return 0
+
+    try:
+        count = await nadfun.process_metadata_queue_immediate(storage)
+        return count
+    except Exception as e:
+        print(f"[Resync] Metadata batch error: {e!r}")
+        return 0
+
+
 async def reindex(start_block: int, batch: int) -> int:
     print(f"[Reindex] Starting reindex from block {start_block}")
 
@@ -34,8 +51,10 @@ async def reindex(start_block: int, batch: int) -> int:
     SEQUENCER._state.reset_for_reindex()
 
     last_processed = start_block - 1
+    total_metadata_fetched = 0
+    metadata_process_interval = 10  # Process metadata every N batches
 
-    for chunk_start in range(start_block, max_cached + 1, batch):
+    for batch_idx, chunk_start in enumerate(range(start_block, max_cached + 1, batch)):
         chunk_end = min(chunk_start + batch - 1, max_cached)
 
         with storage.db_cursor() as cur:
@@ -74,7 +93,15 @@ async def reindex(start_block: int, batch: int) -> int:
 
             SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
 
-        asyncio.create_task(_process_metadata_background())
+        # Process metadata in batches during resync for high throughput
+        # Every N batches, await metadata processing (not fire-and-forget)
+        if (batch_idx + 1) % metadata_process_interval == 0 or chunk_end >= max_cached:
+            qlen = len(nadfun.METADATA_QUEUE)
+            if qlen > 0:
+                fetched = await _process_metadata_batch_for_resync()
+                total_metadata_fetched += fetched
+                if fetched > 0:
+                    print(f"[Reindex] Fetched {fetched}/{qlen} metadata items (total: {total_metadata_fetched})")
 
         last_processed = chunk_end
         if chunk_end % 1000 < batch:
@@ -82,7 +109,14 @@ async def reindex(start_block: int, batch: int) -> int:
 
         await asyncio.sleep(0)
 
-    print(f"[Reindex] Complete, last processed = {last_processed}")
+    # Final metadata drain
+    remaining = len(nadfun.METADATA_QUEUE)
+    if remaining > 0:
+        print(f"[Reindex] Final metadata drain: {remaining} items...")
+        fetched = await _process_metadata_batch_for_resync()
+        total_metadata_fetched += fetched
+
+    print(f"[Reindex] Complete, last processed = {last_processed}, total metadata fetched = {total_metadata_fetched}")
     return last_processed
 
 # parse cli arguments for the backfiller process
@@ -154,8 +188,10 @@ async def backfill(start_block: int, batch: int) -> int:
             print(f"[Backfill] CH @ Init = {head_snapshot}")
 
             last_processed = start_block - 1
+            total_metadata_fetched = 0
+            metadata_process_interval = 10  # Process metadata every N batches
 
-            for chunk_start in range(start_block, head_snapshot + 1, batch):
+            for batch_idx, chunk_start in enumerate(range(start_block, head_snapshot + 1, batch)):
                 chunk_end = min(chunk_start + batch - 1, head_snapshot)
 
                 with storage.db_cursor() as cur:
@@ -228,11 +264,22 @@ async def backfill(start_block: int, batch: int) -> int:
 
                     SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
 
-                asyncio.create_task(_process_metadata_background())
+                # Process metadata in batches for high throughput
+                if (batch_idx + 1) % metadata_process_interval == 0 or chunk_end >= head_snapshot:
+                    qlen = len(nadfun.METADATA_QUEUE)
+                    if qlen > 0:
+                        fetched = await _process_metadata_batch_for_resync()
+                        total_metadata_fetched += fetched
 
                 last_processed = chunk_end
 
-            print(f"[Backfill] Complete, LP = {last_processed}")
+            # Final metadata drain
+            remaining = len(nadfun.METADATA_QUEUE)
+            if remaining > 0:
+                fetched = await _process_metadata_batch_for_resync()
+                total_metadata_fetched += fetched
+
+            print(f"[Backfill] Complete, LP = {last_processed}, metadata fetched = {total_metadata_fetched}")
             return last_processed
 
         except Exception as e:
