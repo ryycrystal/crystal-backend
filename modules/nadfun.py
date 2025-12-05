@@ -15,11 +15,32 @@ _FAILED_HOSTS: Dict[str, float] = {}
 METADATA_QUEUE: list[tuple[str, str]] = []
 _METADATA_CLIENT: httpx.AsyncClient | None = None
 
+# High-throughput settings for resync
+_CONCURRENCY_LIMIT = 100  # max parallel requests
+_REQUEST_TIMEOUT = 1.0    # seconds per request
+_HOST_BLACKLIST_DURATION = 30  # seconds to blacklist failed hosts
+_SEMAPHORE: asyncio.Semaphore | None = None
+
 async def _get_metadata_client() -> httpx.AsyncClient:
     global _METADATA_CLIENT
     if _METADATA_CLIENT is None:
-        _METADATA_CLIENT = httpx.AsyncClient(timeout=2.0)
+        # Configure for high concurrency
+        limits = httpx.Limits(
+            max_connections=200,
+            max_keepalive_connections=100,
+        )
+        _METADATA_CLIENT = httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT,
+            limits=limits,
+            follow_redirects=True,
+        )
     return _METADATA_CLIENT
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _SEMAPHORE
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(_CONCURRENCY_LIMIT)
+    return _SEMAPHORE
 
 async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
     try:
@@ -28,30 +49,32 @@ async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
         host = ""
 
     if host and host in _FAILED_HOSTS:
-        if time.monotonic() - _FAILED_HOSTS[host] < 60:
+        if time.monotonic() - _FAILED_HOSTS[host] < _HOST_BLACKLIST_DURATION:
             return None
         else:
             del _FAILED_HOSTS[host]
 
-    try:
-        client = await _get_metadata_client()
-        resp = await client.get(token_uri)
-        resp.raise_for_status()
-        meta = resp.json()
-        return {
-            "token": token,
-            "name": meta.get("name", ""),
-            "symbol": meta.get("symbol", ""),
-            "description": meta.get("description", ""),
-            "image_uri": meta.get("image_uri", ""),
-            "website": meta.get("website", ""),
-            "twitter": meta.get("twitter", ""),
-            "telegram": meta.get("telegram", ""),
-        }
-    except Exception as e:
-        if host:
-            _FAILED_HOSTS[host] = time.monotonic()
-        return None
+    sem = _get_semaphore()
+    async with sem:
+        try:
+            client = await _get_metadata_client()
+            resp = await client.get(token_uri)
+            resp.raise_for_status()
+            meta = resp.json()
+            return {
+                "token": token,
+                "name": meta.get("name", ""),
+                "symbol": meta.get("symbol", ""),
+                "description": meta.get("description", ""),
+                "image_uri": meta.get("image_uri", ""),
+                "website": meta.get("website", ""),
+                "twitter": meta.get("twitter", ""),
+                "telegram": meta.get("telegram", ""),
+            }
+        except Exception as e:
+            if host:
+                _FAILED_HOSTS[host] = time.monotonic()
+            return None
 
 async def process_metadata_queue() -> list[dict]:
     if not METADATA_QUEUE:
@@ -67,12 +90,14 @@ async def process_metadata_queue() -> list[dict]:
 
 
 _METADATA_WORKER_RUNNING = False
+_STORAGE_MODULE = None
 
 async def start_metadata_worker(storage_module) -> None:
-    global _METADATA_WORKER_RUNNING
+    global _METADATA_WORKER_RUNNING, _STORAGE_MODULE
     if _METADATA_WORKER_RUNNING:
         return
     _METADATA_WORKER_RUNNING = True
+    _STORAGE_MODULE = storage_module
 
     async def worker():
         while True:
@@ -84,15 +109,43 @@ async def start_metadata_worker(storage_module) -> None:
                     if results:
                         print(f"[Metadata] Got {len(results)} results, saving...")
                         storage_module.update_token_metadata_batch(results)
-                    await asyncio.sleep(0.1)
+                    # Faster polling when queue is active
+                    await asyncio.sleep(0.05)
                 else:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"[Metadata] Worker error: {e!r}")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
 
     asyncio.create_task(worker())
     print("[Metadata] Background worker started")
+
+
+async def process_metadata_queue_immediate(storage_module=None) -> int:
+    """Process all queued metadata immediately. Returns count of successful fetches.
+
+    Use this during resync for faster processing without waiting for background worker.
+    """
+    if not METADATA_QUEUE:
+        return 0
+
+    queue = METADATA_QUEUE.copy()
+    METADATA_QUEUE.clear()
+
+    if not queue:
+        return 0
+
+    tasks = [fetch_metadata_single(token, uri) for token, uri in queue]
+    results = await asyncio.gather(*tasks)
+
+    valid_results = [r for r in results if r is not None]
+
+    # Use provided storage_module or fall back to global
+    store = storage_module or _STORAGE_MODULE
+    if valid_results and store:
+        store.update_token_metadata_batch(valid_results)
+
+    return len(valid_results)
 
 # 32-byte word or hex string into a 0x-prefixed address
 def _to_addr(w) -> str:
