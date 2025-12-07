@@ -75,7 +75,7 @@ def _internal_addrs() -> set[str]:
 
     return base
 
-def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int]:
+def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int, List[str]]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
     excluded = _internal_addrs()
@@ -92,7 +92,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
         rows = cur.fetchall()
 
     dev_holding = 0
-    filtered: List[int] = []
+    filtered: List[Tuple[int, str]] = []
 
     for ua, bal in rows:
         ua = ua.lower()
@@ -102,13 +102,15 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
             dev_holding = bal
 
         if ua not in excluded:
-            filtered.append(bal)
+            filtered.append((bal, ua))
 
     filtered.sort(reverse=True)
     holder_count = len(filtered)
-    top10_holding = sum(filtered[:10])
+    top10 = filtered[:10]
+    top10_holding = sum(b for b, _ in top10)
+    top10_addresses = [addr for _, addr in top10]
 
-    return holder_count, dev_holding, top10_holding
+    return holder_count, dev_holding, top10_holding, top10_addresses
 
 
 def _serialize_token(token_addr: str) -> Dict[str, Any]:
@@ -192,7 +194,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
     ) = row
 
     creator = creator or ""
-    holders, dev_holding, top10_holding = _holders_for_token(token, creator)
+    holders, dev_holding, top10_holding, top10_addresses = _holders_for_token(token, creator)
 
     last_price_native = last_price_native or Decimal(0)
     native_volume = int(native_volume or 0)
@@ -273,6 +275,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "holders": holders,
         "developer_holding": str(dev_holding),
         "top10_holding": str(top10_holding),
+        "top10_addresses": top10_addresses,
         "native_volume": str(native_volume),
         "token_volume": str(token_volume),
         "volume_usd": _fmt_usd(volume_usd),
@@ -592,7 +595,7 @@ def token_overview_graph(
         distinct_buyers = int(buyers_sellers[0] or 0)
         distinct_sellers = int(buyers_sellers[1] or 0)
 
-        holders_count, dev_holding, _top10 = _holders_for_token(token_addr, creator)
+        holders_count, dev_holding, _top10, top10_addresses = _holders_for_token(token_addr, creator)
 
         decimals = 18
 
@@ -617,9 +620,25 @@ def token_overview_graph(
         marketcap_native_raw = last_price_native * Decimal(1e9)
         marketcap_usd = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
 
-        volume_native = native_volume or 0
-        volume_token = token_volume or 0
-        volume_usd_val = volume_usd or Decimal(0)
+        now_ts = int(time.time())
+        day_ago = now_ts - 86400
+
+        with db_cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(native_amount), 0),
+                    COALESCE(SUM(usd_amount), 0),
+                    COUNT(*) FILTER (WHERE is_buy),
+                    COUNT(*) FILTER (WHERE NOT is_buy)
+                FROM launchpad_trades
+                WHERE token = %s AND timestamp >= %s
+            """, (token_addr, day_ago))
+            stats_24h = cur.fetchone()
+
+        volume_native_24h = int(stats_24h[0] or 0)
+        volume_usd_24h = stats_24h[1] or Decimal(0)
+        buys_24h = int(stats_24h[2] or 0)
+        sells_24h = int(stats_24h[3] or 0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
@@ -892,10 +911,6 @@ def token_overview_graph(
 
         migrated_flag = bool(migrated)
 
-        volume_native_str = str(int(volume_native or 0))
-        volume_token_str = str(int(volume_token or 0))
-        volume_usd_str = str(volume_usd_val)
-
         dev_tokens_list: List[Dict[str, Any]] = []
         dev_tokens_total = 0
         if creator:
@@ -903,14 +918,12 @@ def token_overview_graph(
             cutoff_ts = now_ts - 3600
 
             with db_cursor() as cur:
-                # Get total count of dev tokens
                 cur.execute(
                     "SELECT COUNT(*) FROM launchpad_tokens WHERE creator = %s",
                     (creator,),
                 )
                 dev_tokens_total = cur.fetchone()[0] or 0
 
-                # Get 50 newest dev tokens
                 cur.execute(
                     """
                     SELECT
@@ -920,7 +933,9 @@ def token_overview_graph(
                         metadata_cid,
                         last_price_native,
                         migrated,
-                        created_at
+                        created_at,
+                        market,
+                        source
                     FROM launchpad_tokens
                     WHERE creator = %s
                     ORDER BY created_at DESC NULLS LAST
@@ -938,6 +953,8 @@ def token_overview_graph(
                 dev_last_price_native,
                 dev_migrated,
                 dev_created_at,
+                dev_market,
+                dev_source,
             ) in dev_token_rows:
                 dev_last_price_native = dev_last_price_native or Decimal(0)
                 dev_price_wad = dev_last_price_native * Decimal(1e9)
@@ -955,7 +972,7 @@ def token_overview_graph(
                     vol_row = cur.fetchone()
                 vol_1h_native = int(vol_row[0] or 0)
 
-                dev_total_holders, _, _ = _holders_for_token(dev_token_addr.lower(), creator)
+                dev_total_holders, _, _, _ = _holders_for_token(dev_token_addr.lower(), creator)
 
                 dev_tokens_list.append(
                     {
@@ -969,6 +986,8 @@ def token_overview_graph(
                         "volumeNative1h": str(vol_1h_native),
                         "holders": int(dev_total_holders),
                         "timestamp": str(int(dev_created_at or 0)),
+                        "market": dev_market or None,
+                        "source": int(dev_source or 0),
                     }
                 )
 
@@ -1012,7 +1031,7 @@ def token_overview_graph(
         }
         
         result = {
-            "buyTxs": int(buy_count or 0),
+            "buyTxs": buys_24h,
             "creator": {
                 "id": creator,
                 "tokensGraduated": int(dev_tokens_graduated),
@@ -1042,7 +1061,7 @@ def token_overview_graph(
                 "klines": mini_klines,
             },
             "name": name,
-            "sellTxs": int(sell_count or 0),
+            "sellTxs": sells_24h,
             "series": {
                 "klines": series_klines,
             },
@@ -1054,13 +1073,14 @@ def token_overview_graph(
             "symbol": symbol,
             "timestamp": str(int(created_at or 0)),
             "totalHolders": int(holders_count),
+            "top10Addresses": top10_addresses,
             "trackedtrades": tracked_trades_out,
             "trades": trades_out,
-            "volumeNative": volume_native_str,
-            "volumeToken": volume_token_str,
-            "volumeUsd": volume_usd_str,
+            "volumeNative": str(volume_native_24h),
+            "volumeUsd": _fmt_usd(volume_usd_24h),
             "graduationPercentageBps": graduation_bps,
             "circulating_supply": str(int(circulating_supply or 0)),
+            "source": int(source or 0),
         }
         
         return result
@@ -1106,7 +1126,9 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
                 t.name,
                 t.symbol,
                 t.metadata_cid,
-                t.last_price_native
+                t.last_price_native,
+                t.market,
+                t.source
             FROM launchpad_positions p
             JOIN launchpad_tokens t ON t.token = p.token
             WHERE p.user_address = %s
@@ -1132,6 +1154,8 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
         symbol,
         metadata_cid,
         last_price_native,
+        market,
+        source,
     ) in pos_rows:
         last_price_native = last_price_native or Decimal(0)
         token_bought = int(token_bought or 0)
@@ -1180,6 +1204,8 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
                 "sell_count": int(sell_count or 0),
                 "token_bought": str(token_bought),
                 "token_sold": str(token_sold),
+                "market": market or None,
+                "source": int(source or 0),
             }
         )
 
