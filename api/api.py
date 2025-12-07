@@ -1,5 +1,5 @@
 from __future__ import annotations
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, ROUND_HALF_UP, InvalidOperation
 from typing import Dict, Any, List, Tuple
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,42 @@ if not log.handlers:
 
 log.setLevel(logging.INFO)
 log.propagate = False
+
+def _fmt(value) -> str:
+    if value is None:
+        return "0"
+    try:
+        d = Decimal(str(value)) if not isinstance(value, Decimal) else value
+        d = d.quantize(Decimal("1e-18"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return "0"
+    if abs(d) <= Decimal("1e-18"):
+        return "0"
+    if d == d.to_integral_value():
+        return str(int(d))
+    s = format(d, 'f')
+    if '.' in s:
+        s = s.rstrip('0').rstrip('.')
+    return s if s else "0"
+
+
+def _fmt_usd(value) -> str:
+    if value is None:
+        return "0"
+    try:
+        d = Decimal(str(value)) if not isinstance(value, Decimal) else value
+        d = d.quantize(Decimal("1e-8"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return "0"
+    if abs(d) <= Decimal("1e-8"):
+        return "0"
+    if d == d.to_integral_value():
+        return str(int(d))
+    s = format(d, 'f')
+    if '.' in s:
+        s = s.rstrip('0').rstrip('.')
+    return s if s else "0"
+
 
 AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
 
@@ -239,10 +275,10 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "top10_holding": str(top10_holding),
         "native_volume": str(native_volume),
         "token_volume": str(token_volume),
-        "volume_usd": str(volume_usd),
-        "fees_usd": str(fees_usd),
-        "marketcap_native_raw": str(marketcap_native_raw),
-        "marketcap_usd": str(marketcap_usd),
+        "volume_usd": _fmt_usd(volume_usd),
+        "fees_usd": _fmt_usd(fees_usd),
+        "marketcap_native_raw": _fmt(marketcap_native_raw),
+        "marketcap_usd": _fmt_usd(marketcap_usd),
         "tx": {
             "buy": buy_count,
             "sell": sell_count,
@@ -653,14 +689,14 @@ def token_overview_graph(
                     "name": name,
                     "metadata_cid": metadata_cid or "",
                     "balance_token": str(balance_token),
-                    "balance_native": str(current_value_native),
-                    "balance_usd": str(balance_usd),
+                    "balance_native": _fmt(current_value_native),
+                    "balance_usd": _fmt_usd(balance_usd),
                     "native_spent": str(native_spent),
                     "native_received": str(native_received),
-                    "realized_pnl_native": str(realized_pnl),
-                    "unrealized_pnl_native": str(unrealized_pnl),
-                    "total_pnl_native": str(total_pnl),
-                    "total_pnl_usd": str(total_pnl_usd),
+                    "realized_pnl_native": _fmt(realized_pnl),
+                    "unrealized_pnl_native": _fmt(unrealized_pnl),
+                    "total_pnl_native": _fmt(total_pnl),
+                    "total_pnl_usd": _fmt_usd(total_pnl_usd),
                     "trade_count": int(trade_count or 0),
                     "buy_count": int(buy_count or 0),
                     "sell_count": int(sell_count or 0),
@@ -737,14 +773,14 @@ def token_overview_graph(
                     "name": name,
                     "metadata_cid": metadata_cid or "",
                     "balance_token": str(balance_token),
-                    "balance_native": str(current_value_native),
-                    "balance_usd": str(balance_usd),
+                    "balance_native": _fmt(current_value_native),
+                    "balance_usd": _fmt_usd(balance_usd),
                     "native_spent": str(native_spent),
                     "native_received": str(native_received),
-                    "realized_pnl_native": str(realized_pnl),
-                    "unrealized_pnl_native": str(unrealized_pnl),
-                    "total_pnl_native": str(total_pnl),
-                    "total_pnl_usd": str(total_pnl_usd),
+                    "realized_pnl_native": _fmt(realized_pnl),
+                    "unrealized_pnl_native": _fmt(unrealized_pnl),
+                    "total_pnl_native": _fmt(total_pnl),
+                    "total_pnl_usd": _fmt_usd(total_pnl_usd),
                     "trade_count": int(trade_count or 0),
                     "buy_count": int(buy_count or 0),
                     "sell_count": int(sell_count or 0),
@@ -1131,14 +1167,14 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
                 "name": name,
                 "metadata_cid": metadata_cid or "",
                 "balance_token": str(balance_token),
-                "balance_native": str(current_value_native),
-                "balance_usd": str(current_value_usd),
+                "balance_native": _fmt(current_value_native),
+                "balance_usd": _fmt_usd(current_value_usd),
                 "native_spent": str(native_spent),
                 "native_received": str(native_received),
-                "realized_pnl_native": str(realized_pnl),
-                "unrealized_pnl_native": str(unrealized_pnl_val),
-                "total_pnl_native": str(total_pnl),
-                "total_pnl_usd": str(total_pnl_usd),
+                "realized_pnl_native": _fmt(realized_pnl),
+                "unrealized_pnl_native": _fmt(unrealized_pnl_val),
+                "total_pnl_native": _fmt(total_pnl),
+                "total_pnl_usd": _fmt_usd(total_pnl_usd),
                 "trade_count": int(trade_count or 0),
                 "buy_count": int(buy_count or 0),
                 "sell_count": int(sell_count or 0),
@@ -1163,12 +1199,12 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
 
     summary = {
         "user": user_addr,
-        "portfolio_value_native": str(total_value_native),
-        "portfolio_value_usd": str(total_value_usd),
-        "realized_pnl_native": str(total_realized_pnl),
-        "unrealized_pnl_native": str(total_unrealized_pnl),
-        "total_pnl_native": str(total_pnl_native_val),
-        "total_pnl_usd": str(total_pnl_usd),
+        "portfolio_value_native": _fmt(total_value_native),
+        "portfolio_value_usd": _fmt_usd(total_value_usd),
+        "realized_pnl_native": _fmt(total_realized_pnl),
+        "unrealized_pnl_native": _fmt(total_unrealized_pnl),
+        "total_pnl_native": _fmt(total_pnl_native_val),
+        "total_pnl_usd": _fmt_usd(total_pnl_usd),
         "native_spent": str(total_native_spent),
         "native_received": str(total_native_received),
         "trade_count": int(total_trades),

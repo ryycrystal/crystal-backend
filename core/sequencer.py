@@ -266,11 +266,77 @@ class Sequencer:
         zero_addr = "0x" + "0" * 40
 
         if is_buy:
+            net_by_addr = defaultdict(int)
+            has_outgoing = set()
+            for t in ordered:
+                net_by_addr[t["from"]] -= t["amount"]
+                net_by_addr[t["to"]] += t["amount"]
+                if t["amount"] > 0:
+                    has_outgoing.add(t["from"])
+
+            candidates = [(addr, net) for addr, net in net_by_addr.items()
+                          if addr not in (pool, zero_addr) and net > 0]
+
+            if candidates:
+                max_net = max(c[1] for c in candidates)
+                max_addrs = [addr for addr, net in candidates if net == max_net]
+
+                if len(max_addrs) == 1:
+                    if debug:
+                        print(f"[DEBUG] Buy: single max retention {max_addrs[0][:10]}... net={max_net}")
+                    return max_addrs[0]
+
+                leaf_addrs = [a for a in max_addrs if a not in has_outgoing]
+                if len(leaf_addrs) == 1:
+                    if debug:
+                        print(f"[DEBUG] Buy: single leaf node {leaf_addrs[0][:10]}...")
+                    return leaf_addrs[0]
+                if leaf_addrs:
+                    max_addrs = leaf_addrs
+
+                edges = defaultdict(list)
+                for t in ordered:
+                    edges[t["from"]].append(t["to"])
+
+                depth = {pool: 0}
+                changed = True
+                while changed:
+                    changed = False
+                    for src, dsts in edges.items():
+                        if src in depth:
+                            for dst in dsts:
+                                if dst not in depth:
+                                    depth[dst] = depth[src] + 1
+                                    changed = True
+
+                max_depth = -1
+                deepest = []
+                for addr in max_addrs:
+                    d = depth.get(addr, 0)
+                    if d > max_depth:
+                        max_depth = d
+                        deepest = [addr]
+                    elif d == max_depth:
+                        deepest.append(addr)
+
+                if len(deepest) == 1:
+                    if debug:
+                        print(f"[DEBUG] Buy: deepest node {deepest[0][:10]}... depth={max_depth}")
+                    return deepest[0]
+
+                for t in reversed(ordered):
+                    if t["to"] in deepest:
+                        if debug:
+                            print(f"[DEBUG] Buy: last recipient among deepest {t['to'][:10]}...")
+                        return t["to"]
+
+                return deepest[0]
+
             for t in reversed(ordered):
                 to_addr = t["to"]
                 if to_addr != pool and to_addr != zero_addr:
                     if debug:
-                        print(f"[DEBUG] Buy: using last recipient {to_addr[:10]}...")
+                        print(f"[DEBUG] Buy: fallback last recipient {to_addr[:10]}...")
                     return to_addr
         elif is_buy is False:
             for t in ordered:
@@ -368,6 +434,9 @@ class Sequencer:
 
             elif tag == "TF":
                 if parsed is not None:
+                    token = (parsed.get("token") or "").lower()
+                    if token not in self._state.launchpad_tokens and token not in self._state.token_to_v3_pool:
+                        continue
                     self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag == "V3SWAP":
