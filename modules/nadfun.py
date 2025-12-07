@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from decimal import Decimal, getcontext
 from typing import Dict, Optional
 from urllib.parse import urlparse
@@ -15,16 +16,19 @@ _FAILED_HOSTS: Dict[str, float] = {}
 METADATA_QUEUE: list[tuple[str, str]] = []
 _METADATA_CLIENT: httpx.AsyncClient | None = None
 
-# High-throughput settings for resync
-_CONCURRENCY_LIMIT = 100  # max parallel requests
-_REQUEST_TIMEOUT = 1.0    # seconds per request
-_HOST_BLACKLIST_DURATION = 30  # seconds to blacklist failed hosts
+_CONCURRENCY_LIMIT = 100
+_REQUEST_TIMEOUT = 1.0
+_HOST_BLACKLIST_DURATION = 30
 _SEMAPHORE: asyncio.Semaphore | None = None
+
+_RETRY_QUEUE: deque[tuple[str, str, int, float]] = deque()
+_MAX_RETRY_QUEUE_SIZE = 10000
+_MAX_RETRIES = 5
+_BACKOFF_SCHEDULE = [30, 60, 120, 240, 480]
 
 async def _get_metadata_client() -> httpx.AsyncClient:
     global _METADATA_CLIENT
     if _METADATA_CLIENT is None:
-        # Configure for high concurrency
         limits = httpx.Limits(
             max_connections=200,
             max_keepalive_connections=100,
@@ -42,7 +46,7 @@ def _get_semaphore() -> asyncio.Semaphore:
         _SEMAPHORE = asyncio.Semaphore(_CONCURRENCY_LIMIT)
     return _SEMAPHORE
 
-async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
+async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None, str, str]:
     try:
         host = urlparse(token_uri).netloc
     except Exception:
@@ -50,7 +54,7 @@ async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
 
     if host and host in _FAILED_HOSTS:
         if time.monotonic() - _FAILED_HOSTS[host] < _HOST_BLACKLIST_DURATION:
-            return None
+            return (None, token, token_uri)
         else:
             del _FAILED_HOSTS[host]
 
@@ -61,7 +65,7 @@ async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
             resp = await client.get(token_uri)
             resp.raise_for_status()
             meta = resp.json()
-            return {
+            return ({
                 "token": token,
                 "name": meta.get("name", ""),
                 "symbol": meta.get("symbol", ""),
@@ -70,11 +74,11 @@ async def fetch_metadata_single(token: str, token_uri: str) -> dict | None:
                 "website": meta.get("website", ""),
                 "twitter": meta.get("twitter", ""),
                 "telegram": meta.get("telegram", ""),
-            }
+            }, token, token_uri)
         except Exception as e:
             if host:
                 _FAILED_HOSTS[host] = time.monotonic()
-            return None
+            return (None, token, token_uri)
 
 async def process_metadata_queue() -> list[dict]:
     if not METADATA_QUEUE:
@@ -83,10 +87,16 @@ async def process_metadata_queue() -> list[dict]:
     queue = METADATA_QUEUE.copy()
     METADATA_QUEUE.clear()
 
-    tasks = [fetch_metadata_single(token, uri) for token, uri in queue]
+    batch_with_attempts = [(token, uri, 0) for token, uri in queue]
+    tasks = [fetch_metadata_single(token, uri) for token, uri, _ in batch_with_attempts]
     results = await asyncio.gather(*tasks)
 
-    return [r for r in results if r is not None]
+    for (result, token, uri), (_, _, attempts) in zip(results, batch_with_attempts):
+        if result is None and attempts < _MAX_RETRIES and len(_RETRY_QUEUE) < _MAX_RETRY_QUEUE_SIZE:
+            backoff = _BACKOFF_SCHEDULE[min(attempts, len(_BACKOFF_SCHEDULE) - 1)]
+            _RETRY_QUEUE.append((token, uri, attempts + 1, time.monotonic() + backoff))
+
+    return [r for r, _, _ in results if r is not None]
 
 
 _METADATA_WORKER_RUNNING = False
@@ -102,6 +112,32 @@ async def start_metadata_worker(storage_module) -> None:
     async def worker():
         while True:
             try:
+                now = time.monotonic()
+                retry_batch = []
+                temp_hold = []
+                while _RETRY_QUEUE:
+                    item = _RETRY_QUEUE.popleft()
+                    token, uri, attempts, next_time = item
+                    if next_time <= now:
+                        retry_batch.append((token, uri, attempts))
+                    else:
+                        temp_hold.append(item)
+                for item in temp_hold:
+                    _RETRY_QUEUE.append(item)
+
+                if retry_batch:
+                    tasks = [fetch_metadata_single(token, uri) for token, uri, _ in retry_batch]
+                    results = await asyncio.gather(*tasks)
+
+                    for (result, token, uri), (_, _, attempts) in zip(results, retry_batch):
+                        if result is None and attempts < _MAX_RETRIES and len(_RETRY_QUEUE) < _MAX_RETRY_QUEUE_SIZE:
+                            backoff = _BACKOFF_SCHEDULE[min(attempts, len(_BACKOFF_SCHEDULE) - 1)]
+                            _RETRY_QUEUE.append((token, uri, attempts + 1, time.monotonic() + backoff))
+
+                    valid = [r for r, _, _ in results if r is not None]
+                    if valid:
+                        storage_module.update_token_metadata_batch(valid)
+
                 qlen = len(METADATA_QUEUE)
                 if qlen > 0:
                     print(f"[Metadata] Processing {qlen} items...")
@@ -109,7 +145,7 @@ async def start_metadata_worker(storage_module) -> None:
                     if results:
                         print(f"[Metadata] Got {len(results)} results, saving...")
                         storage_module.update_token_metadata_batch(results)
-                    # Faster polling when queue is active
+
                     await asyncio.sleep(0.05)
                 else:
                     await asyncio.sleep(0.5)
@@ -122,10 +158,6 @@ async def start_metadata_worker(storage_module) -> None:
 
 
 async def process_metadata_queue_immediate(storage_module=None) -> int:
-    """Process all queued metadata immediately. Returns count of successful fetches.
-
-    Use this during resync for faster processing without waiting for background worker.
-    """
     if not METADATA_QUEUE:
         return 0
 
@@ -135,12 +167,17 @@ async def process_metadata_queue_immediate(storage_module=None) -> int:
     if not queue:
         return 0
 
-    tasks = [fetch_metadata_single(token, uri) for token, uri in queue]
+    batch_with_attempts = [(token, uri, 0) for token, uri in queue]
+    tasks = [fetch_metadata_single(token, uri) for token, uri, _ in batch_with_attempts]
     results = await asyncio.gather(*tasks)
 
-    valid_results = [r for r in results if r is not None]
+    for (result, token, uri), (_, _, attempts) in zip(results, batch_with_attempts):
+        if result is None and attempts < _MAX_RETRIES and len(_RETRY_QUEUE) < _MAX_RETRY_QUEUE_SIZE:
+            backoff = _BACKOFF_SCHEDULE[min(attempts, len(_BACKOFF_SCHEDULE) - 1)]
+            _RETRY_QUEUE.append((token, uri, attempts + 1, time.monotonic() + backoff))
 
-    # Use provided storage_module or fall back to global
+    valid_results = [r for r, _, _ in results if r is not None]
+
     store = storage_module or _STORAGE_MODULE
     if valid_results and store:
         store.update_token_metadata_batch(valid_results)

@@ -19,8 +19,8 @@ def _add_missing(blk: int):
         missing_set.add(blk)
 
 # background worker that replays logs for missing block ranges and feeds them to the sequencer
-async def _gap_worker(event_counts):
-    while True:
+async def _gap_worker(event_counts, should_exit_flag: list):
+    while not should_exit_flag[0]:
         if not missing_blocks:
             await asyncio.sleep(0.5)
             continue
@@ -34,7 +34,6 @@ async def _gap_worker(event_counts):
             missing_set.discard(missing_blocks.popleft())
 
         try:
-            # actual fetching
             async with websockets.connect(h.WS_URL, max_size=None) as gap_ws:
                 rid = str(uuid.uuid4())
                 await h.rate_gate()
@@ -50,12 +49,11 @@ async def _gap_worker(event_counts):
                 }))
                 resp = await h.ack(gap_ws, rid)
 
-            # handing logs to sequencer
-            for log in resp.get("result", []):                
+            for log in resp.get("result", []):
                 topics = log.get("topics") or []
                 if not topics:
                     continue
-                
+
                 tag = h.EVENT_SIGS.get(topics[0].lower())
                 if not tag:
                     continue
@@ -70,9 +68,7 @@ async def _gap_worker(event_counts):
                     pass
 
                 elif tag == "TF":
-                    # Only include transfers of tokens we're tracking
-                    if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
-                        continue
+                    pass
 
                 else:
                     continue
@@ -84,7 +80,13 @@ async def _gap_worker(event_counts):
 
             for blk in range(blk_start, blk_end + 1):
                 SEQUENCER.note_block(blk)
-                
+
+        except asyncio.CancelledError:
+            print(f"[Gap] Cancelled while processing {blk_start}-{blk_end}, re-queuing", flush=True)
+            for blk in range(blk_start, blk_end + 1):
+                _add_missing(blk)
+            raise
+
         except TimeoutError:
             print(f"[Backfill] WS connect timeout for range {blk_start}-{blk_end}, retrying", flush=True)
             for blk in range(blk_start, blk_end + 1):
@@ -107,7 +109,7 @@ async def _gap_worker(event_counts):
                 await asyncio.sleep(0.5)
             else:
                 raise
-            
+
         except Exception as e:
             print(f"[Backfill] Fatal Error for range {blk_start}-{blk_end}: {e!r}, retrying", flush=True)
             for blk in range(blk_start, blk_end + 1):
@@ -145,16 +147,17 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         logs_sub = (await h.ack(ws, 2))["result"]
 
         event_counts = {v: 0 for v in h.EVENT_SIGS.values()}
-        asyncio.create_task(_gap_worker(event_counts))
+        should_exit = [False]
+
+        gap_task = asyncio.create_task(_gap_worker(event_counts, should_exit))
 
         last_head_ts = time.monotonic()
         last_head_num = prev_last_head
         first_head_seen = False
 
-        # used to find a stalled head stream (basically if the ws dies or wifi or sm dies) and triggers backfill
         async def watchdog():
             nonlocal last_head_ts, last_head_num
-            while True:
+            while not should_exit[0]:
                 await asyncio.sleep(0.5)
                 if time.monotonic() - last_head_ts > HEAD_TIMEOUT:
                     print("[WS] No newHeads, forcing reconnect and backfill", flush=True)
@@ -165,74 +168,94 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                             print(f"[WS] Backfill WS timeout {e!r}, skipping backfill", flush=True)
                         except Exception as e:
                             print(f"[WS] Backfill Failed {e!r}", flush=True)
-                    await ws.close()
+                    should_exit[0] = True
+                    try:
+                        await asyncio.wait_for(ws.close(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        print("[WS] Close timed out, forcing", flush=True)
                     return
 
-        asyncio.create_task(watchdog())
+        watchdog_task = asyncio.create_task(watchdog())
 
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg.get("method") != "eth_subscription":
-                continue
+        try:
+            async for raw in ws:
+                if should_exit[0]:
+                    break
 
-            sid = msg["params"]["subscription"]
-            res = msg["params"]["result"]
+                msg = json.loads(raw)
+                if msg.get("method") != "eth_subscription":
+                    continue
 
-            # head stream update
-            if sid == heads_sub:
-                blk = int(res["number"], 16)
+                sid = msg["params"]["subscription"]
+                res = msg["params"]["result"]
 
-                if last_head_num is not None:
-                    for key in event_counts:
-                        event_counts[key] = 0
+                if sid == heads_sub:
+                    blk = int(res["number"], 16)
 
-                if not first_head_seen:
-                    first_head_seen = True
-                    if prev_last_head is not None and blk > prev_last_head + 1:
-                        for m in range(prev_last_head + 1, blk):
+                    if last_head_num is not None:
+                        for key in event_counts:
+                            event_counts[key] = 0
+
+                    if not first_head_seen:
+                        first_head_seen = True
+                        if prev_last_head is not None and blk > prev_last_head + 1:
+                            for m in range(prev_last_head + 1, blk):
+                                _add_missing(m)
+
+                    if last_head_num is not None and blk > last_head_num + 1:
+                        for m in range(last_head_num + 1, blk):
                             _add_missing(m)
 
-                if last_head_num is not None and blk > last_head_num + 1:
-                    for m in range(last_head_num + 1, blk):
-                        _add_missing(m)
+                    if last_head_num is not None:
+                        SEQUENCER.note_block(last_head_num)
 
-                if last_head_num is not None:
-                    SEQUENCER.note_block(last_head_num)
-
-                last_head_ts = time.monotonic()
-                last_head_num = blk
-                continue
-
-            # sequencer feeding
-            if sid == logs_sub:
-                topics = res.get("topics") or []
-                if not topics:
+                    last_head_ts = time.monotonic()
+                    last_head_num = blk
                     continue
 
-                tag = h.EVENT_SIGS.get(topics[0].lower())
-                if not tag:
-                    continue
-
-                addr = res.get("address", "").lower()
-
-                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                    if addr != h.CONTRACTS["NADFUN"].lower():
+                if sid == logs_sub:
+                    topics = res.get("topics") or []
+                    if not topics:
                         continue
 
-                elif tag == "V3SWAP":
+                    tag = h.EVENT_SIGS.get(topics[0].lower())
+                    if not tag:
+                        continue
+
+                    addr = res.get("address", "").lower()
+
+                    if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
+                        if addr != h.CONTRACTS["NADFUN"].lower():
+                            continue
+
+                    elif tag == "V3SWAP":
+                        pass
+
+                    elif tag == "TF":
+                        pass
+
+                    else:
+                        continue
+
+                    if tag in event_counts:
+                        event_counts[tag] += 1
+
+                    SEQUENCER.add_log(res)
+
+        finally:
+            should_exit[0] = True
+            gap_task.cancel()
+            watchdog_task.cancel()
+
+            for task, name in [(gap_task, "gap_worker"), (watchdog_task, "watchdog")]:
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.CancelledError:
                     pass
-
-                elif tag == "TF":
-                    if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
-                        continue
-
-                else:
-                    continue
-
-                if tag in event_counts:
-                    event_counts[tag] += 1
-
-                SEQUENCER.add_log(res)
+                except asyncio.TimeoutError:
+                    print(f"[WS] {name} did not exit cleanly", flush=True)
+                except Exception as e:
+                    print(f"[WS] {name} error on exit: {e!r}", flush=True)
 
         return last_head_num
 
