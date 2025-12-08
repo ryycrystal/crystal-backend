@@ -75,6 +75,209 @@ def _internal_addrs() -> set[str]:
 
     return base
 
+
+from collections import OrderedDict
+from functools import wraps
+
+class TTLCache:
+    def __init__(self, max_size: int = 1000):
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, key: str) -> tuple[Any, bool]:
+        if key not in self._cache:
+            return None, False
+        value, expires = self._cache[key]
+        if time.time() > expires:
+            del self._cache[key]
+            return None, False
+        self._cache.move_to_end(key)
+        return value, True
+
+    def set(self, key: str, value: Any, ttl_seconds: int) -> None:
+        if key in self._cache:
+            del self._cache[key]
+        elif len(self._cache) >= self._max_size:
+            self._cache.popitem(last=False)
+        self._cache[key] = (value, time.time() + ttl_seconds)
+
+    def invalidate(self, key: str) -> None:
+        self._cache.pop(key, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+_cache = TTLCache(max_size=2000)
+
+
+def ttl_cache(prefix: str, ttl_seconds: int = 60):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args):
+            cache_key = f"{prefix}:{':'.join(str(a) for a in args)}"
+            value, hit = _cache.get(cache_key)
+            if hit:
+                return value
+            result = func(*args)
+            _cache.set(cache_key, result, ttl_seconds)
+            return result
+        return wrapper
+    return decorator
+
+
+def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[str, dict]:
+    if not token_addrs:
+        return {}
+
+    excluded_list = list(excluded)
+
+    with db_cursor() as cur:
+        cur.execute("""
+            SELECT
+                p.token,
+                COUNT(*) FILTER (WHERE p.user_address <> ALL(%s)) as holder_count,
+                t.creator
+            FROM launchpad_positions p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.token = ANY(%s) AND p.balance_token > 1
+            GROUP BY p.token, t.creator
+        """, (excluded_list, token_addrs))
+        holder_rows = {row[0]: {"holder_count": row[1], "creator": row[2]} for row in cur.fetchall()}
+
+        cur.execute("""
+            SELECT token, user_address, balance_token
+            FROM launchpad_positions
+            WHERE token = ANY(%s) AND balance_token > 1 AND user_address <> ALL(%s)
+        """, (token_addrs, excluded_list))
+        all_positions = cur.fetchall()
+
+    positions_by_token: dict[str, list[tuple[int, str]]] = {}
+    for token, user_addr, balance in all_positions:
+        if token not in positions_by_token:
+            positions_by_token[token] = []
+        positions_by_token[token].append((int(balance), user_addr.lower()))
+
+    result = {}
+    for token in token_addrs:
+        holder_data = holder_rows.get(token, {"holder_count": 0, "creator": ""})
+        positions = positions_by_token.get(token, [])
+        positions.sort(reverse=True)
+
+        creator = (holder_data.get("creator") or "").lower()
+        dev_holding = 0
+        for bal, addr in positions:
+            if addr == creator:
+                dev_holding = bal
+                break
+
+        top10 = positions[:10]
+        top10_holding = sum(b for b, _ in top10)
+        top10_addresses = [addr for _, addr in top10]
+
+        result[token] = {
+            "holder_count": holder_data["holder_count"],
+            "dev_holding": dev_holding,
+            "top10_holding": top10_holding,
+            "top10_addresses": top10_addresses,
+        }
+
+    return result
+
+
+def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[str, dict]:
+    if not token_addrs:
+        return {}
+
+    with db_cursor() as cur:
+        cur.execute("""
+            SELECT
+                token, creator, name, symbol, metadata_cid, description,
+                social1, social2, social3, social4, source,
+                created_block, created_at, migrated, migrated_block,
+                migrated_at, market, last_price_native, native_volume,
+                token_volume, volume_usd, fees_usd, buy_count, sell_count,
+                tx_count, circulating_supply, snipers_count, approaching_75,
+                approaching_75_block, approaching_75_at
+            FROM launchpad_tokens
+            WHERE token = ANY(%s)
+        """, (token_addrs,))
+        rows = cur.fetchall()
+
+    token_data = {}
+    creators = {}
+    for row in rows:
+        token = row[0]
+        creator = row[1] or ""
+        creators[token] = creator
+
+        last_price_native = row[17] or Decimal(0)
+        marketcap_native_raw = last_price_native * Decimal(1e9)
+        marketcap_usd = marketcap_native_raw * _mon_price_usd()
+
+        token_data[token] = {
+            "token": token,
+            "symbol": row[3],
+            "name": row[2],
+            "created_ts": row[12],
+            "creator": creator,
+            "metadata_cid": row[4],
+            "source": int(row[10] or 0),
+            "native_volume": str(int(row[18] or 0)),
+            "token_volume": str(int(row[19] or 0)),
+            "volume_usd": _fmt_usd(row[20] or Decimal(0)),
+            "fees_usd": _fmt_usd(row[21] or Decimal(0)),
+            "marketcap_native_raw": _fmt(marketcap_native_raw),
+            "marketcap_usd": _fmt_usd(marketcap_usd),
+            "tx": {
+                "buy": int(row[22] or 0),
+                "sell": int(row[23] or 0),
+                "total": int(row[24] or (int(row[22] or 0) + int(row[23] or 0))),
+            },
+            "migrated": bool(row[13]),
+            "migrated_block": row[14],
+            "migrated_at": row[15],
+            "approaching_75": bool(row[27]),
+            "approaching_75_block": row[28],
+            "approaching_75_at": row[29],
+            "social1": row[6],
+            "social2": row[7],
+            "social3": row[8],
+            "social4": row[9],
+            "market": row[16],
+            "circulating_supply": str(int(row[25] or 0)),
+        }
+
+    holder_stats = _batch_get_holder_stats(token_addrs, excluded)
+
+    for token, data in token_data.items():
+        stats = holder_stats.get(token, {})
+        data["holders"] = stats.get("holder_count", 0)
+        data["developer_holding"] = str(stats.get("dev_holding", 0))
+        data["top10_holding"] = str(stats.get("top10_holding", 0))
+        data["top10_addresses"] = stats.get("top10_addresses", [])
+
+    creator_addrs = list(set(c for c in creators.values() if c))
+    creator_stats = {}
+    if creator_addrs:
+        with db_cursor() as cur:
+            cur.execute("""
+                SELECT address, tokens_created, tokens_graduated
+                FROM launchpad_users
+                WHERE address = ANY(%s)
+            """, (creator_addrs,))
+            for addr, tc, tg in cur.fetchall():
+                creator_stats[addr.lower()] = {"created": tc or 0, "graduated": tg or 0}
+
+    for token, data in token_data.items():
+        creator = creators.get(token, "").lower()
+        cs = creator_stats.get(creator, {"created": 0, "graduated": 0})
+        data["developer_tokens_created"] = cs["created"]
+        data["developer_tokens_graduated"] = cs["graduated"]
+        data["snipers"] = {"count": 0, "addresses": [], "holdingShare": 0.0}
+
+    return token_data
+
 def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int, List[str]]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
@@ -380,34 +583,23 @@ def health() -> Dict[str, Any]:
 @app.get("/tokens")
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     t0 = time.time()
-
-    recent_created_out: List[Dict[str, Any]] = []
-    recent_approaching_out: List[Dict[str, Any]] = []
-    recent_graduated_out: List[Dict[str, Any]] = []
+    excluded = _internal_addrs()
 
     with db_cursor() as cur:
-        cur.execute(
-            """
+        cur.execute("""
             SELECT token, circulating_supply
             FROM launchpad_tokens
             WHERE migrated = TRUE
             ORDER BY migrated_at DESC NULLS LAST, migrated_block DESC NULLS LAST
             LIMIT 30
-            """
-        )
+        """)
         grad_rows = cur.fetchall()
 
     graduated_ids = {t.lower() for (t, _) in grad_rows}
 
-    for token, circ in grad_rows:
-        row = _serialize_token(token)
-        row["graduationPercentageBps"] = (circ or 0) / 793100000
-        recent_graduated_out.append(row)
-
     with db_cursor() as cur:
         if graduated_ids:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE approaching_75 = TRUE
@@ -415,58 +607,52 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
                 AND token <> ALL(%s)
                 ORDER BY (circulating_supply::numeric / 793100000) DESC
                 LIMIT 30
-                """,
-                (list(graduated_ids),),
-            )
+            """, (list(graduated_ids),))
         else:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE approaching_75 = TRUE
                 AND migrated = FALSE
                 ORDER BY (circulating_supply::numeric / 793100000) DESC
                 LIMIT 30
-                """
-            )
+            """)
         appr_rows = cur.fetchall()
 
     approaching_ids = {t.lower() for (t, _) in appr_rows}
-
-    for token, circ in appr_rows:
-        row = _serialize_token(token)
-        row["graduationPercentageBps"] = (circ or 0) / 793100000
-        recent_approaching_out.append(row)
-
     excluded_ids = graduated_ids | approaching_ids
 
     with db_cursor() as cur:
         if excluded_ids:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE token <> ALL(%s)
                 ORDER BY created_at DESC NULLS LAST, created_block DESC NULLS LAST
                 LIMIT 30
-                """,
-                (list(excluded_ids),),
-            )
+            """, (list(excluded_ids),))
         else:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 ORDER BY created_at DESC NULLS LAST, created_block DESC NULLS LAST
                 LIMIT 30
-                """
-            )
+            """)
         created_rows = cur.fetchall()
 
-    for token, circ in created_rows:
-        row = _serialize_token(token)
-        row["graduationPercentageBps"] = (circ or 0) / 793100000
-        recent_created_out.append(row)
+    all_token_addrs = [t for t, _ in grad_rows + appr_rows + created_rows]
+    circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
+    token_data = _batch_serialize_tokens(all_token_addrs, excluded)
+
+    def with_graduation_pct(token_addr):
+        data = token_data.get(token_addr, {})
+        if data:
+            data["graduationPercentageBps"] = (circ_map.get(token_addr) or 0) / 793100000
+        return data
+
+    recent_graduated_out = [with_graduation_pct(t) for t, _ in grad_rows if t in token_data]
+    recent_approaching_out = [with_graduation_pct(t) for t, _ in appr_rows if t in token_data]
+    recent_created_out = [with_graduation_pct(t) for t, _ in created_rows if t in token_data]
 
     result = {
         "recent_created": recent_created_out,
@@ -480,6 +666,80 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     return result
 
 
+def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> dict | None:
+    excluded_list = list(excluded)
+    with db_cursor() as cur:
+        cur.execute("""
+            WITH token_data AS (
+                SELECT * FROM launchpad_tokens WHERE token = %s
+            ),
+            holder_stats AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE user_address <> ALL(%s)) as holder_count
+                FROM launchpad_positions
+                WHERE token = %s AND balance_token > 1
+            ),
+            trade_stats_24h AS (
+                SELECT
+                    COALESCE(SUM(native_amount), 0) as volume_native_24h,
+                    COALESCE(SUM(usd_amount), 0) as volume_usd_24h,
+                    COUNT(*) FILTER (WHERE is_buy) as buys_24h,
+                    COUNT(*) FILTER (WHERE NOT is_buy) as sells_24h
+                FROM launchpad_trades
+                WHERE token = %s AND timestamp >= %s
+            ),
+            buyer_seller_counts AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE buy_count > 0 AND user_address <> ALL(%s)) as distinct_buyers,
+                    COUNT(*) FILTER (WHERE sell_count > 0 AND user_address <> ALL(%s)) as distinct_sellers
+                FROM launchpad_positions
+                WHERE token = %s
+            ),
+            creator_stats AS (
+                SELECT
+                    COALESCE(tokens_created, 0) as tokens_created,
+                    COALESCE(tokens_graduated, 0) as tokens_graduated
+                FROM launchpad_users
+                WHERE address = (SELECT creator FROM token_data)
+            )
+            SELECT
+                t.token, t.creator, t.name, t.symbol, t.metadata_cid, t.description,
+                t.social1, t.social2, t.social3, t.social4, t.source,
+                t.created_block, t.created_at, t.migrated, t.migrated_block, t.migrated_at,
+                t.market, t.last_price_native, t.native_volume, t.token_volume,
+                t.volume_usd, t.fees_usd, t.buy_count, t.sell_count, t.tx_count,
+                t.circulating_supply, t.snipers_count, t.approaching_75,
+                t.approaching_75_block, t.approaching_75_at,
+                h.holder_count,
+                s.volume_native_24h, s.volume_usd_24h, s.buys_24h, s.sells_24h,
+                b.distinct_buyers, b.distinct_sellers,
+                COALESCE(c.tokens_created, 0), COALESCE(c.tokens_graduated, 0)
+            FROM token_data t
+            CROSS JOIN holder_stats h
+            CROSS JOIN trade_stats_24h s
+            CROSS JOIN buyer_seller_counts b
+            LEFT JOIN creator_stats c ON true
+        """, (token_addr, excluded_list, token_addr, token_addr, day_ago, excluded_list, excluded_list, token_addr))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "token": row[0], "creator": (row[1] or "").lower(), "name": row[2], "symbol": row[3],
+        "metadata_cid": row[4], "description": row[5], "social1": row[6], "social2": row[7],
+        "social3": row[8], "social4": row[9], "source": row[10], "created_block": row[11],
+        "created_at": row[12], "migrated": row[13], "migrated_block": row[14], "migrated_at": row[15],
+        "market": row[16], "last_price_native": row[17] or Decimal(0), "native_volume": row[18],
+        "token_volume": row[19], "volume_usd": row[20], "fees_usd": row[21], "buy_count": row[22],
+        "sell_count": row[23], "tx_count": row[24], "circulating_supply": row[25], "snipers_count": row[26],
+        "approaching_75": row[27], "approaching_75_block": row[28], "approaching_75_at": row[29],
+        "holder_count": row[30], "volume_native_24h": row[31], "volume_usd_24h": row[32],
+        "buys_24h": row[33], "sells_24h": row[34], "distinct_buyers": row[35], "distinct_sellers": row[36],
+        "dev_tokens_created": row[37], "dev_tokens_graduated": row[38],
+    }
+
+
 @app.get("/token/{token_addr}/{chartres}")
 def token_overview_graph(
     token_addr: str,
@@ -488,157 +748,59 @@ def token_overview_graph(
         "",
         description="comma-separated list of addresses to track for trackedtrades",
     ),
-) -> Dict[str, Any]:    
+) -> Dict[str, Any]:
     t0 = time.time()
     excluded = _internal_addrs()
-    
+
     try:
         if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
             raise HTTPException(status_code=400)
 
         token_addr = token_addr.lower()
-
-        with db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    token,
-                    creator,
-                    name,
-                    symbol,
-                    metadata_cid,
-                    description,
-                    social1,
-                    social2,
-                    social3,
-                    social4,
-                    source,
-                    created_block,
-                    created_at,
-                    migrated,
-                    migrated_block,
-                    migrated_at,
-                    market,
-                    last_price_native,
-                    native_volume,
-                    token_volume,
-                    volume_usd,
-                    fees_usd,
-                    buy_count,
-                    sell_count,
-                    tx_count,
-                    circulating_supply,
-                    snipers_count,
-                    approaching_75,
-                    approaching_75_block,
-                    approaching_75_at
-                FROM launchpad_tokens
-                WHERE token = %s
-                """,
-                (token_addr,),
-            )
-            row = cur.fetchone()
-
-        if row is None:
-            raise HTTPException(status_code=404)
-
-        (
-            token,
-            creator,
-            name,
-            symbol,
-            metadata_cid,
-            description,
-            social1,
-            social2,
-            social3,
-            social4,
-            source,
-            created_block,
-            created_at,
-            migrated,
-            migrated_block,
-            migrated_at,
-            market,
-            last_price_native,
-            native_volume,
-            token_volume,
-            volume_usd,
-            fees_usd,
-            buy_count,
-            sell_count,
-            tx_count,
-            circulating_supply,
-            snipers_count,
-            approaching_75,
-            approaching_75_block,
-            approaching_75_at,
-        ) = row
-
-        creator = (creator or "").lower()
-        last_price_native = last_price_native or Decimal(0)
-        mon_price = _mon_price_usd()
-
-        with db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    COUNT(*) FILTER (WHERE buy_count > 0),
-                    COUNT(*) FILTER (WHERE sell_count > 0)
-                FROM launchpad_positions
-                WHERE token = %s AND user_address <> ALL(%s)
-                """,
-                (token_addr, list(excluded)),
-            )
-            buyers_sellers = cur.fetchone()
-
-        distinct_buyers = int(buyers_sellers[0] or 0)
-        distinct_sellers = int(buyers_sellers[1] or 0)
-
-        holders_count, dev_holding, _top10, top10_addresses = _holders_for_token(token_addr, creator)
-
-        decimals = 18
-
-        dev_tokens_created = 0
-        dev_tokens_graduated = 0
-        if creator:
-            with db_cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT tokens_created, tokens_graduated
-                    FROM launchpad_users
-                    WHERE address = %s
-                    """,
-                    (creator,),
-                )
-                row_user = cur.fetchone()
-            if row_user is not None:
-                dev_tokens_created = row_user[0] or 0
-                dev_tokens_graduated = row_user[1] or 0
-
-        last_price_wad = last_price_native * Decimal(1e9)
-        marketcap_native_raw = last_price_native * Decimal(1e9)
-        marketcap_usd = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
-
         now_ts = int(time.time())
         day_ago = now_ts - 86400
 
-        with db_cursor() as cur:
-            cur.execute("""
-                SELECT
-                    COALESCE(SUM(native_amount), 0),
-                    COALESCE(SUM(usd_amount), 0),
-                    COUNT(*) FILTER (WHERE is_buy),
-                    COUNT(*) FILTER (WHERE NOT is_buy)
-                FROM launchpad_trades
-                WHERE token = %s AND timestamp >= %s
-            """, (token_addr, day_ago))
-            stats_24h = cur.fetchone()
+        core = _get_token_core_stats(token_addr, day_ago, excluded)
+        if core is None:
+            raise HTTPException(status_code=404)
 
-        volume_native_24h = int(stats_24h[0] or 0)
-        volume_usd_24h = stats_24h[1] or Decimal(0)
-        buys_24h = int(stats_24h[2] or 0)
-        sells_24h = int(stats_24h[3] or 0)
+        token = core["token"]
+        creator = core["creator"]
+        name = core["name"]
+        symbol = core["symbol"]
+        metadata_cid = core["metadata_cid"]
+        description = core["description"]
+        social1 = core["social1"]
+        social2 = core["social2"]
+        social3 = core["social3"]
+        social4 = core["social4"]
+        source = core["source"]
+        created_at = core["created_at"]
+        migrated = core["migrated"]
+        migrated_at = core["migrated_at"]
+        market = core["market"]
+        last_price_native = core["last_price_native"]
+        circulating_supply = core["circulating_supply"]
+        snipers_count = core["snipers_count"]
+
+        mon_price = _mon_price_usd()
+
+        holders_count = int(core["holder_count"] or 0)
+        distinct_buyers = int(core["distinct_buyers"] or 0)
+        distinct_sellers = int(core["distinct_sellers"] or 0)
+        dev_tokens_created = int(core["dev_tokens_created"] or 0)
+        dev_tokens_graduated = int(core["dev_tokens_graduated"] or 0)
+        volume_native_24h = int(core["volume_native_24h"] or 0)
+        volume_usd_24h = core["volume_usd_24h"] or Decimal(0)
+        buys_24h = int(core["buys_24h"] or 0)
+        sells_24h = int(core["sells_24h"] or 0)
+
+        _, dev_holding, _top10, top10_addresses = _holders_for_token(token_addr, creator)
+
+        decimals = 18
+        last_price_wad = last_price_native * Decimal(1e9)
+        marketcap_native_raw = last_price_native * Decimal(1e9)
+        marketcap_usd = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
@@ -914,82 +1076,50 @@ def token_overview_graph(
         dev_tokens_list: List[Dict[str, Any]] = []
         dev_tokens_total = 0
         if creator:
-            now_ts = int(time.time())
             cutoff_ts = now_ts - 3600
 
             with db_cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM launchpad_tokens WHERE creator = %s",
-                    (creator,),
-                )
-                dev_tokens_total = cur.fetchone()[0] or 0
-
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT
-                        token,
-                        name,
-                        symbol,
-                        metadata_cid,
-                        last_price_native,
-                        migrated,
-                        created_at,
-                        market,
-                        source
-                    FROM launchpad_tokens
-                    WHERE creator = %s
-                    ORDER BY created_at DESC NULLS LAST
-                    LIMIT 50
-                    """,
-                    (creator,),
-                )
-                dev_token_rows = cur.fetchall()
-
-            for (
-                dev_token_addr,
-                dev_name,
-                dev_symbol,
-                dev_metadata_cid,
-                dev_last_price_native,
-                dev_migrated,
-                dev_created_at,
-                dev_market,
-                dev_source,
-            ) in dev_token_rows:
-                dev_last_price_native = dev_last_price_native or Decimal(0)
-                dev_price_wad = dev_last_price_native * Decimal(1e9)
-                dev_marketcap_native = dev_last_price_native * Decimal(1e9)
-
-                with db_cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT COALESCE(SUM(native_amount), 0)
+                        t.token, t.name, t.symbol, t.metadata_cid, t.last_price_native,
+                        t.migrated, t.created_at, t.market, t.source,
+                        COALESCE(v.vol_1h, 0) as vol_1h,
+                        COALESCE(h.holder_count, 0) as holder_count
+                    FROM launchpad_tokens t
+                    LEFT JOIN LATERAL (
+                        SELECT COALESCE(SUM(native_amount), 0) as vol_1h
                         FROM launchpad_trades
-                        WHERE token = %s AND timestamp >= %s
-                        """,
-                        (dev_token_addr.lower(), cutoff_ts),
-                    )
-                    vol_row = cur.fetchone()
-                vol_1h_native = int(vol_row[0] or 0)
+                        WHERE token = t.token AND timestamp >= %s
+                    ) v ON true
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) as holder_count
+                        FROM launchpad_positions
+                        WHERE token = t.token AND balance_token > 1
+                    ) h ON true
+                    WHERE t.creator = %s
+                    ORDER BY t.created_at DESC NULLS LAST
+                    LIMIT 50
+                """, (cutoff_ts, creator))
+                dev_token_rows = cur.fetchall()
+                dev_tokens_total = len(dev_token_rows)
 
-                dev_total_holders, _, _, _ = _holders_for_token(dev_token_addr.lower(), creator)
-
-                dev_tokens_list.append(
-                    {
-                        "id": dev_token_addr,
-                        "name": dev_name,
-                        "symbol": dev_symbol,
-                        "metadataCID": dev_metadata_cid or "",
-                        "lastPriceNativePerTokenWad": str(dev_price_wad),
-                        "marketcap": str(dev_marketcap_native),
-                        "migrated": bool(dev_migrated),
-                        "volumeNative1h": str(vol_1h_native),
-                        "holders": int(dev_total_holders),
-                        "timestamp": str(int(dev_created_at or 0)),
-                        "market": dev_market or None,
-                        "source": int(dev_source or 0),
-                    }
-                )
+            for row in dev_token_rows:
+                dev_last_price = row[4] or Decimal(0)
+                dev_price_wad = dev_last_price * Decimal(1e9)
+                dev_tokens_list.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "symbol": row[2],
+                    "metadataCID": row[3] or "",
+                    "lastPriceNativePerTokenWad": str(dev_price_wad),
+                    "marketcap": str(dev_price_wad),
+                    "migrated": bool(row[5]),
+                    "volumeNative1h": str(int(row[9] or 0)),
+                    "holders": int(row[10] or 0),
+                    "timestamp": str(int(row[6] or 0)),
+                    "market": row[7] or None,
+                    "source": int(row[8] or 0),
+                })
 
         graduation_bps = (circulating_supply or 0) / 793100000
 
@@ -1525,70 +1655,54 @@ def search_tokens_api(
     if not q:
         raise HTTPException(status_code=400, detail="empty query")
 
+    excluded = _internal_addrs()
+
     if sort is None:
         rows = storage.search_tokens(q, limit=50)
-        results: List[Dict[str, Any]] = []
+        token_addrs = [(token or "").lower() for token, _, _ in rows if token]
+        circ_map = {(token or "").lower(): circ for token, circ, _ in rows}
 
-        for token, circ_supply, _score in rows:
-            token_addr = (token or "").lower()
-            if not token_addr:
-                continue
+        if not token_addrs:
+            return {"query": query, "sort": None, "count": 0, "results": []}
 
-            row = _serialize_token(token_addr)
-            if not row:
-                continue
+        token_data = _batch_serialize_tokens(token_addrs, excluded)
+        results = []
+        for t in token_addrs:
+            if t in token_data:
+                data = token_data[t]
+                data["graduationPercentageBps"] = (circ_map.get(t) or 0) / 793100000
+                results.append(data)
 
-            graduation_bps = (circ_supply or 0) / 793100000
-            row["graduationPercentageBps"] = graduation_bps
-            results.append(row)
-
-        return {
-            "query": query,
-            "sort": None,
-            "count": len(results),
-            "results": results,
-        }
+        return {"query": query, "sort": None, "count": len(results), "results": results}
 
     rows = storage.search_tokens(q, limit=1000)
     token_addrs = [(token or "").lower() for token, _, _ in rows if token]
 
     if not token_addrs:
-        return {
-            "query": query,
-            "sort": sort,
-            "count": 0,
-            "results": [],
-        }
+        return {"query": query, "sort": sort, "count": 0, "results": []}
 
     now_ts = int(time.time())
 
     with db_cursor() as cur:
         if sort == "mc":
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, last_price_native, circulating_supply
                 FROM launchpad_tokens
                 WHERE token = ANY(%s)
                 ORDER BY last_price_native DESC NULLS LAST
                 LIMIT 50
-                """,
-                (token_addrs,),
-            )
+            """, (token_addrs,))
         elif sort == "recent":
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT token, last_price_native, circulating_supply
                 FROM launchpad_tokens
                 WHERE token = ANY(%s)
                 ORDER BY created_at DESC NULLS LAST
                 LIMIT 50
-                """,
-                (token_addrs,),
-            )
+            """, (token_addrs,))
         elif sort == "volume_1h":
             cutoff_1h = now_ts - 3600
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT t.token, t.last_price_native, t.circulating_supply
                 FROM launchpad_tokens t
                 LEFT JOIN LATERAL (
@@ -1599,13 +1713,10 @@ def search_tokens_api(
                 WHERE t.token = ANY(%s)
                 ORDER BY tr.vol DESC NULLS LAST
                 LIMIT 50
-                """,
-                (cutoff_1h, token_addrs),
-            )
+            """, (cutoff_1h, token_addrs))
         elif sort == "volume_24h":
             cutoff_24h = now_ts - 86400
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT t.token, t.last_price_native, t.circulating_supply
                 FROM launchpad_tokens t
                 LEFT JOIN LATERAL (
@@ -1616,12 +1727,9 @@ def search_tokens_api(
                 WHERE t.token = ANY(%s)
                 ORDER BY tr.vol DESC NULLS LAST
                 LIMIT 50
-                """,
-                (cutoff_24h, token_addrs),
-            )
+            """, (cutoff_24h, token_addrs))
         elif sort == "holders":
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT t.token, t.last_price_native, t.circulating_supply
                 FROM launchpad_tokens t
                 LEFT JOIN LATERAL (
@@ -1632,34 +1740,24 @@ def search_tokens_api(
                 WHERE t.token = ANY(%s)
                 ORDER BY p.cnt DESC NULLS LAST
                 LIMIT 50
-                """,
-                (token_addrs,),
-            )
+            """, (token_addrs,))
         else:
             raise HTTPException(status_code=400, detail=f"invalid sort: {sort}. Use 'mc', 'volume_1h', 'volume_24h', 'recent', or 'holders'")
 
         sorted_rows = cur.fetchall()
 
+    sorted_addrs = [row[0].lower() for row in sorted_rows if row[0]]
+    circ_map = {row[0].lower(): row[2] for row in sorted_rows if row[0]}
+    token_data = _batch_serialize_tokens(sorted_addrs, excluded)
+
     results = []
-    for token, _price, circ_supply in sorted_rows:
-        token_addr = (token or "").lower()
-        if not token_addr:
-            continue
+    for t in sorted_addrs:
+        if t in token_data:
+            data = token_data[t]
+            data["graduationPercentageBps"] = (circ_map.get(t) or 0) / 793100000
+            results.append(data)
 
-        row = _serialize_token(token_addr)
-        if not row:
-            continue
-
-        graduation_bps = (circ_supply or 0) / 793100000
-        row["graduationPercentageBps"] = graduation_bps
-        results.append(row)
-
-    return {
-        "query": query,
-        "sort": sort,
-        "count": len(results),
-        "results": results,
-    }
+    return {"query": query, "sort": sort, "count": len(results), "results": results}
 
 
 def _mon_price_usd() -> Decimal:
