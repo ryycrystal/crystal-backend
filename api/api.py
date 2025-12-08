@@ -65,7 +65,15 @@ def _fmt_usd(value) -> str:
 
 AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
 
+_internal_addrs_cache: set[str] | None = None
+_internal_addrs_ts: float = 0
+
 def _internal_addrs() -> set[str]:
+    global _internal_addrs_cache, _internal_addrs_ts
+    now = time.time()
+    if _internal_addrs_cache is not None and (now - _internal_addrs_ts) < 60:
+        return _internal_addrs_cache
+
     base: set[str] = {AGGREGATOR_ADDR}
     base.update(a.lower() for a in getattr(h, "ADDRS", []))
 
@@ -73,6 +81,8 @@ def _internal_addrs() -> set[str]:
         if pool:
             base.add(pool.lower())
 
+    _internal_addrs_cache = base
+    _internal_addrs_ts = now
     return base
 
 
@@ -135,52 +145,52 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[
     with db_cursor() as cur:
         cur.execute("""
             SELECT
-                p.token,
-                COUNT(*) FILTER (WHERE p.user_address <> ALL(%s)) as holder_count,
-                t.creator
-            FROM launchpad_positions p
-            JOIN launchpad_tokens t ON t.token = p.token
-            WHERE p.token = ANY(%s) AND p.balance_token > 1
-            GROUP BY p.token, t.creator
-        """, (excluded_list, token_addrs))
-        holder_rows = {row[0]: {"holder_count": row[1], "creator": row[2]} for row in cur.fetchall()}
-
-        cur.execute("""
-            SELECT token, user_address, balance_token
-            FROM launchpad_positions
-            WHERE token = ANY(%s) AND balance_token > 1 AND user_address <> ALL(%s)
-        """, (token_addrs, excluded_list))
-        all_positions = cur.fetchall()
-
-    positions_by_token: dict[str, list[tuple[int, str]]] = {}
-    for token, user_addr, balance in all_positions:
-        if token not in positions_by_token:
-            positions_by_token[token] = []
-        positions_by_token[token].append((int(balance), user_addr.lower()))
+                t.token,
+                t.creator,
+                COALESCE(hc.cnt, 0) as holder_count,
+                COALESCE(dh.dev_bal, 0) as dev_holding,
+                COALESCE(t10.top10_addrs, ARRAY[]::text[]) as top10_addresses,
+                COALESCE(t10.top10_sum, 0) as top10_holding
+            FROM launchpad_tokens t
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) as cnt
+                FROM launchpad_positions p
+                WHERE p.token = t.token AND p.balance_token > 1 AND p.user_address <> ALL(%s)
+            ) hc ON true
+            LEFT JOIN LATERAL (
+                SELECT p.balance_token as dev_bal
+                FROM launchpad_positions p
+                WHERE p.token = t.token AND LOWER(p.user_address) = LOWER(t.creator) AND p.balance_token > 0
+                LIMIT 1
+            ) dh ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    array_agg(sub.user_address) as top10_addrs,
+                    SUM(sub.balance_token) as top10_sum
+                FROM (
+                    SELECT user_address, balance_token
+                    FROM launchpad_positions p
+                    WHERE p.token = t.token AND p.balance_token > 1 AND p.user_address <> ALL(%s)
+                    ORDER BY p.balance_token DESC
+                    LIMIT 10
+                ) sub
+            ) t10 ON true
+            WHERE t.token = ANY(%s)
+        """, (excluded_list, excluded_list, token_addrs))
+        rows = cur.fetchall()
 
     result = {}
-    for token in token_addrs:
-        holder_data = holder_rows.get(token, {"holder_count": 0, "creator": ""})
-        positions = positions_by_token.get(token, [])
-        positions.sort(reverse=True)
-
-        creator = (holder_data.get("creator") or "").lower()
-        dev_holding = 0
-        for bal, addr in positions:
-            if addr == creator:
-                dev_holding = bal
-                break
-
-        top10 = positions[:10]
-        top10_holding = sum(b for b, _ in top10)
-        top10_addresses = [addr for _, addr in top10]
-
-        result[token] = {
-            "holder_count": holder_data["holder_count"],
-            "dev_holding": dev_holding,
-            "top10_holding": top10_holding,
-            "top10_addresses": top10_addresses,
+    for row in rows:
+        result[row[0]] = {
+            "holder_count": int(row[2] or 0),
+            "dev_holding": int(row[3] or 0),
+            "top10_addresses": [a.lower() for a in (row[4] or [])],
+            "top10_holding": int(row[5] or 0),
         }
+
+    for token in token_addrs:
+        if token not in result:
+            result[token] = {"holder_count": 0, "dev_holding": 0, "top10_addresses": [], "top10_holding": 0}
 
     return result
 
