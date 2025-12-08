@@ -138,6 +138,10 @@ class Sequencer:
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
 
+    # explicitly set the next expected block (used on startup to skip stale gaps)
+    def set_next_block(self, blk: int) -> None:
+        self._next_block = blk
+
     # enqueue a log and start draining (processing) if possible
     def add_log(self, raw_log: dict) -> None:
         blk = int(raw_log["blockNumber"], 16) if isinstance(raw_log["blockNumber"], str) else raw_log["blockNumber"]

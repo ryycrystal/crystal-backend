@@ -148,14 +148,14 @@ class State:
                 print(f"[State] Failed to load MON price from DB: {e!r}")
 
     def reset_for_reindex(self) -> None:
+        """Clear in-memory state for reindex. Call AFTER clear_derived_state_from_block."""
         with self._lock:
             self.launchpad_tokens.clear()
             self.launchpad_market_to_token.clear()
             self.v3_pools.clear()
             self.token_to_v3_pool.clear()
-
-            self.rebuild_from_db()
-            print(f"[State] Reset for reindex: {len(self.launchpad_tokens)} tokens, {len(self.v3_pools)} pools")
+            # don't call rebuild_from_db here - tables are empty after clear_derived_state
+            print(f"[State] Reset for reindex: cleared all in-memory state")
 
     # launchpad
 

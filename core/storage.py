@@ -145,6 +145,12 @@ def init_db() -> None:
             ON launchpad_trades (block_number);
             """
         )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_user_token
+            ON launchpad_trades (user_address, token);
+            """
+        )
         
         # tokens
         cur.execute(
@@ -221,6 +227,13 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_tokens_token_trgm
             ON launchpad_tokens
             USING gin (token gin_trgm_ops);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_approaching
+            ON launchpad_tokens (circulating_supply DESC)
+            WHERE approaching_75 = TRUE AND migrated = FALSE;
             """
         )
         
