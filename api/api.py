@@ -1434,7 +1434,7 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
                 SELECT price_native
                 FROM launchpad_trades
                 WHERE token = %s AND timestamp <= %s
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, log_index DESC
                 LIMIT 1
                 """,
                 (token_addr, start_ts),
@@ -1446,19 +1446,7 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
                 SELECT price_native
                 FROM launchpad_trades
                 WHERE token = %s AND timestamp > %s AND timestamp <= %s
-                ORDER BY timestamp ASC
-                LIMIT 1
-                """,
-                (token_addr, start_ts, now_ts),
-            )
-            start_row = cur.fetchone()
-
-            cur.execute(
-                """
-                SELECT price_native
-                FROM launchpad_trades
-                WHERE token = %s AND timestamp > %s AND timestamp <= %s
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, log_index DESC
                 LIMIT 1
                 """,
                 (token_addr, start_ts, now_ts),
