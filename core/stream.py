@@ -8,15 +8,34 @@ import backfill
 
 HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = 100
+MAX_BLOCK_AGE = 500
 
-missing_blocks: deque[int] = deque() # queue of blocks that need backfilling
-missing_set: set[int] = set() # so we dont backfill the same block twice
+missing_blocks: deque[int] = deque()
+missing_set: set[int] = set()
 
 # enqueue a block into missing queue
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
         missing_set.add(blk)
+
+# clear stale blocks from the queue that are too old relative to current head
+def _clear_stale_blocks(current_head: int):
+    global missing_blocks, missing_set
+    if current_head is None:
+        return
+    cutoff = current_head - MAX_BLOCK_AGE
+    new_blocks = deque()
+    new_set = set()
+    for blk in missing_blocks:
+        if blk >= cutoff:
+            new_blocks.append(blk)
+            new_set.add(blk)
+    cleared = len(missing_blocks) - len(new_blocks)
+    if cleared > 0:
+        print(f"[Gap] Cleared {cleared} stale blocks older than {cutoff}", flush=True)
+    missing_blocks = new_blocks
+    missing_set = new_set
 
 # background worker that replays logs for missing block ranges and feeds them to the sequencer
 async def _gap_worker(event_counts, should_exit_flag: list):
@@ -33,8 +52,13 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             blk_end += 1
             missing_set.discard(missing_blocks.popleft())
 
+        seq_next = SEQUENCER._next_block
+        if seq_next and blk_end < seq_next - MAX_BLOCK_AGE:
+            print(f"[Gap] Skipping stale range {blk_start}-{blk_end}, sequencer at {seq_next}", flush=True)
+            continue
+
         try:
-            async with websockets.connect(h.WS_URL, max_size=None) as gap_ws:
+            async with websockets.connect(h.WS_URL, max_size=None, open_timeout=15, close_timeout=5) as gap_ws:
                 rid = str(uuid.uuid4())
                 await h.rate_gate()
                 await gap_ws.send(json.dumps({
@@ -47,7 +71,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                         "topics": [h.TOPICS],
                     }],
                 }))
-                resp = await h.ack(gap_ws, rid)
+                resp = await asyncio.wait_for(h.ack(gap_ws, rid), timeout=30.0)
 
             for log in resp.get("result", []):
                 topics = log.get("topics") or []
@@ -87,8 +111,8 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                 _add_missing(blk)
             raise
 
-        except TimeoutError:
-            print(f"[Backfill] WS connect timeout for range {blk_start}-{blk_end}, retrying", flush=True)
+        except (TimeoutError, asyncio.TimeoutError):
+            print(f"[Backfill] WS timeout for range {blk_start}-{blk_end}, retrying", flush=True)
             for blk in range(blk_start, blk_end + 1):
                 _add_missing(blk)
             await asyncio.sleep(5.0)
@@ -198,6 +222,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                     if not first_head_seen:
                         first_head_seen = True
+                        _clear_stale_blocks(blk)
                         if prev_last_head is not None and blk > prev_last_head + 1:
                             for m in range(prev_last_head + 1, blk):
                                 _add_missing(m)
