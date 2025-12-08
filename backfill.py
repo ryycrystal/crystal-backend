@@ -9,20 +9,8 @@ from core.sequencer import SEQUENCER
 from state import RPC_HTTP
 from modules import nadfun
 
-async def _process_metadata_background():
-    try:
-        results = await nadfun.process_metadata_queue()
-        if results:
-            storage.update_token_metadata_batch(results)
-    except Exception as e:
-        print(f"[Backfill] Metadata background error: {e!r}")
-
 
 async def _process_metadata_batch_for_resync() -> int:
-    """Process queued metadata with high throughput during resync.
-
-    Returns count of successfully fetched metadata.
-    """
     qlen = len(nadfun.METADATA_QUEUE)
     if qlen == 0:
         return 0
@@ -52,7 +40,7 @@ async def reindex(start_block: int, batch: int) -> int:
 
     last_processed = start_block - 1
     total_metadata_fetched = 0
-    metadata_process_interval = 10  # Process metadata every N batches
+    metadata_process_interval = 10
 
     for batch_idx, chunk_start in enumerate(range(start_block, max_cached + 1, batch)):
         chunk_end = min(chunk_start + batch - 1, max_cached)
@@ -93,8 +81,6 @@ async def reindex(start_block: int, batch: int) -> int:
 
             SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
 
-        # Process metadata in batches during resync for high throughput
-        # Every N batches, await metadata processing (not fire-and-forget)
         if (batch_idx + 1) % metadata_process_interval == 0 or chunk_end >= max_cached:
             qlen = len(nadfun.METADATA_QUEUE)
             if qlen > 0:
@@ -109,7 +95,6 @@ async def reindex(start_block: int, batch: int) -> int:
 
         await asyncio.sleep(0)
 
-    # Final metadata drain
     remaining = len(nadfun.METADATA_QUEUE)
     if remaining > 0:
         print(f"[Reindex] Final metadata drain: {remaining} items...")
@@ -264,7 +249,6 @@ async def backfill(start_block: int, batch: int) -> int:
 
                     SEQUENCER.process_chunk(chunk_start, chunk_end, filtered_logs, cur)
 
-                # Process metadata in batches for high throughput
                 if (batch_idx + 1) % metadata_process_interval == 0 or chunk_end >= head_snapshot:
                     qlen = len(nadfun.METADATA_QUEUE)
                     if qlen > 0:
@@ -273,7 +257,6 @@ async def backfill(start_block: int, batch: int) -> int:
 
                 last_processed = chunk_end
 
-            # Final metadata drain
             remaining = len(nadfun.METADATA_QUEUE)
             if remaining > 0:
                 fetched = await _process_metadata_batch_for_resync()

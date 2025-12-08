@@ -19,7 +19,6 @@ async def main() -> None:
 
     SEQUENCER._state.rebuild_from_db()
 
-    # Start metadata worker for background processing
     await nadfun.start_metadata_worker(storage)
 
     if REINDEX:
