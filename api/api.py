@@ -136,13 +136,9 @@ def ttl_cache(prefix: str, ttl_seconds: int = 60):
     return decorator
 
 
-def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[str, dict]:
+def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = None) -> dict[str, dict]:
     if not token_addrs:
         return {}
-
-    excluded_list = list(excluded)
-    print(f"[PERF]     holder_stats: {len(token_addrs)} tokens, {len(excluded_list)} excluded addrs", flush=True)
-    _ht0 = time.time()
 
     with db_cursor() as cur:
         cur.execute("""
@@ -157,7 +153,7 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[
             LEFT JOIN LATERAL (
                 SELECT COUNT(*) as cnt
                 FROM launchpad_positions p
-                WHERE p.token = t.token AND p.balance_token > 1 AND p.user_address <> ALL(%s)
+                WHERE p.token = t.token AND p.balance_token > 1
             ) hc ON true
             LEFT JOIN LATERAL (
                 SELECT p.balance_token as dev_bal
@@ -172,16 +168,14 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[
                 FROM (
                     SELECT user_address, balance_token
                     FROM launchpad_positions p
-                    WHERE p.token = t.token AND p.balance_token > 1 AND p.user_address <> ALL(%s)
+                    WHERE p.token = t.token AND p.balance_token > 1
                     ORDER BY p.balance_token DESC
                     LIMIT 10
                 ) sub
             ) t10 ON true
             WHERE t.token = ANY(%s)
-        """, (excluded_list, excluded_list, token_addrs))
+        """, (token_addrs,))
         rows = cur.fetchall()
-    _ht1 = time.time()
-    print(f"[PERF]     holder_stats SQL: {(_ht1-_ht0)*1000:.1f}ms, {len(rows)} rows", flush=True)
 
     result = {}
     for row in rows:
@@ -203,7 +197,6 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
     if not token_addrs:
         return {}
 
-    _t0 = time.time()
     with db_cursor() as cur:
         cur.execute("""
             SELECT
@@ -218,8 +211,6 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             WHERE token = ANY(%s)
         """, (token_addrs,))
         rows = cur.fetchall()
-    _t1 = time.time()
-    print(f"[PERF]   token metadata query: {(_t1-_t0)*1000:.1f}ms", flush=True)
 
     mon_price = _mon_price_usd()
     token_data = {}
@@ -266,10 +257,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "circulating_supply": str(int(row[25] or 0)),
         }
 
-    _t2 = time.time()
-    holder_stats = _batch_get_holder_stats(token_addrs, excluded)
-    _t3 = time.time()
-    print(f"[PERF]   holder stats query: {(_t3-_t2)*1000:.1f}ms", flush=True)
+    holder_stats = _batch_get_holder_stats(token_addrs)
 
     for token, data in token_data.items():
         stats = holder_stats.get(token, {})
@@ -289,8 +277,6 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             """, (creator_addrs,))
             for addr, tc, tg in cur.fetchall():
                 creator_stats[addr.lower()] = {"created": tc or 0, "graduated": tg or 0}
-    _t4 = time.time()
-    print(f"[PERF]   creator stats query: {(_t4-_t3)*1000:.1f}ms", flush=True)
 
     for token, data in token_data.items():
         creator = creators.get(token, "").lower()
@@ -607,8 +593,6 @@ def health() -> Dict[str, Any]:
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     t0 = time.time()
     excluded = _internal_addrs()
-    t1 = time.time()
-    print(f"[PERF] _internal_addrs: {(t1-t0)*1000:.1f}ms", flush=True)
 
     with db_cursor() as cur:
         cur.execute("""
@@ -667,11 +651,7 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     all_token_addrs = [t for t, _ in grad_rows + appr_rows + created_rows]
     circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
-    t2 = time.time()
-    print(f"[PERF] fetch token lists: {(t2-t1)*1000:.1f}ms, {len(all_token_addrs)} tokens", flush=True)
     token_data = _batch_serialize_tokens(all_token_addrs, excluded)
-    t3 = time.time()
-    print(f"[PERF] _batch_serialize_tokens: {(t3-t2)*1000:.1f}ms", flush=True)
 
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
