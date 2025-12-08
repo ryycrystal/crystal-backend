@@ -221,6 +221,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
     _t1 = time.time()
     print(f"[PERF]   token metadata query: {(_t1-_t0)*1000:.1f}ms", flush=True)
 
+    mon_price = _mon_price_usd()
     token_data = {}
     creators = {}
     for row in rows:
@@ -230,7 +231,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
 
         last_price_native = row[17] or Decimal(0)
         marketcap_native_raw = last_price_native * Decimal(1e9)
-        marketcap_usd = marketcap_native_raw * _mon_price_usd()
+        marketcap_usd = marketcap_native_raw * mon_price
 
         token_data[token] = {
             "token": token,
@@ -1788,15 +1789,22 @@ def search_tokens_api(
     return {"query": query, "sort": sort, "count": len(results), "results": results}
 
 
+_mon_price_cache: tuple[float, Decimal] | None = None
+
 def _mon_price_usd() -> Decimal:
+    global _mon_price_cache
+    now = time.time()
+    if _mon_price_cache and (now - _mon_price_cache[0]) < 10:
+        return _mon_price_cache[1]
     try:
         px = storage.get_mon_price_usd()
         if px is None:
-            return Decimal("0.03")
-        px_dec = Decimal(px)
-        if px_dec <= 0:
-            return Decimal("0.03")
-        return px_dec
+            result = Decimal("0.03")
+        else:
+            px_dec = Decimal(px)
+            result = px_dec if px_dec > 0 else Decimal("0.03")
+        _mon_price_cache = (now, result)
+        return result
     except Exception:
         return Decimal("0.03")
 
