@@ -199,6 +199,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
     if not token_addrs:
         return {}
 
+    _t0 = time.time()
     with db_cursor() as cur:
         cur.execute("""
             SELECT
@@ -213,6 +214,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             WHERE token = ANY(%s)
         """, (token_addrs,))
         rows = cur.fetchall()
+    _t1 = time.time()
+    print(f"[PERF]   token metadata query: {(_t1-_t0)*1000:.1f}ms", flush=True)
 
     token_data = {}
     creators = {}
@@ -258,7 +261,10 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "circulating_supply": str(int(row[25] or 0)),
         }
 
+    _t2 = time.time()
     holder_stats = _batch_get_holder_stats(token_addrs, excluded)
+    _t3 = time.time()
+    print(f"[PERF]   holder stats query: {(_t3-_t2)*1000:.1f}ms", flush=True)
 
     for token, data in token_data.items():
         stats = holder_stats.get(token, {})
@@ -278,6 +284,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             """, (creator_addrs,))
             for addr, tc, tg in cur.fetchall():
                 creator_stats[addr.lower()] = {"created": tc or 0, "graduated": tg or 0}
+    _t4 = time.time()
+    print(f"[PERF]   creator stats query: {(_t4-_t3)*1000:.1f}ms", flush=True)
 
     for token, data in token_data.items():
         creator = creators.get(token, "").lower()
@@ -594,6 +602,8 @@ def health() -> Dict[str, Any]:
 def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     t0 = time.time()
     excluded = _internal_addrs()
+    t1 = time.time()
+    print(f"[PERF] _internal_addrs: {(t1-t0)*1000:.1f}ms", flush=True)
 
     with db_cursor() as cur:
         cur.execute("""
@@ -652,7 +662,11 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
 
     all_token_addrs = [t for t, _ in grad_rows + appr_rows + created_rows]
     circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
+    t2 = time.time()
+    print(f"[PERF] fetch token lists: {(t2-t1)*1000:.1f}ms, {len(all_token_addrs)} tokens", flush=True)
     token_data = _batch_serialize_tokens(all_token_addrs, excluded)
+    t3 = time.time()
+    print(f"[PERF] _batch_serialize_tokens: {(t3-t2)*1000:.1f}ms", flush=True)
 
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
