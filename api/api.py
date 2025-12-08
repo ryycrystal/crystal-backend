@@ -141,6 +141,8 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[
         return {}
 
     excluded_list = list(excluded)
+    print(f"[PERF]     holder_stats: {len(token_addrs)} tokens, {len(excluded_list)} excluded addrs", flush=True)
+    _ht0 = time.time()
 
     with db_cursor() as cur:
         cur.execute("""
@@ -178,6 +180,8 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str]) -> dict[
             WHERE t.token = ANY(%s)
         """, (excluded_list, excluded_list, token_addrs))
         rows = cur.fetchall()
+    _ht1 = time.time()
+    print(f"[PERF]     holder_stats SQL: {(_ht1-_ht0)*1000:.1f}ms, {len(rows)} rows", flush=True)
 
     result = {}
     for row in rows:
