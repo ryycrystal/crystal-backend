@@ -7,6 +7,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 import time
 import logging
 import traceback
+import base64
+import json
+import re
 import core.storage as storage
 from core import chain as h
 from api.x_api import router as x_router
@@ -61,6 +64,53 @@ def _fmt_usd(value) -> str:
     if '.' in s:
         s = s.rstrip('0').rstrip('.')
     return s if s else "0"
+
+
+_SCI_NOTATION = re.compile(r'[eE]')
+
+
+def _encode_cursor(data: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> dict | None:
+    try:
+        return json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception:
+        return None
+
+
+def _parse_positions_cursor(cursor: str) -> tuple[Decimal, str]:
+    data = _decode_cursor(cursor)
+    if not data or "v" not in data or "t" not in data:
+        raise HTTPException(400, "Invalid cursor: missing fields")
+
+    v_str = str(data["v"])
+    if _SCI_NOTATION.search(v_str):
+        raise HTTPException(400, "Invalid cursor: scientific notation not allowed")
+
+    try:
+        v = Decimal(v_str)
+        if not v.is_finite():
+            raise HTTPException(400, "Invalid cursor: non-finite value")
+        return (v, str(data["t"]))
+    except InvalidOperation:
+        raise HTTPException(400, "Invalid cursor: v must be numeric string")
+
+
+def _parse_history_cursor(cursor: str) -> tuple[int, int, str]:
+    data = _decode_cursor(cursor)
+    if not data:
+        raise HTTPException(400, "Invalid cursor format")
+    try:
+        ts = int(data["ts"])
+        li = int(data["li"])
+        tx = str(data["tx"])
+        if ts < 0 or li < 0:
+            raise HTTPException(400, "Invalid cursor: negative values")
+        return (ts, li, tx)
+    except (KeyError, ValueError, TypeError):
+        raise HTTPException(400, "Invalid cursor: required ts (int), li (int), tx (str)")
 
 
 AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
@@ -1381,6 +1431,350 @@ def user_portfolio(user_addr: str) -> Dict[str, Any]:
         "summary": summary,
         "positions": positions,
     }
+
+
+@app.get("/portfolio/{address}")
+def portfolio_summary(address: str) -> Dict[str, Any]:
+    user_addr = address.lower()
+
+    mon_price = _mon_price_usd()
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                SUM(p.balance_token * COALESCE(t.last_price_native, 0)) as portfolio_value,
+                SUM(p.realized_pnl_native) as realized_pnl,
+                SUM(p.unrealized_pnl_native) as unrealized_pnl,
+                SUM(p.native_spent) as native_spent,
+                SUM(p.native_received) as native_received,
+                SUM(p.trade_count) as trade_count,
+                COUNT(*) FILTER (WHERE p.balance_token > 0) as active_positions,
+                COUNT(*) FILTER (WHERE p.trade_count > 0) as tokens_traded
+            FROM launchpad_positions p
+            LEFT JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.user_address = %s
+            """,
+            (user_addr,),
+        )
+        row = cur.fetchone()
+
+    portfolio_value = row[0] or Decimal(0)
+    realized_pnl = row[1] or Decimal(0)
+    unrealized_pnl = row[2] or Decimal(0)
+    native_spent = int(row[3] or 0)
+    native_received = int(row[4] or 0)
+    trade_count = int(row[5] or 0)
+    active_positions = int(row[6] or 0)
+    tokens_traded = int(row[7] or 0)
+
+    total_pnl = realized_pnl + unrealized_pnl
+
+    portfolio_value_usd = portfolio_value * mon_price if mon_price > 0 else Decimal(0)
+    total_pnl_usd = total_pnl * mon_price if mon_price > 0 else Decimal(0)
+
+    return {
+        "address": user_addr,
+        "summary": {
+            "portfolio_value_native": _fmt(portfolio_value),
+            "portfolio_value_usd": _fmt_usd(portfolio_value_usd),
+            "realized_pnl_native": _fmt(realized_pnl),
+            "unrealized_pnl_native": _fmt(unrealized_pnl),
+            "total_pnl_native": _fmt(total_pnl),
+            "total_pnl_usd": _fmt_usd(total_pnl_usd),
+            "native_spent": str(native_spent),
+            "native_received": str(native_received),
+            "trade_count": trade_count,
+            "active_positions": active_positions,
+            "tokens_traded": tokens_traded,
+        },
+    }
+
+
+@app.get("/portfolio/{address}/positions")
+def portfolio_positions(
+    address: str,
+    sort: str = Query("pnl", description="Sort by: 'pnl' or 'balance'"),
+    active_only: bool = Query(True, description="Only positions with balance > 0"),
+    cursor: str = Query(None, description="Base64 cursor for pagination"),
+    limit: int = Query(20, description="Page size (1-100)"),
+) -> Dict[str, Any]:
+    user_addr = address.lower()
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "limit must be between 1 and 100")
+
+    if sort not in ("pnl", "balance"):
+        raise HTTPException(400, "sort must be 'pnl' or 'balance'")
+
+    mon_price = _mon_price_usd()
+
+    cursor_v: Decimal | None = None
+    cursor_t: str | None = None
+    if cursor:
+        cursor_v, cursor_t = _parse_positions_cursor(cursor)
+
+    sort_col = "p.total_pnl_native" if sort == "pnl" else "p.balance_token"
+
+    if active_only:
+        base_where = "p.user_address = %s AND p.balance_token > 0"
+    else:
+        base_where = "p.user_address = %s"
+
+    if cursor_v is not None and cursor_t is not None:
+        where_clause = f"{base_where} AND ({sort_col}, p.token) < (%s, %s)"
+        params: tuple = (user_addr, cursor_v, cursor_t) if active_only else (user_addr, cursor_v, cursor_t)
+    else:
+        where_clause = base_where
+        params = (user_addr,)
+
+    query = f"""
+        SELECT p.token, p.balance_token, p.native_spent, p.native_received,
+               p.token_bought, p.token_sold, p.realized_pnl_native,
+               p.unrealized_pnl_native, p.total_pnl_native, p.trade_count,
+               p.buy_count, p.sell_count,
+               t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+        FROM launchpad_positions p
+        JOIN launchpad_tokens t ON t.token = p.token
+        WHERE {where_clause}
+        ORDER BY {sort_col} DESC, p.token DESC
+        LIMIT %s
+    """
+
+    with db_cursor() as cur:
+        cur.execute(query, params + (limit + 1,))
+        rows = cur.fetchall()
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    positions = []
+    for row in rows:
+        (
+            token, balance_token, native_spent, native_received,
+            token_bought, token_sold, realized_pnl_native,
+            unrealized_pnl_native, total_pnl_native, trade_count,
+            buy_count, sell_count,
+            name, symbol, metadata_cid, last_price_native, market, source,
+        ) = row
+
+        last_price_native = last_price_native or Decimal(0)
+        balance_token = int(balance_token or 0)
+        native_spent = int(native_spent or 0)
+        native_received = int(native_received or 0)
+        token_bought = int(token_bought or 0)
+        token_sold = int(token_sold or 0)
+        realized_pnl = realized_pnl_native or Decimal(0)
+        unrealized_pnl = unrealized_pnl_native or Decimal(0)
+        total_pnl = total_pnl_native or (realized_pnl + unrealized_pnl)
+
+        current_value_native = Decimal(balance_token) * last_price_native
+        current_value_usd = current_value_native * mon_price if mon_price > 0 else Decimal(0)
+        total_pnl_usd = total_pnl * mon_price if mon_price > 0 else Decimal(0)
+
+        positions.append({
+            "token": token,
+            "symbol": symbol,
+            "name": name,
+            "metadata_cid": metadata_cid or "",
+            "balance_token": str(balance_token),
+            "balance_native": _fmt(current_value_native),
+            "balance_usd": _fmt_usd(current_value_usd),
+            "native_spent": str(native_spent),
+            "native_received": str(native_received),
+            "token_bought": str(token_bought),
+            "token_sold": str(token_sold),
+            "realized_pnl_native": _fmt(realized_pnl),
+            "unrealized_pnl_native": _fmt(unrealized_pnl),
+            "total_pnl_native": _fmt(total_pnl),
+            "total_pnl_usd": _fmt_usd(total_pnl_usd),
+            "trade_count": int(trade_count or 0),
+            "buy_count": int(buy_count or 0),
+            "sell_count": int(sell_count or 0),
+            "market": market,
+            "source": int(source or 0),
+        })
+
+    next_cursor = None
+    if has_more and positions:
+        last_row = rows[-1]
+        if sort == "pnl":
+            cursor_val = last_row[8]
+        else:
+            cursor_val = last_row[1]
+        next_cursor = _encode_cursor({
+            "v": str(cursor_val),
+            "t": last_row[0],
+        })
+
+    return {
+        "positions": positions,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
+
+
+@app.get("/portfolio/{address}/history")
+def portfolio_history(
+    address: str,
+    token: str = Query(None, description="Filter to specific token"),
+    cursor: str = Query(None, description="Base64 cursor for pagination"),
+    limit: int = Query(50, description="Page size (1-200)"),
+) -> Dict[str, Any]:
+    user_addr = address.lower()
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(400, "limit must be between 1 and 200")
+
+    cursor_ts: int | None = None
+    cursor_li: int | None = None
+    cursor_tx: str | None = None
+    if cursor:
+        cursor_ts, cursor_li, cursor_tx = _parse_history_cursor(cursor)
+
+    if token:
+        token = token.lower()
+        if cursor_ts is not None:
+            where_clause = "tr.user_address = %s AND tr.token = %s AND (tr.timestamp, tr.log_index, tr.txhash) < (%s, %s, %s)"
+            params: tuple = (user_addr, token, cursor_ts, cursor_li, cursor_tx)
+        else:
+            where_clause = "tr.user_address = %s AND tr.token = %s"
+            params = (user_addr, token)
+    else:
+        if cursor_ts is not None:
+            where_clause = "tr.user_address = %s AND (tr.timestamp, tr.log_index, tr.txhash) < (%s, %s, %s)"
+            params = (user_addr, cursor_ts, cursor_li, cursor_tx)
+        else:
+            where_clause = "tr.user_address = %s"
+            params = (user_addr,)
+
+    query = f"""
+        SELECT tr.txhash, tr.timestamp, tr.log_index, tr.token, tr.is_buy,
+               tr.native_amount, tr.token_amount, tr.price_native, tr.usd_amount,
+               t.symbol, t.name
+        FROM launchpad_trades tr
+        JOIN launchpad_tokens t ON t.token = tr.token
+        WHERE {where_clause}
+        ORDER BY tr.timestamp DESC, tr.log_index DESC, tr.txhash DESC
+        LIMIT %s
+    """
+
+    with db_cursor() as cur:
+        cur.execute(query, params + (limit + 1,))
+        rows = cur.fetchall()
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    trades = []
+    for row in rows:
+        (
+            txhash, timestamp, log_index, trade_token, is_buy,
+            native_amount, token_amount, price_native, usd_amount,
+            symbol, name,
+        ) = row
+
+        native_amount = int(native_amount or 0)
+        token_amount = int(token_amount or 0)
+        usd_amount_dec = usd_amount or Decimal(0)
+
+        trades.append({
+            "txhash": txhash,
+            "timestamp": int(timestamp),
+            "log_index": int(log_index),
+            "token": trade_token,
+            "symbol": symbol,
+            "name": name,
+            "is_buy": bool(is_buy),
+            "native_amount": str(native_amount),
+            "token_amount": str(token_amount),
+            "price_native": _fmt(price_native or Decimal(0)),
+            "usd_amount": _fmt_usd(usd_amount_dec),
+        })
+
+    next_cursor = None
+    if has_more and trades:
+        last_row = rows[-1]
+        next_cursor = _encode_cursor({
+            "ts": int(last_row[1]),
+            "li": int(last_row[2]),
+            "tx": last_row[0],
+        })
+
+    return {
+        "trades": trades,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
+
+
+@app.get("/leaderboard")
+def leaderboard(
+    search: str = Query(None, description="Filter by address prefix"),
+    limit: int = Query(100, description="Max results (1-100)"),
+) -> Dict[str, Any]:
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "limit must be between 1 and 100")
+
+    if search:
+        search = search.lower()
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT address, total_realized_pnl_native, total_native_volume,
+                       total_trades, tokens_created, tokens_graduated
+                FROM launchpad_users
+                WHERE address ILIKE %s
+                ORDER BY address
+                LIMIT %s
+                """,
+                (search + "%", limit),
+            )
+            rows = cur.fetchall()
+
+        users = []
+        for i, row in enumerate(rows):
+            users.append({
+                "rank": i + 1,
+                "address": row[0],
+                "total_realized_pnl_native": _fmt(row[1] or Decimal(0)),
+                "total_native_volume": _fmt(row[2] or Decimal(0)),
+                "total_trades": int(row[3] or 0),
+                "tokens_created": int(row[4] or 0),
+                "tokens_graduated": int(row[5] or 0),
+            })
+
+        return {"users": users}
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT address, total_realized_pnl_native, total_native_volume,
+                   total_trades, tokens_created, tokens_graduated
+            FROM launchpad_users
+            WHERE total_realized_pnl_native > 0
+            ORDER BY total_realized_pnl_native DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+
+    users = []
+    for i, row in enumerate(rows):
+        users.append({
+            "rank": i + 1,
+            "address": row[0],
+            "total_realized_pnl_native": _fmt(row[1] or Decimal(0)),
+            "total_native_volume": _fmt(row[2] or Decimal(0)),
+            "total_trades": int(row[3] or 0),
+            "tokens_created": int(row[4] or 0),
+            "tokens_graduated": int(row[5] or 0),
+        })
+
+    return {"users": users}
 
 
 @app.get("/stats/{token_addr}")
