@@ -293,7 +293,40 @@ def init_db() -> None:
             ON launchpad_positions (token, total_pnl_native DESC);
             """
         )
-        
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_user_history_keyset
+            ON launchpad_trades (user_address, timestamp DESC, log_index DESC, txhash DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trades_user_token_history_keyset
+            ON launchpad_trades (user_address, token, timestamp DESC, log_index DESC, txhash DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_positions_user_pnl_keyset
+            ON launchpad_positions (user_address, total_pnl_native DESC, token DESC)
+            WHERE balance_token > 0;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_positions_user_balance_keyset
+            ON launchpad_positions (user_address, balance_token DESC, token DESC)
+            WHERE balance_token > 0;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_users_pnl_leaderboard
+            ON launchpad_users (total_realized_pnl_native DESC)
+            WHERE total_realized_pnl_native > 0;
+            """
+        )
+
         # v3 pools
         cur.execute(
             """
@@ -1113,7 +1146,6 @@ def mark_token_migrated(
         )
 
 def update_token_metadata_batch(metadata_list: list[dict]) -> None:
-    """Update token metadata for multiple tokens from async fetch results."""
     if not metadata_list:
         return
     with db_cursor() as cur:
