@@ -35,6 +35,7 @@ ADDRS = [a.lower() for a in CONTRACTS.values()]
 
 EVENT_SIGS = {
     "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
+    "0x77c39d27acc1bbb9c6519311b11749cea1e4ac28704c34f4dd35aff06e870442": "MPC",
     "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c82982": "TR",
     "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
     "0xc367a2f5396f96d105baaaa90fe29b1bb18ef54c712964410d02451e67c19d3e": "LT",
@@ -60,6 +61,7 @@ TOPICS = list(EVENT_SIGS.keys())
 
 PARSERS = {
     "MC": m.parse_market_created,
+    "MPC": m.parse_market_params_changed,
     "TR": m.parse_trade,
     "TC": lp.parse_token_created,
     "LT": lp.parse_launchpad_trade,
@@ -82,7 +84,7 @@ PARSERS = {
     "TF": _parse_transfer,
 }
 
-ROUTER_EVENT_TAGS = {"MC", "TR", "TC", "LT", "MG"}
+ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "TC", "LT", "MG"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}

@@ -386,6 +386,7 @@ class Sequencer:
         logs = sorted(logs, key=self._log_index)
         counts = counts_out if counts_out is not None else {
             "MC": 0,
+            "MPC": 0,
             "TR": 0,
             "TC": 0,
             "LT": 0,
@@ -428,8 +429,13 @@ class Sequencer:
 
         if counts_out is None:
             print(
-                f"[SQ] {blk}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
-                f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']} "
+                f"[SQ] {blk}: MC {counts['MC']} MPC {counts['MPC']} TR {counts['TR']} "
+                f"TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
+                f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
+                f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
+                f"VMAX {counts['VMAX']} VLOCKUP {counts['VLOCKUP']} VDECR {counts['VDECR']} "
+                f"V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+                f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']}"
             )
 
     def _process_block_inner(self, blk: int, logs: List[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None):
@@ -470,6 +476,9 @@ class Sequencer:
 
             if tag == "MC":
                 self._state.apply_market_created(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+
+            elif tag == "MPC":
+                self._state.apply_market_params_changed(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
 
             elif tag == "TR":
                 self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
@@ -558,7 +567,7 @@ class Sequencer:
         cur,
     ) -> None:
         counts = {
-            "MC": 0, "TR": 0, "TC": 0, "LT": 0, "MG": 0,
+            "MC": 0, "MPC": 0, "TR": 0, "TC": 0, "LT": 0, "MG": 0,
             "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "VMAX": 0, "VLOCKUP": 0, "VDECR": 0,
             "NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0,
         }
@@ -587,8 +596,13 @@ class Sequencer:
         self._next_block = chunk_end + 1
 
         print(
-            f"[SQ] {chunk_start}-{chunk_end}: V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} "
-            f"NFB {counts['NFB']} NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']}"
+            f"[SQ] {chunk_start}-{chunk_end}: MC {counts['MC']} MPC {counts['MPC']} TR {counts['TR']} "
+            f"TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
+            f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
+            f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
+            f"VMAX {counts['VMAX']} VLOCKUP {counts['VLOCKUP']} VDECR {counts['VDECR']} "
+            f"V3SWAP {counts['V3SWAP']} NFC {counts['NFC']} NFB {counts['NFB']} "
+            f"NFS {counts['NFS']} NFT {counts['NFT']} TF {counts['TF']}"
         )
 
 SEQUENCER = Sequencer(_st.State())
