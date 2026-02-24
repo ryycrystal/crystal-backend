@@ -13,7 +13,7 @@ def read_str(buf: bytes, base: int, rel: int) -> str:
     ln = int.from_bytes(buf[start:start+32], "big")
     s = buf[start+32:start+32+ln]
     try:
-        return s.decode("utf-8", errors="ignore")
+        return s.decode("utf-8", errors="ignore").replace("\x00", "")
     except Exception:
         return ""
     
