@@ -71,9 +71,9 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
 
     quote_address, quote_decimals, quote_ticker, quote_name = _decode_token_meta(data, quote_info_off)
     base_address, base_decimals, base_ticker, base_name = _decode_token_meta(data, base_info_off)
-    if quote_address == _ZERO_ADDR:
+    if quote_address == _ZERO_ADDR or quote_address.lower() != quote_asset.lower():
         quote_address = quote_asset.lower()
-    if base_address == _ZERO_ADDR:
+    if base_address == _ZERO_ADDR or base_address.lower() != base_asset.lower():
         base_address = base_asset.lower()
 
     market_id = _u256_at(data, pos_details + 32 * 0)
