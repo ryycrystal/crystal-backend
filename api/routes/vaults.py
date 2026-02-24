@@ -1,9 +1,48 @@
 from __future__ import annotations
 from typing import Dict, Any
+import httpx
 from fastapi import APIRouter, Query, HTTPException
 from api.api import storage, time, _vault_snapshot_from_samples, ttl_cache
+from state import RPC_HTTP, State
 
 router = APIRouter()
+
+
+def _rpc_jsonrpc_sync(method: str, params: list[Any]) -> dict:
+    resp = httpx.post(
+        RPC_HTTP,
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("invalid rpc response")
+    if data.get("error") is not None:
+        raise ValueError(str(data.get("error")))
+    return data
+
+
+def _vault_user_lockup_fields(
+    *,
+    now_ts: int,
+    lockup_seconds: int,
+    user_row,
+    user_shares: int,
+) -> dict[str, int | bool]:
+    last_deposit = int(user_row[3] or 0) if user_row and len(user_row) > 3 else 0
+    last_withdraw = int(user_row[4] or 0) if user_row and len(user_row) > 4 else 0
+    lockup_i = int(lockup_seconds or 0)
+    unlock_at = (last_deposit + lockup_i) if (last_deposit > 0 and lockup_i > 0) else 0
+    locked = bool(int(user_shares or 0) > 0 and unlock_at > int(now_ts))
+    remaining = max(0, int(unlock_at) - int(now_ts)) if locked else 0
+    return {
+        "lastDeposit": last_deposit,
+        "lastWithdraw": last_withdraw,
+        "withdrawLocked": locked,
+        "withdrawUnlockAt": int(unlock_at or 0),
+        "withdrawLockupRemaining": int(remaining),
+    }
 
 # endpoint for vault list used by /earn/vaults
 @router.get("/vaults/list")
@@ -157,6 +196,103 @@ def list_vaults(
         "vaults": items,
     }
 
+# endpoint for forcing an immediate rpc balance read for a vault
+@router.post("/vaults/{address}/refresh-balance")
+def vault_refresh_balance(
+    address: str,
+    user: str | None = Query(None, description="optional user address for user balance projection"),
+) -> Dict[str, Any]:
+    vaddr = (address or "").lower()
+    v = storage.get_crystal_vault(vaddr)
+    if not v:
+        raise HTTPException(status_code=404, detail="vault not found")
+    (
+        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
+        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+        lockup, decrease_on_withdraw,
+    ) = v
+
+    try:
+        head = _rpc_jsonrpc_sync("eth_blockNumber", [])
+        blk_hex = head.get("result")
+        if not isinstance(blk_hex, str) or not blk_hex.startswith("0x"):
+            raise ValueError("invalid head block")
+        blk_num = int(blk_hex, 16)
+
+        ts = int(time.time())
+        try:
+            blk = _rpc_jsonrpc_sync("eth_getBlockByNumber", [blk_hex, False])
+            ts_hex = (blk.get("result") or {}).get("timestamp") if isinstance(blk.get("result"), dict) else None
+            if isinstance(ts_hex, str) and ts_hex.startswith("0x"):
+                ts = int(ts_hex, 16)
+        except Exception:
+            pass
+
+        call = _rpc_jsonrpc_sync(
+            "eth_call",
+            [{"to": vaddr, "data": "0x00113e08"}, blk_hex],
+        )
+        ret = call.get("result")
+        if not isinstance(ret, str) or not ret.startswith("0x"):
+            raise ValueError("invalid eth_call result")
+        s = ret[2:].rjust(64 * 4, "0")
+        quote_bal = int(s[128:192], 16)
+        base_bal = int(s[192:256], 16)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"vault balance refresh failed: {e}")
+
+    circ = int(circulating_shares or 0)
+    uaddr = (user if isinstance(user, str) else "" or "").lower()
+    sample_persisted = False
+    usd_value = None
+    try:
+        st = State()
+        st.rebuild_from_db()
+        st.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+        sample_persisted = True
+        latest_row = storage.get_crystal_vault_latest_balance(vaddr)
+        if latest_row is not None:
+            usd_value = float(latest_row[4] or 0.0)
+    except Exception:
+        latest_row = storage.get_crystal_vault_latest_balance(vaddr)
+        if latest_row is not None:
+            usd_value = float(latest_row[4] or 0.0)
+    user_summary = None
+    if uaddr:
+        ur = storage.get_crystal_vault_user(vaddr, uaddr)
+        u_shares = int(ur[0] or 0) if ur else 0
+        share_pct = (u_shares / circ) if circ > 0 and u_shares > 0 else 0.0
+        lock_fields = _vault_user_lockup_fields(
+            now_ts=int(ts),
+            lockup_seconds=int(lockup or 0),
+            user_row=ur,
+            user_shares=u_shares,
+        )
+        user_summary = {
+            "address": uaddr,
+            "shares": u_shares,
+            "sharePct": share_pct,
+            "quoteBalance": int(quote_bal * share_pct) if share_pct > 0 else 0,
+            "baseBalance": int(base_bal * share_pct) if share_pct > 0 else 0,
+            **lock_fields,
+        }
+
+    return {
+        "ok": True,
+        "vault": str(vault_addr or "").lower(),
+        "latestBalance": {
+            "block": int(blk_num),
+            "timestamp": int(ts),
+            "quoteBalance": int(quote_bal),
+            "baseBalance": int(base_bal),
+            "usdValue": float(usd_value or 0.0),
+        },
+        "userBalance": user_summary,
+        "status": {"locked": bool(locked), "closed": bool(closed)},
+        "samplePersisted": bool(sample_persisted),
+        "source": "rpc",
+    }
+
 # endpoint for complete vaults/{address} page
 @router.get("/vaults/{address}/{user}")
 def vault_user_summary(
@@ -191,6 +327,13 @@ def vault_user_summary(
     circ = int(circulating_shares or 0)
     user_row = storage.get_crystal_vault_user(vaddr, uaddr)
     u_shares = int(user_row[0] or 0) if user_row else 0
+    now_ts = int(time.time())
+    lock_fields = _vault_user_lockup_fields(
+        now_ts=now_ts,
+        lockup_seconds=int(lockup or 0),
+        user_row=user_row,
+        user_shares=u_shares,
+    )
 
     if circ > 0 and u_shares > 0:
         share_pct = u_shares / circ
@@ -283,6 +426,7 @@ def vault_user_summary(
             "sharePct": share_pct,
             "quoteBalance": user_quote,
             "baseBalance": user_base,
+            **lock_fields,
         },
         "depositHistory": deposit_history,
         "withdrawHistory": withdraw_history,
