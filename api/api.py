@@ -1,7 +1,7 @@
 from __future__ import annotations
 from decimal import Decimal, getcontext, ROUND_HALF_UP, InvalidOperation
 from typing import Dict, Any, List, Tuple
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 import time
@@ -9,7 +9,6 @@ import logging
 import traceback
 import base64
 import json
-import re
 import core.storage as storage
 from core import chain as h
 from api.x_api import router as x_router
@@ -64,53 +63,6 @@ def _fmt_usd(value) -> str:
     if '.' in s:
         s = s.rstrip('0').rstrip('.')
     return s if s else "0"
-
-
-_SCI_NOTATION = re.compile(r'[eE]')
-
-
-def _encode_cursor(data: dict) -> str:
-    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
-
-
-def _decode_cursor(cursor: str) -> dict | None:
-    try:
-        return json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except Exception:
-        return None
-
-
-def _parse_positions_cursor(cursor: str) -> tuple[Decimal, str]:
-    data = _decode_cursor(cursor)
-    if not data or "v" not in data or "t" not in data:
-        raise HTTPException(400, "Invalid cursor: missing fields")
-
-    v_str = str(data["v"])
-    if _SCI_NOTATION.search(v_str):
-        raise HTTPException(400, "Invalid cursor: scientific notation not allowed")
-
-    try:
-        v = Decimal(v_str)
-        if not v.is_finite():
-            raise HTTPException(400, "Invalid cursor: non-finite value")
-        return (v, str(data["t"]))
-    except InvalidOperation:
-        raise HTTPException(400, "Invalid cursor: v must be numeric string")
-
-
-def _parse_history_cursor(cursor: str) -> tuple[int, int, str]:
-    data = _decode_cursor(cursor)
-    if not data:
-        raise HTTPException(400, "Invalid cursor format")
-    try:
-        ts = int(data["ts"])
-        li = int(data["li"])
-        tx = str(data["tx"])
-        if ts < 0 or li < 0:
-            raise HTTPException(400, "Invalid cursor: negative values")
-        return (ts, li, tx)
-    except (KeyError, ValueError, TypeError):
-        raise HTTPException(400, "Invalid cursor: required ts (int), li (int), tx (str)")
 
 
 AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
@@ -188,6 +140,59 @@ def ttl_cache(prefix: str, ttl_seconds: int = 60):
             return result
         return wrapper
     return decorator
+
+
+def _encode_cursor(payload: Dict[str, Any]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> Dict[str, Any]:
+    if cursor is None:
+        raise HTTPException(400, "invalid cursor")
+    try:
+        s = str(cursor).strip()
+        if not s:
+            raise ValueError("empty cursor")
+        pad = "=" * ((4 - (len(s) % 4)) % 4)
+        data = base64.urlsafe_b64decode((s + pad).encode("ascii"))
+        obj = json.loads(data.decode("utf-8"))
+        if not isinstance(obj, dict):
+            raise ValueError("cursor payload must be object")
+        return obj
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "invalid cursor")
+
+
+def _parse_positions_cursor(cursor: str):
+    obj = _decode_cursor(cursor)
+    try:
+        v_raw = obj.get("v")
+        t_raw = obj.get("t")
+        if v_raw is None or t_raw is None:
+            raise ValueError("missing fields")
+        return Decimal(str(v_raw)), str(t_raw).lower()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "invalid positions cursor")
+
+
+def _parse_history_cursor(cursor: str):
+    obj = _decode_cursor(cursor)
+    try:
+        ts = int(obj.get("ts"))
+        li = int(obj.get("li"))
+        tx = str(obj.get("tx") or "").lower()
+        if not tx:
+            raise ValueError("missing tx")
+        return ts, li, tx
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "invalid history cursor")
 
 
 def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = None) -> dict[str, dict]:

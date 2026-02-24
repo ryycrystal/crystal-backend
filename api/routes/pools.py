@@ -11,14 +11,65 @@ def _pool_row_to_api(row) -> Dict[str, Any]:
     return _crystal_pool_row_to_api(row)
 
 
-# Return indexed AMM pool markets in the legacy pools list response shape
+# endpoint for pools list used by /earn/liquidity
 @router.get("/pools/list")
-def list_pools() -> Dict[str, Any]:
-    rows = storage.list_crystal_pools_with_state()
-    return {"pools": [_pool_row_to_api(r) for r in rows]}
+def list_pools(
+    search: str | None = Query(None, min_length=0, max_length=128),
+    tokens: str | None = Query(None, description="optional comma-separated token addresses (1-2)"),
+    sort: str = Query("volume", description="volume | tvl | apy"),
+    order: str = Query("desc", description="asc | desc"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=50),
+) -> Dict[str, Any]:
+    search_norm = search if isinstance(search, str) else ""
+    sort_norm = (sort if isinstance(sort, str) else "volume" or "volume").strip().lower()
+    if sort_norm not in {"volume", "tvl", "apy"}:
+        raise HTTPException(status_code=400, detail="invalid sort")
+    order_norm = (order if isinstance(order, str) else "desc" or "desc").strip().lower()
+    if order_norm not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="invalid order")
+    try:
+        page_i = int(page)
+    except Exception:
+        page_i = 1
+    try:
+        limit_i = int(limit)
+    except Exception:
+        limit_i = 50
+    token_filters: list[str] = []
+    if isinstance(tokens, str) and tokens.strip():
+        for part in tokens.split(","):
+            t = (part or "").strip().lower()
+            if not t:
+                continue
+            token_filters.append(t)
+        token_filters = token_filters[:2]
+    rows = storage.list_crystal_pools_with_state(
+        search=search_norm,
+        token_addresses=token_filters,
+        page=page_i,
+        limit=limit_i,
+        sort_by=sort_norm,
+        sort_dir=order_norm,
+    )
+    total = int(rows[0][25] or 0) if rows and len(rows[0]) > 25 else 0
+    
+    return {
+        "ok": True,
+        "pools": [_pool_row_to_api(r) for r in rows],
+        "count": len(rows),
+        "total": total,
+        "page": page_i,
+        "limit": limit_i,
+        "hasMore": (page_i * limit_i) < total,
+        "sort": sort_norm,
+        "order": order_norm,
+        "search": search_norm,
+        "tokens": token_filters,
+    }
 
 
-# Return one indexed AMM pool market in the legacy pool response shape
+# endpoint for complete info for one pool
 @router.get("/pools/{address}")
 def get_pool(
     address: str,
@@ -50,4 +101,5 @@ def get_pool(
         {"timestamp": int(p["timestamp"]), "apy": float(out.get("apy24h") or 0.0)}
         for p in tvl_history
     ]
+    
     return out

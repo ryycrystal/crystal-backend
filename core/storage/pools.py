@@ -8,6 +8,7 @@ import psycopg2
 from .base import db_cursor
 
 
+# load persisted lp pool state rows into in-memory state on startup
 def load_crystal_pool_states_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -29,7 +30,7 @@ def load_crystal_pool_states_for_state():
         )
         return cur.fetchall()
 
-
+# fetch one lp pool state row by market address
 def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None = None):
     sql = """
         SELECT
@@ -55,7 +56,7 @@ def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None =
     cur.execute(sql, ((market or "").lower(),))
     return cur.fetchone()
 
-
+# upsert current lp pool reserves and rolling metrics
 def upsert_crystal_pool_state(
     *,
     market: str,
@@ -131,7 +132,7 @@ def upsert_crystal_pool_state(
     else:
         cur.execute(sql, params)
 
-
+# update only the lp token total supply for a pool
 def update_crystal_pool_total_shares(
     market: str,
     total_shares: int,
@@ -159,7 +160,7 @@ def update_crystal_pool_total_shares(
     else:
         cur.execute(sql, params)
 
-
+# insert a sync event with volume and fees
 def insert_crystal_pool_sync_event(
     *,
     block_number: int,
@@ -214,7 +215,7 @@ def insert_crystal_pool_sync_event(
     else:
         cur.execute(sql, params)
 
-
+# sum trade-only sync volume and fees since a timestamp
 def sum_crystal_pool_trade_metrics_since(
     market: str,
     since_ts: int,
@@ -237,7 +238,84 @@ def sum_crystal_pool_trade_metrics_since(
     cur.execute(sql, params)
     return cur.fetchone()
 
+# compute a time-weighted average tvl over a window using pool tvl samples
+def time_weighted_avg_crystal_pool_tvl_since(
+    market: str,
+    since_ts: int,
+    end_ts: int,
+    cur: psycopg2.extensions.cursor | None = None,
+):
+    sql = """
+        WITH p AS (
+            SELECT %s::text AS market, %s::bigint AS since_ts, %s::bigint AS end_ts
+        ),
+        seed AS (
+            SELECT s.timestamp, s.block_number, s.log_index, s.tvl_usd
+            FROM crystal_pool_tvl_samples s, p
+            WHERE s.market = p.market
+              AND s.timestamp < p.since_ts
+            ORDER BY s.timestamp DESC, s.block_number DESC, s.log_index DESC
+            LIMIT 1
+        ),
+        inside_window AS (
+            SELECT s.timestamp, s.block_number, s.log_index, s.tvl_usd
+            FROM crystal_pool_tvl_samples s, p
+            WHERE s.market = p.market
+              AND s.timestamp >= p.since_ts
+              AND s.timestamp <= p.end_ts
+        ),
+        pts AS (
+            SELECT * FROM seed
+            UNION ALL
+            SELECT * FROM inside_window
+        ),
+        ord AS (
+            SELECT
+                timestamp,
+                block_number,
+                log_index,
+                tvl_usd,
+                LEAD(timestamp) OVER (ORDER BY timestamp ASC, block_number ASC, log_index ASC) AS next_ts
+            FROM pts
+        ),
+        seg AS (
+            SELECT
+                tvl_usd,
+                GREATEST(timestamp, (SELECT since_ts FROM p)) AS seg_start,
+                LEAST(COALESCE(next_ts, (SELECT end_ts FROM p)), (SELECT end_ts FROM p)) AS seg_end
+            FROM ord
+        ),
+        agg AS (
+            SELECT
+                COALESCE(SUM(tvl_usd * GREATEST(seg_end - seg_start, 0)), 0) AS weighted_sum,
+                COALESCE(SUM(GREATEST(seg_end - seg_start, 0)), 0) AS total_secs
+            FROM seg
+        ),
+        latest AS (
+            SELECT s.tvl_usd
+            FROM crystal_pool_tvl_samples s, p
+            WHERE s.market = p.market
+              AND s.timestamp <= p.end_ts
+            ORDER BY s.timestamp DESC, s.block_number DESC, s.log_index DESC
+            LIMIT 1
+        )
+        SELECT CASE
+            WHEN (SELECT total_secs FROM agg) > 0
+                THEN (SELECT weighted_sum FROM agg) / (SELECT total_secs FROM agg)
+            ELSE COALESCE((SELECT tvl_usd FROM latest), 0)
+        END
+    """
+    params = ((market or "").lower(), int(since_ts or 0), int(end_ts or 0))
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+            row = cur2.fetchone()
+            return row[0] if row else 0
+    cur.execute(sql, params)
+    row = cur.fetchone()
+    return row[0] if row else 0
 
+# insert a pool tvl sample point for charting and averaging
 def insert_crystal_pool_tvl_sample(
     *,
     market: str,
@@ -285,7 +363,7 @@ def insert_crystal_pool_tvl_sample(
     else:
         cur.execute(sql, params)
 
-
+# list recent pool tvl samples ordered oldest to newest for api charts
 def list_crystal_pool_tvl_samples(
     market: str,
     *,
@@ -314,7 +392,7 @@ def list_crystal_pool_tvl_samples(
         cur.execute(sql, tuple(params))
         return cur.fetchall()
 
-
+# apply an lp transfer delta to a user's lp share balance for a pool
 def upsert_crystal_pool_lp_user_delta(
     *,
     market: str,
@@ -357,11 +435,69 @@ def upsert_crystal_pool_lp_user_delta(
     else:
         cur.execute(sql, params)
 
-
-def list_crystal_pools_with_state():
+# list amm-enabled pools joined with current indexed state and metrics
+def list_crystal_pools_with_state(
+    *,
+    search: str = "",
+    token_addresses: list[str] | None = None,
+    page: int = 1,
+    limit: int = 50,
+    sort_by: str = "volume",
+    sort_dir: str = "desc",
+):
+    sort_key = (sort_by or "volume").strip().lower()
+    if sort_key not in {"volume", "tvl", "apy"}:
+        sort_key = "volume"
+    dir_key = (sort_dir or "desc").strip().lower()
+    if dir_key not in {"asc", "desc"}:
+        dir_key = "desc"
+    limit_i = max(1, min(int(limit or 50), 50))
+    page_i = max(1, int(page or 1))
+    offset_i = (page_i - 1) * limit_i
+    order_sql = {
+        "volume": "COALESCE(cp.volume_24h_usd, 0)",
+        "tvl": "COALESCE(cp.tvl_usd, 0)",
+        "apy": "COALESCE(cp.apy_24h, 0)",
+    }[sort_key]
+    search_s = (search or "").strip().lower()
+    where_extra = ""
+    params: list[object] = []
+    toks = [str(t or "").lower() for t in (token_addresses or []) if str(t or "").strip()]
+    if toks:
+        toks = toks[:2]
+        if len(toks) == 1:
+            where_extra += """
+              AND (
+                    LOWER(cm.quote_address) = %s
+                 OR LOWER(cm.base_address) = %s
+              )
+            """
+            params.extend([toks[0], toks[0]])
+        else:
+            where_extra += """
+              AND (
+                    (LOWER(cm.quote_address) = %s AND LOWER(cm.base_address) = %s)
+                 OR (LOWER(cm.quote_address) = %s AND LOWER(cm.base_address) = %s)
+              )
+            """
+            params.extend([toks[0], toks[1], toks[1], toks[0]])
+    if search_s:
+        like = f"%{search_s}%"
+        where_extra += """
+              AND (
+                    LOWER(cm.market) LIKE %s
+                 OR LOWER(COALESCE(cm.quote_ticker, '')) LIKE %s
+                 OR LOWER(COALESCE(cm.base_ticker, '')) LIKE %s
+                 OR LOWER(COALESCE(cm.quote_name, '')) LIKE %s
+                 OR LOWER(COALESCE(cm.base_name, '')) LIKE %s
+                 OR LOWER(COALESCE(cm.base_ticker, '') || '/' || COALESCE(cm.quote_ticker, '')) LIKE %s
+                 OR LOWER(COALESCE(cm.quote_ticker, '') || '/' || COALESCE(cm.base_ticker, '')) LIKE %s
+              )
+        """
+        params.extend([like, like, like, like, like, like, like])
     with db_cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 cm.market,
                 cm.quote_address,
@@ -387,18 +523,22 @@ def list_crystal_pools_with_state():
                 COALESCE(cp.apy_24h, 0),
                 COALESCE(cp.daily_yield_24h, 0),
                 COALESCE(cp.last_sync_block, 0),
-                COALESCE(cp.last_sync_at, 0)
+                COALESCE(cp.last_sync_at, 0),
+                COUNT(*) OVER()
             FROM crystal_markets cm
             LEFT JOIN crystal_pools cp ON cp.market = cm.market
             WHERE cm.is_canonical = TRUE
               AND cm.market_type > 1
               AND cm.is_amm_enabled = TRUE
-            ORDER BY COALESCE(cp.tvl_usd, 0) DESC, COALESCE(cp.updated_at, cm.updated_at, cm.created_at, 0) DESC, cm.market ASC
-            """
+              {where_extra}
+            ORDER BY {order_sql} {dir_key.upper()}, COALESCE(cp.updated_at, cm.updated_at, cm.created_at, 0) DESC, cm.market ASC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params + [limit_i, offset_i]),
         )
         return cur.fetchall()
 
-
+# fetch one amm-enabled pool joined with current indexed state and metrics
 def get_crystal_pool_with_state(market: str):
     with db_cursor() as cur:
         cur.execute(
