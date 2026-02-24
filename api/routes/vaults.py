@@ -236,8 +236,8 @@ def vault_refresh_balance(
         if not isinstance(ret, str) or not ret.startswith("0x"):
             raise ValueError("invalid eth_call result")
         s = ret[2:].rjust(64 * 4, "0")
-        quote_bal = int(s[128:192], 16)
-        base_bal = int(s[192:256], 16)
+        quote_bal = int(s[0:64], 16)
+        base_bal = int(s[64:128], 16)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"vault balance refresh failed: {e}")
 

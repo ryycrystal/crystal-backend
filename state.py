@@ -228,6 +228,35 @@ class State:
                 self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
                 self._maybe_seed_stable_price_locked(mi.baseAddress, mi.baseTicker, mi.baseName)
 
+            pool_state_rows = storage.load_crystal_pool_states_for_state()
+            for row in pool_state_rows:
+                (
+                    market,
+                    reserve_quote,
+                    reserve_base,
+                    total_shares,
+                    tvl_usd,
+                    volume_24h_usd,
+                    fees_24h_usd,
+                    apy_24h,
+                    daily_yield_24h,
+                    last_sync_block,
+                    last_sync_at,
+                ) = row
+                mi = self.addressToMarket.get((market or "").lower())
+                if mi is None:
+                    continue
+                mi.reserveQuote = int(reserve_quote or 0)
+                mi.reserveBase = int(reserve_base or 0)
+                mi.totalShares = int(total_shares or 0)
+                mi.tvlUsd = Decimal(tvl_usd or 0)
+                mi.volume24hUsd = Decimal(volume_24h_usd or 0)
+                mi.fees24hUsd = Decimal(fees_24h_usd or 0)
+                mi.apy24h = Decimal(apy_24h or 0)
+                mi.dailyYield24h = Decimal(daily_yield_24h or 0)
+                mi.lastSyncBlock = int(last_sync_block or 0)
+                mi.lastSyncAt = int(last_sync_at or 0)
+
             self.sweep()
 
             vault_rows = storage.load_crystal_vaults_for_state()
@@ -1007,6 +1036,236 @@ class State:
                 return
 
         self.sweep()
+
+    @staticmethod
+    def _pool_fee_rate(mi: models.MarketInfo) -> Decimal:
+        try:
+            mt = int(getattr(mi, "marketType", 0) or 0)
+            if mt > 1:
+                return Decimal("0.0025")
+            tf = int(getattr(mi, "takerFee", 0) or 0)
+            if tf <= 0 or tf > 100000:
+                return Decimal(0)
+            fr = (Decimal(100000) - Decimal(tf)) / Decimal(100000)
+            return fr if fr > 0 else Decimal(0)
+        except Exception:
+            return Decimal(0)
+
+    def _pool_tvl_usd_locked(self, mi: models.MarketInfo, reserve_quote: int, reserve_base: int) -> Decimal:
+        try:
+            qd = int(getattr(mi, "quoteDecimals", 0) or 0)
+            bd = int(getattr(mi, "baseDecimals", 0) or 0)
+            pq = Decimal(self.tokenToPrice.get((getattr(mi, "quoteAddress", "") or "").lower(), Decimal(0)) or 0)
+            pb = Decimal(self.tokenToPrice.get((getattr(mi, "baseAddress", "") or "").lower(), Decimal(0)) or 0)
+            q_units = Decimal(int(reserve_quote or 0)) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
+            b_units = Decimal(int(reserve_base or 0)) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+            tvl = (q_units * pq) + (b_units * pb)
+            return tvl if tvl.is_finite() else Decimal(0)
+        except Exception:
+            return Decimal(0)
+
+    def _pool_trade_volume_usd_locked(
+        self,
+        mi: models.MarketInfo,
+        delta_quote_raw: int,
+        delta_base_raw: int,
+    ) -> Decimal:
+        try:
+            qd = int(getattr(mi, "quoteDecimals", 0) or 0)
+            bd = int(getattr(mi, "baseDecimals", 0) or 0)
+            pq = Decimal(self.tokenToPrice.get((getattr(mi, "quoteAddress", "") or "").lower(), Decimal(0)) or 0)
+            pb = Decimal(self.tokenToPrice.get((getattr(mi, "baseAddress", "") or "").lower(), Decimal(0)) or 0)
+            q_usd = Decimal(0)
+            b_usd = Decimal(0)
+            if pq > 0:
+                q_units = Decimal(abs(int(delta_quote_raw or 0))) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
+                q_usd = q_units * pq
+            if pb > 0:
+                b_units = Decimal(abs(int(delta_base_raw or 0))) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+                b_usd = b_units * pb
+            if q_usd > 0 and b_usd > 0:
+                vol = (q_usd + b_usd) / Decimal(2)
+            elif q_usd > 0:
+                vol = q_usd
+            else:
+                vol = b_usd
+            return vol if vol.is_finite() else Decimal(0)
+        except Exception:
+            return Decimal(0)
+
+    def apply_pool_sync(
+        self,
+        blk: int,
+        ts: int,
+        txh: str,
+        ev: dict,
+        log_addr: str,
+        *,
+        log_idx: int = 0,
+        sync_kind: str | None = None,
+        cur=None,
+        batch=None,
+    ) -> None:
+        if not ev:
+            return
+        with self._lock:
+            if (log_addr or "").lower() != h.CONTRACTS["ROUTER"].lower():
+                return
+
+            market = (ev.get("market") or "").lower()
+            mi = self.addressToMarket.get(market)
+            if mi is None or int(getattr(mi, "marketType", 0) or 0) <= 1:
+                return
+
+            new_rq = int(ev.get("reserveQuote", 0) or 0)
+            new_rb = int(ev.get("reserveBase", 0) or 0)
+            prev_rq = int(getattr(mi, "reserveQuote", 0) or 0)
+            prev_rb = int(getattr(mi, "reserveBase", 0) or 0)
+            dq = new_rq - prev_rq
+            db = new_rb - prev_rb
+
+            kind = (sync_kind or "").strip().lower() or None
+            if kind not in {"trade", "mint", "burn"}:
+                if prev_rq == 0 and prev_rb == 0:
+                    kind = "init"
+                elif dq == 0 and db == 0:
+                    kind = "other"
+                elif dq > 0 and db > 0:
+                    kind = "mint"
+                elif dq < 0 and db < 0:
+                    kind = "burn"
+                elif (dq > 0 and db < 0) or (dq < 0 and db > 0):
+                    kind = "trade"
+                else:
+                    kind = "other"
+
+            volume_usd = Decimal(0)
+            fees_usd = Decimal(0)
+            if kind == "trade" and (prev_rq != 0 or prev_rb != 0):
+                volume_usd = self._pool_trade_volume_usd_locked(mi, dq, db)
+                fees_usd = volume_usd * self._pool_fee_rate(mi)
+                if not fees_usd.is_finite():
+                    fees_usd = Decimal(0)
+
+            mi.reserveQuote = new_rq
+            mi.reserveBase = new_rb
+            mi.lastSyncBlock = int(blk or 0)
+            mi.lastSyncAt = int(ts or 0)
+
+            storage.insert_crystal_pool_sync_event(
+                block_number=int(blk or 0),
+                log_index=int(log_idx or 0),
+                timestamp=int(ts or 0),
+                market=market,
+                txhash=(txh or ""),
+                kind=kind,
+                reserve_quote=new_rq,
+                reserve_base=new_rb,
+                prev_reserve_quote=(prev_rq if (prev_rq != 0 or prev_rb != 0) else None),
+                prev_reserve_base=(prev_rb if (prev_rq != 0 or prev_rb != 0) else None),
+                volume_usd=volume_usd,
+                fees_usd=fees_usd,
+                cur=cur,
+            )
+
+            win_row = storage.sum_crystal_pool_trade_metrics_since(
+                market,
+                since_ts=max(0, int(ts or 0) - 24 * 3600),
+                cur=cur,
+            )
+            vol_24h = Decimal((win_row[0] if win_row and len(win_row) > 0 else 0) or 0)
+            fees_24h = Decimal((win_row[1] if win_row and len(win_row) > 1 else 0) or 0)
+
+            tvl_usd = self._pool_tvl_usd_locked(mi, new_rq, new_rb)
+            mi.tvlUsd = tvl_usd
+            mi.volume24hUsd = vol_24h
+            mi.fees24hUsd = fees_24h
+            if tvl_usd > 0:
+                mi.dailyYield24h = fees_24h / tvl_usd
+                mi.apy24h = mi.dailyYield24h * Decimal(365)
+            else:
+                mi.dailyYield24h = Decimal(0)
+                mi.apy24h = Decimal(0)
+
+            storage.insert_crystal_pool_tvl_sample(
+                market=market,
+                block_number=int(blk or 0),
+                log_index=int(log_idx or 0),
+                timestamp=int(ts or 0),
+                reserve_quote=new_rq,
+                reserve_base=new_rb,
+                tvl_usd=tvl_usd,
+                txhash=(txh or ""),
+                cur=cur,
+            )
+            storage.upsert_crystal_pool_state(
+                market=market,
+                reserve_quote=new_rq,
+                reserve_base=new_rb,
+                total_shares=int(getattr(mi, "totalShares", 0) or 0),
+                tvl_usd=tvl_usd,
+                volume_24h_usd=vol_24h,
+                fees_24h_usd=fees_24h,
+                apy_24h=mi.apy24h,
+                daily_yield_24h=mi.dailyYield24h,
+                last_sync_block=int(blk or 0),
+                last_sync_at=int(ts or 0),
+                updated_block=int(blk or 0),
+                updated_at=int(ts or 0),
+                cur=cur,
+            )
+
+    def apply_pool_transfer(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
+        if not ev:
+            return
+        with self._lock:
+            token = (ev.get("token") or "").lower()
+            mi = self.addressToMarket.get(token)
+            if mi is None or int(getattr(mi, "marketType", 0) or 0) <= 1:
+                return
+
+            zero = "0x" + "0" * 40
+            from_addr = (ev.get("from") or "").lower()
+            to_addr = (ev.get("to") or "").lower()
+            amount = int(ev.get("amount", 0) or 0)
+            if amount < 0:
+                amount = 0
+
+            total = int(getattr(mi, "totalShares", 0) or 0)
+            if from_addr == zero:
+                total += amount
+            elif to_addr == zero and from_addr != zero:
+                total -= amount
+                if total < 0:
+                    total = 0
+            mi.totalShares = total
+
+            if from_addr and from_addr != zero:
+                storage.upsert_crystal_pool_lp_user_delta(
+                    market=token,
+                    user_address=from_addr,
+                    shares_delta=-amount,
+                    last_transfer=int(ts or 0),
+                    updated_block=int(blk or 0),
+                    cur=cur,
+                )
+            if to_addr and to_addr != zero:
+                storage.upsert_crystal_pool_lp_user_delta(
+                    market=token,
+                    user_address=to_addr,
+                    shares_delta=amount,
+                    last_transfer=int(ts or 0),
+                    updated_block=int(blk or 0),
+                    cur=cur,
+                )
+
+            storage.update_crystal_pool_total_shares(
+                token,
+                total_shares=total,
+                updated_block=int(blk or 0),
+                updated_at=int(ts or 0),
+                cur=cur,
+            )
 
     def sweep(self) -> None:
         with self._lock:

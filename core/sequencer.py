@@ -378,6 +378,35 @@ class Sequencer:
 
         return fallback_user
 
+    def _classify_pool_sync_kind(self, logs: List[dict], idx: int, txh, parsed_sync: dict | None) -> str | None:
+        if parsed_sync is None:
+            return None
+        market = (parsed_sync.get("market") or "").lower()
+        if not market:
+            return None
+        if idx + 1 >= len(logs):
+            return None
+        nxt = logs[idx + 1]
+        if (nxt.get("transactionHash") or "") != (txh or ""):
+            return None
+        topics = nxt.get("topics") or []
+        if not topics:
+            return None
+        nxt_tag = h.EVENT_SIGS.get(str(topics[0]).lower())
+        if nxt_tag not in {"PMINT", "PBURN"}:
+            return None
+        try:
+            nxt_parsed = h.PARSERS[nxt_tag](
+                (nxt.get("address") or "").lower(),
+                topics,
+                str(nxt.get("data") or "")[2:],
+            )
+        except Exception:
+            return None
+        if (nxt_parsed.get("market") or "").lower() != market:
+            return None
+        return "mint" if nxt_tag == "PMINT" else "burn"
+
 
 
 
@@ -388,6 +417,9 @@ class Sequencer:
             "MC": 0,
             "MPC": 0,
             "TR": 0,
+            "PMINT": 0,
+            "PBURN": 0,
+            "PSYNC": 0,
             "TC": 0,
             "LT": 0,
             "MG": 0,
@@ -430,6 +462,7 @@ class Sequencer:
         if counts_out is None:
             print(
                 f"[SQ] {blk}: MC {counts['MC']} MPC {counts['MPC']} TR {counts['TR']} "
+                f"PMINT {counts['PMINT']} PBURN {counts['PBURN']} PSYNC {counts['PSYNC']} "
                 f"TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
                 f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
                 f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "
@@ -441,7 +474,7 @@ class Sequencer:
     def _process_block_inner(self, blk: int, logs: List[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None):
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
-        for log in logs:
+        for idx, log in enumerate(logs):
             raw_ts = log.get("blockTimestamp")
             if raw_ts is None:
                 raw_ts = self._block_timestamps.get(blk)
@@ -482,6 +515,23 @@ class Sequencer:
 
             elif tag == "TR":
                 self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+
+            elif tag == "PSYNC":
+                sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)
+                self._state.apply_pool_sync(
+                    blk,
+                    blk_ts,
+                    (txh or "").lower(),
+                    parsed,
+                    log.get("address", "").lower(),
+                    log_idx=lii,
+                    sync_kind=sync_kind,
+                    cur=cur,
+                    batch=batch,
+                )
+
+            elif tag in ("PMINT", "PBURN"):
+                pass
 
             elif tag in ("TC", "NFC"):
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower(), cur=cur, batch=batch)
@@ -535,9 +585,14 @@ class Sequencer:
             elif tag == "TF":
                 if parsed is not None:
                     token = (parsed.get("token") or "").lower()
-                    if token not in self._state.launchpad_tokens and token not in self._state.token_to_v3_pool:
+                    mi = self._state.addressToMarket.get(token)
+                    is_lp_token = bool(mi is not None and int(getattr(mi, "marketType", 0) or 0) > 1)
+                    if token not in self._state.launchpad_tokens and token not in self._state.token_to_v3_pool and not is_lp_token:
                         continue
-                    self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch)
+                    if is_lp_token:
+                        self._state.apply_pool_transfer(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+                    else:
+                        self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag == "V3SWAP":
                 pool_addr = (log.get("address") or "").lower()
@@ -567,7 +622,7 @@ class Sequencer:
         cur,
     ) -> None:
         counts = {
-            "MC": 0, "MPC": 0, "TR": 0, "TC": 0, "LT": 0, "MG": 0,
+            "MC": 0, "MPC": 0, "TR": 0, "PMINT": 0, "PBURN": 0, "PSYNC": 0, "TC": 0, "LT": 0, "MG": 0,
             "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "VMAX": 0, "VLOCKUP": 0, "VDECR": 0,
             "NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0,
         }
@@ -597,6 +652,7 @@ class Sequencer:
 
         print(
             f"[SQ] {chunk_start}-{chunk_end}: MC {counts['MC']} MPC {counts['MPC']} TR {counts['TR']} "
+            f"PMINT {counts['PMINT']} PBURN {counts['PBURN']} PSYNC {counts['PSYNC']} "
             f"TC {counts['TC']} LT {counts['LT']} MG {counts['MG']} "
             f"VD {counts['VD']} VDP {counts['VDP']} VWD {counts['VWD']} "
             f"VLOCK {counts['VLOCK']} VUNLOCK {counts['VUNLOCK']} VCLOSE {counts['VCLOSE']} "

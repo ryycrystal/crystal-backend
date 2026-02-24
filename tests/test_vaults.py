@@ -826,7 +826,7 @@ def test_vault_refresh_balance_not_found_and_rpc_failure():
 
 def test_vault_refresh_balance_success_and_user_projection():
     vault_row = _vault_row(vault="0xVaUlT", circulating_shares=200, locked=True, closed=False, lockup=100)
-    call_hex = "0x" + ("00" * 64) + f"{1000:064x}" + f"{5000:064x}"
+    call_hex = "0x" + f"{1000:064x}" + f"{5000:064x}" + ("00" * 64)
     responses = [
         _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": hex(123)}),
         _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": {"timestamp": hex(456)}}),
@@ -887,7 +887,7 @@ def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timest
     ok_fallback_ts = [
         _HttpxResp({"result": hex(11)}),
         _HttpxResp({"result": {"timestamp": hex(0)}}, status_ok=False),
-        _HttpxResp({"result": "0x" + ("00" * 64) + f"{1:064x}" + f"{2:064x}"}),
+        _HttpxResp({"result": "0x" + f"{1:064x}" + f"{2:064x}" + ("00" * 64)}),
     ]
     with ExitStack() as st:
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row))
@@ -908,7 +908,7 @@ def test_vault_refresh_balance_sample_write_paths_without_latest_row():
     ok_rpc = [
         _HttpxResp({"result": hex(22)}),
         _HttpxResp({"result": {"timestamp": hex(333)}}),
-        _HttpxResp({"result": "0x" + ("00" * 64) + f"{7:064x}" + f"{8:064x}"}),
+        _HttpxResp({"result": "0x" + f"{7:064x}" + f"{8:064x}" + ("00" * 64)}),
     ]
     fake_state = MagicMock()
     with ExitStack() as st:
@@ -924,7 +924,7 @@ def test_vault_refresh_balance_sample_write_paths_without_latest_row():
     ok_rpc_2 = [
         _HttpxResp({"result": hex(23)}),
         _HttpxResp({"result": {"timestamp": hex(334)}}),
-        _HttpxResp({"result": "0x" + ("00" * 64) + f"{9:064x}" + f"{10:064x}"}),
+        _HttpxResp({"result": "0x" + f"{9:064x}" + f"{10:064x}" + ("00" * 64)}),
     ]
     with ExitStack() as st:
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row))
