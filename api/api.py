@@ -2366,3 +2366,62 @@ def vault_history(
         "series": {"tvl": tvl_series, "pnl": pnl_series},
         "info": {"timeframe": tf_name, "count": len(pts)},
     }
+
+
+def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
+    (
+        market,
+        quote_address,
+        base_address,
+        market_type,
+        quote_decimals,
+        base_decimals,
+        quote_ticker,
+        quote_name,
+        base_ticker,
+        base_name,
+        taker_fee,
+        last_price,
+        updated_at,
+        created_at,
+    ) = row
+    return {
+        "id": str(market or "").lower(),
+        "address": str(market or "").lower(),
+        "poolAddress": str(market or "").lower(),
+        "market": str(market or "").lower(),
+        "quote": str(quote_address or "").lower(),
+        "base": str(base_address or "").lower(),
+        "marketType": int(market_type or 0),
+        "feeBps": int(taker_fee or 0),
+        "quoteTicker": quote_ticker or "",
+        "quoteName": quote_name or "",
+        "baseTicker": base_ticker or "",
+        "baseName": base_name or "",
+        "quoteDecimals": int(quote_decimals or 0),
+        "baseDecimals": int(base_decimals or 0),
+        "reserveQuote": "0",
+        "reserveBase": "0",
+        "tvlUsd": 0.0,
+        "totalShares": "0",
+        "volume24hUsd": 0.0,
+        "fees24hUsd": 0.0,
+        "apy24h": 0.0,
+        "apyHistory": [],
+        "lastPrice": float(last_price or 0),
+        "updatedAt": int(updated_at or created_at or 0),
+    }
+
+
+@app.get("/pools/list")
+def list_pools() -> Dict[str, Any]:
+    rows = storage.list_crystal_pool_markets()
+    return {"pools": [_crystal_pool_row_to_api(r) for r in rows]}
+
+
+@app.get("/pools/{address}")
+def get_pool(address: str) -> Dict[str, Any]:
+    row = storage.get_crystal_pool_market(address)
+    if not row:
+        raise HTTPException(status_code=404, detail="pool not found")
+    return _crystal_pool_row_to_api(row)
