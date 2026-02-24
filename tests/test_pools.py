@@ -1,12 +1,13 @@
 import os
+import os
 import sys
+import types
 from contextlib import contextmanager
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import api.api as _api_root
 import api.routes.pools as pool_api
 import core.storage.pools as pool_storage
 from fastapi import HTTPException
@@ -81,26 +82,6 @@ def _pool_row_25(updated_at=2000, last_sync_at=2100):
         Decimal("0.003"),
         55,
         last_sync_at,
-    )
-
-
-def _pool_row_15():
-    return (
-        "0xPool",
-        "0xQuote",
-        "0xBase",
-        3,
-        6,
-        18,
-        "USDC",
-        "USD Coin",
-        "WMON",
-        "Wrapped MON",
-        30,
-        False,
-        Decimal("0.0"),
-        0,
-        0,
     )
 
 
@@ -203,6 +184,23 @@ def test_pool_storage_read_helpers_and_query_builders():
     assert pool_storage.sum_crystal_pool_trade_metrics_since("0xPOOL", 0, cur=cur_sum_direct) == (1, 2)
     assert cur_sum_direct.execute.call_args[0][1] == ("0xpool", 0)
 
+    cur_twa = _SqlCur(fetchone_result=(Decimal("42.5"),))
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_twa)):
+        assert pool_storage.time_weighted_avg_crystal_pool_tvl_since("0xPOOL", 111, 222) == Decimal("42.5")
+    twa_sql, twa_params = cur_twa.exec_calls[0]
+    assert "LEAD(timestamp) OVER" in twa_sql
+    assert "weighted_sum" in twa_sql
+    assert twa_params == ("0xpool", 111, 222)
+
+    cur_twa_direct = MagicMock()
+    cur_twa_direct.fetchone.return_value = (Decimal("9.9"),)
+    assert pool_storage.time_weighted_avg_crystal_pool_tvl_since("0xPOOL", 1, 2, cur=cur_twa_direct) == Decimal("9.9")
+    assert cur_twa_direct.execute.call_args[0][1] == ("0xpool", 1, 2)
+
+    cur_twa_empty = _SqlCur(fetchone_result=None)
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_twa_empty)):
+        assert pool_storage.time_weighted_avg_crystal_pool_tvl_since("0xPOOL", 0, 0) == 0
+
     cur_samples_a = _SqlCur(fetchall_result=[(3, Decimal("3.0")), (2, Decimal("2.0"))])
     with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_samples_a)):
         rows_a = pool_storage.list_crystal_pool_tvl_samples("0xPOOL", since_ts=None, limit=-1)
@@ -226,6 +224,43 @@ def test_pool_storage_read_helpers_and_query_builders():
         assert pool_storage.list_crystal_pools_with_state() == [("pool",)]
     assert "FROM crystal_markets cm" in cur_list.exec_calls[0][0]
     assert "AND cm.is_amm_enabled = TRUE" in cur_list.exec_calls[0][0]
+    assert "COALESCE(cp.volume_24h_usd, 0) DESC" in cur_list.exec_calls[0][0]
+    assert cur_list.exec_calls[0][1] == (50, 0)
+
+    cur_list_filtered = _SqlCur(fetchall_result=[("pool",)])
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_list_filtered)):
+        pool_storage.list_crystal_pools_with_state(
+            search="mon/usdc",
+            page=2,
+            limit=999,
+            sort_by="apy",
+            sort_dir="asc",
+        )
+    sql_list_f, params_list_f = cur_list_filtered.exec_calls[0]
+    assert "LOWER(cm.market) LIKE %s" in sql_list_f
+    assert "COALESCE(cp.apy_24h, 0) ASC" in sql_list_f
+    assert params_list_f == ("%mon/usdc%",) * 7 + (50, 50)
+
+    cur_list_tok1 = _SqlCur(fetchall_result=[("pool",)])
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_list_tok1)):
+        pool_storage.list_crystal_pools_with_state(token_addresses=["0xAAA"])
+    sql_list_t1, params_list_t1 = cur_list_tok1.exec_calls[0]
+    assert "LOWER(cm.quote_address) = %s" in sql_list_t1
+    assert "LOWER(cm.base_address) = %s" in sql_list_t1
+    assert params_list_t1 == ("0xaaa", "0xaaa", 50, 0)
+
+    cur_list_tok2 = _SqlCur(fetchall_result=[("pool",)])
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_list_tok2)):
+        pool_storage.list_crystal_pools_with_state(token_addresses=["0xAAA", "0xBBB", "0xCCC"])
+    sql_list_t2, params_list_t2 = cur_list_tok2.exec_calls[0]
+    assert "(LOWER(cm.quote_address) = %s AND LOWER(cm.base_address) = %s)" in sql_list_t2
+    assert params_list_t2 == ("0xaaa", "0xbbb", "0xbbb", "0xaaa", 50, 0)
+
+    cur_list_bad_sort = _SqlCur(fetchall_result=[("pool",)])
+    with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_list_bad_sort)):
+        pool_storage.list_crystal_pools_with_state(sort_by="zzz", sort_dir="sideways")
+    sql_bad_sort, _ = cur_list_bad_sort.exec_calls[0]
+    assert "COALESCE(cp.volume_24h_usd, 0) DESC" in sql_bad_sort
 
     cur_one = _SqlCur(fetchone_result=("pool1",))
     with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_one)):
@@ -400,16 +435,39 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
 
 
 def test_pools_route_helper_and_list_endpoint():
-    with patch.object(_api_root, "_crystal_pool_row_to_api", return_value={"ok": True}) as mapper:
+    fake_api = types.SimpleNamespace(_crystal_pool_row_to_api=MagicMock(return_value={"ok": True}))
+    with patch.dict(sys.modules, {"api.api": fake_api}):
         assert pool_api._pool_row_to_api(("row",)) == {"ok": True}
-    mapper.assert_called_once_with(("row",))
+    fake_api._crystal_pool_row_to_api.assert_called_once_with(("row",))
 
-    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[("a",), ("b",)]), patch.object(
+    rows = [tuple(["a"] * 25 + [2]), tuple(["b"] * 25 + [2])]
+    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=rows) as list_store, patch.object(
         pool_api, "_pool_row_to_api", side_effect=[{"id": "a"}, {"id": "b"}]
     ) as helper:
         out = pool_api.list_pools()
-    assert out == {"pools": [{"id": "a"}, {"id": "b"}]}
+    list_store.assert_called_once_with(search="", token_addresses=[], page=1, limit=50, sort_by="volume", sort_dir="desc")
+    assert out["ok"] is True
+    assert out["pools"] == [{"id": "a"}, {"id": "b"}]
+    assert out["count"] == 2 and out["total"] == 2 and out["page"] == 1 and out["limit"] == 50
+    assert out["hasMore"] is False and out["sort"] == "volume" and out["order"] == "desc" and out["search"] == ""
+    assert out["tokens"] == []
     assert helper.call_count == 2
+
+    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]):
+        _assert_http_exc(lambda: pool_api.list_pools(sort="bad"), 400)
+    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]):
+        _assert_http_exc(lambda: pool_api.list_pools(order="bad"), 400)
+
+    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]) as list_store2:
+        out2 = pool_api.list_pools(search="mon", tokens="0xAA,0xBB", sort="tvl", order="asc", page=3, limit=7)
+    list_store2.assert_called_once_with(search="mon", token_addresses=["0xaa", "0xbb"], page=3, limit=7, sort_by="tvl", sort_dir="asc")
+    assert out2["count"] == 0 and out2["total"] == 0 and out2["hasMore"] is False
+    assert out2["tokens"] == ["0xaa", "0xbb"]
+
+    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]) as list_store3:
+        out3 = pool_api.list_pools(tokens="  , 0xAA ,, ")
+    list_store3.assert_called_once_with(search="", token_addresses=["0xaa"], page=1, limit=50, sort_by="volume", sort_dir="desc")
+    assert out3["tokens"] == ["0xaa"]
 
 
 def test_pools_route_get_pool_success_and_history_building():

@@ -278,7 +278,6 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             await asyncio.sleep(5.0)
 
 
-
 async def _stream_once(prev_last_head: int | None) -> int | None:
     connect_kwargs = dict(
         ping_interval=20,

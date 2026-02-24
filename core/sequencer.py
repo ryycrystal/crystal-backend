@@ -136,14 +136,11 @@ class Sequencer:
         self._block_timestamps: dict[int, int] = {}
         self._missing_ts_warned: set[int] = set()
     
-
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
 
-
     def set_next_block(self, blk: int) -> None:
         self._next_block = blk
-
 
     def reset_pending(self, next_block: int | None = None) -> None:
         self._logs_by_block.clear()
@@ -157,7 +154,6 @@ class Sequencer:
         li = raw_log.get("logIndex")
         return int(li, 16) if isinstance(li, str) else int(li or 0)
 
-
     def add_log(self, raw_log: dict) -> None:
         blk = int(raw_log["blockNumber"], 16) if isinstance(raw_log["blockNumber"], str) else raw_log["blockNumber"]
         if self._next_block is not None and blk < self._next_block:
@@ -170,7 +166,6 @@ class Sequencer:
             self._next_block = blk
         self._drain()
 
-
     def note_block(self, blk: int, block_timestamp: int | None = None) -> None:
         if block_timestamp is not None:
             self._block_timestamps[int(blk)] = int(block_timestamp)
@@ -178,7 +173,6 @@ class Sequencer:
         if self._next_block is None:
             self._next_block = blk
         self._drain()
-
 
     def _drain(self) -> None:
         while self._next_block is not None and self._next_block in self._ready_blocks:
@@ -192,9 +186,6 @@ class Sequencer:
                 except Exception as e:
                     print(f"[SQ] Persist Error: {e!r}")
             self._next_block += 1
-
-
-
 
     def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
         transfer_maps: dict[tuple[str, str], dict] = {}
@@ -242,7 +233,6 @@ class Sequencer:
             maps["ordered"].sort(key=lambda x: x["log_idx"])
 
         return transfer_maps
-
 
     def _resolve_trade_user(
         self,
@@ -406,10 +396,6 @@ class Sequencer:
         if (nxt_parsed.get("market") or "").lower() != market:
             return None
         return "mint" if nxt_tag == "PMINT" else "burn"
-
-
-
-
 
     def _process_block(self, blk: int, logs: List[dict], cur=None, counts_out: dict = None, batch: BatchAccumulator = None):
         logs = sorted(logs, key=self._log_index)
@@ -612,7 +598,6 @@ class Sequencer:
                     parsed["user"] = real_user
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
-
 
     def process_chunk(
         self,
