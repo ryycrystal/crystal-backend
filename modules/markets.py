@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Dict, Any
 
+def _clean_str(s: str) -> str:
+    return (s or "").replace("\x00", "")
+
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
@@ -41,7 +44,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
             qt_end = qt_start + qt_len
             if 0 <= qt_len and qt_end <= len(data):
                 try:
-                    quote_ticker = data[qt_start: qt_end].decode("utf-8", errors="ignore")
+                    quote_ticker = _clean_str(data[qt_start: qt_end].decode("utf-8", errors="ignore"))
                 except Exception:
                     quote_ticker = ""
 
@@ -55,7 +58,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
             qn_end = qn_start + qn_len
             if 0 <= qn_len and qn_end <= len(data):
                 try:
-                    quote_name = data[qn_start: qn_end].decode("utf-8", errors="ignore")
+                    quote_name = _clean_str(data[qn_start: qn_end].decode("utf-8", errors="ignore"))
                 except Exception:
                     quote_name = ""
 
@@ -72,7 +75,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
             bt_end = bt_start + bt_len
             if 0 <= bt_len and bt_end <= len(data):
                 try:
-                    base_ticker = data[bt_start: bt_end].decode("utf-8", errors="ignore")
+                    base_ticker = _clean_str(data[bt_start: bt_end].decode("utf-8", errors="ignore"))
                 except Exception:
                     base_ticker = ""
 
@@ -86,7 +89,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
             bn_end = bn_start + bn_len
             if 0 <= bn_len and bn_end <= len(data):
                 try:
-                    base_name = data[bn_start: bn_end].decode("utf-8", errors="ignore")
+                    base_name = _clean_str(data[bn_start: bn_end].decode("utf-8", errors="ignore"))
                 except Exception:
                     base_name = ""
 

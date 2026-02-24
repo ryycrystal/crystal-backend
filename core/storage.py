@@ -10,12 +10,19 @@ import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import Json, execute_values
 
-_DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL", "postgresql://postgres:ShIsCu2024;1@localhost:5432/postgres")
+_DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL", "postgresql://postgres:ShIsCu2024;1@localhost:5432/logs")
 _DB_MIN_CONN: int = 5
 _DB_MAX_CONN: int = 125
 
 _POOL: Optional[ThreadedConnectionPool] = None
 _POOL_LOCK = threading.Lock()
+
+
+def _clean_text(value) -> str:
+    if value is None:
+        return ""
+    s = str(value)
+    return s.replace("\x00", "")
 
 
 def init_pool() -> None:
@@ -1971,12 +1978,12 @@ def upsert_crystal_market(
         base_asset.lower(),
         quote_address.lower(),
         int(quote_decimals),
-        quote_ticker or "",
-        quote_name or "",
+        _clean_text(quote_ticker),
+        _clean_text(quote_name),
         base_address.lower(),
         int(base_decimals),
-        base_ticker or "",
-        base_name or "",
+        _clean_text(base_ticker),
+        _clean_text(base_name),
         int(market_id or 0),
         int(market_type or 0),
         int(scale_factor or 0),
@@ -2138,11 +2145,11 @@ def upsert_crystal_vault(
         base.lower(),
         (market or "").lower(),
         owner.lower(),
-        name or "",
-        description or "",
-        social1 or "",
-        social2 or "",
-        social3 or "",
+        _clean_text(name),
+        _clean_text(description),
+        _clean_text(social1),
+        _clean_text(social2),
+        _clean_text(social3),
         bool(locked),
         bool(closed),
         int(max_shares or 0),

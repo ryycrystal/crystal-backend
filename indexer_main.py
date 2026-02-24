@@ -9,6 +9,7 @@ from modules import nadfun
 REINDEX = False
 REINDEX_FROM_BLOCK = 56905848
 REINDEX_BATCH = 100
+DEFAULT_START_BLOCK = 56905848
 
 
 async def main() -> None:
@@ -21,7 +22,7 @@ async def main() -> None:
         start = REINDEX_FROM_BLOCK
         if start == 0:
             min_cached, _ = storage.get_cached_block_range()
-            start = min_cached if min_cached else 56905848
+            start = min_cached if min_cached else DEFAULT_START_BLOCK
 
         print(f"[IDX] Reindex mode: clearing derived state and reprocessing from block {start}", flush=True)
         last = await backfill.reindex(start, REINDEX_BATCH)
@@ -39,9 +40,10 @@ async def main() -> None:
 
         last_blk = storage.get_last_processed_block()
         if last_blk is None:
-            last_blk = 56905848
-            print(f"[IDX] No last processed block found, starting from genesis {last_blk}", flush=True)
-        start_blk = last_blk + 1
+            start_blk = DEFAULT_START_BLOCK
+            print(f"[IDX] No last processed block found, starting from genesis {start_blk}", flush=True)
+        else:
+            start_blk = int(last_blk) + 1
 
     print(f"[IDX] Starting live stream from block {start_blk}", flush=True)
 
