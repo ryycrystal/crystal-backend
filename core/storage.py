@@ -428,6 +428,192 @@ def init_db() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_markets
+            (
+                market         TEXT PRIMARY KEY,
+                is_canonical   BOOLEAN NOT NULL,
+                quote_asset    TEXT NOT NULL,
+                base_asset     TEXT NOT NULL,
+                quote_address  TEXT NOT NULL,
+                quote_decimals INTEGER NOT NULL,
+                quote_ticker   TEXT NOT NULL,
+                quote_name     TEXT NOT NULL,
+                base_address   TEXT NOT NULL,
+                base_decimals  INTEGER NOT NULL,
+                base_ticker    TEXT NOT NULL,
+                base_name      TEXT NOT NULL,
+                market_id      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                market_type    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                scale_factor   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                tick_size      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                max_price      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                min_size       NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                taker_fee      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                maker_rebate   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                last_price     NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                created_block  BIGINT,
+                created_at     BIGINT,
+                updated_block  BIGINT,
+                updated_at     BIGINT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_markets_quote_base
+            ON crystal_markets (quote_address, base_address);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_vaults
+            (
+                vault                 TEXT PRIMARY KEY,
+                quote                 TEXT NOT NULL,
+                base                  TEXT NOT NULL,
+                market                TEXT NOT NULL DEFAULT '',
+                owner                 TEXT NOT NULL,
+                name                  TEXT NOT NULL DEFAULT '',
+                description           TEXT NOT NULL DEFAULT '',
+                social1               TEXT NOT NULL DEFAULT '',
+                social2               TEXT NOT NULL DEFAULT '',
+                social3               TEXT NOT NULL DEFAULT '',
+                locked                BOOLEAN NOT NULL DEFAULT FALSE,
+                closed                BOOLEAN NOT NULL DEFAULT FALSE,
+                max_shares            NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                circulating_shares    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                quote_decimals        INTEGER NOT NULL DEFAULT 0,
+                base_decimals         INTEGER NOT NULL DEFAULT 0,
+                lockup                NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                decrease_on_withdraw  BOOLEAN NOT NULL DEFAULT FALSE,
+                deployed_block        BIGINT,
+                deployed_at           BIGINT,
+                updated_block         BIGINT,
+                updated_at            BIGINT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vaults_quote_base
+            ON crystal_vaults (quote, base);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_vault_users
+            (
+                vault         TEXT NOT NULL,
+                user_address  TEXT NOT NULL,
+                shares        NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                deposits      BIGINT NOT NULL DEFAULT 0,
+                withdraws     BIGINT NOT NULL DEFAULT 0,
+                last_deposit  BIGINT NOT NULL DEFAULT 0,
+                last_withdraw BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (vault, user_address)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_users_vault_shares
+            ON crystal_vault_users (vault, shares DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_users_vault_lastdep
+            ON crystal_vault_users (vault, last_deposit DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_users_vault_lastdep_shares_addr
+            ON crystal_vault_users (vault, last_deposit DESC, shares DESC, user_address ASC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_vault_deposits
+            (
+                id           BIGSERIAL PRIMARY KEY,
+                block_number BIGINT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                vault        TEXT NOT NULL,
+                user_address TEXT NOT NULL,
+                shares       NUMERIC(78, 0) NOT NULL,
+                quote_amount NUMERIC(78, 0) NOT NULL,
+                base_amount  NUMERIC(78, 0) NOT NULL,
+                txhash       TEXT NOT NULL,
+                UNIQUE (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_deposits_vault_ts
+            ON crystal_vault_deposits (vault, timestamp DESC, log_index DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_vault_withdrawals
+            (
+                id           BIGSERIAL PRIMARY KEY,
+                block_number BIGINT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                vault        TEXT NOT NULL,
+                user_address TEXT NOT NULL,
+                shares       NUMERIC(78, 0) NOT NULL,
+                quote_amount NUMERIC(78, 0) NOT NULL,
+                base_amount  NUMERIC(78, 0) NOT NULL,
+                txhash       TEXT NOT NULL,
+                UNIQUE (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_withdrawals_vault_ts
+            ON crystal_vault_withdrawals (vault, timestamp DESC, log_index DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_vault_balance_samples
+            (
+                vault         TEXT NOT NULL,
+                block_number  BIGINT NOT NULL,
+                timestamp     BIGINT NOT NULL,
+                quote_balance NUMERIC(78, 0) NOT NULL,
+                base_balance  NUMERIC(78, 0) NOT NULL,
+                usd_value     NUMERIC(50, 18) NOT NULL,
+                PRIMARY KEY (vault, block_number)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_balances_vault_ts
+            ON crystal_vault_balance_samples (vault, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_balances_vault_ts_block
+            ON crystal_vault_balance_samples (vault, timestamp DESC, block_number DESC);
+            """
+        )
+
 
 def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
     if cur is None:
@@ -1721,6 +1907,12 @@ def clear_derived_state_from_block(start_block: int, cur=None) -> None:
 
 
 def _clear_derived_state_impl(start_block: int, cur) -> None:
+    cur.execute("DELETE FROM crystal_vault_balance_samples")
+    cur.execute("DELETE FROM crystal_vault_deposits")
+    cur.execute("DELETE FROM crystal_vault_withdrawals")
+    cur.execute("DELETE FROM crystal_vault_users")
+    cur.execute("DELETE FROM crystal_vaults")
+    cur.execute("DELETE FROM crystal_markets")
     cur.execute("DELETE FROM launchpad_trades")
     cur.execute("DELETE FROM launchpad_ohlcv")
     cur.execute("DELETE FROM launchpad_positions")
@@ -1744,3 +1936,632 @@ def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
     if not row or row[0] is None:
         return None, None
     return int(row[0]), int(row[1])
+
+
+def upsert_crystal_market(
+    *,
+    market: str,
+    is_canonical: bool,
+    quote_asset: str,
+    base_asset: str,
+    quote_address: str,
+    quote_decimals: int,
+    quote_ticker: str,
+    quote_name: str,
+    base_address: str,
+    base_decimals: int,
+    base_ticker: str,
+    base_name: str,
+    market_id: int,
+    market_type: int,
+    scale_factor: int,
+    tick_size: int,
+    max_price: int,
+    min_size: int,
+    taker_fee: int,
+    maker_rebate: int,
+    created_block: int | None,
+    created_at: int | None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    params = (
+        market.lower(),
+        bool(is_canonical),
+        quote_asset.lower(),
+        base_asset.lower(),
+        quote_address.lower(),
+        int(quote_decimals),
+        quote_ticker or "",
+        quote_name or "",
+        base_address.lower(),
+        int(base_decimals),
+        base_ticker or "",
+        base_name or "",
+        int(market_id or 0),
+        int(market_type or 0),
+        int(scale_factor or 0),
+        int(tick_size or 0),
+        int(max_price or 0),
+        int(min_size or 0),
+        int(taker_fee or 0),
+        int(maker_rebate or 0),
+        int(created_block) if created_block is not None else None,
+        int(created_at) if created_at is not None else None,
+        int(created_block) if created_block is not None else None,
+        int(created_at) if created_at is not None else None,
+    )
+    sql = """
+        INSERT INTO crystal_markets (
+            market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
+            quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name,
+            market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate,
+            created_block, created_at, updated_block, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (market) DO UPDATE SET
+            is_canonical = EXCLUDED.is_canonical,
+            quote_asset = EXCLUDED.quote_asset,
+            base_asset = EXCLUDED.base_asset,
+            quote_address = EXCLUDED.quote_address,
+            quote_decimals = EXCLUDED.quote_decimals,
+            quote_ticker = EXCLUDED.quote_ticker,
+            quote_name = EXCLUDED.quote_name,
+            base_address = EXCLUDED.base_address,
+            base_decimals = EXCLUDED.base_decimals,
+            base_ticker = EXCLUDED.base_ticker,
+            base_name = EXCLUDED.base_name,
+            market_id = EXCLUDED.market_id,
+            market_type = EXCLUDED.market_type,
+            scale_factor = EXCLUDED.scale_factor,
+            tick_size = EXCLUDED.tick_size,
+            max_price = EXCLUDED.max_price,
+            min_size = EXCLUDED.min_size,
+            taker_fee = EXCLUDED.taker_fee,
+            maker_rebate = EXCLUDED.maker_rebate,
+            updated_block = COALESCE(EXCLUDED.updated_block, crystal_markets.updated_block),
+            updated_at = COALESCE(EXCLUDED.updated_at, crystal_markets.updated_at);
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def update_crystal_market_price(
+    market: str,
+    last_price,
+    updated_block: int | None,
+    updated_at: int | None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    params = (
+        Decimal(last_price),
+        int(updated_block) if updated_block is not None else None,
+        int(updated_at) if updated_at is not None else None,
+        market.lower(),
+    )
+    sql = """
+        UPDATE crystal_markets
+        SET last_price = %s,
+            updated_block = COALESCE(%s, updated_block),
+            updated_at = COALESCE(%s, updated_at)
+        WHERE market = %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def link_crystal_vaults_for_market(
+    *,
+    quote: str,
+    base: str,
+    market: str,
+    quote_decimals: int,
+    base_decimals: int,
+    updated_block: int | None,
+    updated_at: int | None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    params = (
+        market.lower(),
+        int(quote_decimals or 0),
+        int(base_decimals or 0),
+        int(updated_block) if updated_block is not None else None,
+        int(updated_at) if updated_at is not None else None,
+        quote.lower(),
+        base.lower(),
+    )
+    sql = """
+        UPDATE crystal_vaults
+        SET market = CASE WHEN market = '' THEN %s ELSE market END,
+            quote_decimals = CASE WHEN quote_decimals = 0 THEN %s ELSE quote_decimals END,
+            base_decimals = CASE WHEN base_decimals = 0 THEN %s ELSE base_decimals END,
+            updated_block = COALESCE(%s, updated_block),
+            updated_at = COALESCE(%s, updated_at)
+        WHERE quote = %s AND base = %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def load_crystal_markets_for_state():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
+                quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name,
+                market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate,
+                last_price
+            FROM crystal_markets
+            """
+        )
+        return cur.fetchall()
+
+
+def upsert_crystal_vault(
+    *,
+    vault: str,
+    quote: str,
+    base: str,
+    market: str,
+    owner: str,
+    name: str,
+    description: str,
+    social1: str,
+    social2: str,
+    social3: str,
+    locked: bool,
+    closed: bool,
+    max_shares: int,
+    circulating_shares: int,
+    quote_decimals: int,
+    base_decimals: int,
+    lockup: int,
+    decrease_on_withdraw: bool,
+    deployed_block: int | None,
+    deployed_at: int | None,
+    updated_block: int | None,
+    updated_at: int | None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    params = (
+        vault.lower(),
+        quote.lower(),
+        base.lower(),
+        (market or "").lower(),
+        owner.lower(),
+        name or "",
+        description or "",
+        social1 or "",
+        social2 or "",
+        social3 or "",
+        bool(locked),
+        bool(closed),
+        int(max_shares or 0),
+        int(circulating_shares or 0),
+        int(quote_decimals or 0),
+        int(base_decimals or 0),
+        int(lockup or 0),
+        bool(decrease_on_withdraw),
+        int(deployed_block) if deployed_block is not None else None,
+        int(deployed_at) if deployed_at is not None else None,
+        int(updated_block) if updated_block is not None else None,
+        int(updated_at) if updated_at is not None else None,
+    )
+    sql = """
+        INSERT INTO crystal_vaults (
+            vault, quote, base, market, owner, name, description, social1, social2, social3,
+            locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+            lockup, decrease_on_withdraw, deployed_block, deployed_at, updated_block, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (vault) DO UPDATE SET
+            quote = EXCLUDED.quote,
+            base = EXCLUDED.base,
+            market = CASE WHEN EXCLUDED.market <> '' THEN EXCLUDED.market ELSE crystal_vaults.market END,
+            owner = EXCLUDED.owner,
+            name = EXCLUDED.name,
+            description = EXCLUDED.description,
+            social1 = EXCLUDED.social1,
+            social2 = EXCLUDED.social2,
+            social3 = EXCLUDED.social3,
+            locked = EXCLUDED.locked,
+            closed = EXCLUDED.closed,
+            max_shares = EXCLUDED.max_shares,
+            circulating_shares = EXCLUDED.circulating_shares,
+            quote_decimals = CASE WHEN EXCLUDED.quote_decimals <> 0 THEN EXCLUDED.quote_decimals ELSE crystal_vaults.quote_decimals END,
+            base_decimals = CASE WHEN EXCLUDED.base_decimals <> 0 THEN EXCLUDED.base_decimals ELSE crystal_vaults.base_decimals END,
+            lockup = EXCLUDED.lockup,
+            decrease_on_withdraw = EXCLUDED.decrease_on_withdraw,
+            deployed_block = COALESCE(crystal_vaults.deployed_block, EXCLUDED.deployed_block),
+            deployed_at = COALESCE(crystal_vaults.deployed_at, EXCLUDED.deployed_at),
+            updated_block = COALESCE(EXCLUDED.updated_block, crystal_vaults.updated_block),
+            updated_at = COALESCE(EXCLUDED.updated_at, crystal_vaults.updated_at);
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def update_crystal_vault_fields(
+    *,
+    vault: str,
+    locked: bool | None = None,
+    closed: bool | None = None,
+    max_shares: int | None = None,
+    circulating_shares: int | None = None,
+    lockup: int | None = None,
+    decrease_on_withdraw: bool | None = None,
+    market: str | None = None,
+    quote_decimals: int | None = None,
+    base_decimals: int | None = None,
+    updated_block: int | None = None,
+    updated_at: int | None = None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        UPDATE crystal_vaults
+        SET locked = COALESCE(%s, locked),
+            closed = COALESCE(%s, closed),
+            max_shares = COALESCE(%s, max_shares),
+            circulating_shares = COALESCE(%s, circulating_shares),
+            lockup = COALESCE(%s, lockup),
+            decrease_on_withdraw = COALESCE(%s, decrease_on_withdraw),
+            market = COALESCE(NULLIF(%s, ''), market),
+            quote_decimals = COALESCE(%s, quote_decimals),
+            base_decimals = COALESCE(%s, base_decimals),
+            updated_block = COALESCE(%s, updated_block),
+            updated_at = COALESCE(%s, updated_at)
+        WHERE vault = %s;
+    """
+    params = (
+        locked,
+        closed,
+        int(max_shares) if max_shares is not None else None,
+        int(circulating_shares) if circulating_shares is not None else None,
+        int(lockup) if lockup is not None else None,
+        decrease_on_withdraw,
+        (market or "") if market is not None else None,
+        int(quote_decimals) if quote_decimals is not None else None,
+        int(base_decimals) if base_decimals is not None else None,
+        int(updated_block) if updated_block is not None else None,
+        int(updated_at) if updated_at is not None else None,
+        vault.lower(),
+    )
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def insert_crystal_vault_deposit(
+    *,
+    block_number: int,
+    log_index: int,
+    timestamp: int,
+    vault: str,
+    user_address: str,
+    shares: int,
+    quote_amount: int,
+    base_amount: int,
+    txhash: str,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        INSERT INTO crystal_vault_deposits (
+            block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (txhash, log_index) DO NOTHING;
+    """
+    params = (
+        int(block_number),
+        int(log_index),
+        int(timestamp),
+        vault.lower(),
+        user_address.lower(),
+        int(shares or 0),
+        int(quote_amount or 0),
+        int(base_amount or 0),
+        txhash.lower(),
+    )
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def insert_crystal_vault_withdrawal(
+    *,
+    block_number: int,
+    log_index: int,
+    timestamp: int,
+    vault: str,
+    user_address: str,
+    shares: int,
+    quote_amount: int,
+    base_amount: int,
+    txhash: str,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        INSERT INTO crystal_vault_withdrawals (
+            block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (txhash, log_index) DO NOTHING;
+    """
+    params = (
+        int(block_number),
+        int(log_index),
+        int(timestamp),
+        vault.lower(),
+        user_address.lower(),
+        int(shares or 0),
+        int(quote_amount or 0),
+        int(base_amount or 0),
+        txhash.lower(),
+    )
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def upsert_crystal_vault_user_delta(
+    *,
+    vault: str,
+    user_address: str,
+    shares_delta: int,
+    deposits_delta: int,
+    withdraws_delta: int,
+    last_deposit: int | None = None,
+    last_withdraw: int | None = None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        INSERT INTO crystal_vault_users (
+            vault, user_address, shares, deposits, withdraws, last_deposit, last_withdraw
+        )
+        VALUES (%s, %s, GREATEST(%s, 0), %s, %s, COALESCE(%s, 0), COALESCE(%s, 0))
+        ON CONFLICT (vault, user_address) DO UPDATE SET
+            shares = GREATEST(crystal_vault_users.shares + %s, 0),
+            deposits = crystal_vault_users.deposits + EXCLUDED.deposits,
+            withdraws = crystal_vault_users.withdraws + EXCLUDED.withdraws,
+            last_deposit = CASE
+                WHEN EXCLUDED.last_deposit > crystal_vault_users.last_deposit THEN EXCLUDED.last_deposit
+                ELSE crystal_vault_users.last_deposit
+            END,
+            last_withdraw = CASE
+                WHEN EXCLUDED.last_withdraw > crystal_vault_users.last_withdraw THEN EXCLUDED.last_withdraw
+                ELSE crystal_vault_users.last_withdraw
+            END;
+    """
+    params = (
+        vault.lower(),
+        user_address.lower(),
+        int(shares_delta or 0),
+        int(deposits_delta or 0),
+        int(withdraws_delta or 0),
+        int(last_deposit) if last_deposit is not None else None,
+        int(last_withdraw) if last_withdraw is not None else None,
+        int(shares_delta or 0),
+    )
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def upsert_crystal_vault_balance_sample(
+    *,
+    vault: str,
+    block_number: int,
+    timestamp: int,
+    quote_balance: int,
+    base_balance: int,
+    usd_value,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        INSERT INTO crystal_vault_balance_samples (
+            vault, block_number, timestamp, quote_balance, base_balance, usd_value
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (vault, block_number) DO UPDATE SET
+            timestamp = EXCLUDED.timestamp,
+            quote_balance = EXCLUDED.quote_balance,
+            base_balance = EXCLUDED.base_balance,
+            usd_value = EXCLUDED.usd_value;
+    """
+    params = (
+        vault.lower(),
+        int(block_number),
+        int(timestamp),
+        int(quote_balance or 0),
+        int(base_balance or 0),
+        Decimal(str(usd_value or 0)),
+    )
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def load_crystal_vaults_for_state():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                vault, quote, base, market, owner, name, description, social1, social2, social3,
+                locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+                lockup, decrease_on_withdraw
+            FROM crystal_vaults
+            """
+        )
+        return cur.fetchall()
+
+
+def load_crystal_vault_users_for_state():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT vault, user_address, shares, deposits, withdraws, last_deposit, last_withdraw
+            FROM crystal_vault_users
+            """
+        )
+        return cur.fetchall()
+
+
+def get_crystal_vault(vault: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                vault, quote, base, market, owner, name, description, social1, social2, social3,
+                locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+                lockup, decrease_on_withdraw
+            FROM crystal_vaults
+            WHERE vault = %s
+            """,
+            (vault.lower(),),
+        )
+        return cur.fetchone()
+
+
+def get_crystal_vault_latest_balance(vault: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+            FROM crystal_vault_balance_samples
+            WHERE vault = %s
+            ORDER BY timestamp DESC, block_number DESC
+            LIMIT 1
+            """,
+            (vault.lower(),),
+        )
+        return cur.fetchone()
+
+
+def get_crystal_vault_user(vault: str, user_address: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT shares, deposits, withdraws, last_deposit, last_withdraw
+            FROM crystal_vault_users
+            WHERE vault = %s AND user_address = %s
+            """,
+            (vault.lower(), user_address.lower()),
+        )
+        return cur.fetchone()
+
+
+def list_crystal_vault_deposits(vault: str, limit: int = 50):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_address, timestamp, quote_amount, base_amount, shares, txhash
+            FROM crystal_vault_deposits
+            WHERE vault = %s
+            ORDER BY timestamp DESC, log_index DESC
+            LIMIT %s
+            """,
+            (vault.lower(), int(limit)),
+        )
+        return cur.fetchall()
+
+
+def list_crystal_vault_withdrawals(vault: str, limit: int = 50):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_address, timestamp, quote_amount, base_amount, shares, txhash
+            FROM crystal_vault_withdrawals
+            WHERE vault = %s
+            ORDER BY timestamp DESC, log_index DESC
+            LIMIT %s
+            """,
+            (vault.lower(), int(limit)),
+        )
+        return cur.fetchall()
+
+
+def list_crystal_vault_users(vault: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_address, shares, deposits, withdraws, last_deposit, last_withdraw
+            FROM crystal_vault_users
+            WHERE vault = %s
+            ORDER BY last_deposit DESC, shares DESC, user_address ASC
+            """,
+            (vault.lower(),),
+        )
+        return cur.fetchall()
+
+
+def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, limit: int = 0):
+    with db_cursor() as cur:
+        if start_ts is None:
+            if limit and limit > 0:
+                cur.execute(
+                    """
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    FROM crystal_vault_balance_samples
+                    WHERE vault = %s
+                    ORDER BY timestamp DESC, block_number DESC
+                    LIMIT %s
+                    """,
+                    (vault.lower(), int(limit)),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    FROM crystal_vault_balance_samples
+                    WHERE vault = %s
+                    ORDER BY timestamp DESC, block_number DESC
+                    """,
+                    (vault.lower(),),
+                )
+        else:
+            if limit and limit > 0:
+                cur.execute(
+                    """
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    FROM crystal_vault_balance_samples
+                    WHERE vault = %s AND timestamp >= %s
+                    ORDER BY timestamp DESC, block_number DESC
+                    LIMIT %s
+                    """,
+                    (vault.lower(), int(start_ts), int(limit)),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    FROM crystal_vault_balance_samples
+                    WHERE vault = %s AND timestamp >= %s
+                    ORDER BY timestamp DESC, block_number DESC
+                    """,
+                    (vault.lower(), int(start_ts)),
+                )
+        rows = cur.fetchall()
+    rows.reverse()
+    return rows

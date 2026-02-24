@@ -1,6 +1,8 @@
 import json, decimal, asyncio, time
 import modules.launchpad as lp
 import modules.nadfun as n
+import modules.vaults as v
+import modules.markets as m
 
 decimal.getcontext().prec = 100
 
@@ -23,22 +25,54 @@ def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
         "amount": amount,
     }
 
+
 CONTRACTS = {
+    "ROUTER": "0x2Cd24c8230618e26C149dce9cfb3fBb3d0a9ed54",
+    "VAULTS": "0xA26393399b426658423597DfE12930BaE1a2F9da",
     "NADFUN": "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
 }
 ADDRS = [a.lower() for a in CONTRACTS.values()]
-EVENT_SIGS = {   
+
+EVENT_SIGS = {
+    "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
+    "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c82982": "TR",
+    "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
+    "0xc367a2f5396f96d105baaaa90fe29b1bb18ef54c712964410d02451e67c19d3e": "LT",
+    "0xa2e7361c23d7820040603b83c0cd3f494d377bac69736377d75bb56c651a5098": "MG",
+    "0xc06e2355c9da33769608ef0b4a541792c64990d67d8fe190ccc295daffa0a61c": "VD",
+    "0x4e2ca0515ed1aef1395f66b5303bb5d6f1bf9d61a353fa53f73f8ac9973fa9f6": "VDP",
+    "0xebff2602b3f468259e1e99f613fed6691f3a6526effe6ef3e768ba7ae7a36c4f": "VWD",
+    "0x44427e3003a08f22cf803894075ac0297524e09e521fc1c15bc91741ce3dc159": "VLOCK",
+    "0x7e6adfec7e3f286831a0200a754127c171a2da564078722cb97704741bbdb0ea": "VUNLOCK",
+    "0x13607bf9d2dd20e1f3a7daf47ab12856f8aad65e6ae7e2c75ace3d0c424a40e8": "VCLOSE",
+    "0x1e05b6315930dd64f61371495352862f00b5567797d2a62c78f1b527c24a919a": "VMAX",
+    "0x00ec7b1c26d1057308e56c6900fb540231a33b23494817d35dbfd7f056078451": "VLOCKUP",
+    "0x3f0bf479ded477a0724977a228e5e9afa2efdb537c527aba3cc7169403ef422a": "VDECR",
     "0xd37e3f4f651fe74251701614dbeac478f5a0d29068e87bbe44e5026d166abca9": "NFC",
     "0x00a7ba871905cb955432583640b5c9fc6bdd27d36884ab2b5420839224638862": "NFB",
     "0x0eb25df0e2137de8ce042eeaf39080d25f0c8d451372c99db69a4c0a298d0fa1": "NFS",
     "0xfd4bb47bd45abdbdb2ecd61052c9571773f9cde876e2a7745f488c20b30ab10a": "NFSYNC",
     "0xa1cae252e597e19f398a442722a17a17e62d17f9d4f3656786e18aabcd428908": "NFT",
     "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67": "V3SWAP",
-    
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
 }
 TOPICS = list(EVENT_SIGS.keys())
+
 PARSERS = {
+    "MC": m.parse_market_created,
+    "TR": m.parse_trade,
+    "TC": lp.parse_token_created,
+    "LT": lp.parse_launchpad_trade,
+    "MG": lp.parse_migrated,
+    "VD": v.parse_vault_created,
+    "VDP": v.parse_vault_deposit,
+    "VWD": v.parse_vault_withdraw,
+    "VLOCK": v.parse_vault_lock,
+    "VUNLOCK": v.parse_vault_unlock,
+    "VCLOSE": v.parse_vault_close,
+    "VMAX": v.parse_vault_max_shares_changed,
+    "VLOCKUP": v.parse_vault_lockup_changed,
+    "VDECR": v.parse_vault_decrease_on_withdraw_changed,
     "NFC": n.parse_nadfun_token_created,
     "NFB": n.parse_nadfun_buy,
     "NFS": n.parse_nadfun_sell,
@@ -47,6 +81,26 @@ PARSERS = {
     "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
 }
+
+ROUTER_EVENT_TAGS = {"MC", "TR", "TC", "LT", "MG"}
+VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
+NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
+PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
+
+
+def accepts_log_for_indexing(tag: str, addr: str) -> bool:
+    addr = (addr or "").lower()
+    if tag in ROUTER_EVENT_TAGS:
+        return addr == CONTRACTS["ROUTER"].lower()
+    if tag in VAULT_FACTORY_EVENT_TAGS:
+        return addr == CONTRACTS["VAULTS"].lower()
+    if tag in NADFUN_EVENT_TAGS:
+        return addr == CONTRACTS["NADFUN"].lower()
+    if tag in PASSTHROUGH_EVENT_TAGS:
+        return True
+    return False
+
+
 WS_URL = "wss://rpc-mainnet.monadinfra.com"
 _RPC_MAX_RPS = 20
 _last_rpc_ts = 0.0

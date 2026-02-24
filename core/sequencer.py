@@ -385,6 +385,20 @@ class Sequencer:
     def _process_block(self, blk: int, logs: List[dict], cur=None, counts_out: dict = None, batch: BatchAccumulator = None):
         logs = sorted(logs, key=self._log_index)
         counts = counts_out if counts_out is not None else {
+            "MC": 0,
+            "TR": 0,
+            "TC": 0,
+            "LT": 0,
+            "MG": 0,
+            "VD": 0,
+            "VDP": 0,
+            "VWD": 0,
+            "VLOCK": 0,
+            "VUNLOCK": 0,
+            "VCLOSE": 0,
+            "VMAX": 0,
+            "VLOCKUP": 0,
+            "VDECR": 0,
             "NFC": 0,
             "NFB": 0,
             "NFS": 0,
@@ -400,7 +414,7 @@ class Sequencer:
             if not topics:
                 continue
             tag = h.EVENT_SIGS.get(topics[0].lower())
-            if tag in ("LT", "NFB", "NFS", "V3SWAP"):
+            if tag in ("LT", "TR", "NFB", "NFS", "V3SWAP"):
                 has_trades = True
                 break
 
@@ -432,6 +446,11 @@ class Sequencer:
             if blk_ts == 0 and blk not in self._missing_ts_warned:
                 self._missing_ts_warned.add(blk)
                 print(f"[SQ] Missing blockTimestamp for block {blk}, using 0", flush=True)
+            if hasattr(self._state, "note_block_timestamp"):
+                try:
+                    self._state.note_block_timestamp(blk, blk_ts)
+                except Exception:
+                    pass
             txh = log.get("transactionHash")
             li = log.get("logIndex")
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
@@ -449,7 +468,13 @@ class Sequencer:
 
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
 
-            if tag in ("TC", "NFC"):
+            if tag == "MC":
+                self._state.apply_market_created(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+
+            elif tag == "TR":
+                self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+
+            elif tag in ("TC", "NFC"):
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag in ("LT", "NFB", "NFS"):
@@ -470,6 +495,33 @@ class Sequencer:
                 if pool:
                     if pool.lower() not in h.ADDRS:
                         h.ADDRS.append(pool.lower())
+
+            elif tag == "VD":
+                self._state.apply_vault_deployed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VDP":
+                self._state.apply_vault_deposit(blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii)
+
+            elif tag == "VWD":
+                self._state.apply_vault_withdraw(blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii)
+
+            elif tag == "VLOCK":
+                self._state.apply_vault_locked(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VUNLOCK":
+                self._state.apply_vault_unlocked(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VCLOSE":
+                self._state.apply_vault_closed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VMAX":
+                self._state.apply_vault_max_shares_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VLOCKUP":
+                self._state.apply_vault_lockup_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+
+            elif tag == "VDECR":
+                self._state.apply_vault_decrease_on_withdraw_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag == "TF":
                 if parsed is not None:
@@ -505,7 +557,11 @@ class Sequencer:
         logs_by_block: dict[int, list[dict]],
         cur,
     ) -> None:
-        counts = {"NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0}
+        counts = {
+            "MC": 0, "TR": 0, "TC": 0, "LT": 0, "MG": 0,
+            "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "VMAX": 0, "VLOCKUP": 0, "VDECR": 0,
+            "NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0,
+        }
 
         batch = BatchAccumulator()
         processed_blocks: list[int] = []

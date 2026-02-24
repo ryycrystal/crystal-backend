@@ -2182,3 +2182,187 @@ def get_sync_status() -> Dict[str, Any]:
     return {
         "last_block": last_block,
     }
+
+
+@app.get("/vaults/{address}/{user}")
+def vault_user_summary(
+    address: str,
+    user: str,
+    history_limit: int = Query(50, ge=1, le=500),
+) -> Dict[str, Any]:
+    vaddr = address.lower()
+    uaddr = user.lower()
+    v = storage.get_crystal_vault(vaddr)
+    if not v:
+        return {"ok": False, "error": "vault not found", "vault": vaddr}
+    (
+        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
+        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+        lockup, decrease_on_withdraw,
+    ) = v
+
+    latest_row = storage.get_crystal_vault_latest_balance(vaddr)
+    if latest_row:
+        latest = {
+            "block": int(latest_row[0] or 0),
+            "timestamp": int(latest_row[1] or 0),
+            "quoteBalance": int(latest_row[2] or 0),
+            "baseBalance": int(latest_row[3] or 0),
+            "usdValue": float(latest_row[4] or 0.0),
+        }
+    else:
+        latest = {"quoteBalance": 0, "baseBalance": 0, "timestamp": 0, "usdValue": 0.0, "block": 0}
+
+    circ = int(circulating_shares or 0)
+    user_row = storage.get_crystal_vault_user(vaddr, uaddr)
+    u_shares = int(user_row[0] or 0) if user_row else 0
+
+    if circ > 0 and u_shares > 0:
+        share_pct = u_shares / circ
+        user_quote = int(latest["quoteBalance"] * share_pct)
+        user_base = int(latest["baseBalance"] * share_pct)
+    else:
+        share_pct = 0.0
+        user_quote = 0
+        user_base = 0
+
+    deps = storage.list_crystal_vault_deposits(vaddr, history_limit)
+    wds = storage.list_crystal_vault_withdrawals(vaddr, history_limit)
+
+    deposit_history = [
+        {
+            "user": str(d[0]).lower(),
+            "timestamp": int(d[1] or 0),
+            "quoteAmount": int(d[2] or 0),
+            "baseAmount": int(d[3] or 0),
+            "shares": int(d[4] or 0),
+            "hash": d[5],
+        }
+        for d in deps
+    ]
+    withdraw_history = [
+        {
+            "user": str(w[0]).lower(),
+            "timestamp": int(w[1] or 0),
+            "quoteAmount": int(w[2] or 0),
+            "baseAmount": int(w[3] or 0),
+            "shares": int(w[4] or 0),
+            "hash": w[5],
+        }
+        for w in wds
+    ]
+
+    depositors_raw = storage.list_crystal_vault_users(vaddr)
+    depositors = []
+    for d in depositors_raw:
+        shares = int(d[1] or 0)
+        depositors.append({
+            "address": str(d[0]).lower(),
+            "shares": shares,
+            "sharePct": (shares / circ) if circ > 0 else 0.0,
+            "deposits": int(d[2] or 0),
+            "withdraws": int(d[3] or 0),
+            "lastDeposit": int(d[4] or 0),
+            "lastWithdraw": int(d[5] or 0),
+        })
+
+    return {
+        "ok": True,
+        "vault": {
+            "vault": vault_addr,
+            "owner": owner,
+            "quote": quote,
+            "base": base,
+            "market": market,
+            "name": name,
+            "description": description,
+            "socials": {"social1": social1, "social2": social2, "social3": social3},
+            "decimals": {"quoteDecimals": int(quote_decimals or 0), "baseDecimals": int(base_decimals or 0)},
+            "params": {
+                "maxShares": int(max_shares or 0),
+                "circulatingShares": int(circulating_shares or 0),
+                "lockup": int(lockup or 0),
+                "decreaseOnWithdraw": bool(decrease_on_withdraw),
+            },
+        },
+        "status": {"locked": bool(locked), "closed": bool(closed)},
+        "latestBalance": latest,
+        "tvlUsd": latest["usdValue"],
+        "userBalance": {
+            "address": uaddr,
+            "shares": u_shares,
+            "sharePct": share_pct,
+            "quoteBalance": user_quote,
+            "baseBalance": user_base,
+        },
+        "depositHistory": deposit_history,
+        "withdrawHistory": withdraw_history,
+        "depositors": depositors,
+    }
+
+
+@app.get("/vaults/{address}/history/{timeframe}")
+def vault_history(
+    address: str,
+    timeframe: int,
+    limit: int = Query(0, ge=0, le=2000),
+) -> Dict[str, Any]:
+    vaddr = address.lower()
+    v = storage.get_crystal_vault(vaddr)
+    if not v:
+        raise HTTPException(status_code=404, detail="vault not found")
+    if timeframe not in {1, 2, 3, 4}:
+        raise HTTPException(status_code=400, detail="invalid timeframe")
+    (
+        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
+        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
+        lockup, decrease_on_withdraw,
+    ) = v
+
+    now_ts = int(time.time())
+    if timeframe == 1:
+        start_ts = now_ts - 86400
+    elif timeframe == 2:
+        start_ts = now_ts - (7 * 86400)
+    elif timeframe == 3:
+        start_ts = now_ts - (30 * 86400)
+    else:
+        start_ts = None
+
+    pts_rows = storage.list_crystal_vault_balance_samples(vaddr, start_ts=start_ts, limit=limit)
+    pts = [
+        {
+            "block": int(r[0] or 0),
+            "timestamp": int(r[1] or 0),
+            "quoteBalance": int(r[2] or 0),
+            "baseBalance": int(r[3] or 0),
+            "usdValue": float(r[4] or 0.0),
+        }
+        for r in pts_rows
+    ]
+
+    tvl_series = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
+    base_usd = float(pts[0]["usdValue"]) if pts else 0.0
+    pnl_series = []
+    for p in pts:
+        cur_usd = float(p["usdValue"])
+        pnl_usd = cur_usd - base_usd
+        pnl_pct = ((cur_usd / base_usd) - 1.0) * 100.0 if base_usd > 0 else 0.0
+        pnl_series.append({"timestamp": int(p["timestamp"]), "pnlUsd": pnl_usd, "pnlPct": pnl_pct})
+
+    tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe]
+    return {
+        "ok": True,
+        "meta": {
+            "vault": vault_addr,
+            "name": name,
+            "owner": owner,
+            "quote": quote,
+            "base": base,
+            "locked": bool(locked),
+            "closed": bool(closed),
+            "circulatingShares": int(circulating_shares or 0),
+        },
+        "series": {"tvl": tvl_series, "pnl": pnl_series},
+        "info": {"timeframe": tf_name, "count": len(pts)},
+    }

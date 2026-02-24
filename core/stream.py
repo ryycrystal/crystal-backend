@@ -84,17 +84,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
 
                 addr = log.get("address", "").lower()
 
-                if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                    if addr != h.CONTRACTS["NADFUN"].lower():
-                        continue
-
-                elif tag == "V3SWAP":
-                    pass
-
-                elif tag == "TF":
-                    pass
-
-                else:
+                if not h.accepts_log_for_indexing(tag, addr):
                     continue
 
                 if tag in event_counts:
@@ -266,6 +256,11 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                     last_head_ts = time.monotonic()
                     last_head_num = blk
                     last_head_block_ts = blk_ts
+                    if hasattr(SEQUENCER._state, "note_head"):
+                        try:
+                            SEQUENCER._state.note_head(blk, blk_ts)
+                        except Exception:
+                            pass
                     continue
 
                 if sid == logs_sub:
@@ -279,17 +274,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                     addr = res.get("address", "").lower()
 
-                    if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                        if addr != h.CONTRACTS["NADFUN"].lower():
-                            continue
-
-                    elif tag == "V3SWAP":
-                        pass
-
-                    elif tag == "TF":
-                        pass
-
-                    else:
+                    if not h.accepts_log_for_indexing(tag, addr):
                         continue
 
                     if tag in event_counts:
@@ -336,3 +321,56 @@ async def stream_logs(start_block: int | None = None):
 
         await asyncio.sleep(delay)
         delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
+
+
+async def vault_sampler(state):
+    while True:
+        try:
+            vaults = list(getattr(state, "vaults", {}).keys())
+            if not vaults:
+                await asyncio.sleep(30)
+                continue
+
+            try:
+                state.sweep()
+            except Exception:
+                pass
+
+            head_resp = await backfill.http_jsonrpc("eth_blockNumber", [])
+            blk_hex = head_resp.get("result")
+            if not isinstance(blk_hex, str):
+                await asyncio.sleep(30)
+                continue
+
+            blk_num = int(blk_hex, 16)
+            ts = 0
+            try:
+                ts = int(getattr(state, "block_ts")(blk_num))
+            except Exception:
+                ts = 0
+            if ts <= 0:
+                try:
+                    ts = await backfill.get_block_timestamp_http(blk_num)
+                except Exception:
+                    ts = int(time.time())
+
+            for vaddr in vaults:
+                try:
+                    call_resp = await backfill.http_jsonrpc(
+                        "eth_call",
+                        [{"to": vaddr, "data": "0x00113e08"}, blk_hex],
+                    )
+                    ret = call_resp.get("result")
+                    if not isinstance(ret, str) or not ret.startswith("0x"):
+                        continue
+                    s = ret[2:].rjust(64 * 4, "0")
+                    quote_bal = int(s[128:192], 16)
+                    base_bal = int(s[192:256], 16)
+                    state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+                except Exception:
+                    continue
+
+        except Exception as e:
+            print(f"[SAMPLER] {e!r}", flush=True)
+
+        await asyncio.sleep(30)
