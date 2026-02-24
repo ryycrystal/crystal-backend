@@ -8,36 +8,35 @@ import backfill
 
 HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = 100
-MAX_BLOCK_AGE = 500
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
 
-# enqueue a block into missing queue
+
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
         missing_set.add(blk)
 
-# clear stale blocks from the queue that are too old relative to current head
+
 def _clear_stale_blocks(current_head: int):
     global missing_blocks, missing_set
-    if current_head is None:
+    seq_next = SEQUENCER._next_block
+    if current_head is None or seq_next is None:
         return
-    cutoff = current_head - MAX_BLOCK_AGE
     new_blocks = deque()
     new_set = set()
     for blk in missing_blocks:
-        if blk >= cutoff:
+        if blk >= seq_next:
             new_blocks.append(blk)
             new_set.add(blk)
     cleared = len(missing_blocks) - len(new_blocks)
     if cleared > 0:
-        print(f"[Gap] Cleared {cleared} stale blocks older than {cutoff}", flush=True)
+        print(f"[Gap] Cleared {cleared} already-processed queued blocks (< {seq_next})", flush=True)
     missing_blocks = new_blocks
     missing_set = new_set
 
-# background worker that replays logs for missing block ranges and feeds them to the sequencer
+
 async def _gap_worker(event_counts, should_exit_flag: list):
     while not should_exit_flag[0]:
         if not missing_blocks:
@@ -53,8 +52,8 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             missing_set.discard(missing_blocks.popleft())
 
         seq_next = SEQUENCER._next_block
-        if seq_next and blk_end < seq_next - MAX_BLOCK_AGE:
-            print(f"[Gap] Skipping stale range {blk_start}-{blk_end}, sequencer at {seq_next}", flush=True)
+        if seq_next is not None and blk_end < seq_next:
+            print(f"[Gap] Skipping already-processed range {blk_start}-{blk_end}, sequencer at {seq_next}", flush=True)
             continue
 
         try:
@@ -73,6 +72,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                 }))
                 resp = await asyncio.wait_for(h.ack(gap_ws, rid), timeout=30.0)
 
+            by_block: dict[int, list[dict]] = {}
             for log in resp.get("result", []):
                 topics = log.get("topics") or []
                 if not topics:
@@ -100,10 +100,26 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                 if tag in event_counts:
                     event_counts[tag] += 1
 
-                SEQUENCER.add_log(log)
+                blk_hex = log.get("blockNumber")
+                blk_num = int(blk_hex, 16) if isinstance(blk_hex, str) else int(blk_hex or 0)
+                by_block.setdefault(blk_num, []).append(log)
+
+            if by_block:
+                await backfill.ensure_block_timestamps(by_block)
+                for blk in sorted(by_block):
+                    for log in by_block[blk]:
+                        SEQUENCER.add_log(log)
 
             for blk in range(blk_start, blk_end + 1):
-                SEQUENCER.note_block(blk)
+                blk_logs = by_block.get(blk, [])
+                blk_ts = None
+                if blk_logs:
+                    ts_raw = blk_logs[0].get("blockTimestamp")
+                    if isinstance(ts_raw, str):
+                        blk_ts = int(ts_raw, 16)
+                    elif ts_raw is not None:
+                        blk_ts = int(ts_raw)
+                SEQUENCER.note_block(blk, block_timestamp=blk_ts)
 
         except asyncio.CancelledError:
             print(f"[Gap] Cancelled while processing {blk_start}-{blk_end}, re-queuing", flush=True)
@@ -141,7 +157,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             await asyncio.sleep(5.0)
 
 
-# one websocket session to subscribe to heads + logs, feed sequencer, handle head gaps and watchdog
+
 async def _stream_once(prev_last_head: int | None) -> int | None:
     connect_kwargs = dict(
         ping_interval=20,
@@ -152,8 +168,9 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         max_size=None,
     )
     async with websockets.connect(h.WS_URL, **connect_kwargs) as ws:
+        prefetched_msgs: list[dict] = []
         await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}))
-        heads_sub = (await h.ack(ws, 1))["result"]
+        heads_sub = (await h.ack(ws, 1, prefetched_msgs))["result"]
 
         await ws.send(
             json.dumps({
@@ -168,7 +185,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 ],
             })
         )
-        logs_sub = (await h.ack(ws, 2))["result"]
+        logs_sub = (await h.ack(ws, 2, prefetched_msgs))["result"]
 
         event_counts = {v: 0 for v in h.EVENT_SIGS.values()}
         should_exit = [False]
@@ -177,6 +194,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
         last_head_ts = time.monotonic()
         last_head_num = prev_last_head
+        last_head_block_ts: int | None = None
         first_head_seen = False
 
         async def watchdog():
@@ -202,11 +220,14 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         watchdog_task = asyncio.create_task(watchdog())
 
         try:
-            async for raw in ws:
+            while True:
                 if should_exit[0]:
                     break
 
-                msg = json.loads(raw)
+                if prefetched_msgs:
+                    msg = prefetched_msgs.pop(0)
+                else:
+                    msg = json.loads(await ws.recv())
                 if msg.get("method") != "eth_subscription":
                     continue
 
@@ -215,6 +236,8 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                 if sid == heads_sub:
                     blk = int(res["number"], 16)
+                    ts_hex = res.get("timestamp")
+                    blk_ts = int(ts_hex, 16) if isinstance(ts_hex, str) else (int(ts_hex) if ts_hex is not None else None)
 
                     if last_head_num is not None:
                         for key in event_counts:
@@ -232,10 +255,17 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                             _add_missing(m)
 
                     if last_head_num is not None:
-                        SEQUENCER.note_block(last_head_num)
+                        note_ts = last_head_block_ts
+                        if note_ts is None and SEQUENCER._logs_by_block.get(last_head_num):
+                            try:
+                                note_ts = await backfill.get_block_timestamp_http(last_head_num)
+                            except Exception as e:
+                                print(f"[WS] Failed to fetch timestamp for block {last_head_num}: {e!r}", flush=True)
+                        SEQUENCER.note_block(last_head_num, block_timestamp=note_ts)
 
                     last_head_ts = time.monotonic()
                     last_head_num = blk
+                    last_head_block_ts = blk_ts
                     continue
 
                 if sid == logs_sub:
@@ -284,7 +314,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
         return last_head_num
 
-# main loop w/optional initial backfill or live stream
+
 async def stream_logs(start_block: int | None = None):
     last_seen = None
     delay = 0.5
