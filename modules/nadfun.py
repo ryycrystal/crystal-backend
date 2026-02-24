@@ -184,11 +184,11 @@ async def process_metadata_queue_immediate(storage_module=None) -> int:
 
     return len(valid_results)
 
-# 32-byte word or hex string into a 0x-prefixed address
+                                                       
 def _to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
-# read the 32-byte word at 'index' from a hex string (no 0x) interpreted as uint256
+                                                                                   
 def _word(data_hex: str, index: int) -> int:
     if not data_hex:
         return 0
@@ -198,11 +198,11 @@ def _word(data_hex: str, index: int) -> int:
         return 0
     return int(data_hex[start:end], 16)
 
-# # yield s in fixed-size n-character chunks (used for 32-byte words)
+                                                                     
 def _chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
-# decode an abi-encoded string from the calldata hex starting at 'word_index'
+                                                                             
 def _decode_string(data_hex: str, word_index: int) -> str:
     if not data_hex:
         return ""
@@ -233,7 +233,7 @@ def _decode_string(data_hex: str, word_index: int) -> str:
     except Exception:
         return ""
 
-# parse a hex string into a signed 256-bit integer (two's complement)
+                                                                     
 def _int256_from_hex(x: str) -> int:
     if x.startswith("0x"):
         x = x[2:]
@@ -244,18 +244,18 @@ def _int256_from_hex(x: str) -> int:
         n -= 2**256
     return n
 
-# CurveCreate(
-#   address creator,
-#   address token,
-#   address pool,
-#   string name,
-#   string symbol,
-#   string tokenURI,
-#   uint256 virtualMonReserve,
-#   uint256 virtualTokenReserve,
-#   uint256 targetTokenAmount
-# );
-# into a flat dict for state.apply_token_created
+              
+                    
+                  
+                 
+                
+                  
+                    
+                              
+                                
+                             
+    
+                                                
 def parse_nadfun_token_created(
     _addr: str,
     topics: list[str],
@@ -278,7 +278,7 @@ def parse_nadfun_token_created(
         METADATA_QUEUE.append((token, token_uri))
         print(f"[Metadata] Queued {token[:10]}... queue size={len(METADATA_QUEUE)}")
 
-    metadata_cid = ""  # Will be populated by metadata fetch with actual image_uri
+    metadata_cid = ""                                                             
 
     try:
         last_price_native = Decimal("90000") / Decimal("1073000191")
@@ -300,14 +300,14 @@ def parse_nadfun_token_created(
         "last_price_native": last_price_native,
     }
 
-# CurveSync(
-#   address token,
-#   uint256 realMonReserve,
-#   uint256 realTokenReserve,
-#   uint256 virtualMonReserve,
-#   uint256 virtualTokenReserve
-# );
-# and stashes latest reserves to be used by the next buy/sell event for that token
+            
+                  
+                           
+                             
+                              
+                               
+    
+                                                                                  
 def parse_nadfun_sync(
     _addr: str,
     topics: list[str],
@@ -333,7 +333,7 @@ def parse_nadfun_sync(
 
     return None
 
-# pop and return the last sync snapshot for 'token' or zeros if none
+                                                                    
 def _consume_sync_for_token(token: str) -> dict:
     sync = _PENDING_SYNC.pop(token.lower(), None)
     if not sync:
@@ -351,13 +351,13 @@ def _consume_sync_for_token(token: str) -> dict:
         "real_token_reserve": int(sync.get("real_token_reserve", 0)),
     }
 
-# CurveBuy(
-#   address to, 
-#   address token, 
-#   uint256 actualAmountIn, 
-#   uint256 effectiveAmountOut
-# );
-# into a flat trade dict, merges in latest sync reserves, for state.apply_launchpad_trade
+           
+                
+                   
+                            
+                              
+    
+                                                                                         
 def parse_nadfun_buy(
     _addr: str,
     topics: list[str],
@@ -384,13 +384,13 @@ def parse_nadfun_buy(
         "token_reserve": sync["token_reserve"],
     }
 
-# CurveSell(
-#   address to, 
-#   address token, 
-#   uint256 actualAmountIn, 
-#   uint256 effectiveAmountOut
-# );
-# into a flat trade dict, merges in latest sync reserves, for state.apply_launchpad_trade
+            
+                
+                   
+                            
+                              
+    
+                                                                                         
 def parse_nadfun_sell(
     _addr: str,
     topics: list[str],
@@ -417,8 +417,8 @@ def parse_nadfun_sell(
         "token_reserve": sync["token_reserve"],
     }
 
-# CurveGraduate(token, pool);
-# with a pool param for state.apply_migrated
+                             
+                                            
 def parse_nadfun_graduated(
     _addr: str,
     topics: list[str],
@@ -431,17 +431,17 @@ def parse_nadfun_graduated(
         "pool": pool
     }
 
-# Swap(
-#   address sender,
-#   address recipient,
-#   int256 amount0,
-#   int256 amount1,
-#   uint160 sqrtPriceX96,
-#   uint128 liquidity,
-#   int24 tick
-# );
-# parses uniswap v3-style Swap event into a dict consumable by state.apply_launchpad_trade (slightly diff shape)
-# amount0 and amount1 are signed deltas, sqrt_price_x96 is the new sqrt price
+       
+                   
+                      
+                   
+                   
+                         
+                      
+              
+    
+                                                                                                                
+                                                                             
 def parse_v3_trade(addr, tops, data):
     pool = addr.lower()
     sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""

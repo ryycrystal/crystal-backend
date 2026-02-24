@@ -1,21 +1,21 @@
-# 32-byte word or hex string into a 0x-prefixed address
+                                                       
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
-# yield s in fixed-size n-character chunks (used for 32-byte words)
+                                                                   
 def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
-# LaunchpadTrade(
-#   address indexed token, 
-#   address indexed user, 
-#   bool isBuy, 
-#   uint256 amountIn, 
-#   uint256 amountOut, 
-#   uint256 virtualNativeReserve, 
-#   uint256 virtualTokenReserve
-# );
-# into a flat dict for state.apply_launchpad_trade
+                 
+                           
+                          
+                
+                      
+                       
+                                  
+                               
+    
+                                                  
 def parse_launchpad_trade(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     user = to_addr(tops[2]).lower()
@@ -38,19 +38,19 @@ def parse_launchpad_trade(_addr, tops, data):
         "token_reserve": token_reserve,
     }
 
-# TokenCreated(
-#   address indexed token, 
-#   address indexed creator, 
-#   string name, 
-#   string symbol, 
-#   string metadataCID, 
-#   string description, 
-#   string social1, 
-#   string social2, 
-#   string social3, 
-#   string social4
-# );
-# into a flat dict for state.apply_token_created
+               
+                           
+                             
+                 
+                   
+                        
+                        
+                    
+                    
+                    
+                  
+    
+                                                
 def parse_token_created(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     creator = to_addr(tops[2]).lower()
@@ -106,8 +106,8 @@ def parse_token_created(_addr, tops, data):
         "source": 0,
     }
 
-# Migrated(address indexed token);
-# for state.apply_migrated
+                                  
+                          
 def parse_migrated(_addr, tops, _data):
     token = to_addr(tops[1]).lower()
     return {

@@ -68,20 +68,15 @@ async def reindex(start_block: int, batch: int) -> int:
 
                     addr = raw.get("address", "").lower()
 
-                    if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                        if addr != h.CONTRACTS["NADFUN"].lower():
-                            continue
-                    elif tag == "V3SWAP":
-                        pass
-                    elif tag == "TF":
+                    if not h.accepts_log_for_indexing(tag, addr):
+                        continue
+                    if tag == "TF":
                         if (
                             addr not in SEQUENCER._state.launchpad_tokens
                             and addr not in SEQUENCER._state.token_to_v3_pool
                             and addr not in new_tokens_in_blk
                         ):
                             continue
-                    else:
-                        continue
 
                     filtered.append(raw)
 
@@ -159,11 +154,16 @@ def _new_tokens_in_block(logs_for_blk: list[dict]) -> set[str]:
         topics = raw.get("topics") or []
         if len(topics) < 3:
             continue
-        if h.EVENT_SIGS.get(topics[0].lower()) != "NFC":
+        tag = h.EVENT_SIGS.get(topics[0].lower())
+        if tag not in {"NFC", "TC"}:
             continue
-        if raw.get("address", "").lower() != h.CONTRACTS["NADFUN"].lower():
+        addr = raw.get("address", "").lower()
+        if tag == "NFC" and addr != h.CONTRACTS["NADFUN"].lower():
             continue
-        tok = _topic_addr(topics[2])
+        if tag == "TC" and addr != h.CONTRACTS.get("ROUTER", "").lower():
+            continue
+        tok_topic_idx = 2 if tag == "NFC" else 1
+        tok = _topic_addr(topics[tok_topic_idx]) if len(topics) > tok_topic_idx else ""
         if tok:
             out.add(tok)
     return out
@@ -296,20 +296,15 @@ async def backfill(start_block: int, batch: int) -> int:
 
                             addr = raw.get("address", "").lower()
 
-                            if tag in ("NFC", "NFB", "NFS", "NFSYNC", "NFT", "MG"):
-                                if addr != h.CONTRACTS["NADFUN"].lower():
-                                    continue
-                            elif tag == "V3SWAP":
-                                pass
-                            elif tag == "TF":
+                            if not h.accepts_log_for_indexing(tag, addr):
+                                continue
+                            if tag == "TF":
                                 if (
                                     addr not in SEQUENCER._state.launchpad_tokens
                                     and addr not in SEQUENCER._state.token_to_v3_pool
                                     and addr not in new_tokens_in_blk
                                 ):
                                     continue
-                            else:
-                                continue
 
                             filtered.append(raw)
 

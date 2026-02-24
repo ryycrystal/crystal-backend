@@ -113,3 +113,27 @@ def parse_vault_unlock(addr: str, tops: list[str], data_no0x: str) -> dict:
 def parse_vault_close(addr: str, tops: list[str], data_no0x: str) -> dict:
     vault = to_addr(tops[1][-40:]) if len(tops) > 1 else ""
     return {"vault": vault}
+
+def parse_vault_max_shares_changed(addr: str, tops: list[str], data_no0x: str) -> dict:
+    h = data_no0x or ""
+    h = h if len(h) % 2 == 0 else "0" + h
+    w = list(chunks(h, 64))
+    vault = to_addr(tops[1][-40:]) if len(tops) > 1 else ""
+    max_shares = int(w[0], 16) if len(w) > 0 else 0
+    return {"vault": vault, "maxShares": max_shares}
+
+def parse_vault_lockup_changed(addr: str, tops: list[str], data_no0x: str) -> dict:
+    h = data_no0x or ""
+    h = h if len(h) % 2 == 0 else "0" + h
+    w = list(chunks(h, 64))
+    vault = to_addr(tops[1][-40:]) if len(tops) > 1 else ""
+    lockup = int(w[0], 16) if len(w) > 0 else 0
+    return {"vault": vault, "lockup": lockup}
+
+def parse_vault_decrease_on_withdraw_changed(addr: str, tops: list[str], data_no0x: str) -> dict:
+    h = data_no0x or ""
+    h = h if len(h) % 2 == 0 else "0" + h
+    w = list(chunks(h, 64))
+    vault = to_addr(tops[1][-40:]) if len(tops) > 1 else ""
+    value = int(w[0], 16) != 0 if len(w) > 0 else False
+    return {"vault": vault, "decreaseOnWithdraw": value}
