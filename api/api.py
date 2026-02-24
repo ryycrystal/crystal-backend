@@ -2368,6 +2368,74 @@ def vault_history(
     }
 
 
+def _crystal_market_dump_row_to_api(row) -> Dict[str, Any]:
+    (
+        market,
+        is_canonical,
+        quote_asset,
+        base_asset,
+        quote_address,
+        quote_decimals,
+        quote_ticker,
+        quote_name,
+        base_address,
+        base_decimals,
+        base_ticker,
+        base_name,
+        market_id,
+        market_type,
+        scale_factor,
+        tick_size,
+        max_price,
+        min_size,
+        taker_fee,
+        maker_rebate,
+        is_amm_enabled,
+        last_price,
+        created_block,
+        created_at,
+        updated_block,
+        updated_at,
+    ) = row
+    return {
+        "market": str(market or "").lower(),
+        "address": str(market or "").lower(),
+        "isCanonical": bool(is_canonical),
+        "quoteAsset": str(quote_asset or "").lower(),
+        "baseAsset": str(base_asset or "").lower(),
+        "quoteAddress": str(quote_address or "").lower(),
+        "baseAddress": str(base_address or "").lower(),
+        "quoteDecimals": int(quote_decimals or 0),
+        "baseDecimals": int(base_decimals or 0),
+        "quoteTicker": quote_ticker or "",
+        "quoteName": quote_name or "",
+        "baseTicker": base_ticker or "",
+        "baseName": base_name or "",
+        "marketId": str(int(market_id or 0)),
+        "marketType": int(market_type or 0),
+        "scaleFactor": str(int(scale_factor or 0)),
+        "tickSize": str(int(tick_size or 0)),
+        "maxPrice": str(int(max_price or 0)),
+        "minSize": str(int(min_size or 0)),
+        "takerFee": str(int(taker_fee or 0)),
+        "makerRebate": str(int(maker_rebate or 0)),
+        "isAMMEnabled": bool(is_amm_enabled),
+        "lastPrice": float(last_price or 0),
+        "lastPriceRaw": _fmt(last_price),
+        "createdBlock": int(created_block or 0) if created_block is not None else None,
+        "createdAt": int(created_at or 0) if created_at is not None else None,
+        "updatedBlock": int(updated_block or 0) if updated_block is not None else None,
+        "updatedAt": int(updated_at or 0) if updated_at is not None else None,
+    }
+
+
+@app.get("/markets/list")
+def list_markets_dump() -> Dict[str, Any]:
+    rows = storage.list_crystal_markets_dump()
+    markets = [_crystal_market_dump_row_to_api(r) for r in rows]
+    return {"count": len(markets), "markets": markets}
+
+
 def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
     (
         market,
@@ -2381,6 +2449,7 @@ def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
         base_ticker,
         base_name,
         taker_fee,
+        is_amm_enabled,
         last_price,
         updated_at,
         created_at,
@@ -2394,6 +2463,7 @@ def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
         "base": str(base_address or "").lower(),
         "marketType": int(market_type or 0),
         "feeBps": int(taker_fee or 0),
+        "isAMMEnabled": bool(is_amm_enabled),
         "quoteTicker": quote_ticker or "",
         "quoteName": quote_name or "",
         "baseTicker": base_ticker or "",

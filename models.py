@@ -47,6 +47,7 @@ class PoolInfo:
 @dataclass(slots=True)
 class MarketInfo:
     isCanonical: bool
+    isAMMEnabled: bool
     quoteAsset: str
     baseAsset: str
     market: str

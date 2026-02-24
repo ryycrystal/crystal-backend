@@ -459,6 +459,7 @@ def init_db() -> None:
                 min_size       NUMERIC(78, 0) NOT NULL DEFAULT 0,
                 taker_fee      NUMERIC(78, 0) NOT NULL DEFAULT 0,
                 maker_rebate   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                is_amm_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                 last_price     NUMERIC(50, 18) NOT NULL DEFAULT 0,
                 created_block  BIGINT,
                 created_at     BIGINT,
@@ -471,6 +472,19 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_crystal_markets_quote_base
             ON crystal_markets (quote_address, base_address);
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE crystal_markets
+            ADD COLUMN IF NOT EXISTS is_amm_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
+        cur.execute(
+            """
+            UPDATE crystal_markets
+            SET is_amm_enabled = (market_type > 1)
+            WHERE is_amm_enabled IS DISTINCT FROM (market_type > 1);
             """
         )
 
@@ -1967,6 +1981,7 @@ def upsert_crystal_market(
     min_size: int,
     taker_fee: int,
     maker_rebate: int,
+    is_amm_enabled: bool,
     created_block: int | None,
     created_at: int | None,
     cur: psycopg2.extensions.cursor | None = None,
@@ -1992,6 +2007,7 @@ def upsert_crystal_market(
         int(min_size or 0),
         int(taker_fee or 0),
         int(maker_rebate or 0),
+        bool(is_amm_enabled),
         int(created_block) if created_block is not None else None,
         int(created_at) if created_at is not None else None,
         int(created_block) if created_block is not None else None,
@@ -2001,10 +2017,10 @@ def upsert_crystal_market(
         INSERT INTO crystal_markets (
             market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
             quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name,
-            market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate,
+            market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate, is_amm_enabled,
             created_block, created_at, updated_block, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (market) DO UPDATE SET
             is_canonical = EXCLUDED.is_canonical,
             quote_asset = EXCLUDED.quote_asset,
@@ -2025,6 +2041,7 @@ def upsert_crystal_market(
             min_size = EXCLUDED.min_size,
             taker_fee = EXCLUDED.taker_fee,
             maker_rebate = EXCLUDED.maker_rebate,
+            is_amm_enabled = EXCLUDED.is_amm_enabled,
             updated_block = COALESCE(EXCLUDED.updated_block, crystal_markets.updated_block),
             updated_at = COALESCE(EXCLUDED.updated_at, crystal_markets.updated_at);
     """
@@ -2051,6 +2068,42 @@ def update_crystal_market_price(
     sql = """
         UPDATE crystal_markets
         SET last_price = %s,
+            updated_block = COALESCE(%s, updated_block),
+            updated_at = COALESCE(%s, updated_at)
+        WHERE market = %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
+def update_crystal_market_params(
+    market: str,
+    min_size: int,
+    taker_fee: int,
+    maker_rebate: int,
+    is_amm_enabled: bool,
+    updated_block: int | None,
+    updated_at: int | None,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    params = (
+        int(min_size or 0),
+        int(taker_fee or 0),
+        int(maker_rebate or 0),
+        bool(is_amm_enabled),
+        int(updated_block) if updated_block is not None else None,
+        int(updated_at) if updated_at is not None else None,
+        (market or "").lower(),
+    )
+    sql = """
+        UPDATE crystal_markets
+        SET min_size = %s,
+            taker_fee = %s,
+            maker_rebate = %s,
+            is_amm_enabled = %s,
             updated_block = COALESCE(%s, updated_block),
             updated_at = COALESCE(%s, updated_at)
         WHERE market = %s;
@@ -2106,8 +2159,46 @@ def load_crystal_markets_for_state():
                 market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
                 quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name,
                 market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate,
-                last_price
+                is_amm_enabled, last_price
             FROM crystal_markets
+            """
+        )
+        return cur.fetchall()
+
+
+def list_crystal_markets_dump():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                market,
+                is_canonical,
+                quote_asset,
+                base_asset,
+                quote_address,
+                quote_decimals,
+                quote_ticker,
+                quote_name,
+                base_address,
+                base_decimals,
+                base_ticker,
+                base_name,
+                market_id,
+                market_type,
+                scale_factor,
+                tick_size,
+                max_price,
+                min_size,
+                taker_fee,
+                maker_rebate,
+                is_amm_enabled,
+                last_price,
+                created_block,
+                created_at,
+                updated_block,
+                updated_at
+            FROM crystal_markets
+            ORDER BY COALESCE(updated_at, created_at, 0) DESC, market ASC
             """
         )
         return cur.fetchall()
@@ -2129,12 +2220,14 @@ def list_crystal_pool_markets():
                 base_ticker,
                 base_name,
                 taker_fee,
+                is_amm_enabled,
                 last_price,
                 updated_at,
                 created_at
             FROM crystal_markets
             WHERE is_canonical = TRUE
-              AND market_type NOT IN (0, 1)
+              AND market_type > 1
+              AND is_amm_enabled = TRUE
             ORDER BY COALESCE(updated_at, created_at, 0) DESC, market ASC
             """
         )
@@ -2157,12 +2250,14 @@ def get_crystal_pool_market(market: str):
                 base_ticker,
                 base_name,
                 taker_fee,
+                is_amm_enabled,
                 last_price,
                 updated_at,
                 created_at
             FROM crystal_markets
             WHERE is_canonical = TRUE
-              AND market_type NOT IN (0, 1)
+              AND market_type > 1
+              AND is_amm_enabled = TRUE
               AND market = %s
             LIMIT 1
             """,

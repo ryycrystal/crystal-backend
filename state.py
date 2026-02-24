@@ -192,11 +192,13 @@ class State:
                     min_size,
                     taker_fee,
                     maker_rebate,
+                    is_amm_enabled,
                     last_price,
                 ) = row
 
                 mi = models.MarketInfo(
                     isCanonical=bool(is_canonical),
+                    isAMMEnabled=bool(is_amm_enabled),
                     quoteAsset=(quote_asset or "").lower(),
                     baseAsset=(base_asset or "").lower(),
                     market=(market or "").lower(),
@@ -863,6 +865,7 @@ class State:
 
             mi = models.MarketInfo(
                 isCanonical=bool(ev.get("isCanonical", False)),
+                isAMMEnabled=bool(int(ev.get("marketType", 0) or 0) > 1),
                 quoteAsset=(ev.get("quoteAsset") or "").lower(),
                 baseAsset=(ev.get("baseAsset") or "").lower(),
                 market=(ev.get("market") or "").lower(),
@@ -928,6 +931,7 @@ class State:
                 min_size=mi.minSize,
                 taker_fee=mi.takerFee,
                 maker_rebate=mi.makerRebate,
+                is_amm_enabled=mi.isAMMEnabled,
                 created_block=blk,
                 created_at=ts,
                 cur=cur,
@@ -938,6 +942,36 @@ class State:
                 market=mi.market,
                 quote_decimals=mi.quoteDecimals,
                 base_decimals=mi.baseDecimals,
+                updated_block=blk,
+                updated_at=ts,
+                cur=cur,
+            )
+
+    def apply_market_params_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
+        if not ev:
+            return
+        with self._lock:
+            if (log_addr or "").lower() != h.CONTRACTS["ROUTER"].lower():
+                return
+            market = (ev.get("market") or "").lower()
+            if not market:
+                return
+            mi = self.addressToMarket.get(market)
+            min_size = int(ev.get("minSize", 0) or 0)
+            taker_fee = int(ev.get("takerFee", 0) or 0)
+            maker_rebate = int(ev.get("makerRebate", 0) or 0)
+            is_amm_enabled = bool(ev.get("isAMMEnabled", False))
+            if mi is not None:
+                mi.minSize = min_size
+                mi.takerFee = taker_fee
+                mi.makerRebate = maker_rebate
+                mi.isAMMEnabled = is_amm_enabled
+            storage.update_crystal_market_params(
+                market,
+                min_size=min_size,
+                taker_fee=taker_fee,
+                maker_rebate=maker_rebate,
+                is_amm_enabled=is_amm_enabled,
                 updated_block=blk,
                 updated_at=ts,
                 cur=cur,
@@ -1407,7 +1441,7 @@ class State:
                 return int(max_cached)
             min_cached = max(int(min_cached), int(start_block))
 
-        aux_tags = {"MC", "TR"} | set(h.VAULT_FACTORY_EVENT_TAGS)
+        aux_tags = {"MC", "MPC", "TR"} | set(h.VAULT_FACTORY_EVENT_TAGS)
 
         for chunk_start in range(int(min_cached), int(max_cached) + 1, int(batch_size)):
             chunk_end = min(chunk_start + int(batch_size) - 1, int(max_cached))
@@ -1453,6 +1487,8 @@ class State:
 
                     if tag == "MC":
                         self.apply_market_created(blk, ts_eff, parsed, addr)
+                    elif tag == "MPC":
+                        self.apply_market_params_changed(blk, ts_eff, parsed, addr)
                     elif tag == "TR":
                         self.apply_market_trade(blk, ts_eff, parsed, addr)
                     elif tag == "VD":
