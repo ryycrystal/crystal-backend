@@ -68,6 +68,16 @@ class MarketInfo:
     takerFee: int
     makerRebate: int
     price: Decimal = Decimal(0)
+    reserveQuote: int = 0
+    reserveBase: int = 0
+    totalShares: int = 0
+    tvlUsd: Decimal = Decimal(0)
+    volume24hUsd: Decimal = Decimal(0)
+    fees24hUsd: Decimal = Decimal(0)
+    apy24h: Decimal = Decimal(0)
+    dailyYield24h: Decimal = Decimal(0)
+    lastSyncBlock: int = 0
+    lastSyncAt: int = 0
 
 @dataclass(slots=True)
 class Vault:

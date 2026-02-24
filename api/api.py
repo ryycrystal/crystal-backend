@@ -789,23 +789,61 @@ def _crystal_market_dump_row_to_api(row) -> Dict[str, Any]:
 
 
 def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
-    (
-        market,
-        quote_address,
-        base_address,
-        market_type,
-        quote_decimals,
-        base_decimals,
-        quote_ticker,
-        quote_name,
-        base_ticker,
-        base_name,
-        taker_fee,
-        is_amm_enabled,
-        last_price,
-        updated_at,
-        created_at,
-    ) = row
+    if len(row) >= 25:
+        (
+            market,
+            quote_address,
+            base_address,
+            market_type,
+            quote_decimals,
+            base_decimals,
+            quote_ticker,
+            quote_name,
+            base_ticker,
+            base_name,
+            taker_fee,
+            is_amm_enabled,
+            last_price,
+            updated_at,
+            created_at,
+            reserve_quote,
+            reserve_base,
+            total_shares,
+            tvl_usd,
+            volume_24h_usd,
+            fees_24h_usd,
+            apy_24h,
+            daily_yield_24h,
+            _last_sync_block,
+            last_sync_at,
+        ) = row[:25]
+    else:
+        (
+            market,
+            quote_address,
+            base_address,
+            market_type,
+            quote_decimals,
+            base_decimals,
+            quote_ticker,
+            quote_name,
+            base_ticker,
+            base_name,
+            taker_fee,
+            is_amm_enabled,
+            last_price,
+            updated_at,
+            created_at,
+        ) = row
+        reserve_quote = 0
+        reserve_base = 0
+        total_shares = 0
+        tvl_usd = 0
+        volume_24h_usd = 0
+        fees_24h_usd = 0
+        apy_24h = 0
+        daily_yield_24h = 0
+        last_sync_at = updated_at
     return {
         "id": str(market or "").lower(),
         "address": str(market or "").lower(),
@@ -814,7 +852,7 @@ def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
         "quote": str(quote_address or "").lower(),
         "base": str(base_address or "").lower(),
         "marketType": int(market_type or 0),
-        "feeBps": int(taker_fee or 0),
+        "feeBps": 25 if int(market_type or 0) > 1 else int(taker_fee or 0),
         "isAMMEnabled": bool(is_amm_enabled),
         "quoteTicker": quote_ticker or "",
         "quoteName": quote_name or "",
@@ -822,16 +860,19 @@ def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
         "baseName": base_name or "",
         "quoteDecimals": int(quote_decimals or 0),
         "baseDecimals": int(base_decimals or 0),
-        "reserveQuote": "0",
-        "reserveBase": "0",
-        "tvlUsd": 0.0,
-        "totalShares": "0",
-        "volume24hUsd": 0.0,
-        "fees24hUsd": 0.0,
-        "apy24h": 0.0,
+        "reserveQuote": str(int(reserve_quote or 0)),
+        "reserveBase": str(int(reserve_base or 0)),
+        "tvlUsd": float(tvl_usd or 0.0),
+        "totalShares": str(int(total_shares or 0)),
+        "volume24hUsd": float(volume_24h_usd or 0.0),
+        "fees24hUsd": float(fees_24h_usd or 0.0),
+        "apy24h": float(apy_24h or 0.0),
+        "apy24hPercent": float(apy_24h or 0.0) * 100.0,
+        "dailyYieldPercent": float(daily_yield_24h or 0.0) * 100.0,
         "apyHistory": [],
+        "tvlHistory": [],
         "lastPrice": float(last_price or 0),
-        "updatedAt": int(updated_at or created_at or 0),
+        "updatedAt": int(last_sync_at or updated_at or created_at or 0),
     }
 
 

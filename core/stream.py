@@ -8,9 +8,140 @@ import backfill
 
 HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = 100
+VAULT_SAMPLER_INTERVAL = 30
+VAULT_SAMPLER_MULTICALL_CHUNK = 200
+MULTICALL3_ADDR = "0xca11bde05977b3631167028862be2a173976ca11"
+GET_BALANCES_CALLDATA = bytes.fromhex("00113e08")
+MULTICALL3_AGGREGATE3_SELECTOR = bytes.fromhex("82ad56cb")
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
+
+
+def _u256_at(buf: bytes, off: int) -> int:
+    if off < 0 or (off + 32) > len(buf):
+        return 0
+    return int.from_bytes(buf[off:off + 32], "big")
+
+
+def _abi_u256(n: int) -> bytes:
+    return int(n).to_bytes(32, "big")
+
+
+def _abi_addr(addr: str) -> bytes:
+    h = str(addr or "").lower().replace("0x", "")[-40:].rjust(40, "0")
+    return (b"\x00" * 12) + bytes.fromhex(h)
+
+
+def _abi_bool(v: bool) -> bytes:
+    return _abi_u256(1 if v else 0)
+
+
+def _abi_bytes(data: bytes) -> bytes:
+    d = data or b""
+    pad = (-len(d)) % 32
+    return _abi_u256(len(d)) + d + (b"\x00" * pad)
+
+
+def _encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
+    elems = []
+    for target, calldata in calls:
+        body = _abi_addr(target) + _abi_bool(False) + _abi_u256(96) + _abi_bytes(calldata)
+        elems.append(body)
+    n = len(elems)
+    arr_heads_size = 32 * n
+    cur = arr_heads_size
+    arr_offsets = []
+    for e in elems:
+        arr_offsets.append(cur)
+        cur += len(e)
+    arr = _abi_u256(n) + b"".join(_abi_u256(o) for o in arr_offsets) + b"".join(elems)
+    payload = MULTICALL3_AGGREGATE3_SELECTOR + _abi_u256(32) + arr
+    return "0x" + payload.hex()
+
+
+def _decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, bytes]]:
+    if not isinstance(data_hex, str) or not data_hex.startswith("0x"):
+        return []
+    try:
+        buf = bytes.fromhex(data_hex[2:])
+    except Exception:
+        return []
+    top_off = _u256_at(buf, 0)
+    base = top_off
+    if (base + 32) > len(buf):
+        return []
+    n = _u256_at(buf, base)
+    tuple_base = base + 32
+    out = []
+    for i in range(n):
+        off = _u256_at(buf, tuple_base + (32 * i))
+        elem = tuple_base + off
+        success = bool(_u256_at(buf, elem))
+        bytes_off = _u256_at(buf, elem + 32)
+        bpos = elem + bytes_off
+        blen = _u256_at(buf, bpos)
+        bstart = bpos + 32
+        bend = bstart + blen
+        if bstart > len(buf):
+            out.append((success, b""))
+            continue
+        out.append((success, buf[bstart:min(bend, len(buf))]))
+    return out
+
+
+def _decode_vault_get_balances_return(ret: bytes) -> tuple[int, int] | None:
+    if not isinstance(ret, (bytes, bytearray)):
+        return None
+    quote_bal = _u256_at(ret, 0)
+    base_bal = _u256_at(ret, 32)
+    return (quote_bal, base_bal)
+
+
+async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
+    for vaddr in vaults:
+        try:
+            call_resp = await backfill.http_jsonrpc(
+                "eth_call",
+                [{"to": vaddr, "data": "0x00113e08"}, blk_hex],
+            )
+            ret = call_resp.get("result")
+            if not isinstance(ret, str) or not ret.startswith("0x"):
+                continue
+            raw = bytes.fromhex(ret[2:])
+            decoded = _decode_vault_get_balances_return(raw)
+            if not decoded:
+                continue
+            quote_bal, base_bal = decoded
+            state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+        except Exception:
+            continue
+
+
+async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
+    for i in range(0, len(vaults), VAULT_SAMPLER_MULTICALL_CHUNK):
+        chunk = vaults[i:i + VAULT_SAMPLER_MULTICALL_CHUNK]
+        try:
+            data = _encode_multicall3_aggregate3([(v, GET_BALANCES_CALLDATA) for v in chunk])
+            call_resp = await backfill.http_jsonrpc(
+                "eth_call",
+                [{"to": MULTICALL3_ADDR, "data": data}, blk_hex],
+            )
+            ret = call_resp.get("result")
+            results = _decode_multicall3_aggregate3_result(ret) if isinstance(ret, str) else []
+            if len(results) != len(chunk):
+                raise ValueError(f"multicall result length mismatch {len(results)} != {len(chunk)}")
+            for vaddr, (ok, raw) in zip(chunk, results):
+                if not ok:
+                    continue
+                decoded = _decode_vault_get_balances_return(raw)
+                if not decoded:
+                    continue
+                quote_bal, base_bal = decoded
+                state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+        except Exception as e:
+            print(f"[SAMPLER] Multicall fallback for chunk {i}-{i + len(chunk) - 1}: {e!r}", flush=True)
+            await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)
 
 
 def _add_missing(blk: int):
@@ -328,7 +459,7 @@ async def vault_sampler(state):
         try:
             vaults = list(getattr(state, "vaults", {}).keys())
             if not vaults:
-                await asyncio.sleep(30)
+                await asyncio.sleep(VAULT_SAMPLER_INTERVAL)
                 continue
 
             try:
@@ -339,7 +470,7 @@ async def vault_sampler(state):
             head_resp = await backfill.http_jsonrpc("eth_blockNumber", [])
             blk_hex = head_resp.get("result")
             if not isinstance(blk_hex, str):
-                await asyncio.sleep(30)
+                await asyncio.sleep(VAULT_SAMPLER_INTERVAL)
                 continue
 
             blk_num = int(blk_hex, 16)
@@ -354,23 +485,9 @@ async def vault_sampler(state):
                 except Exception:
                     ts = int(time.time())
 
-            for vaddr in vaults:
-                try:
-                    call_resp = await backfill.http_jsonrpc(
-                        "eth_call",
-                        [{"to": vaddr, "data": "0x00113e08"}, blk_hex],
-                    )
-                    ret = call_resp.get("result")
-                    if not isinstance(ret, str) or not ret.startswith("0x"):
-                        continue
-                    s = ret[2:].rjust(64 * 4, "0")
-                    quote_bal = int(s[128:192], 16)
-                    base_bal = int(s[192:256], 16)
-                    state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
-                except Exception:
-                    continue
+            await _sample_vaults_multicall(state, vaults, blk_hex, blk_num, ts)
 
         except Exception as e:
             print(f"[SAMPLER] {e!r}", flush=True)
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(VAULT_SAMPLER_INTERVAL)

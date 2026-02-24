@@ -408,6 +408,116 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS crystal_pools
+            (
+                market          TEXT PRIMARY KEY,
+                reserve_quote   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                reserve_base    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                total_shares    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                tvl_usd         NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                volume_24h_usd  NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                fees_24h_usd    NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                apy_24h         NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                daily_yield_24h NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                last_sync_block BIGINT,
+                last_sync_at    BIGINT,
+                updated_block   BIGINT,
+                updated_at      BIGINT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pools_updated
+            ON crystal_pools (COALESCE(updated_at, last_sync_at, 0) DESC, market ASC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pools_tvl
+            ON crystal_pools (tvl_usd DESC, market ASC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_pool_sync_events
+            (
+                id                 BIGSERIAL PRIMARY KEY,
+                block_number       BIGINT NOT NULL,
+                log_index          INTEGER NOT NULL,
+                timestamp          BIGINT NOT NULL,
+                market             TEXT NOT NULL,
+                txhash             TEXT NOT NULL,
+                kind               TEXT NOT NULL,
+                reserve_quote      NUMERIC(78, 0) NOT NULL,
+                reserve_base       NUMERIC(78, 0) NOT NULL,
+                prev_reserve_quote NUMERIC(78, 0),
+                prev_reserve_base  NUMERIC(78, 0),
+                volume_usd         NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                fees_usd           NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                UNIQUE (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pool_sync_events_market_ts
+            ON crystal_pool_sync_events (market, timestamp DESC, log_index DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pool_sync_events_market_kind_ts
+            ON crystal_pool_sync_events (market, kind, timestamp DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_pool_tvl_samples
+            (
+                market        TEXT NOT NULL,
+                block_number  BIGINT NOT NULL,
+                log_index     INTEGER NOT NULL,
+                timestamp     BIGINT NOT NULL,
+                reserve_quote NUMERIC(78, 0) NOT NULL,
+                reserve_base  NUMERIC(78, 0) NOT NULL,
+                tvl_usd       NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                txhash        TEXT NOT NULL,
+                PRIMARY KEY (market, block_number, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pool_tvl_samples_market_ts
+            ON crystal_pool_tvl_samples (market, timestamp DESC, block_number DESC, log_index DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_pool_lp_users
+            (
+                market        TEXT NOT NULL,
+                user_address  TEXT NOT NULL,
+                shares        NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                last_transfer BIGINT NOT NULL DEFAULT 0,
+                updated_block BIGINT,
+                PRIMARY KEY (market, user_address)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pool_lp_users_market_shares
+            ON crystal_pool_lp_users (market, shares DESC, user_address ASC);
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS crystal_vaults
             (
                 vault                 TEXT PRIMARY KEY,

@@ -3,6 +3,7 @@ import modules.launchpad as lp
 import modules.nadfun as n
 import modules.vaults as v
 import modules.markets as m
+import modules.pools as p
 
 decimal.getcontext().prec = 100
 
@@ -37,6 +38,9 @@ EVENT_SIGS = {
     "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
     "0x77c39d27acc1bbb9c6519311b11749cea1e4ac28704c34f4dd35aff06e870442": "MPC",
     "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c82982": "TR",
+    "0x2f00e3cdd69a77be7ed215ec7b2a36784dd158f921fca79ac29deffa353fe6ee": "PMINT",
+    "0xd3986fdc78865c06fb072387efddb45772a87fe2105e598db99f085be3d05b84": "PBURN",
+    "0xc95e30a514d4115dee44b3ba17b2fc114501726562d4c5f2663c06f42df8f1e7": "PSYNC",
     "0x24ad3570873d98f204dae563a92a783a01f6935a8965547ce8bf2cadd2c6ce3b": "TC",
     "0xc367a2f5396f96d105baaaa90fe29b1bb18ef54c712964410d02451e67c19d3e": "LT",
     "0xa2e7361c23d7820040603b83c0cd3f494d377bac69736377d75bb56c651a5098": "MG",
@@ -63,6 +67,9 @@ PARSERS = {
     "MC": m.parse_market_created,
     "MPC": m.parse_market_params_changed,
     "TR": m.parse_trade,
+    "PMINT": p.parse_mint,
+    "PBURN": p.parse_burn,
+    "PSYNC": p.parse_sync,
     "TC": lp.parse_token_created,
     "LT": lp.parse_launchpad_trade,
     "MG": lp.parse_migrated,
@@ -84,7 +91,7 @@ PARSERS = {
     "TF": _parse_transfer,
 }
 
-ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "TC", "LT", "MG"}
+ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
