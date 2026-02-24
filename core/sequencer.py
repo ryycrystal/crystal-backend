@@ -13,11 +13,11 @@ import state as _st
 class BatchAccumulator:
     def __init__(self):
         self.trades: list[tuple] = []
-        self.token_updates: dict[str, dict] = {}  # token -> final state
-        self.user_updates: dict[str, dict] = {}  # addr -> {native_volume_delta, realized_delta, trade_count_delta}
-        self.position_updates: dict[tuple[str, str], dict] = {}  # (user, token) -> deltas
-        self.ohlcv_data: list[tuple] = []  # (token, resolution_sec, bucket_start, price_native, native_amount)
-        self.snipers: list[tuple[str, str]] = []  # (token, user)
+        self.token_updates: dict[str, dict] = {}
+        self.user_updates: dict[str, dict] = {}
+        self.position_updates: dict[tuple[str, str], dict] = {}
+        self.ohlcv_data: list[tuple] = []
+        self.snipers: list[tuple[str, str]] = []
 
     def add_trade(
         self,
@@ -125,44 +125,67 @@ class BatchAccumulator:
         self.ohlcv_data.clear()
         self.snipers.clear()
 
-# facilitates the processing of logs into state, in the right order
+
 class Sequencer:
     def __init__(self, global_state: _st.State) -> None:
-        self._state = global_state # shared state instance that all logs mutate (global state thats used for all queries n em)
-        self._logs_by_block: Dict[int, List[dict]] = defaultdict(list) # pending logs by block number awaiting that block to be marked ready
-        self._ready_blocks: set[int] = set() # set of blocks marked ready
-        self._next_block: int | None = None # lowest block number we next need to process (or empty if none)
-        self._on_block: Optional[Callable[[int], None]] = None # callback invoked after each fully processed block
+        self._state = global_state
+        self._logs_by_block: Dict[int, List[dict]] = defaultdict(list)
+        self._ready_blocks: set[int] = set()
+        self._next_block: int | None = None
+        self._on_block: Optional[Callable[[int], None]] = None
+        self._block_timestamps: dict[int, int] = {}
+        self._missing_ts_warned: set[int] = set()
     
-    # callback invoked whenever a block finishes processing
+
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
 
-    # explicitly set the next expected block (used on startup to skip stale gaps)
+
     def set_next_block(self, blk: int) -> None:
         self._next_block = blk
 
-    # enqueue a log and start draining (processing) if possible
+
+    def reset_pending(self, next_block: int | None = None) -> None:
+        self._logs_by_block.clear()
+        self._ready_blocks.clear()
+        self._block_timestamps.clear()
+        self._missing_ts_warned.clear()
+        self._next_block = next_block
+
+    @staticmethod
+    def _log_index(raw_log: dict) -> int:
+        li = raw_log.get("logIndex")
+        return int(li, 16) if isinstance(li, str) else int(li or 0)
+
+
     def add_log(self, raw_log: dict) -> None:
         blk = int(raw_log["blockNumber"], 16) if isinstance(raw_log["blockNumber"], str) else raw_log["blockNumber"]
+        if self._next_block is not None and blk < self._next_block:
+            return
+        if raw_log.get("blockTimestamp") is None and blk in self._block_timestamps:
+            raw_log = dict(raw_log)
+            raw_log["blockTimestamp"] = hex(self._block_timestamps[blk])
         self._logs_by_block[blk].append(raw_log)
         if self._next_block is None:
             self._next_block = blk
         self._drain()
 
-    # marks a block as fully seen on-chain so its logs can be processed
-    def note_block(self, blk: int) -> None:
+
+    def note_block(self, blk: int, block_timestamp: int | None = None) -> None:
+        if block_timestamp is not None:
+            self._block_timestamps[int(blk)] = int(block_timestamp)
         self._ready_blocks.add(blk)
         if self._next_block is None:
             self._next_block = blk
         self._drain()
 
-    # processes blocks in order once both logs and ready signal exist
+
     def _drain(self) -> None:
         while self._next_block is not None and self._next_block in self._ready_blocks:
             logs = self._logs_by_block.pop(self._next_block, [])
             self._ready_blocks.discard(self._next_block)
             self._process_block(self._next_block, logs)
+            self._block_timestamps.pop(self._next_block, None)
             if self._on_block:
                 try:
                     self._on_block(self._next_block)
@@ -170,9 +193,9 @@ class Sequencer:
                     print(f"[SQ] Persist Error: {e!r}")
             self._next_block += 1
 
-    # per block, build transfer chains keyed by (tx_hash, token), for each txfer next[from] = to, prev[to] = from
-    # so for a given (tx, token) we follow buy is pool -> ... -> user using next, sell is user -> ... -> pool using prev
-    # also tracks ordered list of transfers for simpler first/last lookup
+
+
+
     def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
         transfer_maps: dict[tuple[str, str], dict] = {}
 
@@ -220,7 +243,7 @@ class Sequencer:
 
         return transfer_maps
 
-    # for a given trade event and transfer chains, find the true user
+
     def _resolve_trade_user(
         self,
         txh: str,
@@ -355,11 +378,12 @@ class Sequencer:
 
         return fallback_user
 
-    # actual processing (parsing, route to state handlers, apply changes)
-    # if cur is provided, uses that cursor (no commit)
-    # if counts_out is provided, accumulates into it instead of printing
-    # if batch is provided, accumulates writes instead of executing immediately
+
+
+
+
     def _process_block(self, blk: int, logs: List[dict], cur=None, counts_out: dict = None, batch: BatchAccumulator = None):
+        logs = sorted(logs, key=self._log_index)
         counts = counts_out if counts_out is not None else {
             "NFC": 0,
             "NFB": 0,
@@ -383,8 +407,10 @@ class Sequencer:
         if cur is None:
             with db_cursor() as cur:
                 self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+                storage.record_block_processed(blk, cur=cur)
         else:
             self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+            storage.record_block_processed(blk, cur=cur)
 
         if counts_out is None:
             print(
@@ -396,7 +422,16 @@ class Sequencer:
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
         for log in logs:
-            blk_ts = int(log.get("blockTimestamp"), 16)
+            raw_ts = log.get("blockTimestamp")
+            if raw_ts is None:
+                raw_ts = self._block_timestamps.get(blk)
+            if isinstance(raw_ts, str):
+                blk_ts = int(raw_ts, 16)
+            else:
+                blk_ts = int(raw_ts or 0)
+            if blk_ts == 0 and blk not in self._missing_ts_warned:
+                self._missing_ts_warned.add(blk)
+                print(f"[SQ] Missing blockTimestamp for block {blk}, using 0", flush=True)
             txh = log.get("transactionHash")
             li = log.get("logIndex")
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
@@ -462,7 +497,7 @@ class Sequencer:
 
                 self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
 
-    # batch processes multiple blocks with a shared cursor (one commit for entire batch)
+
     def process_chunk(
         self,
         chunk_start: int,
@@ -473,21 +508,25 @@ class Sequencer:
         counts = {"NFC": 0, "NFB": 0, "NFS": 0, "NFT": 0, "TF": 0, "V3SWAP": 0}
 
         batch = BatchAccumulator()
+        processed_blocks: list[int] = []
 
         for blk in range(chunk_start, chunk_end + 1):
             logs = logs_by_block.get(blk, [])
             self._process_block(blk, logs, cur=cur, counts_out=counts, batch=batch)
+            processed_blocks.append(blk)
 
             self._logs_by_block.pop(blk, None)
             self._ready_blocks.discard(blk)
+            self._block_timestamps.pop(blk, None)
 
-            if self._on_block:
+        batch.flush(cur)
+
+        if self._on_block:
+            for blk in processed_blocks:
                 try:
                     self._on_block(blk)
                 except Exception as e:
                     print(f"[SQ] on_block error: {e!r}")
-
-        batch.flush(cur)
 
         self._next_block = chunk_end + 1
 

@@ -17,7 +17,7 @@ _DB_MAX_CONN: int = 125
 _POOL: Optional[ThreadedConnectionPool] = None
 _POOL_LOCK = threading.Lock()
 
-# initializes global connection pool
+
 def init_pool() -> None:
     global _POOL
     
@@ -34,7 +34,7 @@ def init_pool() -> None:
             dsn=_DATABASE_URL,
         )
 
-# closes all connections in pool
+
 def close_pool() -> None:
     global _POOL
     
@@ -43,7 +43,7 @@ def close_pool() -> None:
             _POOL.closeall()
         _POOL = None
 
-# internal helper, fetches pool or loudly fail
+
 def _get_pool() -> ThreadedConnectionPool:
     global _POOL
     
@@ -52,8 +52,8 @@ def _get_pool() -> ThreadedConnectionPool:
 
     return _POOL
 
-# yields a psycopg2 cursor from the pool, gets connection, creates cursor, 
-# yields to caller, commits txn, closes cursor, returns connection to pool
+
+
 @contextmanager
 def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
     pool = _get_pool()
@@ -76,17 +76,17 @@ def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
     finally:
         pool.putconn(conn)
     
-# schema initialization
+
 def init_db() -> None:
     with db_cursor() as cur:
-        # extensions
+
         cur.execute(
             """
             CREATE EXTENSION IF NOT EXISTS pg_trgm;
             """
         )
         
-        # processed blocks history
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_blocks
@@ -106,7 +106,7 @@ def init_db() -> None:
             """
         )
         
-        # full trade history
+
         cur.execute(
            """
             CREATE TABLE IF NOT EXISTS launchpad_trades
@@ -152,7 +152,7 @@ def init_db() -> None:
             """
         )
         
-        # tokens
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_tokens
@@ -237,7 +237,7 @@ def init_db() -> None:
             """
         )
         
-        # user stats
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_users
@@ -252,7 +252,7 @@ def init_db() -> None:
             """
         )
         
-        # positions
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_positions
@@ -327,7 +327,7 @@ def init_db() -> None:
             """
         )
 
-        # v3 pools
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_pools
@@ -346,7 +346,7 @@ def init_db() -> None:
             """
         )
         
-        # klines stuff
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_ohlcv
@@ -370,7 +370,7 @@ def init_db() -> None:
             """
         )
         
-        # jolly portfolio
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_daily_pnl
@@ -393,7 +393,7 @@ def init_db() -> None:
             """
         )
         
-        # sniper stuff
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_snipers
@@ -417,7 +417,7 @@ def init_db() -> None:
             """
         )
         
-        # mon price
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_meta
@@ -428,9 +428,20 @@ def init_db() -> None:
             """
         )
 
-# block helpers
-def record_block_processed(block_number: int) -> None:
-    with db_cursor() as cur:
+
+def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(
+                """
+                INSERT INTO launchpad_blocks (number)
+                VALUES (%s)
+                ON CONFLICT (number) DO UPDATE
+                SET processed_at = NOW();
+                """,
+                (block_number,),
+            )
+    else:
         cur.execute(
             """
             INSERT INTO launchpad_blocks (number)
@@ -452,7 +463,7 @@ def get_last_processed_block() -> Optional[str]:
     last = row[0]
     return int(last) if last is not None else None
 
-# trade helpers
+
 def insert_trade(
     *,
     block_number: int,
@@ -952,7 +963,7 @@ def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.c
             
     return inserted
 
-# tokens/pools   
+
 def upsert_token_created(
     *,
     token: str,
@@ -1257,7 +1268,7 @@ def upsert_pool(
             ),
         )
 
-# reload/state reconstruction      
+
 def load_all_pools():
     with db_cursor() as cur:
         cur.execute("""
@@ -1306,7 +1317,7 @@ def load_tokens_for_state():
         )
         return cur.fetchall()
         
-# api helpers
+
 def search_tokens(query: str, limit: int = 20):
     q = (query or "").strip().lower()
     if not q:
@@ -1415,7 +1426,7 @@ def clear_position(
             (addr, tok),
         )
 
-# db helpers
+
 def write_block_logs(block_number: int, logs: list[dict], cur: psycopg2.extensions.cursor | None = None) -> None:
     if not logs:
         logs = []

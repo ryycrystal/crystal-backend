@@ -4,7 +4,7 @@ import modules.nadfun as n
 
 decimal.getcontext().prec = 100
 
-# transfer parser idk where else to put ts
+
 def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
     from_addr = lp.to_addr(tops[1]) if len(tops) > 1 else "0x" + "0" * 40
     to_addr = lp.to_addr(tops[2]) if len(tops) > 2 else "0x" + "0" * 40
@@ -52,16 +52,24 @@ _RPC_MAX_RPS = 20
 _last_rpc_ts = 0.0
 _rpc_lock = asyncio.Lock()
 
-# wait for the jsonrpc response with matching id, raising if it contains an error
-async def ack(ws, rid):
+
+async def ack(ws, rid, stash: list[dict] | None = None):
+    deferred: list[dict] = []
     while True:
-        resp = json.loads(await ws.recv())
+        if stash is not None and stash:
+            resp = stash.pop(0)
+        else:
+            resp = json.loads(await ws.recv())
         if resp.get("id") == rid:
+            if stash is not None and deferred:
+                stash[:0] = deferred
             if "error" in resp:
                 raise RuntimeError(resp)
             return resp
+        if stash is not None:
+            deferred.append(resp)
 
-# applies rate limit so rpc calls dont exceed rps limit
+
 async def rate_gate() -> None:
     global _last_rpc_ts
     async with _rpc_lock:

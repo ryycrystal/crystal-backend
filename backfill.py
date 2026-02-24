@@ -37,6 +37,8 @@ async def reindex(start_block: int, batch: int) -> int:
         storage.clear_derived_state_from_block(start_block, cur)
 
     SEQUENCER._state.reset_for_reindex()
+    SEQUENCER.reset_pending(start_block)
+    nadfun._PENDING_SYNC.clear()
 
     last_processed = start_block - 1
     total_metadata_fetched = 0
@@ -47,11 +49,13 @@ async def reindex(start_block: int, batch: int) -> int:
 
         with storage.db_cursor() as cur:
             cached = storage.get_block_logs_range(chunk_start, chunk_end, cur=cur)
+            await ensure_block_timestamps(cached)
 
             filtered_logs: dict[int, list[dict]] = {}
             for blk in range(chunk_start, chunk_end + 1):
                 logs_for_blk = cached.get(blk, [])
                 filtered = []
+                new_tokens_in_blk = _new_tokens_in_block(logs_for_blk)
 
                 for raw in logs_for_blk:
                     topics = raw.get("topics") or []
@@ -70,7 +74,11 @@ async def reindex(start_block: int, batch: int) -> int:
                     elif tag == "V3SWAP":
                         pass
                     elif tag == "TF":
-                        if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
+                        if (
+                            addr not in SEQUENCER._state.launchpad_tokens
+                            and addr not in SEQUENCER._state.token_to_v3_pool
+                            and addr not in new_tokens_in_blk
+                        ):
                             continue
                     else:
                         continue
@@ -104,8 +112,8 @@ async def reindex(start_block: int, batch: int) -> int:
     print(f"[Reindex] Complete, last processed = {last_processed}, total metadata fetched = {total_metadata_fetched}")
     return last_processed
 
-# parse cli arguments for the backfiller process
-# returns an argparse namespace with start_block and batch size
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="backfiller")
     parser.add_argument(
@@ -127,6 +135,7 @@ def parse_args():
     return parser.parse_args()
 
 _HTTP_CLIENT: httpx.AsyncClient | None = None
+_BLOCK_TS_CACHE: dict[int, int] = {}
 
 async def _get_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
@@ -134,7 +143,63 @@ async def _get_client() -> httpx.AsyncClient:
         _HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
     return _HTTP_CLIENT
 
-# gets current chainhead block number
+
+def _topic_addr(topic: str) -> str:
+    if not isinstance(topic, str):
+        return ""
+    hex_topic = topic[2:] if topic.startswith("0x") else topic
+    if len(hex_topic) < 40:
+        return ""
+    return ("0x" + hex_topic[-40:]).lower()
+
+
+def _new_tokens_in_block(logs_for_blk: list[dict]) -> set[str]:
+    out: set[str] = set()
+    for raw in logs_for_blk:
+        topics = raw.get("topics") or []
+        if len(topics) < 3:
+            continue
+        if h.EVENT_SIGS.get(topics[0].lower()) != "NFC":
+            continue
+        if raw.get("address", "").lower() != h.CONTRACTS["NADFUN"].lower():
+            continue
+        tok = _topic_addr(topics[2])
+        if tok:
+            out.add(tok)
+    return out
+
+
+async def get_block_timestamp_http(block_number: int) -> int:
+    blk = int(block_number)
+    cached = _BLOCK_TS_CACHE.get(blk)
+    if cached is not None:
+        return cached
+
+    data = await http_jsonrpc("eth_getBlockByNumber", [hex(blk), False])
+    result = data.get("result") or {}
+    ts_raw = result.get("timestamp")
+    if ts_raw is None:
+        raise RuntimeError(f"missing timestamp for block {blk}")
+    ts = int(ts_raw, 16) if isinstance(ts_raw, str) else int(ts_raw)
+    _BLOCK_TS_CACHE[blk] = ts
+    return ts
+
+
+async def ensure_block_timestamps(logs_by_block: dict[int, list[dict]]) -> None:
+    missing: list[int] = []
+    for blk, logs in logs_by_block.items():
+        if not logs:
+            continue
+        if any(log.get("blockTimestamp") is None for log in logs):
+            missing.append(int(blk))
+
+    for blk in missing:
+        ts_hex = hex(await get_block_timestamp_http(blk))
+        for log in logs_by_block.get(blk, []):
+            if log.get("blockTimestamp") is None:
+                log["blockTimestamp"] = ts_hex
+
+
 async def get_head_http() -> int:
     data = await http_jsonrpc("eth_blockNumber", [])
     return int(data["result"], 16)
@@ -150,7 +215,7 @@ async def http_jsonrpc(method: str, params: list) -> dict:
         raise RuntimeError(data)
     return data
 
-# fetch logs for a block range [frm, to] using eth_getLogs
+
 async def fetch_logs_http(frm: int, to: int) -> list[dict]:
     data = await http_jsonrpc(
         "eth_getLogs",
@@ -162,10 +227,10 @@ async def fetch_logs_http(frm: int, to: int) -> list[dict]:
     )
     return data["result"]
 
-# main backfill loop
-# walks from start_block up to current head in batches
-# seeds headers and replaying logs into the sequencer in order
-# returns the last processed block
+
+
+
+
 async def backfill(start_block: int, batch: int) -> int:
     while True:
         try:
@@ -174,7 +239,7 @@ async def backfill(start_block: int, batch: int) -> int:
 
             last_processed = start_block - 1
             total_metadata_fetched = 0
-            metadata_process_interval = 10  # Process metadata every N batches
+            metadata_process_interval = 10
 
             for batch_idx, chunk_start in enumerate(range(start_block, head_snapshot + 1, batch)):
                 chunk_end = min(chunk_start + batch - 1, head_snapshot)
@@ -212,10 +277,13 @@ async def backfill(start_block: int, batch: int) -> int:
                             cached[blk] = by_block.get(blk, [])
                             fetched_blocks.add(blk)
 
+                    await ensure_block_timestamps(cached)
+
                     filtered_logs: dict[int, list[dict]] = {}
                     for blk in range(chunk_start, chunk_end + 1):
                         logs_for_blk = cached.get(blk, [])
                         filtered = []
+                        new_tokens_in_blk = _new_tokens_in_block(logs_for_blk)
 
                         for raw in logs_for_blk:
                             topics = raw.get("topics") or []
@@ -234,7 +302,11 @@ async def backfill(start_block: int, batch: int) -> int:
                             elif tag == "V3SWAP":
                                 pass
                             elif tag == "TF":
-                                if addr not in SEQUENCER._state.launchpad_tokens and addr not in SEQUENCER._state.token_to_v3_pool:
+                                if (
+                                    addr not in SEQUENCER._state.launchpad_tokens
+                                    and addr not in SEQUENCER._state.token_to_v3_pool
+                                    and addr not in new_tokens_in_blk
+                                ):
                                     continue
                             else:
                                 continue
@@ -268,4 +340,14 @@ async def backfill(start_block: int, batch: int) -> int:
         except Exception as e:
             print(f"[Backfill] Fatal Error {e!r}", flush=True)
             traceback.print_exc()
+            try:
+                db_last = storage.get_last_processed_block()
+                resume_from = max(start_block, (int(db_last) + 1) if db_last is not None else start_block)
+                print(f"[Backfill] Rebuilding in-memory state from DB, resume at {resume_from}", flush=True)
+                SEQUENCER._state.rebuild_from_db()
+                SEQUENCER.reset_pending(resume_from)
+                nadfun._PENDING_SYNC.clear()
+                start_block = resume_from
+            except Exception as recover_err:
+                print(f"[Backfill] Recovery failed {recover_err!r}", flush=True)
             await asyncio.sleep(5.0)

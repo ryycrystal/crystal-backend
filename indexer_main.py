@@ -15,8 +15,6 @@ async def main() -> None:
     storage.init_pool()
     storage.init_db()
 
-    SEQUENCER.set_on_block(storage.record_block_processed)
-
     await nadfun.start_metadata_worker(storage)
 
     if REINDEX:
