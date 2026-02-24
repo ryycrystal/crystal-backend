@@ -2113,6 +2113,64 @@ def load_crystal_markets_for_state():
         return cur.fetchall()
 
 
+def list_crystal_pool_markets():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                market,
+                quote_address,
+                base_address,
+                market_type,
+                quote_decimals,
+                base_decimals,
+                quote_ticker,
+                quote_name,
+                base_ticker,
+                base_name,
+                taker_fee,
+                last_price,
+                updated_at,
+                created_at
+            FROM crystal_markets
+            WHERE is_canonical = TRUE
+              AND market_type NOT IN (0, 1)
+            ORDER BY COALESCE(updated_at, created_at, 0) DESC, market ASC
+            """
+        )
+        return cur.fetchall()
+
+
+def get_crystal_pool_market(market: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                market,
+                quote_address,
+                base_address,
+                market_type,
+                quote_decimals,
+                base_decimals,
+                quote_ticker,
+                quote_name,
+                base_ticker,
+                base_name,
+                taker_fee,
+                last_price,
+                updated_at,
+                created_at
+            FROM crystal_markets
+            WHERE is_canonical = TRUE
+              AND market_type NOT IN (0, 1)
+              AND market = %s
+            LIMIT 1
+            """,
+            ((market or "").lower(),),
+        )
+        return cur.fetchone()
+
+
 def upsert_crystal_vault(
     *,
     vault: str,
