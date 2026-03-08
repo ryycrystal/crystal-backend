@@ -679,214 +679,62 @@ def _mon_price_usd() -> Decimal:
         return Decimal("0.03")
 
 
-
-def _vault_snapshot_from_samples(vaddr: str, timeframe: int = 1, points: int = 0) -> Dict[str, Any] | None:
-    now_ts = int(time.time())
-    if timeframe == 1:
-        start_ts = now_ts - 86400
-    elif timeframe == 2:
-        start_ts = now_ts - (7 * 86400)
-    elif timeframe == 3:
-        start_ts = now_ts - (30 * 86400)
-    else:
-        start_ts = None
-
-    rows = storage.list_crystal_vault_balance_samples(vaddr, start_ts=start_ts, limit=0)
-    if not rows:
-        return None
-    if points and int(points) > 0:
-        target_points = max(2, int(points))
-        if len(rows) > target_points:
-            if target_points == 2:
-                rows = [rows[0], rows[-1]]
-            else:
-                idxs = [round(i * (len(rows) - 1) / (target_points - 1)) for i in range(target_points)]
-                dedup = []
-                prev = None
-                for idx in idxs:
-                    if idx != prev:
-                        dedup.append(rows[idx])
-                        prev = idx
-                rows = dedup
-    pts = []
-    vals = []
-    for r in rows:
-        ts = int(r[1] or 0)
-        usd = float(r[4] or 0.0)
-        pts.append([ts, usd])
-        vals.append(usd)
-    if not vals:
-        return None
-    first = float(vals[0])
-    last = float(vals[-1])
-    pct = ((last / first) - 1.0) * 100.0 if first > 0 else 0.0
-    return {
-        "timeframe": int(timeframe),
-        "tvl": pts,
-        "stats": {
-            "pctChange": pct,
-            "lastUsd": last,
-            "min": float(min(vals)),
-            "max": float(max(vals)),
-        },
-    }
-
-
-def _crystal_market_dump_row_to_api(row) -> Dict[str, Any]:
-    (
-        market,
-        is_canonical,
-        quote_asset,
-        base_asset,
-        quote_address,
-        quote_decimals,
-        quote_ticker,
-        quote_name,
-        base_address,
-        base_decimals,
-        base_ticker,
-        base_name,
-        market_id,
-        market_type,
-        scale_factor,
-        tick_size,
-        max_price,
-        min_size,
-        taker_fee,
-        maker_rebate,
-        is_amm_enabled,
-        last_price,
-        created_block,
-        created_at,
-        updated_block,
-        updated_at,
-    ) = row
-    return {
-        "market": str(market or "").lower(),
-        "address": str(market or "").lower(),
-        "isCanonical": bool(is_canonical),
-        "quoteAsset": str(quote_asset or "").lower(),
-        "baseAsset": str(base_asset or "").lower(),
-        "quoteAddress": str(quote_address or "").lower(),
-        "baseAddress": str(base_address or "").lower(),
-        "quoteDecimals": int(quote_decimals or 0),
-        "baseDecimals": int(base_decimals or 0),
-        "quoteTicker": quote_ticker or "",
-        "quoteName": quote_name or "",
-        "baseTicker": base_ticker or "",
-        "baseName": base_name or "",
-        "marketId": str(int(market_id or 0)),
-        "marketType": int(market_type or 0),
-        "scaleFactor": str(int(scale_factor or 0)),
-        "tickSize": str(int(tick_size or 0)),
-        "maxPrice": str(int(max_price or 0)),
-        "minSize": str(int(min_size or 0)),
-        "takerFee": str(int(taker_fee or 0)),
-        "makerRebate": str(int(maker_rebate or 0)),
-        "isAMMEnabled": bool(is_amm_enabled),
-        "lastPrice": float(last_price or 0),
-        "lastPriceRaw": _fmt(last_price),
-        "createdBlock": int(created_block or 0) if created_block is not None else None,
-        "createdAt": int(created_at or 0) if created_at is not None else None,
-        "updatedBlock": int(updated_block or 0) if updated_block is not None else None,
-        "updatedAt": int(updated_at or 0) if updated_at is not None else None,
-    }
-
-
-def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
-    if len(row) >= 25:
-        (
-            market,
-            quote_address,
-            base_address,
-            market_type,
-            quote_decimals,
-            base_decimals,
-            quote_ticker,
-            quote_name,
-            base_ticker,
-            base_name,
-            taker_fee,
-            is_amm_enabled,
-            last_price,
-            updated_at,
-            created_at,
-            reserve_quote,
-            reserve_base,
-            total_shares,
-            tvl_usd,
-            volume_24h_usd,
-            fees_24h_usd,
-            apy_24h,
-            daily_yield_24h,
-            _last_sync_block,
-            last_sync_at,
-        ) = row[:25]
-    else:
-        (
-            market,
-            quote_address,
-            base_address,
-            market_type,
-            quote_decimals,
-            base_decimals,
-            quote_ticker,
-            quote_name,
-            base_ticker,
-            base_name,
-            taker_fee,
-            is_amm_enabled,
-            last_price,
-            updated_at,
-            created_at,
-        ) = row
-        reserve_quote = 0
-        reserve_base = 0
-        total_shares = 0
-        tvl_usd = 0
-        volume_24h_usd = 0
-        fees_24h_usd = 0
-        apy_24h = 0
-        daily_yield_24h = 0
-        last_sync_at = updated_at
-    return {
-        "id": str(market or "").lower(),
-        "address": str(market or "").lower(),
-        "poolAddress": str(market or "").lower(),
-        "market": str(market or "").lower(),
-        "quote": str(quote_address or "").lower(),
-        "base": str(base_address or "").lower(),
-        "marketType": int(market_type or 0),
-        "feeBps": 25 if int(market_type or 0) > 1 else int(taker_fee or 0),
-        "isAMMEnabled": bool(is_amm_enabled),
-        "quoteTicker": quote_ticker or "",
-        "quoteName": quote_name or "",
-        "baseTicker": base_ticker or "",
-        "baseName": base_name or "",
-        "quoteDecimals": int(quote_decimals or 0),
-        "baseDecimals": int(base_decimals or 0),
-        "reserveQuote": str(int(reserve_quote or 0)),
-        "reserveBase": str(int(reserve_base or 0)),
-        "tvlUsd": float(tvl_usd or 0.0),
-        "totalShares": str(int(total_shares or 0)),
-        "volume24hUsd": float(volume_24h_usd or 0.0),
-        "fees24hUsd": float(fees_24h_usd or 0.0),
-        "apy24h": float(apy_24h or 0.0),
-        "apy24hPercent": float(apy_24h or 0.0) * 100.0,
-        "dailyYieldPercent": float(daily_yield_24h or 0.0) * 100.0,
-        "apyHistory": [],
-        "tvlHistory": [],
-        "lastPrice": float(last_price or 0),
-        "updatedAt": int(last_sync_at or updated_at or created_at or 0),
-    }
-
+def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
+    pts = [it for it in (items or []) if it is not None]
+    if max_points <= 0 or len(pts) <= max_points:
+        return pts
+    pts = sorted(pts, key=lambda x: int(ts_getter(x) or 0))
+    if len(pts) <= max_points:
+        return pts
+    start_ts = int(ts_getter(pts[0]) or 0)
+    end_ts = int(ts_getter(pts[-1]) or 0)
+    if end_ts <= start_ts:
+        return pts[-max_points:]
+    chosen: list[int] = []
+    next_min_idx = 0
+    span = end_ts - start_ts
+    for i in range(max_points):
+        target = start_ts + (span * i) / max(1, max_points - 1)
+        best_idx = -1
+        best_dist = float("inf")
+        for j in range(next_min_idx, len(pts)):
+            d = abs(int(ts_getter(pts[j]) or 0) - target)
+            if d < best_dist:
+                best_dist = d
+                best_idx = j
+            if int(ts_getter(pts[j]) or 0) > target and d > best_dist:
+                break
+        if best_idx < next_min_idx:
+            best_idx = next_min_idx
+        if best_idx < 0 or best_idx >= len(pts):
+            break
+        chosen.append(best_idx)
+        next_min_idx = best_idx + 1
+        if next_min_idx >= len(pts):
+            break
+    if not chosen:
+        return pts[-max_points:]
+    if chosen[-1] != len(pts) - 1:
+        if len(chosen) < max_points:
+            chosen.append(len(pts) - 1)
+        else:
+            chosen[-1] = len(pts) - 1
+    out = []
+    seen = set()
+    for idx in sorted(chosen):
+        if idx in seen:
+            continue
+        if 0 <= idx < len(pts):
+            out.append(pts[idx])
+            seen.add(idx)
+    return out[:max_points] if out else pts[-max_points:]
 
 
 from api.routes.launchpad import router as launchpad_router
 from api.routes.system import router as system_router
-from api.routes.vaults import router as vaults_router, vault_user_summary, vault_history
-from api.routes.markets import router as markets_router, list_markets_dump
-from api.routes.pools import router as pools_router, list_pools, get_pool
+from api.routes.vaults import router as vaults_router
+from api.routes.markets import router as markets_router
+from api.routes.pools import router as pools_router
 
 app.include_router(launchpad_router)
 app.include_router(system_router)

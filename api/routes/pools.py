@@ -11,6 +11,11 @@ def _pool_row_to_api(row) -> Dict[str, Any]:
     return _crystal_pool_row_to_api(row)
 
 
+def _sample_pool_chart_points(points: list[dict[str, Any]], max_points: int = 48) -> list[dict[str, Any]]:
+    from api.api import _sample_evenly_by_time
+    return _sample_evenly_by_time(points, max_points, lambda p: int((p or {}).get("timestamp") or 0))
+
+
 # endpoint for pools list used by /earn/liquidity
 @router.get("/pools/list")
 def list_pools(
@@ -73,7 +78,7 @@ def list_pools(
 @router.get("/pools/{address}")
 def get_pool(
     address: str,
-    history_seconds: int = Query(7 * 24 * 3600, ge=3600, le=365 * 24 * 3600),
+    history_seconds: int = Query(24 * 3600, ge=3600, le=365 * 24 * 3600),
     history_limit: int = Query(500, ge=1, le=2000),
 ) -> Dict[str, Any]:
     try:
@@ -96,6 +101,7 @@ def get_pool(
         limit=history_limit_i,
     )
     tvl_history = [{"timestamp": int(ts or 0), "tvl": float(v or 0.0)} for ts, v in samples]
+    tvl_history = _sample_pool_chart_points(tvl_history, 48)
     out["tvlHistory"] = tvl_history
     out["apyHistory"] = [
         {"timestamp": int(p["timestamp"]), "apy": float(out.get("apy24h") or 0.0)}

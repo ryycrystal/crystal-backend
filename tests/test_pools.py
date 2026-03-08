@@ -223,6 +223,7 @@ def test_pool_storage_read_helpers_and_query_builders():
     with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_list)):
         assert pool_storage.list_crystal_pools_with_state() == [("pool",)]
     assert "FROM crystal_markets cm" in cur_list.exec_calls[0][0]
+    assert "WHERE cm.is_canonical = TRUE" in cur_list.exec_calls[0][0]
     assert "AND cm.is_amm_enabled = TRUE" in cur_list.exec_calls[0][0]
     assert "COALESCE(cp.volume_24h_usd, 0) DESC" in cur_list.exec_calls[0][0]
     assert cur_list.exec_calls[0][1] == (50, 0)
@@ -266,6 +267,7 @@ def test_pool_storage_read_helpers_and_query_builders():
     with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(cur_one)):
         assert pool_storage.get_crystal_pool_with_state("0xPOOL") == ("pool1",)
     sql_one, params_one = cur_one.exec_calls[0]
+    assert "WHERE cm.is_canonical = TRUE" in sql_one
     assert "AND cm.market = %s" in sql_one
     assert params_one == ("0xpool",)
 

@@ -223,10 +223,10 @@ class State:
                 if not mi.market:
                     continue
                 self.addressToMarket[mi.market] = mi
-                self.tokenGraph.setdefault(mi.baseAddress, []).append(mi)
-                self.tokenGraph.setdefault(mi.quoteAddress, []).append(mi)
-                self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
-                self._maybe_seed_stable_price_locked(mi.baseAddress, mi.baseTicker, mi.baseName)
+                if mi.isCanonical:
+                    self._replace_canonical_pair_market_locked(mi)
+                    self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
+                    self._maybe_seed_stable_price_locked(mi.baseAddress, mi.baseTicker, mi.baseName)
 
             pool_state_rows = storage.load_crystal_pool_states_for_state()
             for row in pool_state_rows:
@@ -885,6 +885,65 @@ class State:
         if t in _STABLE_TICKERS or n in _STABLE_TICKERS or " usd" in n or n.startswith("usd"):
             self.tokenToPrice[token_l] = Decimal(1)
 
+    @staticmethod
+    def _same_pair_unordered(a_quote: str, a_base: str, b_quote: str, b_base: str) -> bool:
+        aq = (a_quote or "").lower()
+        ab = (a_base or "").lower()
+        bq = (b_quote or "").lower()
+        bb = (b_base or "").lower()
+        if not aq or not ab or not bq or not bb:
+            return False
+        return (aq == bq and ab == bb) or (aq == bb and ab == bq)
+
+    def _remove_market_from_token_graph_locked(self, market_addr: str) -> None:
+        maddr = (market_addr or "").lower()
+        if not maddr:
+            return
+        for tok in list(self.tokenGraph.keys()):
+            items = self.tokenGraph.get(tok) or []
+            kept = [mi for mi in items if (getattr(mi, "market", "") or "").lower() != maddr]
+            if kept:
+                self.tokenGraph[tok] = kept
+            else:
+                self.tokenGraph.pop(tok, None)
+
+    def _add_market_to_token_graph_locked(self, mi: models.MarketInfo) -> None:
+        if mi is None:
+            return
+        maddr = (getattr(mi, "market", "") or "").lower()
+        if not maddr:
+            return
+        for tok in (((getattr(mi, "baseAddress", "") or "").lower()), ((getattr(mi, "quoteAddress", "") or "").lower())):
+            if not tok:
+                continue
+            items = self.tokenGraph.setdefault(tok, [])
+            if any(((getattr(x, "market", "") or "").lower() == maddr) for x in items):
+                continue
+            items.append(mi)
+
+    def _replace_canonical_pair_market_locked(self, mi: models.MarketInfo) -> None:
+        if mi is None or not bool(getattr(mi, "isCanonical", False)):
+            return
+        maddr = (getattr(mi, "market", "") or "").lower()
+        qa = (getattr(mi, "quoteAddress", "") or "").lower()
+        ba = (getattr(mi, "baseAddress", "") or "").lower()
+        if not maddr or not qa or not ba:
+            return
+        for other in list(self.addressToMarket.values()):
+            if other is None:
+                continue
+            om = (getattr(other, "market", "") or "").lower()
+            if not om or om == maddr:
+                continue
+            if not bool(getattr(other, "isCanonical", False)):
+                continue
+            if not self._same_pair_unordered(qa, ba, getattr(other, "quoteAddress", ""), getattr(other, "baseAddress", "")):
+                continue
+            other.isCanonical = False
+            self._remove_market_from_token_graph_locked(om)
+        self._remove_market_from_token_graph_locked(maddr)
+        self._add_market_to_token_graph_locked(mi)
+
     def apply_market_created(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -917,27 +976,29 @@ class State:
                 price=Decimal(0),
             )
 
-            if not mi.isCanonical or not mi.market:
+            if not mi.market:
                 return
 
             self.addressToMarket[mi.market] = mi
-            self.tokenGraph.setdefault(mi.baseAddress, []).append(mi)
-            self.tokenGraph.setdefault(mi.quoteAddress, []).append(mi)
-            self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
-            self._maybe_seed_stable_price_locked(mi.baseAddress, mi.baseTicker, mi.baseName)
-            if mi.quoteAddress == WMON and self.mon_price_usd > 0:
-                self.tokenToPrice[WMON] = self.mon_price_usd
-            if mi.baseAddress == WMON and self.mon_price_usd > 0:
-                self.tokenToPrice[WMON] = self.mon_price_usd
+            if mi.isCanonical:
+                self._replace_canonical_pair_market_locked(mi)
+                self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
+                self._maybe_seed_stable_price_locked(mi.baseAddress, mi.baseTicker, mi.baseName)
+                if mi.quoteAddress == WMON and self.mon_price_usd > 0:
+                    self.tokenToPrice[WMON] = self.mon_price_usd
+                if mi.baseAddress == WMON and self.mon_price_usd > 0:
+                    self.tokenToPrice[WMON] = self.mon_price_usd
 
-            for v in self.vaults.values():
-                if v.quote == mi.quoteAddress and v.base == mi.baseAddress:
-                    if not v.market:
-                        v.market = mi.market
-                    if int(v.quoteDecimals or 0) == 0:
+                for v in self.vaults.values():
+                    if not self._same_pair_unordered(v.quote, v.base, mi.quoteAddress, mi.baseAddress):
+                        continue
+                    v.market = mi.market
+                    if (v.quote or "").lower() == (mi.quoteAddress or "").lower() and (v.base or "").lower() == (mi.baseAddress or "").lower():
                         v.quoteDecimals = int(mi.quoteDecimals or 0)
-                    if int(v.baseDecimals or 0) == 0:
                         v.baseDecimals = int(mi.baseDecimals or 0)
+                    elif (v.quote or "").lower() == (mi.baseAddress or "").lower() and (v.base or "").lower() == (mi.quoteAddress or "").lower():
+                        v.quoteDecimals = int(mi.baseDecimals or 0)
+                        v.baseDecimals = int(mi.quoteDecimals or 0)
 
             storage.upsert_crystal_market(
                 market=mi.market,
@@ -965,16 +1026,17 @@ class State:
                 created_at=ts,
                 cur=cur,
             )
-            storage.link_crystal_vaults_for_market(
-                quote=mi.quoteAddress,
-                base=mi.baseAddress,
-                market=mi.market,
-                quote_decimals=mi.quoteDecimals,
-                base_decimals=mi.baseDecimals,
-                updated_block=blk,
-                updated_at=ts,
-                cur=cur,
-            )
+            if mi.isCanonical:
+                storage.link_crystal_vaults_for_market(
+                    quote=mi.quoteAddress,
+                    base=mi.baseAddress,
+                    market=mi.market,
+                    quote_decimals=mi.quoteDecimals,
+                    base_decimals=mi.baseDecimals,
+                    updated_block=blk,
+                    updated_at=ts,
+                    cur=cur,
+                )
 
     def apply_market_params_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
@@ -1454,11 +1516,16 @@ class State:
             qd = 0
             bd = 0
             for mi in self.tokenGraph.get(quote, []):
+                if not self._same_pair_unordered(quote, base, mi.quoteAddress, mi.baseAddress):
+                    continue
+                market = (mi.market or "").lower()
                 if (mi.quoteAddress or "").lower() == quote and (mi.baseAddress or "").lower() == base:
-                    market = (mi.market or "").lower()
                     qd = int(mi.quoteDecimals or 0)
                     bd = int(mi.baseDecimals or 0)
-                    break
+                else:
+                    qd = int(mi.baseDecimals or 0)
+                    bd = int(mi.quoteDecimals or 0)
+                break
 
             current = self.vaults.get(vaddr)
             circulating = int(getattr(current, "circulatingShares", 0) or 0)

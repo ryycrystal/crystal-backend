@@ -34,16 +34,21 @@ def upsert_crystal_market(
     created_at: int | None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
+    market_l = (market or "").lower()
+    quote_addr_l = (quote_address or "").lower()
+    base_addr_l = (base_address or "").lower()
+    created_block_i = int(created_block) if created_block is not None else None
+    created_at_i = int(created_at) if created_at is not None else None
     params = (
-        market.lower(),
+        market_l,
         bool(is_canonical),
         quote_asset.lower(),
         base_asset.lower(),
-        quote_address.lower(),
+        quote_addr_l,
         int(quote_decimals),
         _clean_text(quote_ticker),
         _clean_text(quote_name),
-        base_address.lower(),
+        base_addr_l,
         int(base_decimals),
         _clean_text(base_ticker),
         _clean_text(base_name),
@@ -56,10 +61,31 @@ def upsert_crystal_market(
         int(taker_fee or 0),
         int(maker_rebate or 0),
         bool(is_amm_enabled),
-        int(created_block) if created_block is not None else None,
-        int(created_at) if created_at is not None else None,
-        int(created_block) if created_block is not None else None,
-        int(created_at) if created_at is not None else None,
+        created_block_i,
+        created_at_i,
+        created_block_i,
+        created_at_i,
+    )
+    decanon_sql = """
+        UPDATE crystal_markets
+        SET is_canonical = FALSE,
+            updated_block = COALESCE(%s, updated_block),
+            updated_at = COALESCE(%s, updated_at)
+        WHERE is_canonical = TRUE
+          AND market <> %s
+          AND (
+                (quote_address = %s AND base_address = %s)
+             OR (quote_address = %s AND base_address = %s)
+          );
+    """
+    decanon_params = (
+        created_block_i,
+        created_at_i,
+        market_l,
+        quote_addr_l,
+        base_addr_l,
+        base_addr_l,
+        quote_addr_l,
     )
     sql = """
         INSERT INTO crystal_markets (
@@ -95,8 +121,12 @@ def upsert_crystal_market(
     """
     if cur is None:
         with db_cursor() as cur2:
+            if bool(is_canonical) and quote_addr_l and base_addr_l:
+                cur2.execute(decanon_sql, decanon_params)
             cur2.execute(sql, params)
     else:
+        if bool(is_canonical) and quote_addr_l and base_addr_l:
+            cur.execute(decanon_sql, decanon_params)
         cur.execute(sql, params)
 
 
@@ -176,21 +206,42 @@ def link_crystal_vaults_for_market(
 ) -> None:
     params = (
         market.lower(),
+        quote.lower(),
+        base.lower(),
         int(quote_decimals or 0),
+        base.lower(),
+        quote.lower(),
         int(base_decimals or 0),
+        quote.lower(),
+        base.lower(),
+        int(base_decimals or 0),
+        base.lower(),
+        quote.lower(),
+        int(quote_decimals or 0),
         int(updated_block) if updated_block is not None else None,
         int(updated_at) if updated_at is not None else None,
         quote.lower(),
         base.lower(),
+        base.lower(),
+        quote.lower(),
     )
     sql = """
         UPDATE crystal_vaults
-        SET market = CASE WHEN market = '' THEN %s ELSE market END,
-            quote_decimals = CASE WHEN quote_decimals = 0 THEN %s ELSE quote_decimals END,
-            base_decimals = CASE WHEN base_decimals = 0 THEN %s ELSE base_decimals END,
+        SET market = %s,
+            quote_decimals = CASE
+                WHEN quote = %s AND base = %s THEN %s
+                WHEN quote = %s AND base = %s THEN %s
+                ELSE quote_decimals
+            END,
+            base_decimals = CASE
+                WHEN quote = %s AND base = %s THEN %s
+                WHEN quote = %s AND base = %s THEN %s
+                ELSE base_decimals
+            END,
             updated_block = COALESCE(%s, updated_block),
             updated_at = COALESCE(%s, updated_at)
-        WHERE quote = %s AND base = %s;
+        WHERE (quote = %s AND base = %s)
+           OR (quote = %s AND base = %s);
     """
     if cur is None:
         with db_cursor() as cur2:
@@ -209,6 +260,9 @@ def load_crystal_markets_for_state():
                 market_id, market_type, scale_factor, tick_size, max_price, min_size, taker_fee, maker_rebate,
                 is_amm_enabled, last_price
             FROM crystal_markets
+            ORDER BY COALESCE(updated_block, created_block, 0) ASC,
+                     COALESCE(updated_at, created_at, 0) ASC,
+                     market ASC
             """
         )
         return cur.fetchall()
