@@ -955,6 +955,35 @@ def test_vault_rpc_jsonrpc_sync_invalid_response_branches():
             raise AssertionError("expected ValueError")
 
 
+def test_vault_timeframe_parser_accepts_aliases_and_rejects_bad_values():
+    for raw, expected in [
+        (1, 1),
+        ("1", 1),
+        ("1d", 1),
+        ("day", 1),
+        ("24h", 1),
+        ("2", 2),
+        ("1w", 2),
+        ("week", 2),
+        ("7d", 2),
+        ("3", 3),
+        ("1m", 3),
+        ("month", 3),
+        ("30d", 3),
+        ("4", 4),
+        ("all", 4),
+        ("all-time", 4),
+        ("all_time", 4),
+        ("alltime", 4),
+        ("lifetime", 4),
+    ]:
+        assert vault_api._parse_timeframe(raw) == expected
+
+    _assert_http_exc(lambda: vault_api._parse_timeframe("9"), 400)
+    _assert_http_exc(lambda: vault_api._parse_timeframe("banana"), 400)
+    _assert_http_exc(lambda: vault_api._parse_timeframe(True), 400)
+
+
 def test_vault_history_not_found_invalid_timeframe_and_empty_series():
     with patch.object(vault_api.storage, "get_crystal_vault", return_value=None):
         _assert_http_exc(lambda: vault_api.vault_history("0xvault", 1, limit=0), 404)
@@ -968,6 +997,23 @@ def test_vault_history_not_found_invalid_timeframe_and_empty_series():
     assert out["series"]["tvl"] == []
     assert out["series"]["pnl"] == []
     assert out["info"]["timeframe"] == "all"
+
+
+def test_vault_history_accepts_string_timeframes():
+    now_ts = 2_100_000_000
+    with patch.object(vault_api.time, "time", return_value=float(now_ts)):
+        with patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(vault="0xv")):
+            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]) as m:
+                out = vault_api.vault_history("0xV", "1w", limit=0)
+    m.assert_called_once_with("0xv", start_ts=now_ts - (7 * 86400), limit=0)
+    assert out["info"]["timeframe"] == "week"
+
+    with patch.object(vault_api.time, "time", return_value=float(now_ts)):
+        with patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(vault="0xv")):
+            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]) as m2:
+                out2 = vault_api.vault_history("0xV", "all-time", limit=0)
+    m2.assert_called_once_with("0xv", start_ts=None, limit=0)
+    assert out2["info"]["timeframe"] == "all"
 
 
 def test_vault_history_timeframe_calls_and_series_math():
@@ -1414,7 +1460,9 @@ if __name__ == "__main__":
         test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timestamp,
         test_vault_refresh_balance_sample_write_paths_without_latest_row,
         test_vault_rpc_jsonrpc_sync_invalid_response_branches,
+        test_vault_timeframe_parser_accepts_aliases_and_rejects_bad_values,
         test_vault_history_not_found_invalid_timeframe_and_empty_series,
+        test_vault_history_accepts_string_timeframes,
         test_vault_history_timeframe_calls_and_series_math,
         test_vault_storage_upsert_vault_sql_and_cursor_paths,
         test_vault_storage_update_fields_sql_and_cursor_paths,

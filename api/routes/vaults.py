@@ -2,10 +2,45 @@ from __future__ import annotations
 from typing import Dict, Any
 import httpx
 from fastapi import APIRouter, Query, HTTPException
-from api.api import storage, time, _vault_snapshot_from_samples, ttl_cache
+from api.api import storage, time, _vault_snapshot_from_samples, _sample_evenly_by_time, ttl_cache
 from state import RPC_HTTP, State
 
 router = APIRouter()
+
+
+def _parse_timeframe(value: Any) -> int:
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail="invalid timeframe")
+    if isinstance(value, int):
+        if value in {1, 2, 3, 4}:
+            return int(value)
+        raise HTTPException(status_code=400, detail="invalid timeframe")
+    sval = str(value or "").strip().lower().replace("_", "-")
+    tf_map = {
+        "1": 1,
+        "1d": 1,
+        "day": 1,
+        "24h": 1,
+        "24hr": 1,
+        "24hrs": 1,
+        "2": 2,
+        "1w": 2,
+        "week": 2,
+        "7d": 2,
+        "3": 3,
+        "1m": 3,
+        "month": 3,
+        "30d": 3,
+        "4": 4,
+        "all": 4,
+        "all-time": 4,
+        "alltime": 4,
+        "lifetime": 4,
+    }
+    tf = tf_map.get(sval)
+    if tf is None:
+        raise HTTPException(status_code=400, detail="invalid timeframe")
+    return int(tf)
 
 
 def _rpc_jsonrpc_sync(method: str, params: list[Any]) -> dict:
@@ -56,7 +91,7 @@ def list_vaults(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=50),
     include_snapshot: bool = Query(True),
-    snapshot_timeframe: int = Query(1, ge=1, le=4),
+    snapshot_timeframe: str = Query("1", description="1|2|3|4 or 1d|1w|1m|all-time"),
     snapshot_points: int = Query(48, ge=0, le=200),
 ) -> Dict[str, Any]:
     status_norm = (status if isinstance(status, str) else "all" or "all").strip().lower()
@@ -69,6 +104,7 @@ def list_vaults(
     if order_norm not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="invalid order")
     user_addr = (user or "0x0000000000000000000000000000000000000000").lower()
+    timeframe_i = _parse_timeframe(snapshot_timeframe)
     rows = storage.list_crystal_vaults_page(
         user_address=user_addr,
         search=(search or ""),
@@ -121,13 +157,13 @@ def list_vaults(
         if include_snapshot:
             snapshot = _vault_snapshot_from_samples(
                 str(vault_addr).lower(),
-                timeframe=int(snapshot_timeframe),
+                timeframe=timeframe_i,
                 points=int(snapshot_points),
             )
             if snapshot is None and float(latest_usd_value or 0.0) > 0:
                 last_usd = float(latest_usd_value or 0.0)
                 snapshot = {
-                    "timeframe": int(snapshot_timeframe),
+                    "timeframe": timeframe_i,
                     "tvl": [],
                     "stats": {"pctChange": 0.0, "lastUsd": last_usd, "min": last_usd, "max": last_usd},
                 }
@@ -190,7 +226,7 @@ def list_vaults(
             "sort": sort_norm,
             "order": order_norm,
             "includeSnapshot": bool(include_snapshot),
-            "snapshotTimeframe": int(snapshot_timeframe),
+            "snapshotTimeframe": timeframe_i,
             "snapshotPoints": int(snapshot_points),
         },
         "vaults": items,
@@ -299,7 +335,7 @@ def vault_user_summary(
     address: str,
     user: str,
     history_limit: int = Query(50, ge=1, le=500),
-    snapshot_timeframe: int = Query(1, ge=1, le=4),
+    snapshot_timeframe: str = Query("1", description="1|2|3|4 or 1d|1w|1m|all-time"),
 ) -> Dict[str, Any]:
     vaddr = address.lower()
     uaddr = user.lower()
@@ -384,11 +420,12 @@ def vault_user_summary(
             "lastWithdraw": int(d[5] or 0),
         })
 
-    snapshot = _vault_snapshot_from_samples(vaddr, timeframe=int(snapshot_timeframe), points=0)
+    timeframe_i = _parse_timeframe(snapshot_timeframe)
+    snapshot = _vault_snapshot_from_samples(vaddr, timeframe=timeframe_i, points=0)
     if snapshot is None and float(latest["usdValue"] or 0.0) > 0:
         last_usd = float(latest["usdValue"] or 0.0)
         snapshot = {
-            "timeframe": int(snapshot_timeframe),
+            "timeframe": timeframe_i,
             "tvl": [],
             "stats": {
                 "pctChange": 0.0,
@@ -438,15 +475,14 @@ def vault_user_summary(
 @router.get("/vaults/{address}/history/{timeframe}")
 def vault_history(
     address: str,
-    timeframe: int,
+    timeframe: str,
     limit: int = Query(0, ge=0, le=2000),
 ) -> Dict[str, Any]:
     vaddr = address.lower()
     v = storage.get_crystal_vault(vaddr)
     if not v:
         raise HTTPException(status_code=404, detail="vault not found")
-    if timeframe not in {1, 2, 3, 4}:
-        raise HTTPException(status_code=400, detail="invalid timeframe")
+    timeframe_i = _parse_timeframe(timeframe)
     (
         vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
         locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
@@ -454,11 +490,11 @@ def vault_history(
     ) = v
 
     now_ts = int(time.time())
-    if timeframe == 1:
+    if timeframe_i == 1:
         start_ts = now_ts - 86400
-    elif timeframe == 2:
+    elif timeframe_i == 2:
         start_ts = now_ts - (7 * 86400)
-    elif timeframe == 3:
+    elif timeframe_i == 3:
         start_ts = now_ts - (30 * 86400)
     else:
         start_ts = None
@@ -474,6 +510,8 @@ def vault_history(
         }
         for r in pts_rows
     ]
+    raw_count = len(pts)
+    pts = _sample_evenly_by_time(pts, 48, lambda p: int(p.get("timestamp") or 0))
 
     tvl_series = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
     base_usd = float(pts[0]["usdValue"]) if pts else 0.0
@@ -484,7 +522,7 @@ def vault_history(
         pnl_pct = ((cur_usd / base_usd) - 1.0) * 100.0 if base_usd > 0 else 0.0
         pnl_series.append({"timestamp": int(p["timestamp"]), "pnlUsd": pnl_usd, "pnlPct": pnl_pct})
 
-    tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe]
+    tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe_i]
     return {
         "ok": True,
         "meta": {
@@ -498,5 +536,5 @@ def vault_history(
             "circulatingShares": int(circulating_shares or 0),
         },
         "series": {"tvl": tvl_series, "pnl": pnl_series},
-        "info": {"timeframe": tf_name, "count": len(pts)},
+        "info": {"timeframe": tf_name, "count": len(pts), "rawCount": raw_count},
     }
