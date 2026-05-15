@@ -1,9 +1,12 @@
-import json, decimal, asyncio, time
+import json, decimal, asyncio, time, os
+from env_loader import load_env
 import modules.launchpad as lp
 import modules.nadfun as n
 import modules.vaults as v
 import modules.markets as m
 import modules.pools as p
+
+load_env()
 
 decimal.getcontext().prec = 100
 
@@ -27,12 +30,37 @@ def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
     }
 
 
+def _addr_from_env(default: str, *names: str) -> str:
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            return val.lower()
+    return default.lower()
+
+
+CRYSTAL_ADDR = _addr_from_env(
+    "0xAb0a934eea61C69329735EB37bd72d8c871C56F3",
+    "CRYSTAL_ADDRESS",
+    "ROUTER_ADDRESS",
+)
+VAULT_FACTORY_ADDR = _addr_from_env(
+    "0x69e385b1A78B12beaF30f6fE2Df3c37bde1f1f33",
+    "VAULT_FACTORY_ADDRESS",
+    "VAULTS_ADDRESS",
+)
+NADFUN_ADDR = _addr_from_env(
+    "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
+    "NADFUN_ADDRESS",
+)
+
 CONTRACTS = {
-    "ROUTER": "0x2Cd24c8230618e26C149dce9cfb3fBb3d0a9ed54",
-    "VAULTS": "0xA26393399b426658423597DfE12930BaE1a2F9da",
-    "NADFUN": "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
+    "ROUTER": CRYSTAL_ADDR,
+    "CRYSTAL": CRYSTAL_ADDR,
+    "VAULTS": VAULT_FACTORY_ADDR,
+    "VAULT_FACTORY": VAULT_FACTORY_ADDR,
+    "NADFUN": NADFUN_ADDR,
 }
-ADDRS = [a.lower() for a in CONTRACTS.values()]
+ADDRS = list(dict.fromkeys(a.lower() for a in CONTRACTS.values()))
 
 EVENT_SIGS = {
     "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",

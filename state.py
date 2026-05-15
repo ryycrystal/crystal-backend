@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Dict, Any
 from decimal import Decimal, getcontext
 from collections import deque
+import os
 import models
 import core.storage as storage
 import threading
@@ -14,7 +15,7 @@ getcontext().prec = 100
 INTERVALS = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
 LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
-RPC_HTTP = "https://rpc.monad.xyz"
+RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 

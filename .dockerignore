@@ -1,0 +1,16 @@
+.git
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage*
+chain-log-dump/
+indexed-log-dump/
+snapshots/
+*.dump
+*.jsonl.gz
+.env
+.env.*
+node_modules/
+artifacts/
+cache/
+coverage/

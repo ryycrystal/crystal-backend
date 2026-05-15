@@ -29,6 +29,23 @@ def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | 
             """,
             (block_number,),
         )
+
+
+def record_blocks_processed_batch(block_numbers: list[int], cur: psycopg2.extensions.cursor | None = None) -> None:
+    if not block_numbers:
+        return
+    rows = [(int(b),) for b in block_numbers]
+    query = """
+        INSERT INTO launchpad_blocks (number)
+        VALUES %s
+        ON CONFLICT (number) DO UPDATE
+        SET processed_at = NOW();
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            execute_values(cur2, query, rows, page_size=10000)
+    else:
+        execute_values(cur, query, rows, page_size=10000)
         
 def get_last_processed_block() -> Optional[str]:
     with db_cursor() as cur:

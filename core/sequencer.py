@@ -397,7 +397,15 @@ class Sequencer:
             return None
         return "mint" if nxt_tag == "PMINT" else "burn"
 
-    def _process_block(self, blk: int, logs: List[dict], cur=None, counts_out: dict = None, batch: BatchAccumulator = None):
+    def _process_block(
+        self,
+        blk: int,
+        logs: List[dict],
+        cur=None,
+        counts_out: dict = None,
+        batch: BatchAccumulator = None,
+        record_processed: bool = True,
+    ):
         logs = sorted(logs, key=self._log_index)
         counts = counts_out if counts_out is not None else {
             "MC": 0,
@@ -440,10 +448,12 @@ class Sequencer:
         if cur is None:
             with db_cursor() as cur:
                 self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
-                storage.record_block_processed(blk, cur=cur)
+                if record_processed:
+                    storage.record_block_processed(blk, cur=cur)
         else:
             self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
-            storage.record_block_processed(blk, cur=cur)
+            if record_processed:
+                storage.record_block_processed(blk, cur=cur)
 
         if counts_out is None:
             print(
@@ -617,7 +627,7 @@ class Sequencer:
 
         for blk in range(chunk_start, chunk_end + 1):
             logs = logs_by_block.get(blk, [])
-            self._process_block(blk, logs, cur=cur, counts_out=counts, batch=batch)
+            self._process_block(blk, logs, cur=cur, counts_out=counts, batch=batch, record_processed=False)
             processed_blocks.append(blk)
 
             self._logs_by_block.pop(blk, None)
@@ -625,6 +635,7 @@ class Sequencer:
             self._block_timestamps.pop(blk, None)
 
         batch.flush(cur)
+        storage.record_blocks_processed_batch(processed_blocks, cur=cur)
 
         if self._on_block:
             for blk in processed_blocks:
