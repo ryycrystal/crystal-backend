@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+!.env.azure.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+chain-log-dump/
+indexed-log-dump/
+snapshots/
+*.dump
+*.jsonl.gz

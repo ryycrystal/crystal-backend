@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Any
 import httpx
 from fastapi import APIRouter, Query, HTTPException
-from api.api import storage, time, _vault_snapshot_from_samples, _sample_evenly_by_time, ttl_cache
+from api.api import storage, time, _sample_evenly_by_time, ttl_cache
 from state import RPC_HTTP, State
 
 router = APIRouter()
@@ -77,6 +77,50 @@ def _vault_user_lockup_fields(
         "withdrawLocked": locked,
         "withdrawUnlockAt": int(unlock_at or 0),
         "withdrawLockupRemaining": int(remaining),
+    }
+
+
+def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: int = 0) -> dict | None:
+    now_ts = int(time.time())
+    if timeframe == 1:
+        start_ts = now_ts - 86400
+    elif timeframe == 2:
+        start_ts = now_ts - (7 * 86400)
+    elif timeframe == 3:
+        start_ts = now_ts - (30 * 86400)
+    else:
+        start_ts = None
+
+    rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=start_ts, limit=0)
+    if not rows:
+        return None
+
+    pts = [
+        {
+            "block": int(r[0] or 0),
+            "timestamp": int(r[1] or 0),
+            "usdValue": float(r[4] or 0.0),
+        }
+        for r in rows
+    ]
+    pts.sort(key=lambda p: int(p["timestamp"]))
+    if points and int(points) > 0:
+        pts = _sample_evenly_by_time(pts, int(points), lambda p: int(p.get("timestamp") or 0))
+
+    tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
+    values = [float(p["usdValue"]) for p in pts]
+    first = values[0] if values else 0.0
+    last = values[-1] if values else 0.0
+    pct = ((last / first) - 1.0) * 100.0 if first > 0 else 0.0
+    return {
+        "timeframe": int(timeframe),
+        "tvl": tvl,
+        "stats": {
+            "pctChange": pct,
+            "lastUsd": last,
+            "min": min(values) if values else 0.0,
+            "max": max(values) if values else 0.0,
+        },
     }
 
 # endpoint for vault list used by /earn/vaults
