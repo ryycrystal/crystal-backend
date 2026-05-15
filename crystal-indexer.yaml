@@ -1,0 +1,287 @@
+﻿id: /subscriptions/935a9888-7be5-4fba-80f7-97cd92cc25eb/resourceGroups/crystal-prod-rg/providers/Microsoft.App/containerapps/crystal-indexer
+identity:
+  principalId: fc1b8bdf-5367-445e-a544-57a9715a85a5
+  tenantId: 10dce85b-d7c0-405f-a47e-0b8397efae17
+  type: SystemAssigned
+location: Japan East
+name: crystal-indexer
+properties:
+  configuration:
+    activeRevisionsMode: Single
+    dapr: null
+    identitySettings: []
+    ingress: null
+    maxInactiveRevisions: null
+    registries:
+    - identity: system
+      passwordSecretRef: ''
+      server: crystalprodacr-c3dbbeh2exdec8av.azurecr.io
+      username: ''
+    revisionTransitionThreshold: null
+    runtime: null
+    secrets:
+    - name: pgpassword
+    - name: rpchttp
+    service: null
+    targetLabel: ''
+  customDomainVerificationId: 5FA9F9C8BA6E4FB89A2D52CBD7BB9966DB5839E944E9304F174B54B30F281EC9
+  delegatedIdentities: []
+  environmentId: /subscriptions/935a9888-7be5-4fba-80f7-97cd92cc25eb/resourceGroups/crystal-prod-rg/providers/Microsoft.App/managedEnvironments/crystal-prod-env
+  eventStreamEndpoint: https://japaneast.azurecontainerapps.dev/subscriptions/935a9888-7be5-4fba-80f7-97cd92cc25eb/resourceGroups/crystal-prod-rg/containerApps/crystal-indexer/eventstream
+  latestReadyRevisionName: crystal-indexer--suz3yac
+  latestRevisionFqdn: ''
+  latestRevisionName: crystal-indexer--0000001
+  managedEnvironmentId: /subscriptions/935a9888-7be5-4fba-80f7-97cd92cc25eb/resourceGroups/crystal-prod-rg/providers/Microsoft.App/managedEnvironments/crystal-prod-env
+  outboundIpAddresses:
+  - 20.48.86.170
+  - 20.48.86.160
+  - 20.48.86.154
+  - 20.48.86.165
+  - 48.218.81.17
+  - 48.218.80.248
+  - 48.218.80.238
+  - 48.218.81.11
+  - 48.218.81.1
+  - 48.218.80.246
+  - 135.149.20.219
+  - 135.149.76.115
+  - 130.33.185.188
+  - 74.176.238.136
+  - 130.33.224.1
+  - 130.33.187.88
+  - 74.176.139.200
+  - 130.33.181.51
+  - 135.149.21.221
+  - 130.33.187.39
+  - 130.33.94.24
+  - 48.218.156.239
+  - 130.33.93.3
+  - 135.149.23.2
+  - 135.149.36.207
+  - 20.18.233.249
+  - 4.241.8.139
+  - 4.190.94.248
+  - 4.214.161.121
+  - 4.189.82.93
+  - 48.218.198.49
+  - 4.190.94.247
+  - 48.218.242.169
+  - 4.214.161.122
+  - 48.218.211.235
+  - 4.190.94.246
+  - 135.149.18.49
+  - 4.190.52.251
+  - 135.149.47.87
+  - 4.190.94.237
+  - 48.218.108.188
+  - 20.191.171.38
+  - 52.156.44.83
+  - 20.78.116.74
+  - 20.78.116.192
+  - 48.218.196.243
+  - 20.18.151.251
+  - 4.189.7.246
+  - 4.241.17.127
+  - 48.218.198.45
+  - 20.18.239.198
+  - 130.33.206.89
+  - 48.218.211.148
+  - 20.210.87.152
+  - 4.241.6.158
+  - 135.149.17.168
+  - 135.149.47.85
+  - 4.190.48.173
+  - 48.218.240.80
+  - 4.241.17.112
+  - 48.218.198.42
+  - 4.189.236.97
+  - 4.190.48.220
+  - 20.89.35.137
+  - 20.18.96.154
+  - 20.18.151.142
+  - 4.214.161.120
+  - 48.218.198.76
+  - 4.189.6.191
+  - 130.33.207.67
+  - 4.189.236.92
+  - 4.190.94.245
+  - 20.27.144.111
+  - 4.190.40.0
+  - 4.190.93.165
+  - 20.210.87.162
+  - 20.18.239.188
+  - 20.18.239.172
+  - 4.190.4.237
+  - 74.176.170.178
+  - 4.189.255.130
+  - 13.78.120.208
+  - 172.192.30.217
+  - 20.37.102.148
+  - 4.215.203.23
+  - 52.185.132.178
+  - 48.210.194.118
+  - 48.210.221.157
+  - 4.216.99.72
+  - 48.210.250.121
+  - 4.190.41.172
+  - 20.18.97.162
+  - 20.48.87.45
+  - 4.241.6.143
+  - 20.48.82.140
+  - 20.18.145.19
+  - 4.190.93.2
+  - 20.210.87.110
+  - 52.253.121.52
+  - 4.214.160.245
+  - 20.210.72.88
+  - 20.210.72.103
+  - 20.210.72.109
+  - 20.210.72.73
+  - 48.218.158.62
+  - 48.218.158.84
+  - 48.218.158.83
+  - 48.218.158.66
+  - 48.218.158.55
+  - 48.218.158.81
+  - 135.149.35.113
+  - 130.33.240.89
+  - 74.176.172.174
+  - 130.33.161.134
+  - 130.33.161.153
+  - 135.149.80.143
+  - 74.176.172.145
+  - 130.33.186.220
+  - 130.33.161.216
+  - 130.33.161.209
+  - 48.218.235.166
+  - 48.218.130.158
+  - 74.176.142.75
+  - 135.149.20.234
+  - 135.149.82.9
+  - 130.33.180.154
+  - 130.33.152.3
+  - 130.33.181.150
+  - 130.33.162.33
+  - 20.27.22.88
+  - 130.33.178.168
+  - 130.33.80.28
+  - 130.33.153.52
+  - 4.241.16.148
+  - 20.210.87.114
+  - 4.189.82.185
+  - 48.218.209.246
+  - 4.190.43.34
+  - 20.27.40.90
+  - 20.48.82.141
+  - 48.218.195.116
+  - 4.189.82.167
+  - 20.78.105.243
+  - 52.253.121.86
+  - 20.78.41.96
+  - 48.218.211.124
+  - 4.189.82.172
+  - 135.149.44.51
+  - 48.218.218.215
+  - 4.241.17.95
+  - 4.189.82.179
+  - 4.189.90.206
+  - 52.156.43.245
+  - 4.190.94.240
+  - 4.190.43.85
+  - 130.33.206.33
+  - 20.18.222.156
+  - 20.18.211.246
+  - 52.253.121.53
+  - 4.189.73.53
+  - 20.210.87.116
+  - 48.218.197.2
+  - 20.194.206.149
+  - 20.18.237.225
+  - 52.156.44.44
+  - 4.190.44.187
+  - 4.190.94.241
+  - 130.33.206.51
+  - 135.149.46.203
+  - 135.149.17.183
+  - 4.241.17.101
+  - 20.78.105.250
+  - 48.218.107.154
+  - 4.214.161.60
+  - 4.190.44.238
+  - 52.253.121.87
+  - 48.218.108.57
+  - 20.194.144.71
+  - 4.189.25.143
+  - 20.210.87.124
+  - 4.241.13.200
+  patchingMode: Automatic
+  provisioningState: Succeeded
+  runningStatus: Running
+  template:
+    containers:
+    - args:
+      - indexer_main.py
+      - --mode
+      - resume
+      - --dump-dir
+      - /dump
+      - --live-dump-dir
+      - /dump
+      - --start-block
+      - '37709836'
+      command:
+      - python
+      env:
+      - name: PGHOST
+        value: crystal-prod-db.postgres.database.azure.com
+      - name: PGUSER
+        value: crystaladmin
+      - name: PGPORT
+        value: '5432'
+      - name: PGDATABASE
+        value: crystal
+      - name: PGSSLMODE
+        value: require
+      - name: PGPASSWORD
+        secretRef: pgpassword
+      - name: RPC_HTTP
+        secretRef: rpchttp
+      - name: DB_MIN_CONN
+        value: '1'
+      - name: DB_MAX_CONN
+        value: '25'
+      image: crystalprodacr-c3dbbeh2exdec8av.azurecr.io/crystal-backend:latest
+      imageType: ContainerImage
+      name: crystal-indexer
+      resources:
+        cpu: 0.5
+        ephemeralStorage: 2Gi
+        memory: 1Gi
+      volumeMounts:
+      - mountPath: /dump
+        volumeName: chain-log-dump
+    customMetricsSettings: null
+    initContainers: null
+    revisionSuffix: ''
+    scale:
+      cooldownPeriod: 300
+      maxReplicas: 1
+      minReplicas: 0
+      pollingInterval: 30
+      rules: null
+    serviceBinds: null
+    terminationGracePeriodSeconds: null
+    volumes:
+      - name: chain-log-dump
+        storageType: AzureFile
+        storageName: chainlogdump
+  workloadProfileName: Consumption
+resourceGroup: crystal-prod-rg
+systemData:
+  createdAt: '2026-05-15T04:57:05.1096494'
+  createdBy: bz@crystal.exchange
+  createdByType: User
+  lastModifiedAt: '2026-05-15T04:58:58.8188762'
+  lastModifiedBy: bz@crystal.exchange
+  lastModifiedByType: User
+type: Microsoft.App/containerApps
