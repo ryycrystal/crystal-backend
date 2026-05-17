@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections import deque
 from decimal import Decimal, getcontext
@@ -17,6 +18,8 @@ METADATA_QUEUE: list[tuple[str, str]] = []
 _METADATA_CLIENT: httpx.AsyncClient | None = None
 
 _CONCURRENCY_LIMIT = 100
+_METADATA_BATCH_SIZE = int(os.getenv("METADATA_BATCH_SIZE", "500"))
+_METADATA_LOG_EVERY = int(os.getenv("METADATA_LOG_EVERY", "1000"))
 _REQUEST_TIMEOUT = 1.0
 _HOST_BLACKLIST_DURATION = 30
 _SEMAPHORE: asyncio.Semaphore | None = None
@@ -25,6 +28,16 @@ _RETRY_QUEUE: deque[tuple[str, str, int, float]] = deque()
 _MAX_RETRY_QUEUE_SIZE = 10000
 _MAX_RETRIES = 5
 _BACKOFF_SCHEDULE = [30, 60, 120, 240, 480]
+
+
+def _pop_metadata_batch(limit: int) -> list[tuple[str, str]]:
+    if not METADATA_QUEUE:
+        return []
+    n = min(max(int(limit or 1), 1), len(METADATA_QUEUE))
+    batch = METADATA_QUEUE[:n]
+    del METADATA_QUEUE[:n]
+    return batch
+
 
 async def _get_metadata_client() -> httpx.AsyncClient:
     global _METADATA_CLIENT
@@ -84,8 +97,7 @@ async def process_metadata_queue() -> list[dict]:
     if not METADATA_QUEUE:
         return []
 
-    queue = METADATA_QUEUE.copy()
-    METADATA_QUEUE.clear()
+    queue = _pop_metadata_batch(_METADATA_BATCH_SIZE)
 
     batch_with_attempts = [(token, uri, 0) for token, uri in queue]
     tasks = [fetch_metadata_single(token, uri) for token, uri, _ in batch_with_attempts]
@@ -140,7 +152,8 @@ async def start_metadata_worker(storage_module) -> None:
 
                 qlen = len(METADATA_QUEUE)
                 if qlen > 0:
-                    print(f"[Metadata] Processing {qlen} items...")
+                    batch_n = min(_METADATA_BATCH_SIZE, qlen)
+                    print(f"[Metadata] Processing {batch_n}/{qlen} queued items...")
                     results = await process_metadata_queue()
                     if results:
                         print(f"[Metadata] Got {len(results)} results, saving...")
@@ -161,8 +174,7 @@ async def process_metadata_queue_immediate(storage_module=None) -> int:
     if not METADATA_QUEUE:
         return 0
 
-    queue = METADATA_QUEUE.copy()
-    METADATA_QUEUE.clear()
+    queue = _pop_metadata_batch(_METADATA_BATCH_SIZE)
 
     if not queue:
         return 0
@@ -276,7 +288,9 @@ def parse_nadfun_token_created(
 
     if token_uri and token:
         METADATA_QUEUE.append((token, token_uri))
-        print(f"[Metadata] Queued {token[:10]}... queue size={len(METADATA_QUEUE)}")
+        qlen = len(METADATA_QUEUE)
+        if qlen == 1 or (_METADATA_LOG_EVERY > 0 and qlen % _METADATA_LOG_EVERY == 0):
+            print(f"[Metadata] Queued {token[:10]}... queue size={qlen}")
 
     metadata_cid = ""                                                             
 

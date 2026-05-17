@@ -159,13 +159,14 @@ async def main() -> None:
     args = parse_args()
 
     storage.init_pool()
-    storage.init_db()
     lock_conn = None
 
     try:
         if not args.no_indexer_lock:
             lock_conn = storage.acquire_indexer_lock()
             print("[IDX] Acquired Postgres advisory indexer lock", flush=True)
+
+        storage.init_db()
 
         if args.mode == "bootstrap":
             if _dump_exists(args.dump_dir):
