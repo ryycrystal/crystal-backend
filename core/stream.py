@@ -187,6 +187,7 @@ async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) ->
             continue
 
         addr = log.get("address", "").lower()
+        h.register_dynamic_addresses_from_log(log)
         if not h.accepts_log_for_indexing(tag, addr):
             continue
 
@@ -254,6 +255,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
 
                 addr = log.get("address", "").lower()
 
+                h.register_dynamic_addresses_from_log(log)
                 if not h.accepts_log_for_indexing(tag, addr):
                     continue
 
@@ -449,6 +451,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                     addr = res.get("address", "").lower()
 
+                    h.register_dynamic_addresses_from_log(res)
                     if not h.accepts_log_for_indexing(tag, addr):
                         continue
 

@@ -147,6 +147,29 @@ def test_v2_pair_swap_is_address_gated_and_decoded_as_pool_delta():
     assert parsed["sqrt_price_x96"] == 0
 
 
+def test_v2_create_registers_pair_before_swap_filtering():
+    original_addrs = list(chain.ADDRS)
+    pair = "0x2222222222222222222222222222222222222222"
+    try:
+        chain.ADDRS[:] = [a for a in chain.ADDRS if a != pair.lower()]
+        create_log = {
+            "address": V2_BONDING,
+            "topics": [
+                nadfun.V2_CREATE_TOPIC,
+                _topic_addr(CREATOR),
+                _topic_addr(TOKEN),
+                _topic_addr(pair),
+            ],
+            "data": "0x",
+        }
+
+        assert not chain.accepts_log_for_indexing("V2SWAP", pair)
+        chain.register_dynamic_addresses_from_log(create_log)
+        assert chain.accepts_log_for_indexing("V2SWAP", pair)
+    finally:
+        chain.ADDRS[:] = original_addrs
+
+
 def test_v2_created_token_keeps_non_wmon_quote_in_state_and_storage(monkeypatch):
     captured_token = {}
     captured_pool = {}
