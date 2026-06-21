@@ -445,8 +445,8 @@ class State:
                      
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
-            is_v3_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
-            if not is_v3_swap:
+            is_pool_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
+            if not is_pool_swap:
                 token = ev.get("token", "").lower()
                 user = ev.get("user", "").lower()
                 if not token or not user:
@@ -539,12 +539,12 @@ class State:
             lp = self.launchpad_tokens.get(token)
             if lp is None:
                 return
-            if is_v3_swap and not getattr(lp, "quote_token", ""):
+            if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
             
             lp.last_price_native = price_native
                 
-            if not is_v3_swap:
+            if not is_pool_swap:
                 if is_buy and blk <= lp.created_block + 10:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
@@ -1970,6 +1970,7 @@ class State:
                         continue
 
                     addr = (raw.get("address") or "").lower()
+                    h.register_dynamic_addresses_from_log(raw)
                     if not h.accepts_log_for_indexing(tag, addr):
                         continue
 

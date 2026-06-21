@@ -54,6 +54,8 @@ async def reindex(start_block: int, batch: int) -> int:
             filtered_logs: dict[int, list[dict]] = {}
             for blk in range(chunk_start, chunk_end + 1):
                 logs_for_blk = cached.get(blk, [])
+                for raw in logs_for_blk:
+                    h.register_dynamic_addresses_from_log(raw)
                 filtered = []
                 new_tokens_in_blk = _new_tokens_in_block(logs_for_blk)
 
@@ -162,7 +164,7 @@ def _new_tokens_in_block(logs_for_blk: list[dict]) -> set[str]:
         if tag in {"NFC", "TC"}:
             if len(topics) < 3:
                 continue
-            if tag == "NFC" and addr != h.CONTRACTS["NADFUN"].lower():
+            if tag == "NFC" and not h.is_nadfun_address(addr):
                 continue
             if tag == "TC" and addr != h.CONTRACTS.get("ROUTER", "").lower():
                 continue
@@ -299,6 +301,8 @@ async def backfill(start_block: int, batch: int) -> int:
                     filtered_logs: dict[int, list[dict]] = {}
                     for blk in range(chunk_start, chunk_end + 1):
                         logs_for_blk = cached.get(blk, [])
+                        for raw in logs_for_blk:
+                            h.register_dynamic_addresses_from_log(raw)
                         filtered = []
                         new_tokens_in_blk = _new_tokens_in_block(logs_for_blk)
 

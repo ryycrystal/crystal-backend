@@ -165,6 +165,35 @@ def is_nadfun_address(addr: str) -> bool:
     return (addr or "").lower() in NADFUN_ADDRS
 
 
+def _topic_addr(topic: str) -> str:
+    if not isinstance(topic, str):
+        return ""
+    hex_topic = topic[2:] if topic.startswith("0x") else topic
+    if len(hex_topic) < 40:
+        return ""
+    return ("0x" + hex_topic[-40:]).lower()
+
+
+def register_dynamic_addresses_from_log(raw_log: dict) -> None:
+    topics = raw_log.get("topics") or []
+    if not topics:
+        return
+
+    tag = EVENT_SIGS.get(str(topics[0]).lower())
+    addr = (raw_log.get("address") or "").lower()
+    pool = ""
+
+    if tag == "NFC" and is_nadfun_address(addr) and len(topics) > 3:
+        pool = _topic_addr(topics[3])
+    elif tag == "NFT" and is_nadfun_address(addr) and len(topics) > 2:
+        pool = _topic_addr(topics[2])
+    elif tag == "MG" and addr == CONTRACTS.get("ROUTER", "").lower() and len(topics) > 2:
+        pool = _topic_addr(topics[2])
+
+    if pool and pool not in ADDRS:
+        ADDRS.append(pool)
+
+
 def accepts_log_for_indexing(tag: str, addr: str) -> bool:
     addr = (addr or "").lower()
     if tag in ROUTER_EVENT_TAGS:
