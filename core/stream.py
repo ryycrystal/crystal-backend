@@ -168,6 +168,45 @@ def _clear_stale_blocks(current_head: int):
     missing_set = new_set
 
 
+async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) -> bool:
+    try:
+        logs = await backfill.fetch_logs_http(blk, blk)
+    except Exception as e:
+        print(f"[WS] Failed to fetch logs for block {blk}: {e!r}", flush=True)
+        _add_missing(blk)
+        return False
+
+    by_block: dict[int, list[dict]] = {}
+    for log in logs:
+        topics = log.get("topics") or []
+        if not topics:
+            continue
+
+        tag = h.EVENT_SIGS.get(topics[0].lower())
+        if not tag:
+            continue
+
+        addr = log.get("address", "").lower()
+        if not h.accepts_log_for_indexing(tag, addr):
+            continue
+
+        if tag in event_counts:
+            event_counts[tag] += 1
+
+        blk_hex = log.get("blockNumber")
+        blk_num = int(blk_hex, 16) if isinstance(blk_hex, str) else int(blk_hex or 0)
+        if blk_num != blk:
+            continue
+        by_block.setdefault(blk_num, []).append(log)
+
+    if by_block:
+        await backfill.ensure_block_timestamps(by_block)
+        for log in by_block.get(blk, []):
+            SEQUENCER.add_log(log)
+
+    return True
+
+
 async def _gap_worker(event_counts, should_exit_flag: list):
     while not should_exit_flag[0]:
         if not missing_blocks:
@@ -376,6 +415,12 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
 
                     if last_head_num is not None:
                         note_ts = last_head_block_ts
+                        fetched = await _fetch_and_add_indexed_logs_for_block(last_head_num, event_counts)
+                        if not fetched:
+                            last_head_ts = time.monotonic()
+                            last_head_num = blk
+                            last_head_block_ts = blk_ts
+                            continue
                         if note_ts is None and SEQUENCER._logs_by_block.get(last_head_num):
                             try:
                                 note_ts = await backfill.get_block_timestamp_http(last_head_num)

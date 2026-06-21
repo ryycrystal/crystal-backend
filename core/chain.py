@@ -38,6 +38,19 @@ def _addr_from_env(default: str, *names: str) -> str:
     return default.lower()
 
 
+def _addrs_from_env(defaults: list[str], *names: str) -> list[str]:
+    values: list[str] = []
+    for name in names:
+        val = os.getenv(name)
+        if val:
+            values.extend(v.strip() for v in val.split(",") if v.strip())
+
+    if not values:
+        values = defaults
+
+    return list(dict.fromkeys(v.lower() for v in values))
+
+
 CRYSTAL_ADDR = _addr_from_env(
     "0xAb0a934eea61C69329735EB37bd72d8c871C56F3",
     "CRYSTAL_ADDRESS",
@@ -52,6 +65,17 @@ NADFUN_ADDR = _addr_from_env(
     "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
     "NADFUN_ADDRESS",
 )
+NADFUN_V2_ADDR = _addr_from_env(
+    "0x9f3832732923252A21044F21eE6bd87F09514ae4",
+    "NADFUN_V2_ADDRESS",
+)
+NADFUN_ADDRS = _addrs_from_env(
+    [
+        NADFUN_ADDR,
+        NADFUN_V2_ADDR,
+    ],
+    "NADFUN_ADDRESSES",
+)
 
 CONTRACTS = {
     "ROUTER": CRYSTAL_ADDR,
@@ -60,7 +84,7 @@ CONTRACTS = {
     "VAULT_FACTORY": VAULT_FACTORY_ADDR,
     "NADFUN": NADFUN_ADDR,
 }
-ADDRS = list(dict.fromkeys(a.lower() for a in CONTRACTS.values()))
+ADDRS = list(dict.fromkeys([*(a.lower() for a in CONTRACTS.values()), *NADFUN_ADDRS]))
 
 EVENT_SIGS = {
     "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
@@ -82,10 +106,18 @@ EVENT_SIGS = {
     "0x00ec7b1c26d1057308e56c6900fb540231a33b23494817d35dbfd7f056078451": "VLOCKUP",
     "0x3f0bf479ded477a0724977a228e5e9afa2efdb537c527aba3cc7169403ef422a": "VDECR",
     "0xd37e3f4f651fe74251701614dbeac478f5a0d29068e87bbe44e5026d166abca9": "NFC",
+    "0xac11ceed5187dce8e72afc92116e2aebbbd4fb263cb4021374a5df1b90c89936": "NFC",
     "0x00a7ba871905cb955432583640b5c9fc6bdd27d36884ab2b5420839224638862": "NFB",
+    "0x89f5adc174562e07c9c9b1cae7109bbecb21cf9d1b2847e550042b8653c54a0e": "NFB",
     "0x0eb25df0e2137de8ce042eeaf39080d25f0c8d451372c99db69a4c0a298d0fa1": "NFS",
+    "0xa082022e93cfcd9f1da5f9236718053910f7e840da080c789c7845698dc032ff": "NFS",
     "0xfd4bb47bd45abdbdb2ecd61052c9571773f9cde876e2a7745f488c20b30ab10a": "NFSYNC",
+    "0x27efe2fec96cb0ff68b9206e3dca402a919bb7172e2f2d12d49b633df3eabc4f": "NFSYNC",
     "0xa1cae252e597e19f398a442722a17a17e62d17f9d4f3656786e18aabcd428908": "NFT",
+    "0xc0682ac2d5a530c92664a8717db0ab335b5c5cbdfdc740185679e170244633e0": "NFT",
+    "0x381d54fa425631e6266af114239150fae1d5db67bb65b4fa9ecc65013107e07e": "NFT",
+    "0x9cf337bf5592ea341168705a5dd168d5d26aaedb4d4725f6f13dd30aeae3322d": "NFPEN",
+    "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822": "V2SWAP",
     "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67": "V3SWAP",
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
 }
@@ -115,6 +147,8 @@ PARSERS = {
     "NFS": n.parse_nadfun_sell,
     "NFSYNC": n.parse_nadfun_sync,
     "NFT": n.parse_nadfun_graduated,
+    "NFPEN": n.parse_nadfun_sniping_penalty,
+    "V2SWAP": n.parse_v2_pair_swap,
     "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
 }
@@ -122,7 +156,13 @@ PARSERS = {
 ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
+NADFUN_AUX_EVENT_TAGS = {"NFPEN"}
+V2_PAIR_EVENT_TAGS = {"V2SWAP"}
 PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
+
+
+def is_nadfun_address(addr: str) -> bool:
+    return (addr or "").lower() in NADFUN_ADDRS
 
 
 def accepts_log_for_indexing(tag: str, addr: str) -> bool:
@@ -132,7 +172,11 @@ def accepts_log_for_indexing(tag: str, addr: str) -> bool:
     if tag in VAULT_FACTORY_EVENT_TAGS:
         return addr == CONTRACTS["VAULTS"].lower()
     if tag in NADFUN_EVENT_TAGS:
-        return addr == CONTRACTS["NADFUN"].lower()
+        return is_nadfun_address(addr)
+    if tag in NADFUN_AUX_EVENT_TAGS:
+        return is_nadfun_address(addr)
+    if tag in V2_PAIR_EVENT_TAGS:
+        return addr in ADDRS
     if tag in PASSTHROUGH_EVENT_TAGS:
         return True
     return False

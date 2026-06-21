@@ -17,6 +17,8 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
+NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 
 class State:
@@ -62,6 +64,7 @@ class State:
         self.mon_price_usd = px
         with self._lock:
             self.tokenToPrice[WMON] = px
+            self.tokenToPrice[LVMON] = px
 
         try:
             storage.set_mon_price_usd(px)
@@ -109,6 +112,7 @@ class State:
                     approaching_75,
                     approaching_75_block,
                     approaching_75_at,
+                    quote_token,
                 ) = row
 
                 lp = models.LaunchpadToken(
@@ -129,6 +133,7 @@ class State:
                     migrated_block=int(migrated_block) if migrated_block is not None else None,
                     migrated_at=int(migrated_at) if migrated_at is not None else None,
                     market=market,
+                    quote_token=(quote_token or WMON).lower(),
                     last_price_native=Decimal(last_price_native),
                     native_volume=int(native_volume),
                     token_volume=int(token_volume),
@@ -169,6 +174,7 @@ class State:
             except Exception as e:
                 print(f"[State] Failed to load MON price from DB: {e!r}")
             self.tokenToPrice[WMON] = self.mon_price_usd
+            self.tokenToPrice[LVMON] = self.mon_price_usd
 
             market_rows = storage.load_crystal_markets_for_state()
             for row in market_rows:
@@ -345,7 +351,7 @@ class State:
     def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             src = (log_addr or "").lower()
-            if src not in {h.CONTRACTS["NADFUN"].lower(), h.CONTRACTS.get("ROUTER", "").lower()}:
+            if not (h.is_nadfun_address(src) or src == h.CONTRACTS.get("ROUTER", "").lower()):
                 return
             
             token = ev.get("token","").lower()
@@ -362,6 +368,7 @@ class State:
             social3 = ev.get("social3", "")
             social4 = ev.get("social4", "")
             source = int(ev.get("source", 0))
+            quote_token = (ev.get("quote_token") or WMON).lower()
             
             lp = self.launchpad_tokens.get(token)
             if lp is not None:
@@ -382,6 +389,7 @@ class State:
                 lp.created_block = blk
                 lp.created_at = ts
                 lp.source = source
+                lp.quote_token = quote_token
                 self.launchpad_tokens[token] = lp
                 
                 if (source == 1):
@@ -405,11 +413,34 @@ class State:
                 created_block=blk,
                 created_at=ts,
                 last_price_native=lp.last_price_native,
+                quote_token=lp.quote_token,
                 cur=cur
             )
             
             if creator:                
                 storage.increment_user_tokens_created(creator, cur=cur)
+
+            pool = (ev.get("pool") or "").lower()
+            if source == 1 and pool and quote_token and token != quote_token:
+                lp.market = pool
+                lp.quote_token = quote_token
+                token_is_0 = token < quote_token
+                self.v3_pools[pool] = models.PoolInfo(
+                    pool=pool,
+                    token_addr=token,
+                    native_addr=quote_token,
+                    token_is_0=token_is_0,
+                )
+                self.token_to_v3_pool[token] = pool
+                if pool not in h.ADDRS:
+                    h.ADDRS.append(pool)
+                storage.upsert_pool(
+                    pool=pool,
+                    token_addr=token,
+                    native_addr=quote_token,
+                    token_is_0=token_is_0,
+                    cur=cur,
+                )
 
                      
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
@@ -489,22 +520,27 @@ class State:
 
                 price_raw = ev.get("sqrt_price_x96") or 0
                 try:
-                    sqrt_p = Decimal(int(price_raw)) / Decimal(1 << 96)
-                    ratio = sqrt_p * sqrt_p
-
-                    if ratio <= 0:
-                        price_native = Decimal(0)
+                    if int(price_raw) <= 0:
+                        price_native = Decimal(native_amt) / Decimal(token_amt)
                     else:
-                        if pi.token_is_0:
-                            price_native = ratio
+                        sqrt_p = Decimal(int(price_raw)) / Decimal(1 << 96)
+                        ratio = sqrt_p * sqrt_p
+
+                        if ratio <= 0:
+                            price_native = Decimal(native_amt) / Decimal(token_amt)
                         else:
-                            price_native = Decimal(1) / ratio
+                            if pi.token_is_0:
+                                price_native = ratio
+                            else:
+                                price_native = Decimal(1) / ratio
                 except Exception:
                     price_native = Decimal(0)
 
             lp = self.launchpad_tokens.get(token)
             if lp is None:
                 return
+            if is_v3_swap and not getattr(lp, "quote_token", ""):
+                lp.quote_token = pi.native_addr or WMON
             
             lp.last_price_native = price_native
                 
@@ -553,9 +589,10 @@ class State:
             else:
                 lp.sell_count += 1
 
-            mon_price = self.mon_price_usd
-            if mon_price > 0:
-                volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * mon_price
+            quote_price = self._quote_price_usd(lp.quote_token)
+            volume_usd_trade = Decimal(0)
+            if quote_price > 0:
+                volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
                 lp.volume_usd += volume_usd_trade
                 lp.fees_usd += volume_usd_trade * Decimal("0.01")
 
@@ -580,7 +617,7 @@ class State:
 
             trade_count_delta = 1
             
-            usd_amount = Decimal(native_amt) * Decimal(0.05)
+            usd_amount = volume_usd_trade
 
             if batch is not None:
                                                
@@ -701,7 +738,7 @@ class State:
     def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> str | None:
         with self._lock:
             src = (log_addr or "").lower()
-            if src not in {h.CONTRACTS["NADFUN"].lower(), h.CONTRACTS.get("ROUTER", "").lower()}:
+            if not (h.is_nadfun_address(src) or src == h.CONTRACTS.get("ROUTER", "").lower()):
                 return None
             
             token = (ev.get("token") or "").lower()
@@ -719,17 +756,17 @@ class State:
             pool = (ev.get("pool") or "").lower()
             
             if pool and pool not in self.v3_pools:
-                wmon = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A".lower()
+                quote_token = (lp.quote_token or WMON).lower()
 
                 lp.market = pool
 
-                if token != wmon:
-                    token_is_0 = token < wmon
+                if token != quote_token:
+                    token_is_0 = token < quote_token
 
                     self.v3_pools[pool] = models.PoolInfo(
                         pool=pool,
                         token_addr=token,
-                        native_addr=wmon,
+                        native_addr=quote_token,
                         token_is_0=token_is_0,
                     )
                     self.token_to_v3_pool[token] = pool
@@ -737,7 +774,7 @@ class State:
                     storage.upsert_pool(
                         pool=pool,
                         token_addr=token,
-                        native_addr=wmon,
+                        native_addr=quote_token,
                         token_is_0=token_is_0,
                         cur=cur,
                     )
@@ -830,6 +867,13 @@ class State:
         self.tokenToPrice.clear()
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
+            self.tokenToPrice[LVMON] = self.mon_price_usd
+
+    def _quote_price_usd(self, quote_token: str) -> Decimal:
+        quote = (quote_token or WMON).lower()
+        if quote in NATIVE_EQUIV_QUOTES:
+            return self.mon_price_usd if self.mon_price_usd > 0 else Decimal(0)
+        return self.tokenToPrice.get(quote, Decimal(0))
 
     def _reset_aux_locked(self) -> None:
         self.addressToMarket.clear()

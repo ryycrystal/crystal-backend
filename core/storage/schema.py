@@ -111,8 +111,15 @@ def init_db() -> None:
                 snipers_count        BIGINT NOT NULL DEFAULT 0,
                 approaching_75       BOOLEAN NOT NULL DEFAULT false,
                 approaching_75_block BIGINT,
-                approaching_75_at    BIGINT
+                approaching_75_at    BIGINT,
+                quote_token          TEXT NOT NULL DEFAULT '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'
             ); 
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_tokens
+            ADD COLUMN IF NOT EXISTS quote_token TEXT NOT NULL DEFAULT '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
             """
         )
         cur.execute(

@@ -29,6 +29,10 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 log.propagate = False
 
+WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
+NATIVE_EQUIV_QUOTES = {WMON, LVMON}
+
 def _fmt(value) -> str:
     if value is None:
         return "0"
@@ -63,6 +67,77 @@ def _fmt_usd(value) -> str:
     if '.' in s:
         s = s.rstrip('0').rstrip('.')
     return s if s else "0"
+
+
+def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
+    (
+        market,
+        quote_address,
+        base_address,
+        market_type,
+        quote_decimals,
+        base_decimals,
+        quote_ticker,
+        quote_name,
+        base_ticker,
+        base_name,
+        taker_fee,
+        is_amm_enabled,
+        last_price,
+        updated_at,
+        created_at,
+        reserve_quote,
+        reserve_base,
+        total_shares,
+        tvl_usd,
+        volume_24h_usd,
+        fees_24h_usd,
+        apy_24h,
+        daily_yield_24h,
+        last_sync_block,
+        last_sync_at,
+        *_rest,
+    ) = row
+
+    apy = Decimal(apy_24h or 0)
+    daily_yield = Decimal(daily_yield_24h or 0)
+
+    return {
+        "market": (market or "").lower(),
+        "address": (market or "").lower(),
+        "quoteAsset": (quote_address or "").lower(),
+        "baseAsset": (base_address or "").lower(),
+        "quote": {
+            "address": (quote_address or "").lower(),
+            "decimals": int(quote_decimals or 0),
+            "ticker": quote_ticker or "",
+            "name": quote_name or "",
+        },
+        "base": {
+            "address": (base_address or "").lower(),
+            "decimals": int(base_decimals or 0),
+            "ticker": base_ticker or "",
+            "name": base_name or "",
+        },
+        "marketType": int(market_type or 0),
+        "isAmmEnabled": bool(is_amm_enabled),
+        "lastPrice": _fmt(last_price or Decimal(0)),
+        "takerFee": str(int(taker_fee or 0)),
+        "reserveQuote": str(int(reserve_quote or 0)),
+        "reserveBase": str(int(reserve_base or 0)),
+        "totalShares": str(int(total_shares or 0)),
+        "tvlUsd": float(tvl_usd or 0.0),
+        "volume24hUsd": float(volume_24h_usd or 0.0),
+        "fees24hUsd": float(fees_24h_usd or 0.0),
+        "apy24h": float(apy),
+        "apy24hPercent": float(apy * Decimal(100)),
+        "dailyYield24h": float(daily_yield),
+        "dailyYieldPercent": float(daily_yield * Decimal(100)),
+        "lastSyncBlock": int(last_sync_block or 0),
+        "lastSyncAt": int(last_sync_at or 0),
+        "updatedAt": int(last_sync_at or updated_at or created_at or 0),
+        "createdAt": int(created_at or 0),
+    }
 
 
 AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
@@ -296,22 +371,24 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
                 tx_count, circulating_supply, snipers_count, approaching_75,
                 approaching_75_block, approaching_75_at,
                 COALESCE(u.tokens_created, 0) as dev_tokens_created,
-                COALESCE(u.tokens_graduated, 0) as dev_tokens_graduated
+                COALESCE(u.tokens_graduated, 0) as dev_tokens_graduated,
+                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a') as quote_token
             FROM launchpad_tokens t
             LEFT JOIN launchpad_users u ON u.address = t.creator
             WHERE token = ANY(%s)
         """, (token_addrs,))
         rows = cur.fetchall()
 
-    mon_price = _mon_price_usd()
     token_data = {}
     for row in rows:
         token = row[0]
         creator = (row[1] or "").lower()
 
         last_price_native = row[17] or Decimal(0)
+        quote_token = (row[32] or WMON).lower()
+        quote_price_usd = _quote_price_usd(quote_token)
         marketcap_native_raw = last_price_native * Decimal(1e9)
-        marketcap_usd = marketcap_native_raw * mon_price
+        marketcap_usd = marketcap_native_raw * quote_price_usd
 
         token_data[token] = {
             "token": token,
@@ -321,11 +398,16 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "creator": creator,
             "metadata_cid": row[4],
             "source": int(row[10] or 0),
+            "quote_token": quote_token,
+            "quote_asset": quote_token,
             "native_volume": str(int(row[18] or 0)),
+            "quote_volume": str(int(row[18] or 0)),
             "token_volume": str(int(row[19] or 0)),
             "volume_usd": _fmt_usd(row[20] or Decimal(0)),
             "fees_usd": _fmt_usd(row[21] or Decimal(0)),
             "marketcap_native_raw": _fmt(marketcap_native_raw),
+            "marketcap_quote_raw": _fmt(marketcap_native_raw),
+            "price_quote": _fmt(last_price_native),
             "marketcap_usd": _fmt_usd(marketcap_usd),
             "tx": {
                 "buy": int(row[22] or 0),
@@ -436,7 +518,8 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
                 snipers_count,
                 approaching_75,
                 approaching_75_block,
-                approaching_75_at
+                approaching_75_at,
+                quote_token
             FROM launchpad_tokens
             WHERE token = %s
             """,
@@ -478,6 +561,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         approaching_75,
         approaching_75_block,
         approaching_75_at,
+        quote_token,
     ) = row
 
     creator = creator or ""
@@ -495,7 +579,8 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
     snipers_count = int(snipers_count or 0)
 
     marketcap_native_raw = last_price_native * Decimal(1e9)
-    marketcap_usd = marketcap_native_raw * _mon_price_usd()
+    quote_token = (quote_token or WMON).lower()
+    marketcap_usd = marketcap_native_raw * _quote_price_usd(quote_token)
 
     dev_tokens_created = 0
     dev_tokens_graduated = 0
@@ -559,15 +644,20 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "creator": creator,
         "metadata_cid": metadata_cid,
         "source": int(source or 0),
+        "quote_token": quote_token,
+        "quote_asset": quote_token,
         "holders": holders,
         "developer_holding": str(dev_holding),
         "top10_holding": str(top10_holding),
         "top10_addresses": top10_addresses,
         "native_volume": str(native_volume),
+        "quote_volume": str(native_volume),
         "token_volume": str(token_volume),
         "volume_usd": _fmt_usd(volume_usd),
         "fees_usd": _fmt_usd(fees_usd),
         "marketcap_native_raw": _fmt(marketcap_native_raw),
+        "marketcap_quote_raw": _fmt(marketcap_native_raw),
+        "price_quote": _fmt(last_price_native),
         "marketcap_usd": _fmt_usd(marketcap_usd),
         "tx": {
             "buy": buy_count,
@@ -677,6 +767,12 @@ def _mon_price_usd() -> Decimal:
         return result
     except Exception:
         return Decimal("0.03")
+
+def _quote_price_usd(quote_token: str | None) -> Decimal:
+    quote = (quote_token or WMON).lower()
+    if quote in NATIVE_EQUIV_QUOTES:
+        return _mon_price_usd()
+    return Decimal(0)
 
 
 def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:

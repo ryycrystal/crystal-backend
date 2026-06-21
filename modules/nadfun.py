@@ -29,6 +29,12 @@ _MAX_RETRY_QUEUE_SIZE = 10000
 _MAX_RETRIES = 5
 _BACKOFF_SCHEDULE = [30, 60, 120, 240, 480]
 
+V2_CREATE_TOPIC = "0xac11ceed5187dce8e72afc92116e2aebbbd4fb263cb4021374a5df1b90c89936"
+V2_BUY_TOPIC = "0x89f5adc174562e07c9c9b1cae7109bbecb21cf9d1b2847e550042b8653c54a0e"
+V2_SELL_TOPIC = "0xa082022e93cfcd9f1da5f9236718053910f7e840da080c789c7845698dc032ff"
+V2_SNIPING_PENALTY_TOPIC = "0x9cf337bf5592ea341168705a5dd168d5d26aaedb4d4725f6f13dd30aeae3322d"
+V2_PAIR_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+
 
 def _pop_metadata_batch(limit: int) -> list[tuple[str, str]]:
     if not METADATA_QUEUE:
@@ -275,10 +281,14 @@ def parse_nadfun_token_created(
 ) -> dict:
     creator = _to_addr(topics[1]) if len(topics) > 1 else ""
     token = _to_addr(topics[2]) if len(topics) > 2 else ""
+    pool = _to_addr(topics[3]) if len(topics) > 3 else ""
 
-    name = _decode_string(data_no0x, 0)
-    symbol = _decode_string(data_no0x, 1)
-    token_uri = _decode_string(data_no0x, 2)
+    is_v2 = topics and topics[0].lower() == V2_CREATE_TOPIC
+    quote_token = _to_addr(data_no0x[:64]) if is_v2 and len(data_no0x) >= 64 else ""
+    string_base = 1 if is_v2 else 0
+    name = _decode_string(data_no0x, string_base)
+    symbol = _decode_string(data_no0x, string_base + 1)
+    token_uri = _decode_string(data_no0x, string_base + 2)
 
     description: str = ""
     image_uri: str = ""
@@ -302,6 +312,8 @@ def parse_nadfun_token_created(
     return {
         "token": token,
         "creator": creator,
+        "pool": pool,
+        "quote_token": quote_token,
         "name": name,
         "symbol": symbol,
         "metadata_cid": metadata_cid,
@@ -372,16 +384,22 @@ def _consume_sync_for_token(token: str) -> dict:
                               
     
                                                                                          
-def parse_nadfun_buy(
+def _parse_nadfun_trade(
     _addr: str,
     topics: list[str],
     data_no0x: str,
+    is_buy: bool,
 ) -> Optional[dict]:
     if len(topics) < 3:
         return None
 
-    user = _to_addr(topics[1])
-    token = _to_addr(topics[2])
+    is_v2 = topics[0].lower() in {V2_BUY_TOPIC, V2_SELL_TOPIC}
+    if is_v2:
+        token = _to_addr(topics[1])
+        user = _to_addr(topics[2])
+    else:
+        user = _to_addr(topics[1])
+        token = _to_addr(topics[2])
 
     actual_in = _word(data_no0x, 0)
     effective_out = _word(data_no0x, 1)
@@ -391,12 +409,20 @@ def parse_nadfun_buy(
     return {
         "token": token,
         "user": user,
-        "is_buy": True,
+        "is_buy": is_buy,
         "amount_in": actual_in,
         "amount_out": effective_out,
         "native_reserve": sync["native_reserve"],
         "token_reserve": sync["token_reserve"],
     }
+
+
+def parse_nadfun_buy(
+    _addr: str,
+    topics: list[str],
+    data_no0x: str,
+) -> Optional[dict]:
+    return _parse_nadfun_trade(_addr, topics, data_no0x, True)
 
             
                 
@@ -410,26 +436,7 @@ def parse_nadfun_sell(
     topics: list[str],
     data_no0x: str,
 ) -> Optional[dict]:
-    if len(topics) < 3:
-        return None
-
-    user = _to_addr(topics[1])
-    token = _to_addr(topics[2])
-
-    actual_in = _word(data_no0x, 0)
-    effective_out = _word(data_no0x, 1)
-
-    sync = _consume_sync_for_token(token)
-
-    return {
-        "token": token,
-        "user": user,
-        "is_buy": False,
-        "amount_in": actual_in,
-        "amount_out": effective_out,
-        "native_reserve": sync["native_reserve"],
-        "token_reserve": sync["token_reserve"],
-    }
+    return _parse_nadfun_trade(_addr, topics, data_no0x, False)
 
                              
                                             
@@ -443,6 +450,21 @@ def parse_nadfun_graduated(
     return {
         "token": token, 
         "pool": pool
+    }
+
+
+def parse_nadfun_sniping_penalty(
+    _addr: str,
+    topics: list[str],
+    data_no0x: str,
+) -> dict:
+    token = _to_addr(topics[1]).lower() if len(topics) > 1 else ""
+    buyer = _to_addr(topics[2]).lower() if len(topics) > 2 else ""
+    return {
+        "token": token,
+        "user": buyer,
+        "sniping_fee": _word(data_no0x, 0),
+        "penalty_bps": _word(data_no0x, 1),
     }
 
        
@@ -493,4 +515,43 @@ def parse_v3_trade(addr, tops, data):
         "amount0": amount0,
         "amount1": amount1,
         "sqrt_price_x96": sqrt_price_x96,
+    }
+
+
+def parse_v2_pair_swap(addr, tops, data):
+    pool = addr.lower()
+    sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""
+    recipient = _to_addr(tops[2]).lower() if len(tops) > 2 else ""
+
+    if isinstance(data, str) and data.startswith("0x"):
+        hex_data = data[2:]
+    else:
+        hex_data = data
+
+    words = list(_chunks(hex_data, 64))
+    if len(words) < 4:
+        return {
+            "pool": pool,
+            "sender": sender,
+            "user": recipient,
+            "amount0": 0,
+            "amount1": 0,
+            "sqrt_price_x96": 0,
+        }
+
+    try:
+        amount0_in = int(words[0], 16)
+        amount1_in = int(words[1], 16)
+        amount0_out = int(words[2], 16)
+        amount1_out = int(words[3], 16)
+    except Exception:
+        amount0_in = amount1_in = amount0_out = amount1_out = 0
+
+    return {
+        "pool": pool,
+        "sender": sender,
+        "user": recipient,
+        "amount0": amount0_in - amount0_out,
+        "amount1": amount1_in - amount1_out,
+        "sqrt_price_x96": 0,
     }

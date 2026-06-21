@@ -7,6 +7,8 @@ from psycopg2.extras import Json, execute_values
 
 from .base import db_cursor, _clean_text
 
+WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+
 def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -575,8 +577,10 @@ def upsert_token_created(
     created_block: int,
     created_at: int,
     last_price_native,
+    quote_token: str | None = None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
+    quote_token_l = (quote_token or WMON).lower()
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -595,9 +599,10 @@ def upsert_token_created(
                     source,
                     created_block,
                     created_at,
-                    last_price_native
+                    last_price_native,
+                    quote_token
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (token) DO UPDATE
                 SET
                     creator = EXCLUDED.creator,
@@ -612,7 +617,8 @@ def upsert_token_created(
                     source = EXCLUDED.source,
                     created_block = EXCLUDED.created_block,
                     created_at = EXCLUDED.created_at,
-                    last_price_native = EXCLUDED.last_price_native;
+                    last_price_native = EXCLUDED.last_price_native,
+                    quote_token = EXCLUDED.quote_token;
                 """,
                 (
                     token,
@@ -629,6 +635,7 @@ def upsert_token_created(
                     int(created_block),
                     int(created_at),
                     last_price_native,
+                    quote_token_l,
                 ),
             )
     else:
@@ -648,9 +655,10 @@ def upsert_token_created(
                 source,
                 created_block,
                 created_at,
-                last_price_native
+                last_price_native,
+                quote_token
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (token) DO UPDATE
             SET
                 creator = EXCLUDED.creator,
@@ -665,7 +673,8 @@ def upsert_token_created(
                 source = EXCLUDED.source,
                 created_block = EXCLUDED.created_block,
                 created_at = EXCLUDED.created_at,
-                last_price_native = EXCLUDED.last_price_native;
+                last_price_native = EXCLUDED.last_price_native,
+                quote_token = EXCLUDED.quote_token;
             """,
             (
                 token,
@@ -682,6 +691,7 @@ def upsert_token_created(
                 int(created_block),
                 int(created_at),
                 last_price_native,
+                quote_token_l,
             ),
         )
 
@@ -906,7 +916,8 @@ def load_tokens_for_state():
                 snipers_count,
                 approaching_75,
                 approaching_75_block,
-                approaching_75_at
+                approaching_75_at,
+                quote_token
             FROM launchpad_tokens
             """
         )

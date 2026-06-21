@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+
                  
 @dataclass(slots=True)
 class LaunchpadToken:
@@ -22,6 +24,7 @@ class LaunchpadToken:
     migrated_at: int = 0
     market: str = ""
     source: int = 0                                               
+    quote_token: str = WMON
     last_price_native: Decimal = Decimal(0.000001)
     native_volume: int = 0
     token_volume: int = 0
