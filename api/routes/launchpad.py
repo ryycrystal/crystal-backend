@@ -22,6 +22,7 @@ from api.api import (
     _serialize_token,
     _build_ohlcv_from_db,
     _mon_price_usd,
+    _quote_price_usd,
 )
 
 router = APIRouter()
@@ -158,7 +159,8 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
                 h.holder_count,
                 s.volume_native_24h, s.volume_usd_24h, s.buys_24h, s.sells_24h,
                 b.distinct_buyers, b.distinct_sellers,
-                COALESCE(c.tokens_created, 0), COALESCE(c.tokens_graduated, 0)
+                COALESCE(c.tokens_created, 0), COALESCE(c.tokens_graduated, 0),
+                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a')
             FROM token_data t
             CROSS JOIN holder_stats h
             CROSS JOIN trade_stats_24h s
@@ -182,6 +184,7 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
         "holder_count": row[30], "volume_native_24h": row[31], "volume_usd_24h": row[32],
         "buys_24h": row[33], "sells_24h": row[34], "distinct_buyers": row[35], "distinct_sellers": row[36],
         "dev_tokens_created": row[37], "dev_tokens_graduated": row[38],
+        "quote_token": (row[39] or "0x3bd359c1119da7da1d913d1c4d2b7c461115433a").lower(),
     }
 
 
@@ -226,10 +229,11 @@ def token_overview_graph(
         migrated_at = core["migrated_at"]
         market = core["market"]
         last_price_native = core["last_price_native"]
+        quote_token = core["quote_token"]
         circulating_supply = core["circulating_supply"]
         snipers_count = core["snipers_count"]
 
-        mon_price = _mon_price_usd()
+        quote_price_usd = _quote_price_usd(quote_token)
 
         holders_count = int(core["holder_count"] or 0)
         distinct_buyers = int(core["distinct_buyers"] or 0)
@@ -246,7 +250,7 @@ def token_overview_graph(
         decimals = 18
         last_price_wad = last_price_native * Decimal(1e9)
         marketcap_native_raw = last_price_native * Decimal(1e9)
-        marketcap_usd = marketcap_native_raw * mon_price if mon_price > 0 else Decimal(0)
+        marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
@@ -301,9 +305,9 @@ def token_overview_graph(
 
             current_value_native = Decimal(balance_token) * last_price_native
 
-            if mon_price > 0:
-                balance_usd = current_value_native * mon_price
-                total_pnl_usd = total_pnl * mon_price
+            if quote_price_usd > 0:
+                balance_usd = current_value_native * quote_price_usd
+                total_pnl_usd = total_pnl * quote_price_usd
             else:
                 balance_usd = Decimal(0)
                 total_pnl_usd = Decimal(0)
@@ -385,9 +389,9 @@ def token_overview_graph(
 
             current_value_native = Decimal(balance_token) * last_price_native
 
-            if mon_price > 0:
-                balance_usd = current_value_native * mon_price
-                total_pnl_usd = total_pnl * mon_price
+            if quote_price_usd > 0:
+                balance_usd = current_value_native * quote_price_usd
+                total_pnl_usd = total_pnl * quote_price_usd
             else:
                 balance_usd = Decimal(0)
                 total_pnl_usd = Decimal(0)
@@ -625,9 +629,11 @@ def token_overview_graph(
             "id": token_addr,
             "initialSupply": str(10**18),
             "lastPriceNativePerTokenWad": str(last_price_wad),
+            "lastPriceQuotePerTokenWad": str(last_price_wad),
             "lastUpdatedAt": str(last_timestamp),
             "market": market,
             "marketcap": marketcap_native_raw,
+            "marketcap_quote": marketcap_native_raw,
             "marketcap_usd": marketcap_usd,
             "metadataCID": metadata_cid_val,
             "migrated": migrated_flag,
@@ -653,10 +659,13 @@ def token_overview_graph(
             "trackedtrades": tracked_trades_out,
             "trades": trades_out,
             "volumeNative": str(volume_native_24h),
+            "volumeQuote": str(volume_native_24h),
             "volumeUsd": _fmt_usd(volume_usd_24h),
             "graduationPercentageBps": graduation_bps,
             "circulating_supply": str(int(circulating_supply or 0)),
             "source": int(source or 0),
+            "quoteToken": quote_token,
+            "quote_token": quote_token,
         }
         
         return result

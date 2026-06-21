@@ -437,6 +437,16 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
 
 
 def test_pools_route_helper_and_list_endpoint():
+    real_row = _pool_row_25()
+    real_api_row = pool_api._pool_row_to_api(real_row)
+    assert real_api_row["market"] == "0xpool"
+    assert real_api_row["reserveQuote"] == "123456"
+    assert real_api_row["reserveBase"] == "654321"
+    assert real_api_row["tvlUsd"] == 777.7
+    assert real_api_row["volume24hUsd"] == 88.8
+    assert real_api_row["fees24hUsd"] == 9.9
+    assert real_api_row["apy24hPercent"] == 12.0
+
     fake_api = types.SimpleNamespace(_crystal_pool_row_to_api=MagicMock(return_value={"ok": True}))
     with patch.dict(sys.modules, {"api.api": fake_api}):
         assert pool_api._pool_row_to_api(("row",)) == {"ok": True}
