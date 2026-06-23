@@ -5,6 +5,7 @@ import asyncio
 import os
 from pathlib import Path
 
+import backfill
 import export_logs
 from core.stream import stream_logs, vault_sampler
 from core.sequencer import SEQUENCER
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--live-dump-rps", type=float, default=5.0, help="max RPC requests per second for live dump follower")
     parser.add_argument("--live-dump-indexed-only", action="store_true", help="live dump only backend-indexed topics instead of all logs")
     parser.add_argument("--no-indexer-lock", action="store_true", help="disable Postgres advisory lock guard")
+    parser.add_argument(
+        "--from-current-block",
+        action="store_true",
+        help="in live mode, load DB state but start streaming from the current RPC head",
+    )
     return parser.parse_args()
 
 
@@ -155,6 +161,19 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     await asyncio.gather(*tasks)
 
 
+async def _live_start_block(args: argparse.Namespace, last_db: int) -> int:
+    if not args.from_current_block:
+        return (last_db + 1) if last_db else args.start_block
+
+    head = await backfill.get_head_http()
+    print(
+        f"[IDX] --from-current-block set: DB last processed block is {last_db or 'none'}; "
+        f"RPC head is {head}",
+        flush=True,
+    )
+    return head
+
+
 async def main() -> None:
     args = parse_args()
 
@@ -237,7 +256,7 @@ async def main() -> None:
 
         if args.mode == "live":
             last_db = _load_state_from_db()
-            start = (last_db + 1) if last_db else args.start_block
+            start = await _live_start_block(args, last_db)
             await _start_live(args, start)
             return
 

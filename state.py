@@ -3,6 +3,7 @@ from typing import Dict, Any
 from decimal import Decimal, getcontext
 from collections import deque
 import os
+import httpx
 import models
 import core.storage as storage
 import threading
@@ -20,6 +21,72 @@ WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
+_ERC20_NAME_SELECTOR = "0x06fdde03"
+_ERC20_SYMBOL_SELECTOR = "0x95d89b41"
+_TOKEN_URI_SELECTOR = "0x3c130d90"
+_GET_QUOTE_TOKEN_SELECTOR = "0x3df8a468"
+
+
+def _abi_addr_arg(addr: str) -> str:
+    return (addr or "").lower().removeprefix("0x").rjust(64, "0")
+
+
+def _decode_abi_string(result: str | None) -> str:
+    if not result or not isinstance(result, str) or result == "0x":
+        return ""
+    data_hex = result[2:] if result.startswith("0x") else result
+    try:
+        data = bytes.fromhex(data_hex)
+    except ValueError:
+        return ""
+    if len(data) < 64:
+        return ""
+    try:
+        offset = int.from_bytes(data[:32], "big")
+        length = int.from_bytes(data[offset : offset + 32], "big")
+        raw = data[offset + 32 : offset + 32 + length]
+        return raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _decode_abi_address(result: str | None) -> str:
+    if not result or not isinstance(result, str) or result == "0x":
+        return ""
+    data_hex = result[2:] if result.startswith("0x") else result
+    if len(data_hex) < 64:
+        return ""
+    return ("0x" + data_hex[-40:]).lower()
+
+
+def _eth_call(to: str, data: str) -> str:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{"to": to, "data": data}, "latest"],
+    }
+    resp = httpx.post(RPC_HTTP, json=payload, timeout=10.0)
+    resp.raise_for_status()
+    body = resp.json()
+    if "error" in body:
+        raise RuntimeError(body)
+    return body.get("result") or "0x"
+
+
+def _fetch_token_string(token: str, selector: str) -> str:
+    try:
+        return _decode_abi_string(_eth_call(token, selector))
+    except Exception:
+        return ""
+
+
+def _fetch_v2_quote_token(token: str) -> str:
+    try:
+        data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
+        return _decode_abi_address(_eth_call(h.NADFUN_V2_ADDR, data)) or WMON
+    except Exception:
+        return WMON
 
 class State:
     def __init__(self) -> None:
@@ -346,6 +413,81 @@ class State:
             print(f"[State] Reset for reindex: cleared all in-memory state")
 
                
+    def ensure_v2_launchpad_token(
+        self,
+        token: str,
+        blk: int,
+        ts: int,
+        cur: psycopg2.extensions.cursor | None = None,
+    ) -> bool:
+        token = (token or "").lower()
+        if not token:
+            return False
+
+        with self._lock:
+            if token in self.launchpad_tokens:
+                return True
+
+        name = _fetch_token_string(token, _ERC20_NAME_SELECTOR)
+        symbol = _fetch_token_string(token, _ERC20_SYMBOL_SELECTOR)
+        token_uri = _fetch_token_string(token, _TOKEN_URI_SELECTOR)
+        quote_token = _fetch_v2_quote_token(token)
+
+        with self._lock:
+            if token in self.launchpad_tokens:
+                return True
+
+            lp = models.LaunchpadToken(
+                token=token,
+                creator="",
+                name=name,
+                symbol=symbol,
+                metadata_cid="",
+                description="",
+                social1="",
+                social2="",
+                social3="",
+                social4="",
+            )
+            lp.created_block = int(blk)
+            lp.created_at = int(ts or 0)
+            lp.source = 1
+            lp.quote_token = quote_token
+            self.launchpad_tokens[token] = lp
+
+            storage.upsert_token_created(
+                token=token,
+                creator="",
+                name=name,
+                symbol=symbol,
+                metadata_cid="",
+                description="",
+                social1="",
+                social2="",
+                social3="",
+                social4="",
+                source=1,
+                created_block=int(blk),
+                created_at=int(ts or 0),
+                last_price_native=lp.last_price_native,
+                quote_token=quote_token,
+                cur=cur,
+            )
+
+            if token_uri:
+                try:
+                    from modules import nadfun
+
+                    nadfun.METADATA_QUEUE.append((token, token_uri))
+                except Exception:
+                    pass
+
+            print(
+                f"[State] discovered nad.fun v2 token {token} "
+                f"name={name!r} symbol={symbol!r} quote={quote_token}",
+                flush=True,
+            )
+            return True
 
                           
     def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
