@@ -397,6 +397,39 @@ class Sequencer:
             return None
         return "mint" if nxt_tag == "PMINT" else "burn"
 
+    def _timestamp_for_block_log(self, blk: int, log: dict) -> int:
+        raw_ts = log.get("blockTimestamp")
+        if raw_ts is None:
+            raw_ts = self._block_timestamps.get(blk)
+        if isinstance(raw_ts, str):
+            return int(raw_ts, 16)
+        return int(raw_ts or 0)
+
+    def _preload_missing_v2_tokens(self, blk: int, logs: List[dict], cur) -> None:
+        v2_addr = h.NADFUN_V2_ADDR.lower()
+        for log in logs:
+            if (log.get("address") or "").lower() != v2_addr:
+                continue
+            topics = log.get("topics") or []
+            if len(topics) < 2:
+                continue
+            if str(topics[0]).lower() not in h.NADFUN_V2_DIRECT_TRADE_TOPICS:
+                continue
+
+            token = h._topic_addr(topics[1])
+            if not token or token in self._state.launchpad_tokens:
+                continue
+
+            try:
+                self._state.ensure_v2_launchpad_token(
+                    token,
+                    blk,
+                    self._timestamp_for_block_log(blk, log),
+                    cur=cur,
+                )
+            except Exception as e:
+                print(f"[SQ] Failed to discover nad.fun v2 token {token}: {e!r}", flush=True)
+
     def _process_block(
         self,
         blk: int,
@@ -471,16 +504,11 @@ class Sequencer:
             )
 
     def _process_block_inner(self, blk: int, logs: List[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None):
+        self._preload_missing_v2_tokens(blk, logs, cur)
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
         for idx, log in enumerate(logs):
-            raw_ts = log.get("blockTimestamp")
-            if raw_ts is None:
-                raw_ts = self._block_timestamps.get(blk)
-            if isinstance(raw_ts, str):
-                blk_ts = int(raw_ts, 16)
-            else:
-                blk_ts = int(raw_ts or 0)
+            blk_ts = self._timestamp_for_block_log(blk, log)
             if blk_ts == 0 and blk not in self._missing_ts_warned:
                 self._missing_ts_warned.add(blk)
                 print(f"[SQ] Missing blockTimestamp for block {blk}, using 0", flush=True)
