@@ -167,6 +167,26 @@ def _internal_addrs() -> set[str]:
     return base
 
 
+_nadfun_v2_cache: set[str] | None = None
+_nadfun_v2_ts: float = 0
+
+def _nadfun_v2_set() -> set[str]:
+    global _nadfun_v2_cache, _nadfun_v2_ts
+    now = time.time()
+    if _nadfun_v2_cache is not None and (now - _nadfun_v2_ts) < 60:
+        return _nadfun_v2_cache
+    s = {a.lower() for a in storage.load_nadfun_v2_tokens() if a}
+    _nadfun_v2_cache = s
+    _nadfun_v2_ts = now
+    return s
+
+
+def _nadfun_version(token: str, source) -> int:
+    if int(source or 0) != 1:
+        return 0
+    return 2 if (token or "").lower() in _nadfun_v2_set() else 1
+
+
 from collections import OrderedDict
 from functools import wraps
 
@@ -402,6 +422,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "creator": creator,
             "metadata_cid": row[4],
             "source": int(row[10] or 0),
+            "nadfunVersion": _nadfun_version(token, row[10]),
             "quote_token": quote_token,
             "quote_asset": quote_token,
             "native_volume": str(int(row[18] or 0)),
@@ -648,6 +669,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "creator": creator,
         "metadata_cid": metadata_cid,
         "source": int(source or 0),
+        "nadfunVersion": _nadfun_version(token, source),
         "quote_token": quote_token,
         "quote_asset": quote_token,
         "holders": holders,

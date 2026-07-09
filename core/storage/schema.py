@@ -682,4 +682,13 @@ def init_db() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nadfun_v2_tokens
+            (
+                token TEXT PRIMARY KEY
+            );
+            """
+        )
+
 

@@ -1011,6 +1011,25 @@ def load_holder_denylist() -> list[str]:
     except Exception:
         return []
 
+def mark_nadfun_v2(token: str, cur: psycopg2.extensions.cursor | None = None) -> None:
+    tok = (token or "").lower()
+    if not tok:
+        return
+    sql = "INSERT INTO nadfun_v2_tokens (token) VALUES (%s) ON CONFLICT (token) DO NOTHING"
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (tok,))
+    else:
+        cur.execute(sql, (tok,))
+
+def load_nadfun_v2_tokens() -> list[str]:
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT token FROM nadfun_v2_tokens")
+            return [r[0].lower() for r in cur.fetchall() if r[0]]
+    except Exception:
+        return []
+
 def clear_position(
     *,
     user_address: str,
