@@ -10,6 +10,7 @@ snapshots/
 *.jsonl.gz
 .env
 .env.*
+dev-env.ps1
 node_modules/
 artifacts/
 cache/
