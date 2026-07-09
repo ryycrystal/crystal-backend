@@ -670,4 +670,16 @@ def init_db() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS holder_denylist
+            (
+                address  TEXT PRIMARY KEY,
+                label    TEXT NOT NULL DEFAULT '',
+                note     TEXT NOT NULL DEFAULT '',
+                added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
 
