@@ -559,8 +559,11 @@ class State:
                 cur=cur
             )
             
-            if creator:                
+            if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
+
+            if src == h.NADFUN_V2_ADDR:
+                storage.mark_nadfun_v2(token, cur=cur)
 
             pool = (ev.get("pool") or "").lower()
             if source == 1 and pool and quote_token and token != quote_token:

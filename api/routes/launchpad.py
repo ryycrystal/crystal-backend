@@ -23,6 +23,7 @@ from api.api import (
     _build_ohlcv_from_db,
     _mon_price_usd,
     _quote_price_usd,
+    _nadfun_version,
 )
 
 router = APIRouter()
@@ -664,10 +665,11 @@ def token_overview_graph(
             "graduationPercentageBps": graduation_bps,
             "circulating_supply": str(int(circulating_supply or 0)),
             "source": int(source or 0),
+            "nadfunVersion": _nadfun_version(token_addr, source),
             "quoteToken": quote_token,
             "quote_token": quote_token,
         }
-        
+
         return result
     except Exception:
         print(f"[token_overview_graph] error token={token_addr}")
