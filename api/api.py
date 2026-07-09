@@ -158,6 +158,10 @@ def _internal_addrs() -> set[str]:
         if pool:
             base.add(pool.lower())
 
+    for addr in storage.load_holder_denylist():
+        if addr:
+            base.add(addr.lower())
+
     _internal_addrs_cache = base
     _internal_addrs_ts = now
     return base

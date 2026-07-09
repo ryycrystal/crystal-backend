@@ -1003,6 +1003,14 @@ def get_mon_price_usd():
         row = cur.fetchone()
     return row[0] if row else None
 
+def load_holder_denylist() -> list[str]:
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT address FROM holder_denylist")
+            return [r[0].lower() for r in cur.fetchall() if r[0]]
+    except Exception:
+        return []
+
 def clear_position(
     *,
     user_address: str,
