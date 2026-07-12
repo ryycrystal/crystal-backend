@@ -519,6 +519,35 @@ class State:
 
             lp = self.launchpad_tokens.get(token)
             if lp is not None:
+                if creator and not (lp.creator or ""):
+                    lp.creator = creator
+                    if name and not (lp.name or ""):
+                        lp.name = name
+                    if symbol and not (lp.symbol or ""):
+                        lp.symbol = symbol
+                    if metadata_cid and not (lp.metadata_cid or ""):
+                        lp.metadata_cid = metadata_cid
+                    lp.created_block = blk
+                    lp.created_at = ts
+                    storage.upsert_token_created(
+                        token=token,
+                        creator=creator,
+                        name=lp.name,
+                        symbol=lp.symbol,
+                        metadata_cid=lp.metadata_cid,
+                        description=lp.description,
+                        social1=lp.social1,
+                        social2=lp.social2,
+                        social3=lp.social3,
+                        social4=lp.social4,
+                        source=lp.source,
+                        created_block=blk,
+                        created_at=ts,
+                        last_price_native=lp.last_price_native,
+                        quote_token=lp.quote_token,
+                        cur=cur,
+                    )
+                    storage.increment_user_tokens_created(creator, cur=cur)
                 return
             else:
                 lp = models.LaunchpadToken(
