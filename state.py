@@ -474,6 +474,8 @@ class State:
                 cur=cur,
             )
 
+            storage.mark_nadfun_v2(token, cur=cur)
+
             if token_uri:
                 try:
                     from modules import nadfun
@@ -512,6 +514,9 @@ class State:
             source = int(ev.get("source", 0))
             quote_token = (ev.get("quote_token") or WMON).lower()
             
+            if src == h.NADFUN_V2_ADDR:
+                storage.mark_nadfun_v2(token, cur=cur)
+
             lp = self.launchpad_tokens.get(token)
             if lp is not None:
                 return
@@ -561,9 +566,6 @@ class State:
             
             if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
-
-            if src == h.NADFUN_V2_ADDR:
-                storage.mark_nadfun_v2(token, cur=cur)
 
             pool = (ev.get("pool") or "").lower()
             if source == 1 and pool and quote_token and token != quote_token:
