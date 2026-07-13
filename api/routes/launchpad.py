@@ -359,7 +359,7 @@ def token_overview_graph(
                     token_bought,
                     token_sold
                 FROM launchpad_positions
-                WHERE token = %s AND user_address <> ALL(%s)
+                WHERE token = %s AND user_address <> ALL(%s) AND balance_token >= 0
                 ORDER BY total_pnl_native DESC
                 LIMIT 50
                 """,
