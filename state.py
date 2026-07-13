@@ -1835,6 +1835,7 @@ class State:
             )
 
             vobj = self.vaults[vaddr]
+            prev_circulating = vobj.circulatingShares
             vobj.circulatingShares += shares
 
             users = self.vaultToUsers.setdefault(vaddr, {})
@@ -1885,6 +1886,12 @@ class State:
                 updated_at=ts,
                 cur=cur,
             )
+
+            if prev_circulating == 0 and shares > 0:
+                try:
+                    self.record_vault_balance_sample(vaddr, blk, ts, q_amt, b_amt)
+                except Exception:
+                    pass
 
     def apply_vault_withdraw(self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0) -> None:
         if not ev:
