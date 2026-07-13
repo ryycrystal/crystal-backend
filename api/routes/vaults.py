@@ -58,6 +58,44 @@ def _rpc_jsonrpc_sync(method: str, params: list[Any]) -> dict:
     return data
 
 
+from decimal import Decimal
+import threading as _threading
+
+_STATE_CACHE: Dict[str, Any] = {"state": None, "ts": 0.0}
+_STATE_CACHE_LOCK = _threading.Lock()
+_STATE_CACHE_TTL = 30.0
+
+
+def _cached_state():
+    now = time.time()
+    st = _STATE_CACHE["state"]
+    if st is not None and (now - float(_STATE_CACHE["ts"])) < _STATE_CACHE_TTL:
+        return st
+    with _STATE_CACHE_LOCK:
+        st = _STATE_CACHE["state"]
+        if st is not None and (time.time() - float(_STATE_CACHE["ts"])) < _STATE_CACHE_TTL:
+            return st
+        new_st = State()
+        new_st.rebuild_from_db()
+        _STATE_CACHE["state"] = new_st
+        _STATE_CACHE["ts"] = time.time()
+        return new_st
+
+
+def _vault_usd_from_state(st, quote, base, quote_bal, base_bal, qd, bd) -> float:
+    try:
+        pq = Decimal(str(st.tokenToPrice.get((quote or "").lower(), 0) or 0))
+        pb = Decimal(str(st.tokenToPrice.get((base or "").lower(), 0) or 0))
+        qd = int(qd or 0)
+        bd = int(bd or 0)
+        q_units = Decimal(int(quote_bal)) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
+        b_units = Decimal(int(base_bal)) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+        val = (q_units * pq) + (b_units * pb)
+        return float(val) if val.is_finite() else 0.0
+    except Exception:
+        return 0.0
+
+
 def _vault_user_lockup_fields(
     *,
     now_ts: int,
@@ -323,16 +361,10 @@ def vault_refresh_balance(
 
     circ = int(circulating_shares or 0)
     uaddr = (user if isinstance(user, str) else "" or "").lower()
-    sample_persisted = False
     usd_value = None
     try:
-        st = State()
-        st.rebuild_from_db()
-        st.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
-        sample_persisted = True
-        latest_row = storage.get_crystal_vault_latest_balance(vaddr)
-        if latest_row is not None:
-            usd_value = float(latest_row[4] or 0.0)
+        st = _cached_state()
+        usd_value = _vault_usd_from_state(st, quote, base, quote_bal, base_bal, quote_decimals, base_decimals)
     except Exception:
         latest_row = storage.get_crystal_vault_latest_balance(vaddr)
         if latest_row is not None:
@@ -369,7 +401,7 @@ def vault_refresh_balance(
         },
         "userBalance": user_summary,
         "status": {"locked": bool(locked), "closed": bool(closed)},
-        "samplePersisted": bool(sample_persisted),
+        "samplePersisted": False,
         "source": "rpc",
     }
 

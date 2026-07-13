@@ -81,6 +81,21 @@ def _fetch_token_string(token: str, selector: str) -> str:
         return ""
 
 
+_ERC20_DECIMALS_SELECTOR = "0x313ce567"
+
+
+def _fetch_token_decimals(token: str) -> int | None:
+    try:
+        res = _eth_call(token, _ERC20_DECIMALS_SELECTOR)
+        if isinstance(res, str) and res.startswith("0x") and len(res) > 2:
+            d = int(res, 16)
+            if 0 <= d <= 36:
+                return d
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_v2_quote_token(token: str) -> str:
     try:
         data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
@@ -1747,6 +1762,15 @@ class State:
                     qd = int(mi.baseDecimals or 0)
                     bd = int(mi.quoteDecimals or 0)
                 break
+
+            if qd <= 0:
+                d = _fetch_token_decimals(quote)
+                if d is not None:
+                    qd = d
+            if bd <= 0:
+                d = _fetch_token_decimals(base)
+                if d is not None:
+                    bd = d
 
             current = self.vaults.get(vaddr)
             circulating = int(getattr(current, "circulatingShares", 0) or 0)
