@@ -28,7 +28,10 @@ from api.api import (
 
 router = APIRouter()
 
-CRYSTAL_GRADUATION_SUPPLY = 800_000_000
+from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
+
+# single source of truth: the native adapter owns our curve geometry
+CRYSTAL_GRADUATION_SUPPLY = _NATIVE_CURVE_SUPPLY // 10 ** 18
 NADFUN_GRADUATION_SUPPLY = 793_100_000
 
 

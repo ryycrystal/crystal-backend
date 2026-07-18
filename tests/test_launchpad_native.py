@@ -263,9 +263,9 @@ def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
 def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
     for v0_mon in (1_000, 49_300, 141_600):
         st = _fresh_state(monkeypatch)
-        state._LAUNCHPAD_PARAMS_CACHE.clear()
+        # the adapter takes V0 by injection; that is the seam to patch
         monkeypatch.setattr(
-            state, "_fetch_launchpad_initial_native_supply", lambda v=v0_mon: v * 10 ** 18
+            state.NATIVE_ADAPTER, "_initial_native_supply_fn", lambda v=v0_mon: v * 10 ** 18
         )
         _create_token(st)
         lp = st.launchpad_tokens[TOKEN]
