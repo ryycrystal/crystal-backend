@@ -160,6 +160,8 @@ def update_token_after_trade(
     approaching_75_block: int,
     approaching_75_at: int,
     snipers_count: int,
+    curve_native_reserve=0,
+    curve_token_reserve=0,
     cur: psycopg2.extensions.cursor | None = None
 ) -> None:
     if cur is None:
@@ -180,7 +182,9 @@ def update_token_after_trade(
                     approaching_75 = %s,
                     approaching_75_block = %s,
                     approaching_75_at = %s,
-                    snipers_count = %s
+                    snipers_count = %s,
+                    curve_native_reserve = %s,
+                    curve_token_reserve = %s
                 WHERE token = %s;
                 """,
                 (
@@ -197,6 +201,8 @@ def update_token_after_trade(
                     int(approaching_75_block) if approaching_75_block is not None else None,
                     int(approaching_75_at) if approaching_75_at is not None else None,
                     int(snipers_count),
+                    int(curve_native_reserve or 0),
+                    int(curve_token_reserve or 0),
                     token.lower(),
                 ),
             )
@@ -217,7 +223,9 @@ def update_token_after_trade(
                 approaching_75 = %s,
                 approaching_75_block = %s,
                 approaching_75_at = %s,
-                snipers_count = %s
+                snipers_count = %s,
+                curve_native_reserve = %s,
+                curve_token_reserve = %s
             WHERE token = %s;
             """,
             (
@@ -234,6 +242,8 @@ def update_token_after_trade(
                 int(approaching_75_block) if approaching_75_block is not None else None,
                 int(approaching_75_at) if approaching_75_at is not None else None,
                 int(snipers_count),
+                int(curve_native_reserve or 0),
+                int(curve_token_reserve or 0),
                 token.lower(),
             ),
         )
