@@ -482,6 +482,53 @@ def test_short_reorg_replaces_previously_indexed_blocks(db):
     assert int(_token_row(db)[2]) == 1800 * 10 ** 18
 
 
+def test_sniper_count_does_not_exceed_distinct_snipers(db):
+    """One address buying twice inside the window is ONE sniper.
+
+    Must run through the BatchAccumulator: that is the path production uses, and
+    it was the one incrementing the counter unconditionally while the table
+    deduped, so snipers_count drifted above the row count.
+    """
+    import psycopg2
+    from core.sequencer import BatchAccumulator
+    from modules import launchpad as lp_mod
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    batch = BatchAccumulator()
+    conn = psycopg2.connect(db)
+    try:
+        with conn.cursor() as cur:
+            # same address, two buys inside the 10-block window, batched
+            for i, nr in enumerate((1100 * 10 ** 18, 1200 * 10 ** 18)):
+                ev = lp_mod.parse_launchpad_trade(
+                    _router(),
+                    ["0x", _ta(TOKEN), _ta(USER)],
+                    _lt_data(True, 10 ** 18, 10 ** 20, nr, _reserve_for(nr)),
+                )
+                st.apply_launchpad_trade(ev, 101 + i, 1001 + i, f"0xsnipe{i}", 0, _router(), cur=cur, batch=batch)
+            batch.flush(cur)
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = _q(db, "SELECT count(*) FROM launchpad_snipers WHERE token=%s", (TOKEN,))[0][0]
+    counted = _q(db, "SELECT snipers_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
+    assert rows == 1, "one address is one sniper"
+    assert int(counted) == rows, f"snipers_count {counted} must equal distinct snipers {rows}"
+
+
+def test_sniper_window_excludes_late_buys_and_the_creator(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    # outside the 10-block window
+    _trade(st, native_reserve=1100 * 10 ** 18, blk=200, ts=1100, txh="0xlate", log_idx=0)
+    assert _q(db, "SELECT count(*) FROM launchpad_snipers WHERE token=%s", (TOKEN,))[0][0] == 0
+    assert int(_q(db, "SELECT snipers_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]) == 0
+
+
 def test_deep_reorg_scan_finds_divergence_the_per_block_guard_misses(db):
     """The per-block guard only fires when a block is delivered again. This
     simulates the scan that walks the indexed tail newest-first."""
