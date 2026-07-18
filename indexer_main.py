@@ -7,7 +7,7 @@ from pathlib import Path
 
 import backfill
 import export_logs
-from core.stream import stream_logs, vault_sampler
+from core.stream import stream_logs, vault_sampler, reorg_watcher
 from core.sequencer import SEQUENCER
 import core.storage as storage
 from modules import nadfun
@@ -149,6 +149,7 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
+        asyncio.create_task(reorg_watcher(SEQUENCER._state)),
     ]
     if args.live_dump_dir:
         print(

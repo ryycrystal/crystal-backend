@@ -289,8 +289,8 @@ def test_trade_before_creation_is_recovered_and_backfilled(db):
 # -- lifecycle ----------------------------------------------------------------
 
 def test_created_to_active_on_first_trade(db):
-    from core.lifecycle import TokenPhase, resolve_phase
     from core.adapters import native as native_mod
+    from core.lifecycle import TokenPhase, resolve_phase
 
     st = _new_state()
     _create(st)
@@ -480,6 +480,38 @@ def test_short_reorg_replaces_previously_indexed_blocks(db):
     _trade(st2, native_reserve=1800 * 10 ** 18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
     assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
     assert int(_token_row(db)[2]) == 1800 * 10 ** 18
+
+
+def test_deep_reorg_scan_finds_divergence_the_per_block_guard_misses(db):
+    """The per-block guard only fires when a block is delivered again. This
+    simulates the scan that walks the indexed tail newest-first."""
+    import core.storage as storage
+
+    st = _new_state()
+    _create(st)
+    _trade(st, native_reserve=1300 * 10 ** 18, blk=120, ts=1020, txh="0xb120", log_idx=0)
+    storage.record_block_hash(120, "0x120good")
+    _trade(st, native_reserve=1400 * 10 ** 18, blk=121, ts=1021, txh="0xb121", log_idx=0)
+    storage.record_block_hash(121, "0x121bad")
+    _trade(st, native_reserve=1500 * 10 ** 18, blk=122, ts=1022, txh="0xb122", log_idx=0)
+    storage.record_block_hash(122, "0x122bad")
+
+    rows = storage.get_recent_block_hashes(32)
+    assert [r[0] for r in rows] == [122, 121, 120], "must be newest-first"
+
+    # chain now reports different hashes for 121/122; 120 is unchanged
+    onchain = {120: "0x120good", 121: "0x121new", 122: "0x122new"}
+    rollback_from = None
+    for number, stored in rows:
+        if onchain[number] == stored:
+            break                      # canonical from here down -- scan stops
+        rollback_from = number
+    assert rollback_from == 121, "must roll back to the deepest divergent block"
+
+    st.handle_reorg(rollback_from)
+    remaining = {r[0] for r in _q(db, "SELECT txhash FROM launchpad_trades")}
+    assert remaining == {"0xb120"}
+    assert int(_token_row(db)[2]) == 1300 * 10 ** 18
 
 
 def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):

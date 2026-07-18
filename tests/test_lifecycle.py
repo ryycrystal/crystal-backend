@@ -4,6 +4,12 @@ from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.adapters.native import (
+    CURVE_SUPPLY,
+    GRADUATED_TOKEN_SUPPLY,
+    INITIAL_TOKEN_SUPPLY,
+    NativeLaunchpadAdapter,
+)
 from core.lifecycle import (
     BPS_DENOMINATOR,
     GRADUATING_THRESHOLD_BPS,
@@ -11,12 +17,6 @@ from core.lifecycle import (
     TokenPhase,
     resolve_phase,
     snapshot,
-)
-from core.adapters.native import (
-    CURVE_SUPPLY,
-    GRADUATED_TOKEN_SUPPLY,
-    INITIAL_TOKEN_SUPPLY,
-    NativeLaunchpadAdapter,
 )
 
 
@@ -134,6 +134,30 @@ def test_native_geometry_helpers_recover_v0_and_threshold():
 
 
 # --- the model must not assume native geometry --------------------------------
+
+def test_api_lifecycle_fields_map_each_phase():
+    """The API exposes phase derived from stored fields, so it cannot drift."""
+    import api.api as api_mod
+
+    def phase_of(**kw):
+        return api_mod._lifecycle_fields(**kw)["phase"]
+
+    # native, on the curve
+    assert phase_of(source=0, circulating_supply=0, tx_count=0, migrated=False) == "created"
+    assert phase_of(source=0, circulating_supply=100_000_000, tx_count=3, migrated=False) == "active"
+    assert phase_of(source=0, circulating_supply=600_000_000, tx_count=9, migrated=False) == "graduating"
+    # native terminal is graduated; nad.fun hands off to an external venue
+    assert phase_of(source=0, circulating_supply=800_000_000, tx_count=9, migrated=True) == "graduated"
+    assert phase_of(source=1, circulating_supply=793_100_000, tx_count=9, migrated=True) == "migrated"
+
+    # progress uses each source's own curve supply
+    assert api_mod._lifecycle_fields(
+        source=0, circulating_supply=600_000_000, tx_count=1, migrated=False
+    )["progressBps"] == 7_500
+    assert api_mod._lifecycle_fields(
+        source=1, circulating_supply=594_825_000, tx_count=1, migrated=False
+    )["progressBps"] == 7_500
+
 
 def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     """A source with a different supply split must get identical phase/progress

@@ -11,7 +11,7 @@ should need to learn a new special case.
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from core.lifecycle import CurveState
 
@@ -24,7 +24,7 @@ class LaunchpadAdapter(Protocol):
     #: human-readable identifier, for logs and diagnostics
     name: str
 
-    def curve_state(self, ev: dict) -> Optional[CurveState]:
+    def curve_state(self, ev: dict) -> CurveState | None:
         """Normalize a trade event into curve state.
 
         Returns ``None`` when the event carries no usable curve state (for
@@ -32,7 +32,7 @@ class LaunchpadAdapter(Protocol):
         """
         ...
 
-    def initial_price_native(self) -> Optional[object]:
+    def initial_price_native(self) -> object | None:
         """Spot price of a freshly created token, before any trade.
 
         ``None`` when the source cannot determine it. Returned as ``Decimal``.
@@ -56,7 +56,7 @@ def register(adapter: LaunchpadAdapter) -> LaunchpadAdapter:
     return adapter
 
 
-def get(source: int) -> Optional[LaunchpadAdapter]:
+def get(source: int) -> LaunchpadAdapter | None:
     return _REGISTRY.get(int(source or 0))
 
 

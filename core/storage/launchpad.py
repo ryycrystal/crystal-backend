@@ -1576,3 +1576,25 @@ def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
     return int(row[0]), int(row[1])
 
 
+
+
+def get_recent_block_hashes(limit: int = 32, cur: psycopg2.extensions.cursor | None = None) -> list[tuple]:
+    """Most recently indexed blocks, newest first, as (number, block_hash).
+
+    Used to verify the tail of the chain still matches what we indexed. A reorg
+    replaces a contiguous suffix, so walking newest-first lets the check stop at
+    the first block that still matches.
+    """
+    sql = """
+        SELECT number, block_hash
+        FROM launchpad_blocks
+        WHERE block_hash IS NOT NULL
+        ORDER BY number DESC
+        LIMIT %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (int(limit),))
+            return [(int(r[0]), r[1]) for r in cur2.fetchall()]
+    cur.execute(sql, (int(limit),))
+    return [(int(r[0]), r[1]) for r in cur.fetchall()]
