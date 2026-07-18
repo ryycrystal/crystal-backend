@@ -25,6 +25,7 @@ from api.api import (
     _quote_price_usd,
     _nadfun_version,
     _lifecycle_fields,
+    _scaled_price,
 )
 
 router = APIRouter()
@@ -1393,20 +1394,14 @@ def chart_only(
 
     out = []
     for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
-        open_wad = (open_p or Decimal(0)) * Decimal(1e9)
-        high_wad = (high_p or Decimal(0)) * Decimal(1e9)
-        low_wad = (low_p or Decimal(0)) * Decimal(1e9)
-        close_wad = (close_p or Decimal(0)) * Decimal(1e9)
-        quote_volume = int(qv or 0)
-
         out.append(
             {
                 "time": str(int(bucket_start)),
-                "open": str(int(open_wad)),
-                "high": str(int(high_wad)),
-                "low": str(int(low_wad)),
-                "close": str(int(close_wad)),
-                "quoteVolume": str(quote_volume),
+                "open": _scaled_price(open_p),
+                "high": _scaled_price(high_p),
+                "low": _scaled_price(low_p),
+                "close": _scaled_price(close_p),
+                "quoteVolume": str(int(qv or 0)),
             }
         )
 
