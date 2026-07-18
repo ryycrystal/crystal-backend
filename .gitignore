@@ -10,3 +10,8 @@ indexed-log-dump/
 snapshots/
 *.dump
 *.jsonl.gz
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
