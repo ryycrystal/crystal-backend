@@ -32,6 +32,8 @@ class BatchAccumulator:
         usd_amount,
         price_native,
         txhash: str,
+        native_reserve=0,
+        token_reserve=0,
     ):
         self.trades.append((
             int(block_number),
@@ -45,6 +47,8 @@ class BatchAccumulator:
             usd_amount,
             price_native,
             txhash,
+            int(native_reserve or 0),
+            int(token_reserve or 0),
         ))
 
     def set_token_state(self, token: str, state_dict: dict):
@@ -480,15 +484,42 @@ class Sequencer:
                 has_trades = True
                 break
 
+        block_hash = ""
+        for log in logs:
+            bh = log.get("blockHash")
+            if bh:
+                block_hash = str(bh).lower()
+                break
+
+        def _reorg_guard(c):
+            # a block we already indexed coming back with a different hash means
+            # the chain replaced it; drop the orphaned rows before re-indexing
+            if not block_hash:
+                return
+            try:
+                if self._state.detect_reorg(blk, block_hash, cur=c):
+                    print(f"[SQ] reorg detected at block {blk}, rolling back", flush=True)
+                    self._state.handle_reorg(blk, cur=c)
+            except Exception as e:
+                print(f"[SQ] reorg check failed at {blk}: {e!r}", flush=True)
+
+        def _mark_processed(c):
+            if not record_processed:
+                return
+            if block_hash:
+                storage.record_block_hash(blk, block_hash, cur=c)
+            else:
+                storage.record_block_processed(blk, cur=c)
+
         if cur is None:
             with db_cursor() as cur:
+                _reorg_guard(cur)
                 self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
-                if record_processed:
-                    storage.record_block_processed(blk, cur=cur)
+                _mark_processed(cur)
         else:
+            _reorg_guard(cur)
             self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
-            if record_processed:
-                storage.record_block_processed(blk, cur=cur)
+            _mark_processed(cur)
 
         if counts_out is None:
             print(
