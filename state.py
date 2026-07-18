@@ -3,6 +3,7 @@ from typing import Dict, Any
 from decimal import Decimal, getcontext
 from collections import deque
 import os
+import time
 import httpx
 import models
 import core.storage as storage
@@ -84,6 +85,7 @@ def _fetch_token_string(token: str, selector: str) -> str:
 
 
 _LAUNCHPAD_PARAMS_SELECTOR = "0xfef2c170"
+_LAUNCHPAD_PARAMS_TTL = 300
 _LAUNCHPAD_PARAMS_CACHE: Dict[str, Any] = {}
 
 
@@ -95,7 +97,8 @@ def _fetch_launchpad_initial_native_supply() -> int:
     must be read rather than assumed.
     """
     cached = _LAUNCHPAD_PARAMS_CACHE.get("initial_native_supply")
-    if cached is not None:
+    fetched_at = _LAUNCHPAD_PARAMS_CACHE.get("fetched_at")
+    if cached is not None and (fetched_at is None or (time.time() - fetched_at) < _LAUNCHPAD_PARAMS_TTL):
         return int(cached)
     value = 0
     try:
@@ -106,7 +109,9 @@ def _fetch_launchpad_initial_native_supply() -> int:
         value = 0
     if value > 0:
         _LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = value
-    return value
+        _LAUNCHPAD_PARAMS_CACHE["fetched_at"] = time.time()
+        return value
+    return int(cached) if cached is not None else 0
 
 
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)

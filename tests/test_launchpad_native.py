@@ -613,3 +613,66 @@ def test_post_graduation_trades_still_write_ohlcv(monkeypatch):
         assert c.kwargs["price_native"] > 0
         res = c.kwargs["resolution_sec"]
         assert c.kwargs["bucket_start"] % res == 0
+
+
+def test_launchpad_params_cache_expires(monkeypatch):
+    """V0 is governance-settable and the setter emits no event, so a permanently
+    cached value meant a param change never reached a running indexer. We hit
+    exactly this in production: V0 moved 1000 -> 5 and the indexer kept pricing
+    new tokens off the stale value until it was restarted."""
+    state._LAUNCHPAD_PARAMS_CACHE.clear()
+    calls = []
+
+    def fake_eth_call(addr, sel):
+        calls.append(sel)
+        return "0x" + f"{(1000 if len(calls) == 1 else 5) * 10 ** 18:064x}"
+
+    monkeypatch.setattr(state, "_eth_call", fake_eth_call)
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(state.time, "time", lambda: now[0])
+
+    assert state._fetch_launchpad_initial_native_supply() == 1000 * 10 ** 18
+    assert len(calls) == 1
+
+    now[0] += state._LAUNCHPAD_PARAMS_TTL - 1
+    assert state._fetch_launchpad_initial_native_supply() == 1000 * 10 ** 18
+    assert len(calls) == 1, "must not refetch before the TTL elapses"
+
+    now[0] += 2
+    assert state._fetch_launchpad_initial_native_supply() == 5 * 10 ** 18
+    assert len(calls) == 2, "must refetch once the TTL elapses"
+
+    state._LAUNCHPAD_PARAMS_CACHE.clear()
+
+
+def test_launchpad_params_falls_back_to_cache_on_rpc_failure(monkeypatch):
+    """A transient RPC blip must not surface as V0=0, which would price every
+    newly created token at zero."""
+    state._LAUNCHPAD_PARAMS_CACHE.clear()
+    now = [1_000_000.0]
+    monkeypatch.setattr(state.time, "time", lambda: now[0])
+    monkeypatch.setattr(state, "_eth_call", lambda a, s: "0x" + f"{7 * 10 ** 18:064x}")
+    assert state._fetch_launchpad_initial_native_supply() == 7 * 10 ** 18
+
+    def boom(addr, sel):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(state, "_eth_call", boom)
+    now[0] += state._LAUNCHPAD_PARAMS_TTL + 1
+    assert state._fetch_launchpad_initial_native_supply() == 7 * 10 ** 18
+
+    state._LAUNCHPAD_PARAMS_CACHE.clear()
+
+
+def test_pinned_cache_without_timestamp_never_expires(monkeypatch):
+    """Tests pin V0 by writing the key directly; that seam must keep working
+    without reaching the network."""
+    state._LAUNCHPAD_PARAMS_CACHE.clear()
+    state._LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = V0
+
+    def boom(addr, sel):
+        raise AssertionError("must not hit the network when pinned")
+
+    monkeypatch.setattr(state, "_eth_call", boom)
+    assert state._fetch_launchpad_initial_native_supply() == V0
