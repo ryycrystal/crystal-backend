@@ -180,6 +180,7 @@ def test_v2_created_token_keeps_non_wmon_quote_in_state_and_storage(monkeypatch)
         lambda **kwargs: captured_token.update(kwargs),
     )
     monkeypatch.setattr(state.storage, "increment_user_tokens_created", lambda *args, **kwargs: None)
+    monkeypatch.setattr(state.storage, "mark_nadfun_v2", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         state.storage,
         "upsert_pool",

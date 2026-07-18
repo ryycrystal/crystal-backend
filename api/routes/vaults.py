@@ -364,8 +364,12 @@ def vault_refresh_balance(
     usd_value = None
     try:
         st = _cached_state()
-        usd_value = _vault_usd_from_state(st, quote, base, quote_bal, base_bal, quote_decimals, base_decimals)
+        computed = _vault_usd_from_state(st, quote, base, quote_bal, base_bal, quote_decimals, base_decimals)
+        if computed > 0:
+            usd_value = computed
     except Exception:
+        usd_value = None
+    if usd_value is None:
         latest_row = storage.get_crystal_vault_latest_balance(vaddr)
         if latest_row is not None:
             usd_value = float(latest_row[4] or 0.0)

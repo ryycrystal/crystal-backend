@@ -761,6 +761,49 @@ def mark_token_migrated(
             (int(migrated_block), int(migrated_at), pool_addr, tok),
         )
 
+def update_launchpad_token_market(
+    *,
+    token: str,
+    market: str,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    tok = (token or "").lower()
+    mkt = (market or "").lower()
+    if not tok or not mkt:
+        return
+    sql = """
+        UPDATE launchpad_tokens
+        SET market = %s
+        WHERE token = %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (mkt, tok))
+    else:
+        cur.execute(sql, (mkt, tok))
+
+
+def update_launchpad_token_price(
+    *,
+    token: str,
+    last_price_native,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    tok = (token or "").lower()
+    if not tok:
+        return
+    sql = """
+        UPDATE launchpad_tokens
+        SET last_price_native = %s
+        WHERE token = %s;
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (last_price_native, tok))
+    else:
+        cur.execute(sql, (last_price_native, tok))
+
+
 def update_token_metadata_batch(metadata_list: list[dict]) -> None:
     if not metadata_list:
         return

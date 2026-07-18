@@ -860,11 +860,11 @@ def test_vault_refresh_balance_success_and_user_projection():
     assert out["userBalance"]["withdrawUnlockAt"] == 500
     assert out["userBalance"]["withdrawLockupRemaining"] == 44
     assert out["status"] == {"locked": True, "closed": False}
-    assert out["samplePersisted"] is True
+    # refresh-balance no longer writes samples; the indexer's sampler owns the series
+    assert out["samplePersisted"] is False
     assert out["source"] == "rpc"
     assert post.call_count == 3
-    fake_state.rebuild_from_db.assert_called_once()
-    fake_state.record_vault_balance_sample.assert_called_once_with("0xvault", 123, 456, 1000, 5000)
+    fake_state.record_vault_balance_sample.assert_not_called()
 
 
 def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timestamp():
@@ -918,7 +918,7 @@ def test_vault_refresh_balance_sample_write_paths_without_latest_row():
         st.enter_context(patch.object(vault_api, "State", return_value=fake_state))
         st.enter_context(patch.object(vault_api.httpx, "post", side_effect=ok_rpc))
         out_ok = vault_api.vault_refresh_balance("0xv")
-    assert out_ok["samplePersisted"] is True
+    assert out_ok["samplePersisted"] is False
     assert out_ok["latestBalance"]["usdValue"] == 0.0
 
     ok_rpc_2 = [
