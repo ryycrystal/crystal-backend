@@ -177,3 +177,30 @@ def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     assert (
         resolve_phase(curve=three_quarters, has_trades=True, migrated=True) is TokenPhase.MIGRATED
     )
+
+
+def test_chart_prices_keep_sub_unit_movement():
+    """A 0.1 MON buy against the 1000 MON test curve moves the scaled price by
+    0.198. Truncating to an integer collapsed every candle to a flat 1000, which
+    is what made small-trade charts look like a straight line."""
+    from decimal import Decimal, getcontext
+
+    import api.api  # noqa: F401
+    from api.api import _scaled_price
+
+    getcontext().prec = 60
+    v0 = Decimal(1000 * 10 ** 18)
+    supply = Decimal(10 ** 27)
+    k = v0 * supply
+
+    def price(native_reserve: Decimal) -> Decimal:
+        token_reserve = (k + native_reserve - 1) // native_reserve
+        return native_reserve / Decimal(token_reserve)
+
+    at_creation = price(v0)
+    after_buy = price(v0 + Decimal(10 ** 17 * 99_000 // 100_000))
+
+    assert _scaled_price(at_creation) == "1000"
+    assert _scaled_price(after_buy) == "1000.198009801"
+    assert _scaled_price(at_creation) != _scaled_price(after_buy), "candles must not flatten"
+    assert _scaled_price(None) == "0"
