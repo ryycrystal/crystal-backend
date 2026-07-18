@@ -587,3 +587,29 @@ def test_post_graduation_market_trade_updates_token_price(monkeypatch):
 
     assert lp.last_price_native == Decimal(end_price) / (Decimal(10) ** 9)
     assert lp.last_price_native != frozen, "price must not freeze at the last bonding-curve tick"
+
+
+def test_post_graduation_trades_still_write_ohlcv(monkeypatch):
+    """The chart froze at the graduation candle: price and volume kept updating
+    but no bars were written, so a graduated token's chart silently diverged
+    from its real price forever."""
+    st = _fresh_state(monkeypatch)
+    lp = _graduate(st)
+    state.storage.upsert_ohlcv.reset_mock()
+
+    native_in, tokens_out = 3 * 10 ** 18, 150 * 10 ** 18
+    _market_trade(st, MARKET, True, native_in, tokens_out)
+
+    calls = state.storage.upsert_ohlcv.call_args_list
+    assert calls, "post-graduation trades must produce OHLCV bars"
+
+    resolutions = {c.kwargs["resolution_sec"] for c in calls}
+    assert resolutions == set(state.INTERVALS), "every resolution must get a bar"
+
+    for c in calls:
+        assert c.kwargs["token"] == TOKEN
+        assert c.kwargs["native_amount"] == native_in
+        assert c.kwargs["price_native"] == lp.last_price_native
+        assert c.kwargs["price_native"] > 0
+        res = c.kwargs["resolution_sec"]
+        assert c.kwargs["bucket_start"] % res == 0

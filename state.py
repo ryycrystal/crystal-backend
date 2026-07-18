@@ -1662,6 +1662,24 @@ class State:
                 except Exception:
                     pass
 
+        if lp.last_price_native and lp.last_price_native > 0:
+            for bucket_seconds in INTERVALS:
+                bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
+                if batch is not None:
+                    batch.add_ohlcv(lp_addr, bucket_seconds, bucket_start, lp.last_price_native, int(native_amt))
+                else:
+                    try:
+                        storage.upsert_ohlcv(
+                            token=lp_addr,
+                            resolution_sec=bucket_seconds,
+                            bucket_start=bucket_start,
+                            price_native=lp.last_price_native,
+                            native_amount=int(native_amt),
+                            cur=cur,
+                        )
+                    except Exception:
+                        pass
+
         token_state = {
             "last_price_native": lp.last_price_native,
             "native_volume": int(lp.native_volume),
