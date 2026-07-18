@@ -67,7 +67,11 @@ def _reserves_after(native_reserve: int):
 
 
 def _fresh_state(monkeypatch):
-    monkeypatch.setattr(state, "storage", MagicMock())
+    stub = MagicMock()
+    # a bare MagicMock is truthy, which would make every log look like a
+    # duplicate and short-circuit the trade handler
+    stub.trade_exists.return_value = False
+    monkeypatch.setattr(state, "storage", stub)
     # keep tests off the network: pin the deployed launchpadInitialNativeSupply
     state._LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = V0
     st = state.State()

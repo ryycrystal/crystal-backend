@@ -144,6 +144,25 @@ def insert_trade(
             ),
         )
 
+def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | None = None) -> bool:
+    """Has this exact log already been applied?
+
+    launchpad_trades is UNIQUE (txhash, log_index), so the row is the natural
+    idempotency key. Token aggregates (volume, tx_count, ...) are running sums,
+    so they must not be advanced a second time for a log already accounted for.
+    """
+    tx = (txhash or "").lower()
+    if not tx:
+        return False
+    sql = "SELECT 1 FROM launchpad_trades WHERE txhash = %s AND log_index = %s LIMIT 1;"
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (tx, int(log_index)))
+            return cur2.fetchone() is not None
+    cur.execute(sql, (tx, int(log_index)))
+    return cur.fetchone() is not None
+
+
 def update_token_after_trade(
     *,
     token: str,
@@ -752,7 +771,7 @@ def mark_token_migrated(
                     migrated = TRUE,
                     migrated_block = %s,
                     migrated_at = %s,
-                    market = %s
+                    market = COALESCE(%s, market)
                 WHERE token = %s;
                 """,
                 (int(migrated_block), int(migrated_at), pool_addr, tok),
@@ -765,7 +784,7 @@ def mark_token_migrated(
                 migrated = TRUE,
                 migrated_block = %s,
                 migrated_at = %s,
-                market = %s
+                market = COALESCE(%s, market)
             WHERE token = %s;
             """,
             (int(migrated_block), int(migrated_at), pool_addr, tok),
