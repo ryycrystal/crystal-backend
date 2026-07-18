@@ -8,6 +8,8 @@ import models
 import core.storage as storage
 import threading
 from core import chain as h
+from core import adapters as launchpad_adapters
+from core.adapters import native as native_adapter_mod
 
 import psycopg2
 
@@ -81,10 +83,6 @@ def _fetch_token_string(token: str, selector: str) -> str:
         return ""
 
 
-LAUNCHPAD_INITIAL_TOKEN_SUPPLY = 10 ** 27
-LAUNCHPAD_GRADUATED_TOKEN_SUPPLY = 2 * 10 ** 26
-
-
 _LAUNCHPAD_PARAMS_SELECTOR = "0xfef2c170"
 _LAUNCHPAD_PARAMS_CACHE: Dict[str, Any] = {}
 
@@ -109,6 +107,9 @@ def _fetch_launchpad_initial_native_supply() -> int:
     if value > 0:
         _LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = value
     return value
+
+
+NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
 
 
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
@@ -618,12 +619,12 @@ class State:
                         "last_price_native",
                         Decimal("0.00008387696")
                     )
-                elif source == 0:
-                    initial_native = _fetch_launchpad_initial_native_supply()
-                    if initial_native > 0:
-                        lp.last_price_native = (
-                            Decimal(initial_native) / Decimal(LAUNCHPAD_INITIAL_TOKEN_SUPPLY)
-                        )
+                else:
+                    adapter = launchpad_adapters.get(source)
+                    if adapter is not None:
+                        initial_price = adapter.initial_price_native()
+                        if initial_price is not None and initial_price > 0:
+                            lp.last_price_native = initial_price
                 
             storage.upsert_token_created(
                 token=token,
@@ -855,30 +856,28 @@ class State:
                             if inserted:
                                 lp.snipers += 1
 
-                reserve_token_now = int(ev.get("token_reserve") or 0)
-                if lp.source == 0 and 0 < reserve_token_now <= LAUNCHPAD_INITIAL_TOKEN_SUPPLY:
-                    # exact and self-correcting: the curve's token reserve is authoritative,
-                    # unlike a float running sum that desyncs on any missed trade
-                    lp.circulating_supply = (LAUNCHPAD_INITIAL_TOKEN_SUPPLY - reserve_token_now) // 10 ** 18
+                adapter = launchpad_adapters.get(lp.source)
+                curve = adapter.curve_state(ev) if adapter is not None else None
+
+                if curve is not None:
+                    # normalized path: the adapter owns the curve geometry, the
+                    # lifecycle model owns the progress/phase rules
+                    lp.circulating_supply = curve.tokens_sold // 10 ** 18
+                    if (not lp.approaching_75) and curve.is_graduating:
+                        lp.approaching_75 = True
+                        lp.approaching_75_block = blk
+                        lp.approaching_75_at = ts
+                    elif lp.approaching_75 and not curve.is_graduating:
+                        lp.approaching_75 = False
+                        lp.approaching_75_block = 0
+                        lp.approaching_75_at = 0
                 elif is_buy:
                     lp.circulating_supply += token_amt / 1e18
                 else:
                     lp.circulating_supply -= token_amt / 1e18
 
-                if lp.source == 0:
-                    tr = int(ev.get("token_reserve") or 0)
-                    if tr > 0:
-                        curve_supply = LAUNCHPAD_INITIAL_TOKEN_SUPPLY - LAUNCHPAD_GRADUATED_TOKEN_SUPPLY
-                        threshold = (curve_supply * 3) // 4
-                        sold = LAUNCHPAD_INITIAL_TOKEN_SUPPLY - tr
-                        if (not lp.approaching_75) and sold >= threshold:
-                            lp.approaching_75 = True
-                            lp.approaching_75_block = blk
-                            lp.approaching_75_at = ts
-                        elif (lp.approaching_75) and sold < threshold:
-                            lp.approaching_75 = False
-                            lp.approaching_75_block = 0
-                            lp.approaching_75_at = 0
+                if curve is not None:
+                    pass
                 elif lp.source == 1:
                     if (not lp.approaching_75) and lp.circulating_supply >= 594_825_000:
                         lp.approaching_75 = True
