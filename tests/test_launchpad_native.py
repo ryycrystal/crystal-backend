@@ -330,6 +330,53 @@ def test_fee_rate_is_derivable_from_the_native_reserve_delta(monkeypatch):
     assert lp.curve_native_reserve == new_native
 
 
+def test_volume_is_gross_on_both_sides_of_the_trade(monkeypatch):
+    """A buy reports gross in the event but a sell reports the user's net payout,
+    so taking the event leg verbatim would undercount every sell by the fee. The
+    curve's native delta is the gross notional in both directions."""
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    keep_factor = 99_000
+    buy_gross = 10 ** 17
+    buy_net = (buy_gross * keep_factor) // 100_000
+    native_after_buy = V0 + buy_net
+
+    _buy(st, native_after_buy, blk=101, ts=1001, amount_in=buy_gross, amount_out=10 ** 20)
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.native_volume == buy_gross
+
+    sell_gross = 10 ** 17
+    sell_net = (sell_gross * keep_factor) // 100_000
+    native_after_sell = native_after_buy - sell_gross
+    parsed = lp_mod.parse_launchpad_trade(
+        ROUTER,
+        ["0x", _topic_addr(TOKEN), _topic_addr(USER)],
+        _launchpad_trade_data(False, 10 ** 20, sell_net, native_after_sell, _reserves_after(native_after_sell)),
+    )
+    st.apply_launchpad_trade(parsed, 102, 1002, "0xbeef", 0, ROUTER)
+
+    assert lp.native_volume == buy_gross + sell_gross
+    assert lp.native_volume != buy_gross + sell_net
+
+
+def test_sell_volume_falls_back_to_the_event_leg_without_a_prior_reserve(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.curve_native_reserve == 0
+
+    sell_net = 5 * 10 ** 16
+    parsed = lp_mod.parse_launchpad_trade(
+        ROUTER,
+        ["0x", _topic_addr(TOKEN), _topic_addr(USER)],
+        _launchpad_trade_data(False, 10 ** 20, sell_net, V0, _reserves_after(V0)),
+    )
+    st.apply_launchpad_trade(parsed, 101, 1001, "0xbeef", 0, ROUTER)
+
+    assert lp.native_volume == sell_net
+
+
 def test_pnl_unit_semantics_are_coherent():
     """Guard: balance_token is raw (1e18) and last_price_native is MON per WHOLE
     token, so balance_token * price already lands in native wei -- the same unit
