@@ -28,6 +28,18 @@ from api.api import (
 
 router = APIRouter()
 
+CRYSTAL_GRADUATION_SUPPLY = 800_000_000
+NADFUN_GRADUATION_SUPPLY = 793_100_000
+
+
+def _graduation_pct(circulating, source) -> float:
+    try:
+        denom = CRYSTAL_GRADUATION_SUPPLY if int(source or 0) == 0 else NADFUN_GRADUATION_SUPPLY
+        return float(circulating or 0) / denom
+    except Exception:
+        return 0.0
+
+
 # Return grouped launchpad token lists for recent created, approaching, and graduated tokens
 @router.get("/tokens")
 @ttl_cache("tokens:list", ttl_seconds=3)
@@ -94,7 +106,7 @@ def list_tokens() -> Dict[str, List[Dict[str, Any]]]:
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
         if data:
-            data["graduationPercentageBps"] = (circ_map.get(token_addr) or 0) / 793100000
+            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(token_addr), data.get("source"))
         return data
 
     recent_graduated_out = [with_graduation_pct(t) for t, _ in grad_rows if t in token_data]
@@ -572,7 +584,7 @@ def token_overview_graph(
                     "source": int(row[8] or 0),
                 })
 
-        graduation_bps = (circulating_supply or 0) / 793100000
+        graduation_bps = _graduation_pct(circulating_supply, source)
 
         sniper_addresses: List[str] = []
         with db_cursor() as cur:
@@ -1470,7 +1482,7 @@ def search_tokens_api(
         for t in token_addrs:
             if t in token_data:
                 data = token_data[t]
-                data["graduationPercentageBps"] = (circ_map.get(t) or 0) / 793100000
+                data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), data.get("source"))
                 results.append(data)
 
         return {"query": query, "sort": None, "count": len(results), "results": results}
@@ -1557,7 +1569,7 @@ def search_tokens_api(
     for t in sorted_addrs:
         if t in token_data:
             data = token_data[t]
-            data["graduationPercentageBps"] = (circ_map.get(t) or 0) / 793100000
+            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), data.get("source"))
             results.append(data)
 
     return {"query": query, "sort": sort, "count": len(results), "results": results}
