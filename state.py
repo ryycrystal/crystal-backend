@@ -1015,6 +1015,8 @@ class State:
                     approaching_75_block=lp.approaching_75_block,
                     approaching_75_at=lp.approaching_75_at,
                     snipers_count=lp.snipers,
+                    curve_native_reserve=int(lp.curve_native_reserve),
+                    curve_token_reserve=int(lp.curve_token_reserve),
                     cur=cur,
                 )
                 storage.update_user_on_trade(
