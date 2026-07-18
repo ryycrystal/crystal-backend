@@ -1434,7 +1434,106 @@ class State:
                 cur=cur,
             )
 
-    def apply_market_trade(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
+    def _record_graduated_launchpad_trade_locked(
+        self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
+    ) -> None:
+        """Keep a graduated launchpad token's price, trades and volume continuous.
+
+        Before this, a token that graduated stopped producing launchpad_trades rows
+        entirely: total and windowed volume froze at the graduation block while the
+        token kept trading on its Crystal market.
+
+        The launchpad token is the market's base and WMON the quote, so a buy is
+        quote-in/base-out -- the same convention the bonding-curve event uses.
+        """
+        lp = self.launchpad_tokens.get(lp_addr)
+        if lp is None:
+            return
+
+        price = getattr(mi, "price", None)
+        if price and price > 0:
+            lp.last_price_native = price
+            try:
+                storage.update_launchpad_token_price(
+                    token=lp_addr, last_price_native=price, cur=cur
+                )
+            except Exception:
+                pass
+
+        is_buy = bool(ev.get("is_buy", False))
+        amount_in = int(ev.get("amount_in", 0) or 0)
+        amount_out = int(ev.get("amount_out", 0) or 0)
+        native_amt = amount_in if is_buy else amount_out
+        token_amt = amount_out if is_buy else amount_in
+        if native_amt <= 0 or token_amt <= 0:
+            return
+
+        lp.native_volume += native_amt
+        lp.token_volume += token_amt
+        lp.tx_count += 1
+        if is_buy:
+            lp.buy_count += 1
+        else:
+            lp.sell_count += 1
+
+        usd_amount = Decimal(0)
+        quote_price = self._quote_price_usd(lp.quote_token)
+        if quote_price > 0:
+            usd_amount = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
+            lp.volume_usd += usd_amount
+
+        user = (ev.get("user") or "").lower()
+        token_state = {
+            "last_price_native": lp.last_price_native,
+            "native_volume": int(lp.native_volume),
+            "token_volume": int(lp.token_volume),
+            "volume_usd": lp.volume_usd,
+            "fees_usd": lp.fees_usd,
+            "buy_count": lp.buy_count,
+            "sell_count": lp.sell_count,
+            "tx_count": lp.tx_count,
+            "circulating_supply": lp.circulating_supply,
+            "approaching_75": lp.approaching_75,
+            "approaching_75_block": lp.approaching_75_block,
+            "approaching_75_at": lp.approaching_75_at,
+            "snipers_count": lp.snipers,
+        }
+
+        if batch is not None:
+            batch.add_trade(
+                block_number=blk,
+                log_index=int(log_idx or 0),
+                timestamp=ts,
+                token=lp_addr,
+                user_address=user,
+                is_buy=is_buy,
+                native_amount=int(native_amt),
+                token_amount=int(token_amt),
+                usd_amount=usd_amount,
+                price_native=lp.last_price_native,
+                txhash=txh or "",
+            )
+            batch.set_token_state(lp_addr, token_state)
+        else:
+            try:
+                storage.insert_trade(
+                    block_number=blk,
+                    log_index=int(log_idx or 0),
+                    timestamp=ts,
+                    token=lp_addr,
+                    user_address=user,
+                    is_buy=is_buy,
+                    native_amount=int(native_amt),
+                    token_amount=int(token_amt),
+                    usd_amount=usd_amount,
+                    price_native=lp.last_price_native,
+                    txhash=txh or "",
+                    cur=cur,
+                )
+            except Exception:
+                pass
+
+    def apply_market_trade(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0) -> None:
         if not ev:
             return
         with self._lock:
@@ -1461,21 +1560,25 @@ class State:
                         cur=cur,
                     )
 
-                    lp_addr = self.launchpad_market_to_token.get(market)
-                    if lp_addr and (mi.baseAddress or "").lower() == lp_addr:
-                        lp_tok = self.launchpad_tokens.get(lp_addr)
-                        if lp_tok is not None and mi.price > 0:
-                            lp_tok.last_price_native = mi.price
-                            try:
-                                storage.update_launchpad_token_price(
-                                    token=lp_addr,
-                                    last_price_native=mi.price,
-                                    cur=cur,
-                                )
-                            except Exception:
-                                pass
             except Exception:
                 return
+
+            # Launchpad-owned markets only. launchpad_market_to_token is populated
+            # solely from MarketCreated events whose base/quote is a known launchpad
+            # token, so ordinary Crystal markets never reach this.
+            lp_addr = self.launchpad_market_to_token.get(market)
+            if lp_addr and (mi.baseAddress or "").lower() == lp_addr:
+                self._record_graduated_launchpad_trade_locked(
+                    lp_addr=lp_addr,
+                    mi=mi,
+                    ev=ev,
+                    blk=blk,
+                    ts=ts,
+                    txh=txh,
+                    log_idx=log_idx,
+                    cur=cur,
+                    batch=batch,
+                )
 
         changed_tokens = self.sweep()
         if changed_tokens:

@@ -373,6 +373,97 @@ def test_sell_transfer_debits_user(monkeypatch):
     assert sum(d for a, d in deltas if a == USER) == 300 * 10 ** 18
 
 
+OTHER_TOKEN = "0xaaaabbbbccccddddeeeeffff0000111122223333"
+OTHER_MARKET = "0x9999888877776666555544443333222211110000"
+
+
+def _graduate(st):
+    _create_token(st)
+    _buy(st, 2500 * 10 ** 18, blk=101, ts=1001)
+    st.apply_migrated(102, 1002, {"token": TOKEN}, ROUTER)
+    st.apply_market_created(102, 1002, _market_created_ev(), ROUTER)
+    return st.launchpad_tokens[TOKEN]
+
+
+def _market_trade(st, market, is_buy, amount_in, amount_out, blk=103, ts=1003, log_idx=0):
+    st.apply_market_trade(
+        blk,
+        ts,
+        {
+            "market": market,
+            "user": USER,
+            "is_buy": is_buy,
+            "amount_in": amount_in,
+            "amount_out": amount_out,
+            "end_price": 20_000,
+        },
+        ROUTER,
+        txh="0xfeed",
+        log_idx=log_idx,
+    )
+
+
+def test_post_graduation_trades_keep_volume_flowing(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    lp = _graduate(st)
+
+    vol_before = lp.native_volume
+    tx_before = lp.tx_count
+
+    native_in, tokens_out = 3 * 10 ** 18, 150 * 10 ** 18
+    _market_trade(st, MARKET, True, native_in, tokens_out)
+
+    assert lp.native_volume == vol_before + native_in, "volume must not freeze at graduation"
+    assert lp.token_volume >= tokens_out
+    assert lp.tx_count == tx_before + 1
+    assert lp.buy_count >= 1
+
+    # and the trade is persisted as a launchpad trade, so windowed volume sees it
+    tokens = [c.kwargs["token"] for c in state.storage.insert_trade.call_args_list]
+    assert TOKEN in tokens
+
+
+def test_post_graduation_sell_uses_correct_leg(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    lp = _graduate(st)
+    vol_before = lp.native_volume
+
+    # sell: base in, quote (native) out
+    tokens_in, native_out = 150 * 10 ** 18, 3 * 10 ** 18
+    _market_trade(st, MARKET, False, tokens_in, native_out)
+
+    assert lp.native_volume == vol_before + native_out
+    assert lp.sell_count >= 1
+
+
+def test_non_launchpad_market_trades_do_not_touch_launchpad_aggregates(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    lp = _graduate(st)
+
+    # an ordinary Crystal market, unrelated to any launchpad token
+    other = dict(_market_created_ev())
+    other.update(
+        market=OTHER_MARKET,
+        baseAsset=OTHER_TOKEN,
+        baseAddress=OTHER_TOKEN,
+        baseTicker="OTHER",
+        marketId=2,
+    )
+    st.apply_market_created(103, 1003, other, ROUTER)
+
+    assert OTHER_MARKET not in st.launchpad_market_to_token
+
+    vol_before = lp.native_volume
+    tx_before = lp.tx_count
+    state.storage.insert_trade.reset_mock()
+
+    _market_trade(st, OTHER_MARKET, True, 5 * 10 ** 18, 900 * 10 ** 18, log_idx=1)
+
+    assert lp.native_volume == vol_before, "a non-launchpad market must not move launchpad volume"
+    assert lp.tx_count == tx_before
+    assert state.storage.insert_trade.call_count == 0
+
+
 def test_post_graduation_market_trade_updates_token_price(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
