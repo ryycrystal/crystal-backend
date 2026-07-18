@@ -64,6 +64,8 @@ def _reserves_after(native_reserve: int):
 
 def _fresh_state(monkeypatch):
     monkeypatch.setattr(state, "storage", MagicMock())
+    # keep tests off the network: pin the deployed launchpadInitialNativeSupply
+    state._LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = V0
     st = state.State()
     st.tokenToPrice[WMON] = Decimal("0.02")
     st.mon_price_usd = Decimal("0.02")
@@ -178,6 +180,117 @@ def test_final_stretch_threshold_is_independent_of_initial_native_supply(monkeyp
 
 # --- graduation ---------------------------------------------------------------
 
+def test_trade_for_unknown_token_is_recovered_not_dropped(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "RECOVERED")
+
+    # no TokenCreated was ever applied for TOKEN
+    assert TOKEN not in st.launchpad_tokens
+
+    nr = 2500 * 10 ** 18
+    _buy(st, nr, blk=101, ts=1001)
+
+    lp = st.launchpad_tokens.get(TOKEN)
+    assert lp is not None, "a trade for an unseen token must not be dropped silently"
+    assert lp.source == 0
+    assert lp.quote_token == state.WMON
+    assert lp.last_price_native == Decimal(nr) / Decimal(_reserves_after(nr))
+
+
+def test_recovered_stub_is_backfilled_by_later_token_created(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "")
+
+    _buy(st, 2500 * 10 ** 18, blk=101, ts=1001)
+    assert st.launchpad_tokens[TOKEN].creator == ""
+
+    _create_token(st, blk=102, ts=1002)
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.creator == CREATOR
+    assert lp.name == "Test Token"
+    assert lp.symbol == "TEST"
+
+
+def test_zero_reserve_price_falls_back_to_amount_ratio(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    amount_in, amount_out = 10 ** 18, 4 * 10 ** 20
+    parsed = lp_mod.parse_launchpad_trade(
+        ROUTER,
+        ["0x", _topic_addr(TOKEN), _topic_addr(USER)],
+        _launchpad_trade_data(True, amount_in, amount_out, 0, 10 ** 27),
+    )
+    st.apply_launchpad_trade(parsed, 101, 1001, "0xdead", 0, ROUTER)
+
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.last_price_native == Decimal(amount_in) / Decimal(amount_out)
+    assert lp.last_price_native > 0, "a zero reserve must not silently zero the price"
+
+
+def test_circulating_supply_is_exact_and_matches_progress_bar(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    nr = 2500 * 10 ** 18
+    _, tr = _buy(st, nr, blk=101, ts=1001)
+    lp = st.launchpad_tokens[TOKEN]
+
+    # exact integer, derived from the authoritative reserve
+    assert lp.circulating_supply == 600_000_000
+    assert isinstance(lp.circulating_supply, int)
+
+    # the progress bar and the final-stretch flag agree at exactly 75%
+    from api.routes.launchpad import _graduation_pct
+
+    assert _graduation_pct(lp.circulating_supply, 0) == 0.75
+    assert lp.approaching_75 is True
+
+
+def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    # a trade is missed entirely, then the next one arrives
+    _buy(st, 2500 * 10 ** 18, blk=102, ts=1002)
+    assert st.launchpad_tokens[TOKEN].circulating_supply == 600_000_000
+
+
+def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
+    for v0_mon in (1_000, 49_300, 141_600):
+        st = _fresh_state(monkeypatch)
+        state._LAUNCHPAD_PARAMS_CACHE.clear()
+        monkeypatch.setattr(
+            state, "_fetch_launchpad_initial_native_supply", lambda v=v0_mon: v * 10 ** 18
+        )
+        _create_token(st)
+        lp = st.launchpad_tokens[TOKEN]
+        expected = Decimal(v0_mon * 10 ** 18) / Decimal(INITIAL_TOKEN_SUPPLY)
+        assert lp.last_price_native == expected, v0_mon
+    # the old hardcoded default is only right by coincidence at the test V0
+    assert Decimal(1_000 * 10 ** 18) / Decimal(INITIAL_TOKEN_SUPPLY) == Decimal("0.000001")
+
+
+def test_pnl_unit_semantics_are_coherent():
+    """Guard: balance_token is raw (1e18) and last_price_native is MON per WHOLE
+    token, so balance_token * price already lands in native wei -- the same unit
+    as realized_pnl_native. This looks like a 1e18 bug but is correct; dividing
+    here would break it."""
+    nr, tr = 2500 * 10 ** 18, 4 * 10 ** 26
+    price = Decimal(nr) / Decimal(tr)
+
+    whole_tokens = 500
+    balance_raw = whole_tokens * 10 ** 18
+    unrealized_wei = Decimal(balance_raw) * price
+    assert unrealized_wei == Decimal(whole_tokens) * price * (10 ** 18)
+
+    native_spent, native_received = 10 * 10 ** 18, 4 * 10 ** 18
+    realized = Decimal(native_received - native_spent)
+    total = realized + unrealized_wei
+    # total PnL == (what you took out + what you still hold) - what you put in
+    assert total == (Decimal(native_received) + unrealized_wei) - Decimal(native_spent)
+
+
 def _market_created_ev():
     return {
         "isCanonical": True,
@@ -215,6 +328,45 @@ def test_graduation_links_market_to_launchpad_token(monkeypatch):
     st.apply_market_created(102, 1002, _market_created_ev(), ROUTER)
     assert lp.market == MARKET, "graduated market must be linked to the launchpad token"
     assert st.launchpad_market_to_token[MARKET] == TOKEN
+
+
+def _transfer(st, frm, to, amount):
+    parsed = h.PARSERS["TF"](TOKEN, ["0x", _topic_addr(frm), _topic_addr(to)], _word(amount))
+    st.apply_token_transfer(parsed, 110, 1100, TOKEN)
+    return parsed
+
+
+def _balance_deltas(st):
+    """(address, balance_token_delta) for every position write."""
+    return [
+        (c.kwargs["user_address"], c.kwargs["balance_token_delta"])
+        for c in state.storage.upsert_position.call_args_list
+    ]
+
+
+def test_buy_transfer_credits_user_and_skips_contract_side(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    # a curve buy transfers tokens out of the Crystal core contract to the buyer
+    _transfer(st, ROUTER, USER, 500 * 10 ** 18)
+
+    deltas = _balance_deltas(st)
+    assert (USER, 500 * 10 ** 18) in deltas
+    assert all(addr != ROUTER for addr, _ in deltas), "contract side must not be tracked as a holder"
+
+
+def test_sell_transfer_debits_user(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    _transfer(st, ROUTER, USER, 500 * 10 ** 18)
+    _transfer(st, USER, ROUTER, 200 * 10 ** 18)
+
+    deltas = _balance_deltas(st)
+    assert (USER, 500 * 10 ** 18) in deltas
+    assert (USER, -200 * 10 ** 18) in deltas
+    assert sum(d for a, d in deltas if a == USER) == 300 * 10 ** 18
 
 
 def test_post_graduation_market_trade_updates_token_price(monkeypatch):

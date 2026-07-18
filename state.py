@@ -85,6 +85,32 @@ LAUNCHPAD_INITIAL_TOKEN_SUPPLY = 10 ** 27
 LAUNCHPAD_GRADUATED_TOKEN_SUPPLY = 2 * 10 ** 26
 
 
+_LAUNCHPAD_PARAMS_SELECTOR = "0xfef2c170"
+_LAUNCHPAD_PARAMS_CACHE: Dict[str, Any] = {}
+
+
+def _fetch_launchpad_initial_native_supply() -> int:
+    """launchpadParams().launchpadInitialNativeSupply (first return word).
+
+    This is the curve's initial VIRTUAL native reserve, so the price of a freshly
+    created token is V0 / INITIAL_TOKEN_SUPPLY. It is governance-settable, so it
+    must be read rather than assumed.
+    """
+    cached = _LAUNCHPAD_PARAMS_CACHE.get("initial_native_supply")
+    if cached is not None:
+        return int(cached)
+    value = 0
+    try:
+        res = _eth_call(h.CONTRACTS.get("ROUTER", ""), _LAUNCHPAD_PARAMS_SELECTOR)
+        if isinstance(res, str) and res.startswith("0x") and len(res) >= 66:
+            value = int(res[2:66], 16)
+    except Exception:
+        value = 0
+    if value > 0:
+        _LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = value
+    return value
+
+
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
 
 
@@ -589,9 +615,15 @@ class State:
                 
                 if (source == 1):
                     lp.last_price_native = ev.get(
-                        "last_price_native", 
+                        "last_price_native",
                         Decimal("0.00008387696")
                     )
+                elif source == 0:
+                    initial_native = _fetch_launchpad_initial_native_supply()
+                    if initial_native > 0:
+                        lp.last_price_native = (
+                            Decimal(initial_native) / Decimal(LAUNCHPAD_INITIAL_TOKEN_SUPPLY)
+                        )
                 
             storage.upsert_token_created(
                 token=token,
@@ -638,6 +670,67 @@ class State:
                 )
 
                      
+    def _ensure_native_launchpad_token_locked(self, token: str, blk: int, ts: int, cur=None):
+        """Create a stub for a native launchpad token whose TokenCreated we never saw.
+
+        Without this a LaunchpadTrade for an unknown token is dropped silently and
+        permanently (backfill starting mid-range, a gap, or a reorg). A later
+        TokenCreated backfills creator/name/symbol onto this stub.
+        """
+        tok = (token or "").lower()
+        if not tok:
+            return None
+
+        name = _fetch_token_string(tok, _ERC20_NAME_SELECTOR)
+        symbol = _fetch_token_string(tok, _ERC20_SYMBOL_SELECTOR)
+
+        lp = models.LaunchpadToken(
+            token=tok,
+            creator="",
+            name=name,
+            symbol=symbol,
+            metadata_cid="",
+            description="",
+            social1="",
+            social2="",
+            social3="",
+            social4="",
+        )
+        lp.created_block = int(blk)
+        lp.created_at = int(ts or 0)
+        lp.source = 0
+        lp.quote_token = WMON
+        self.launchpad_tokens[tok] = lp
+
+        try:
+            storage.upsert_token_created(
+                token=tok,
+                creator="",
+                name=name,
+                symbol=symbol,
+                metadata_cid="",
+                description="",
+                social1="",
+                social2="",
+                social3="",
+                social4="",
+                source=0,
+                created_block=int(blk),
+                created_at=int(ts or 0),
+                last_price_native=lp.last_price_native,
+                quote_token=WMON,
+                cur=cur,
+            )
+        except Exception:
+            pass
+
+        print(
+            f"[State] recovered native launchpad token {tok} from a trade at block {blk} "
+            f"(TokenCreated not seen) name={name!r} symbol={symbol!r}",
+            flush=True,
+        )
+        return lp
+
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             is_pool_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
@@ -659,9 +752,15 @@ class State:
                 if native_amt <= 0 or token_amt <= 0:
                     return
                 
+                price_native = Decimal(0)
                 try:
-                    price_native = Decimal(ev.get("native_reserve")) / Decimal(ev.get("token_reserve"))
+                    reserve_native = Decimal(int(ev.get("native_reserve") or 0))
+                    reserve_token = Decimal(int(ev.get("token_reserve") or 0))
+                    if reserve_native > 0 and reserve_token > 0:
+                        price_native = reserve_native / reserve_token
                 except Exception:
+                    price_native = Decimal(0)
+                if price_native <= 0:
                     try:
                         price_native = Decimal(native_amt) / Decimal(token_amt)
                     except Exception:
@@ -733,7 +832,11 @@ class State:
 
             lp = self.launchpad_tokens.get(token)
             if lp is None:
-                return
+                if is_pool_swap:
+                    return
+                lp = self._ensure_native_launchpad_token_locked(token, blk, ts, cur=cur)
+                if lp is None:
+                    return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
             
@@ -752,11 +855,16 @@ class State:
                             if inserted:
                                 lp.snipers += 1
 
-                if is_buy:
+                reserve_token_now = int(ev.get("token_reserve") or 0)
+                if lp.source == 0 and 0 < reserve_token_now <= LAUNCHPAD_INITIAL_TOKEN_SUPPLY:
+                    # exact and self-correcting: the curve's token reserve is authoritative,
+                    # unlike a float running sum that desyncs on any missed trade
+                    lp.circulating_supply = (LAUNCHPAD_INITIAL_TOKEN_SUPPLY - reserve_token_now) // 10 ** 18
+                elif is_buy:
                     lp.circulating_supply += token_amt / 1e18
                 else:
                     lp.circulating_supply -= token_amt / 1e18
-            
+
                 if lp.source == 0:
                     tr = int(ev.get("token_reserve") or 0)
                     if tr > 0:
