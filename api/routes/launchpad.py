@@ -24,6 +24,7 @@ from api.api import (
     _mon_price_usd,
     _quote_price_usd,
     _nadfun_version,
+    _lifecycle_fields,
 )
 
 router = APIRouter()
@@ -679,6 +680,12 @@ def token_overview_graph(
             "volumeUsd": _fmt_usd(volume_usd_24h),
             "graduationPercentageBps": graduation_bps,
             "circulating_supply": str(int(circulating_supply or 0)),
+            **_lifecycle_fields(
+                source=source,
+                circulating_supply=circulating_supply,
+                tx_count=int(core.get("tx_count") or 0),
+                migrated=migrated_flag,
+            ),
             "source": int(source or 0),
             "nadfunVersion": _nadfun_version(token_addr, source),
             "quoteToken": quote_token,
