@@ -490,6 +490,7 @@ def test_sniper_count_does_not_exceed_distinct_snipers(db):
     deduped, so snipers_count drifted above the row count.
     """
     import psycopg2
+
     from core.sequencer import BatchAccumulator
     from modules import launchpad as lp_mod
 
