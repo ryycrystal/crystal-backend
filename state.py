@@ -738,6 +738,16 @@ class State:
 
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
+            # Trade rows dedupe on (txhash, log_index), but volume / tx_count /
+            # volume_usd are running sums that would be advanced twice if the same
+            # log were delivered again, inflating volume on any replay.
+            if txh:
+                try:
+                    if storage.trade_exists(txh, log_idx, cur=cur):
+                        return
+                except Exception:
+                    pass
+
             is_pool_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
             if not is_pool_swap:
                 token = ev.get("token", "").lower()
