@@ -275,6 +275,59 @@ def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
     assert Decimal(1_000 * 10 ** 18) / Decimal(INITIAL_TOKEN_SUPPLY) == Decimal("0.000001")
 
 
+def test_curve_reserves_are_recorded_for_fee_derivation(monkeypatch):
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    nr = 2500 * 10 ** 18
+    _, tr = _buy(st, nr, blk=101, ts=1001)
+    lp = st.launchpad_tokens[TOKEN]
+
+    assert lp.curve_native_reserve == nr
+    assert lp.curve_token_reserve == tr
+
+    # a later trade overwrites them, so the delta is always vs the prior trade
+    nr2 = 3000 * 10 ** 18
+    _, tr2 = _buy(st, nr2, blk=102, ts=1002)
+    assert lp.curve_native_reserve == nr2
+    assert lp.curve_token_reserve == tr2
+
+
+def test_fee_rate_is_derivable_from_the_native_reserve_delta(monkeypatch):
+    """The contract credits the curve net of fee on a buy and reports gross in
+    the event, so the keep-factor falls out of the reserve delta. No hardcoded
+    rate, and a governance change shows up on the very next trade."""
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    keep_factor = 99_000  # launchpadFee: 1% fee
+    v0 = V0
+    k = v0 * INITIAL_TOKEN_SUPPLY
+
+    prev_native = v0
+    gross_in = 7 * 10 ** 18
+    net_in = (gross_in * keep_factor) // 100_000
+    new_native = prev_native + net_in
+    new_token = (k + new_native - 1) // new_native
+
+    _buy(st, prev_native, blk=101, ts=1001)  # establishes the previous reserve
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.curve_native_reserve == prev_native
+
+    parsed = lp_mod.parse_launchpad_trade(
+        ROUTER,
+        ["0x", _topic_addr(TOKEN), _topic_addr(USER)],
+        _launchpad_trade_data(True, gross_in, 1, new_native, new_token),
+    )
+    delta_native = int(parsed["native_reserve"]) - lp.curve_native_reserve
+    implied_keep_factor = (delta_native * 100_000) // gross_in
+    assert implied_keep_factor == keep_factor
+    assert gross_in - delta_native == gross_in - net_in  # the fee actually taken
+
+    st.apply_launchpad_trade(parsed, 102, 1002, "0xdead", 0, ROUTER)
+    assert lp.curve_native_reserve == new_native
+
+
 def test_pnl_unit_semantics_are_coherent():
     """Guard: balance_token is raw (1e18) and last_price_native is MON per WHOLE
     token, so balance_token * price already lands in native wei -- the same unit

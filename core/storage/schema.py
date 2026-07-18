@@ -124,6 +124,18 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE launchpad_tokens
+            ADD COLUMN IF NOT EXISTS curve_native_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_tokens
+            ADD COLUMN IF NOT EXISTS curve_token_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_tokens_creator 
             ON launchpad_tokens (creator); 
             """

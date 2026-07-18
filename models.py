@@ -38,6 +38,11 @@ class LaunchpadToken:
     approaching_75_at: int = 0
     circulating_supply: int = 0
     snipers: int = 0
+    # last observed curve reserves. Persisted so the previous native reserve
+    # survives a restart: the per-trade fee rate is derived from its delta, and
+    # reconstructing it from k = native * token is inexact (ceiling division).
+    curve_native_reserve: int = 0
+    curve_token_reserve: int = 0
 
                                  
 @dataclass(slots=True)
