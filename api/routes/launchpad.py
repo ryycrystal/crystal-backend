@@ -178,7 +178,8 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
                 s.volume_native_24h, s.volume_usd_24h, s.buys_24h, s.sells_24h,
                 b.distinct_buyers, b.distinct_sellers,
                 COALESCE(c.tokens_created, 0), COALESCE(c.tokens_graduated, 0),
-                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a')
+                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'),
+                COALESCE(t.ath_price_native, 0)
             FROM token_data t
             CROSS JOIN holder_stats h
             CROSS JOIN trade_stats_24h s
@@ -203,6 +204,7 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
         "buys_24h": row[33], "sells_24h": row[34], "distinct_buyers": row[35], "distinct_sellers": row[36],
         "dev_tokens_created": row[37], "dev_tokens_graduated": row[38],
         "quote_token": (row[39] or "0x3bd359c1119da7da1d913d1c4d2b7c461115433a").lower(),
+        "ath_price_native": row[40] or Decimal(0),
     }
 
 
@@ -268,6 +270,10 @@ def token_overview_graph(
         decimals = 18
         last_price_wad = last_price_native * Decimal(1e9)
         marketcap_native_raw = last_price_native * Decimal(1e9)
+        ath_price_native = core.get("ath_price_native") or Decimal(0)
+        if ath_price_native < last_price_native:
+            ath_price_native = last_price_native
+        ath_marketcap = ath_price_native * Decimal(1e9)
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
@@ -653,6 +659,9 @@ def token_overview_graph(
             "marketcap": marketcap_native_raw,
             "marketcap_quote": marketcap_native_raw,
             "marketcap_usd": marketcap_usd,
+            "athPriceNative": _fmt(ath_price_native),
+            "athMarketcap": ath_marketcap,
+            "athMarketcapUsd": ath_marketcap * quote_price_usd if quote_price_usd > 0 else Decimal(0),
             "metadataCID": metadata_cid_val,
             "migrated": migrated_flag,
             "migratedAt": migrated_at,
@@ -1221,7 +1230,20 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
     }
 
     now_ts = int(time.time())
-    INITIAL_NATIVE_PRICE = Decimal("0.00008387696")
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT price_native
+            FROM launchpad_trades
+            WHERE token = %s
+            ORDER BY timestamp ASC, log_index ASC
+            LIMIT 1
+            """,
+            (token_addr,),
+        )
+        first_row = cur.fetchone()
+    first_price = (first_row[0] if first_row else None) or None
 
     for label, secs in windows.items():
         suffix = label
@@ -1277,16 +1299,10 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         prev_price = (prev_row[0] if prev_row else None) or None
         last_price = (last_row[0] if last_row else None) or None
 
-        if last_price is not None:
-            last_eff = last_price
-        elif prev_price is not None:
-            last_eff = prev_price
-        else:
-            last_eff = INITIAL_NATIVE_PRICE
+        last_eff = last_price or prev_price or first_price
+        base_price = prev_price or first_price
 
-        base_price = prev_price or INITIAL_NATIVE_PRICE
-
-        if base_price == 0:
+        if not base_price or last_eff is None:
             change_pct = 0.0
         else:
             change_pct = float((last_eff - base_price) / base_price * Decimal(100))
