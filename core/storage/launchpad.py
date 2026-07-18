@@ -74,6 +74,8 @@ def insert_trade(
     usd_amount,
     price_native,
     txhash: str,
+    native_reserve=0,
+    token_reserve=0,
     cur: psycopg2.extensions.cursor | None = None
 ) -> None:
     if cur is None:
@@ -91,9 +93,11 @@ def insert_trade(
                     token_amount,
                     usd_amount,
                     price_native,
-                    txhash
+                    txhash,
+                    native_reserve,
+                    token_reserve
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (txhash, log_index) DO NOTHING;
                 """,
                 (
@@ -108,6 +112,8 @@ def insert_trade(
                     usd_amount,
                     price_native,
                     txhash,
+                    int(native_reserve or 0),
+                    int(token_reserve or 0),
                 ),
             )
     else:
@@ -124,9 +130,11 @@ def insert_trade(
                 token_amount,
                 usd_amount,
                 price_native,
-                txhash
+                txhash,
+                native_reserve,
+                token_reserve
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (txhash, log_index) DO NOTHING;
             """,
             (
@@ -141,8 +149,107 @@ def insert_trade(
                 usd_amount,
                 price_native,
                 txhash,
+                int(native_reserve or 0),
+                int(token_reserve or 0),
             ),
         )
+
+def record_block_hash(block_number: int, block_hash: str, cur: psycopg2.extensions.cursor | None = None) -> None:
+    sql = """
+        INSERT INTO launchpad_blocks (number, block_hash)
+        VALUES (%s, %s)
+        ON CONFLICT (number) DO UPDATE
+        SET processed_at = NOW(), block_hash = EXCLUDED.block_hash;
+    """
+    args = (int(block_number), (block_hash or "").lower() or None)
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, args)
+    else:
+        cur.execute(sql, args)
+
+
+def get_processed_block_hash(block_number: int, cur: psycopg2.extensions.cursor | None = None):
+    sql = "SELECT block_hash FROM launchpad_blocks WHERE number = %s;"
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (int(block_number),))
+            row = cur2.fetchone()
+    else:
+        cur.execute(sql, (int(block_number),))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def rollback_launchpad_from_block(from_block: int, cur: psycopg2.extensions.cursor | None = None) -> list[str]:
+    """Drop everything indexed at or after ``from_block`` and report the tokens hit.
+
+    Used when a reorg replaces blocks we already indexed. Trades are the source of
+    truth for token aggregates, so removing the orphaned rows lets the affected
+    tokens be recomputed exactly rather than adjusted by guesswork.
+    """
+    def _run(c):
+        c.execute(
+            "SELECT DISTINCT token FROM launchpad_trades WHERE block_number >= %s;",
+            (int(from_block),),
+        )
+        tokens = [r[0] for r in c.fetchall() if r and r[0]]
+        c.execute("DELETE FROM launchpad_trades WHERE block_number >= %s;", (int(from_block),))
+        c.execute("DELETE FROM launchpad_blocks WHERE number >= %s;", (int(from_block),))
+        return tokens
+
+    if cur is None:
+        with db_cursor() as cur2:
+            return _run(cur2)
+    return _run(cur)
+
+
+def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | None = None) -> dict:
+    """Recompute a token's trade-derived totals from the surviving trade rows."""
+    tok = (token or "").lower()
+
+    def _run(c):
+        c.execute(
+            """
+            SELECT
+                COALESCE(SUM(native_amount), 0),
+                COALESCE(SUM(token_amount), 0),
+                COALESCE(SUM(usd_amount), 0),
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN is_buy THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_buy THEN 0 ELSE 1 END), 0)
+            FROM launchpad_trades WHERE token = %s;
+            """,
+            (tok,),
+        )
+        native_volume, token_volume, volume_usd, tx_count, buys, sells = c.fetchone()
+        c.execute(
+            """
+            SELECT price_native, native_reserve, token_reserve
+            FROM launchpad_trades WHERE token = %s
+            ORDER BY block_number DESC, log_index DESC
+            LIMIT 1;
+            """,
+            (tok,),
+        )
+        last = c.fetchone()
+        return {
+            "native_volume": int(native_volume or 0),
+            "token_volume": int(token_volume or 0),
+            "volume_usd": Decimal(volume_usd or 0),
+            "tx_count": int(tx_count or 0),
+            "buy_count": int(buys or 0),
+            "sell_count": int(sells or 0),
+            "last_price_native": (last[0] if last else None),
+            "native_reserve": int(last[1] or 0) if last else 0,
+            "token_reserve": int(last[2] or 0) if last else 0,
+        }
+
+    if cur is None:
+        with db_cursor() as cur2:
+            return _run(cur2)
+    return _run(cur)
+
 
 def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | None = None) -> bool:
     """Has this exact log already been applied?
@@ -1220,7 +1327,8 @@ def insert_trades_batch(trades: list[tuple], cur) -> None:
         """
         INSERT INTO launchpad_trades (
             block_number, log_index, timestamp, token, user_address,
-            is_buy, native_amount, token_amount, usd_amount, price_native, txhash
+            is_buy, native_amount, token_amount, usd_amount, price_native, txhash,
+            native_reserve, token_reserve
         )
         VALUES %s
         ON CONFLICT (txhash, log_index) DO NOTHING

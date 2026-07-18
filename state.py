@@ -675,6 +675,100 @@ class State:
                 )
 
                      
+    def handle_reorg(self, from_block: int, cur=None) -> list[str]:
+        """Discard blocks orphaned by a reorg and rebuild the affected tokens.
+
+        Token aggregates are running sums, so they cannot be un-applied
+        incrementally. Trades are the source of truth: drop the orphaned rows,
+        then recompute each affected token exactly from what survives. Curve
+        state comes from the last surviving trade's reserves, and the derived
+        fields go back through the adapter so no source-specific geometry leaks
+        in here.
+        """
+        with self._lock:
+            affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
+
+            for token in affected:
+                tok = (token or "").lower()
+                lp = self.launchpad_tokens.get(tok)
+                if lp is None:
+                    continue
+
+                agg = storage.aggregate_token_from_trades(tok, cur=cur)
+
+                lp.native_volume = int(agg["native_volume"])
+                lp.token_volume = int(agg["token_volume"])
+                lp.volume_usd = Decimal(agg["volume_usd"] or 0)
+                lp.fees_usd = lp.volume_usd * Decimal("0.01")
+                lp.tx_count = int(agg["tx_count"])
+                lp.buy_count = int(agg["buy_count"])
+                lp.sell_count = int(agg["sell_count"])
+
+                if agg["last_price_native"] is not None:
+                    lp.last_price_native = Decimal(agg["last_price_native"])
+
+                lp.curve_native_reserve = int(agg["native_reserve"] or 0)
+                lp.curve_token_reserve = int(agg["token_reserve"] or 0)
+
+                adapter = launchpad_adapters.get(lp.source)
+                curve = None
+                if adapter is not None and lp.curve_token_reserve > 0:
+                    curve = adapter.curve_state(
+                        {
+                            "native_reserve": lp.curve_native_reserve,
+                            "token_reserve": lp.curve_token_reserve,
+                        }
+                    )
+
+                if curve is not None:
+                    lp.circulating_supply = curve.tokens_sold // 10 ** 18
+                    lp.approaching_75 = bool(curve.is_graduating)
+                    if not lp.approaching_75:
+                        lp.approaching_75_block = 0
+                        lp.approaching_75_at = 0
+                elif lp.tx_count == 0:
+                    lp.circulating_supply = 0
+                    lp.approaching_75 = False
+                    lp.approaching_75_block = 0
+                    lp.approaching_75_at = 0
+
+                storage.update_token_after_trade(
+                    token=tok,
+                    last_price_native=lp.last_price_native,
+                    native_volume=int(lp.native_volume),
+                    token_volume=int(lp.token_volume),
+                    volume_usd=lp.volume_usd,
+                    fees_usd=lp.fees_usd,
+                    buy_count=lp.buy_count,
+                    sell_count=lp.sell_count,
+                    tx_count=lp.tx_count,
+                    circulating_supply=lp.circulating_supply,
+                    approaching_75=lp.approaching_75,
+                    approaching_75_block=lp.approaching_75_block,
+                    approaching_75_at=lp.approaching_75_at,
+                    snipers_count=lp.snipers,
+                    curve_native_reserve=int(lp.curve_native_reserve),
+                    curve_token_reserve=int(lp.curve_token_reserve),
+                    cur=cur,
+                )
+
+            if affected:
+                print(
+                    f"[State] reorg from block {from_block}: rebuilt {len(affected)} token(s)",
+                    flush=True,
+                )
+            return affected
+
+    def detect_reorg(self, block_number: int, block_hash: str, cur=None) -> bool:
+        """True when a block we already indexed now has a different hash."""
+        if not block_hash:
+            return False
+        try:
+            known = storage.get_processed_block_hash(int(block_number), cur=cur)
+        except Exception:
+            return False
+        return bool(known) and known.lower() != block_hash.lower()
+
     def _ensure_native_launchpad_token_locked(self, token: str, blk: int, ts: int, cur=None):
         """Create a stub for a native launchpad token whose TokenCreated we never saw.
 
@@ -958,6 +1052,8 @@ class State:
                     usd_amount=usd_amount,
                     price_native=lp.last_price_native,
                     txhash=txh,
+                    native_reserve=int(lp.curve_native_reserve),
+                    token_reserve=int(lp.curve_token_reserve),
                 )
                 batch.set_token_state(token, {
                     "last_price_native": lp.last_price_native,
@@ -1008,6 +1104,8 @@ class State:
                     usd_amount=usd_amount,
                     price_native=lp.last_price_native,
                     txhash=txh,
+                    native_reserve=int(lp.curve_native_reserve),
+                    token_reserve=int(lp.curve_token_reserve),
                     cur=cur,
                 )
                 storage.update_token_after_trade(

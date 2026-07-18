@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import sys
-from decimal import Decimal
 
 import pytest
 
@@ -447,20 +446,67 @@ def test_crash_midway_through_block_then_reprocess(db):
 
 # -- known gap ----------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="no reorg handling: rows from orphaned blocks are never invalidated",
-)
 def test_short_reorg_replaces_previously_indexed_blocks(db):
+    import core.storage as storage
+
     st = _new_state()
     _create(st)
+    _trade(st, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    storage.record_block_hash(109, "0xaaa")
     _trade(st, native_reserve=1500 * 10 ** 18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
-    assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xorphan'")[0][0] == 1
+    storage.record_block_hash(110, "0xbbb")
 
-    # block 110 is replaced by a different block carrying a different trade
+    assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
+
+    # block 110 comes back with a different hash -> reorg
     st2 = _new_state()
     st2.rebuild_from_db()
-    _trade(st2, native_reserve=1800 * 10 ** 18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
+    assert st2.detect_reorg(110, "0xdifferent") is True
+    assert st2.detect_reorg(109, "0xaaa") is False
 
-    # the orphaned trade should no longer be counted
+    st2.handle_reorg(110)
+
+    # the orphaned trade is gone and the surviving one still counts
     assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xorphan'")[0][0] == 0
+    assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xkeep'")[0][0] == 1
+
+    row = _token_row(db)
+    assert int(row[4]) == 10 ** 18                      # native_volume back to one trade
+    assert int(row[5]) == 1                             # tx_count
+    assert int(row[2]) == 1400 * 10 ** 18               # curve reserve from surviving trade
+    assert row[1] is False                              # no longer graduating
+
+    # replaying the canonical block lands cleanly on the rebuilt state
+    _trade(st2, native_reserve=1800 * 10 ** 18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
+    assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
+    assert int(_token_row(db)[2]) == 1800 * 10 ** 18
+
+
+def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
+    """After a reorg the state must equal what a fresh index of the surviving
+    chain would produce -- not merely 'something plausible'."""
+    import core.storage as storage
+
+    st = _new_state()
+    _create(st)
+    _trade(st, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    storage.record_block_hash(109, "0xaaa")
+    _trade(st, native_reserve=2500 * 10 ** 18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
+    storage.record_block_hash(110, "0xbbb")
+    st.handle_reorg(110)
+    after_reorg = _token_row(db)
+
+    # now index only the canonical chain from scratch
+    import psycopg2
+    conn = psycopg2.connect(db)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE " + ", ".join(LAUNCHPAD_TABLES) + " RESTART IDENTITY CASCADE;")
+    conn.close()
+
+    st2 = _new_state()
+    _create(st2)
+    _trade(st2, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    clean = _token_row(db)
+
+    assert after_reorg == clean

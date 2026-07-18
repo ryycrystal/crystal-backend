@@ -102,4 +102,6 @@ class NativeLaunchpadAdapter:
 
 
 def build(initial_native_supply_fn=None) -> NativeLaunchpadAdapter:
-    return register(NativeLaunchpadAdapter(initial_native_supply_fn))
+    adapter = NativeLaunchpadAdapter(initial_native_supply_fn)
+    register(adapter)
+    return adapter

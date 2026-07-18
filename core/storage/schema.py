@@ -124,6 +124,30 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE launchpad_blocks
+            ADD COLUMN IF NOT EXISTS block_hash TEXT;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_trades
+            ADD COLUMN IF NOT EXISTS native_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_trades
+            ADD COLUMN IF NOT EXISTS token_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_launchpad_trades_block
+            ON launchpad_trades (block_number);
+            """
+        )
+        cur.execute(
+            """
             ALTER TABLE launchpad_tokens
             ADD COLUMN IF NOT EXISTS curve_native_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
             """
