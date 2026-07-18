@@ -541,7 +541,7 @@ class Sequencer:
                 self._state.apply_market_params_changed(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
 
             elif tag == "TR":
-                self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+                self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx)
 
             elif tag == "PSYNC":
                 sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)
