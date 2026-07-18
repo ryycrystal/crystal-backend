@@ -155,6 +155,24 @@ def init_db() -> None:
         cur.execute(
             """
             ALTER TABLE launchpad_tokens
+            ADD COLUMN IF NOT EXISTS ath_price_native NUMERIC(50, 18) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            UPDATE launchpad_tokens t
+            SET ath_price_native = s.mx
+            FROM (
+                SELECT token, MAX(price_native) AS mx
+                FROM launchpad_trades
+                GROUP BY token
+            ) s
+            WHERE t.token = s.token AND t.ath_price_native < s.mx;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_tokens
             ADD COLUMN IF NOT EXISTS curve_token_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
             """
         )

@@ -219,6 +219,16 @@ def _q(db, sql, args=None):
     return rows
 
 
+def _x(db, sql, args=None):
+    import psycopg2
+
+    conn = psycopg2.connect(db)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(sql, args or ())
+    conn.close()
+
+
 def _token_row(db, token=TOKEN):
     return _q(
         db,
@@ -590,3 +600,52 @@ def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
     clean = _token_row(db)
 
     assert after_reorg == clean
+
+
+def test_ath_is_persisted_and_never_regresses(db):
+    """ATH derived client-side from loaded bars only sees the fetched window and
+    resets on reload, so it lives in the index. GREATEST also makes it replay-
+    safe: reprocessing a trade can never lower it."""
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    def ath():
+        return _q(db, "SELECT ath_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
+
+    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=1001, txh="0xa", log_idx=0)
+    first = ath()
+    assert first > 0, "a trade must establish an ATH"
+
+    # price up -> ATH follows
+    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    peak = ath()
+    assert peak > first
+
+    # price back down -> ATH holds at the peak
+    _trade(st, native_reserve=1200 * 10 ** 18, blk=103, ts=1003, txh="0xc", log_idx=0)
+    current = _q(db, "SELECT last_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
+    assert ath() == peak, "ATH must not follow price down"
+    assert current < peak
+
+    # replaying the peak trade must not disturb it
+    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    assert ath() == peak
+
+
+def test_ath_backfills_from_existing_trades_on_migration(db):
+    """Tokens indexed before the column existed must not report an ATH of 0."""
+    import core.storage as storage
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=2000 * 10 ** 18, blk=101, ts=1001, txh="0xa", log_idx=0)
+    _trade(st, native_reserve=1200 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+
+    peak = _q(db, "SELECT MAX(price_native) FROM launchpad_trades WHERE token=%s", (TOKEN,))[0][0]
+
+    _x(db, "UPDATE launchpad_tokens SET ath_price_native = 0 WHERE token=%s", (TOKEN,))
+    assert _q(db, "SELECT ath_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0] == 0
+
+    storage.init_db()
+
+    assert _q(db, "SELECT ath_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0] == peak

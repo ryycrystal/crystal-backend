@@ -310,7 +310,8 @@ def update_token_after_trade(
                     approaching_75_at = %s,
                     snipers_count = %s,
                     curve_native_reserve = %s,
-                    curve_token_reserve = %s
+                    curve_token_reserve = %s,
+                    ath_price_native = GREATEST(launchpad_tokens.ath_price_native, %s)
                 WHERE token = %s;
                 """,
                 (
@@ -329,6 +330,7 @@ def update_token_after_trade(
                     int(snipers_count),
                     int(curve_native_reserve or 0),
                     int(curve_token_reserve or 0),
+                    last_price_native,
                     token.lower(),
                 ),
             )
@@ -351,7 +353,8 @@ def update_token_after_trade(
                 approaching_75_at = %s,
                 snipers_count = %s,
                 curve_native_reserve = %s,
-                curve_token_reserve = %s
+                curve_token_reserve = %s,
+                ath_price_native = GREATEST(launchpad_tokens.ath_price_native, %s)
             WHERE token = %s;
             """,
             (
@@ -370,6 +373,7 @@ def update_token_after_trade(
                 int(snipers_count),
                 int(curve_native_reserve or 0),
                 int(curve_token_reserve or 0),
+                last_price_native,
                 token.lower(),
             ),
         )
@@ -1359,6 +1363,7 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
             int(u["snipers_count"]),
             int(u.get("curve_native_reserve") or 0),
             int(u.get("curve_token_reserve") or 0),
+            u["last_price_native"],
             token.lower(),
         ))
     execute_values(
@@ -1379,17 +1384,18 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
             approaching_75_at = v.approaching_75_at,
             snipers_count = v.snipers_count,
             curve_native_reserve = v.curve_native_reserve,
-            curve_token_reserve = v.curve_token_reserve
+            curve_token_reserve = v.curve_token_reserve,
+            ath_price_native = GREATEST(t.ath_price_native, v.ath_price_native)
         FROM (VALUES %s) AS v(
             last_price_native, native_volume, token_volume, volume_usd, fees_usd,
             buy_count, sell_count, tx_count, circulating_supply, approaching_75,
             approaching_75_block, approaching_75_at, snipers_count,
-            curve_native_reserve, curve_token_reserve, token
+            curve_native_reserve, curve_token_reserve, ath_price_native, token
         )
         WHERE t.token = v.token
         """,
         data,
-        template="(%s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::boolean, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::numeric, %s::text)",
+        template="(%s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::boolean, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::numeric, %s::numeric, %s::text)",
         page_size=1000,
     )
 
