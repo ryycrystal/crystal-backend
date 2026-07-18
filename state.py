@@ -965,6 +965,12 @@ class State:
                         if inserted:
                             lp.snipers += 1
 
+                if not is_buy:
+                    prev_native_reserve = int(getattr(lp, "curve_native_reserve", 0) or 0)
+                    new_native_reserve = int(ev.get("native_reserve") or 0)
+                    if prev_native_reserve > new_native_reserve > 0:
+                        native_amt = prev_native_reserve - new_native_reserve
+
                 adapter = launchpad_adapters.get(lp.source)
                 curve = adapter.curve_state(ev) if adapter is not None else None
 
