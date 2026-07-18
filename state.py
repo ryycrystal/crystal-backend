@@ -1225,6 +1225,20 @@ class State:
                 return
 
             self.addressToMarket[mi.market] = mi
+
+            for cand in ((mi.baseAddress or "").lower(), (mi.quoteAddress or "").lower()):
+                if not cand or cand not in self.launchpad_tokens:
+                    continue
+                lp_tok = self.launchpad_tokens[cand]
+                if (lp_tok.market or "").lower() != mi.market:
+                    lp_tok.market = mi.market
+                    try:
+                        storage.update_launchpad_token_market(token=cand, market=mi.market, cur=cur)
+                    except Exception:
+                        pass
+                self.launchpad_market_to_token[mi.market] = cand
+                break
+
             if mi.isCanonical:
                 self._replace_canonical_pair_market_locked(mi)
                 self._maybe_seed_stable_price_locked(mi.quoteAddress, mi.quoteTicker, mi.quoteName)
@@ -1339,6 +1353,20 @@ class State:
                         updated_at=ts,
                         cur=cur,
                     )
+
+                    lp_addr = self.launchpad_market_to_token.get(market)
+                    if lp_addr and (mi.baseAddress or "").lower() == lp_addr:
+                        lp_tok = self.launchpad_tokens.get(lp_addr)
+                        if lp_tok is not None and mi.price > 0:
+                            lp_tok.last_price_native = mi.price
+                            try:
+                                storage.update_launchpad_token_price(
+                                    token=lp_addr,
+                                    last_price_native=mi.price,
+                                    cur=cur,
+                                )
+                            except Exception:
+                                pass
             except Exception:
                 return
 
