@@ -226,6 +226,8 @@ class State:
                     approaching_75_block,
                     approaching_75_at,
                     quote_token,
+                    curve_native_reserve,
+                    curve_token_reserve,
                 ) = row
 
                 lp = models.LaunchpadToken(
@@ -260,6 +262,8 @@ class State:
                     approaching_75=bool(approaching_75),
                     approaching_75_block=int(approaching_75_block) if approaching_75_block is not None else 0,
                     approaching_75_at=int(approaching_75_at) if approaching_75_at is not None else 0,
+                    curve_native_reserve=int(curve_native_reserve or 0),
+                    curve_token_reserve=int(curve_token_reserve or 0),
                 )
 
                 self.launchpad_tokens[token.lower()] = lp
@@ -860,6 +864,10 @@ class State:
                 curve = adapter.curve_state(ev) if adapter is not None else None
 
                 if curve is not None:
+                    # keep the last observed reserves so the next trade can derive
+                    # its fee from the native delta after a restart
+                    lp.curve_native_reserve = int(curve.native_reserve)
+                    lp.curve_token_reserve = int(curve.token_reserve)
                     # normalized path: the adapter owns the curve geometry, the
                     # lifecycle model owns the progress/phase rules
                     lp.circulating_supply = curve.tokens_sold // 10 ** 18
@@ -955,6 +963,8 @@ class State:
                     "approaching_75_block": lp.approaching_75_block,
                     "approaching_75_at": lp.approaching_75_at,
                     "snipers_count": lp.snipers,
+                    "curve_native_reserve": int(lp.curve_native_reserve),
+                    "curve_token_reserve": int(lp.curve_token_reserve),
                 })
                 batch.add_user_delta(user, int(native_amt), realized_delta)
                 batch.add_position_delta(
@@ -1497,6 +1507,10 @@ class State:
             "approaching_75_block": lp.approaching_75_block,
             "approaching_75_at": lp.approaching_75_at,
             "snipers_count": lp.snipers,
+            # unchanged post-graduation: the curve is gone, but the last observed
+            # reserves must not be zeroed by this write
+            "curve_native_reserve": int(lp.curve_native_reserve),
+            "curve_token_reserve": int(lp.curve_token_reserve),
         }
 
         if batch is not None:

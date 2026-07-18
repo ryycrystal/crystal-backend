@@ -960,7 +960,9 @@ def load_tokens_for_state():
                 approaching_75,
                 approaching_75_block,
                 approaching_75_at,
-                quote_token
+                quote_token,
+                curve_native_reserve,
+                curve_token_reserve
             FROM launchpad_tokens
             """
         )
@@ -1218,6 +1220,8 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
             int(u["approaching_75_block"]) if u.get("approaching_75_block") else None,
             int(u["approaching_75_at"]) if u.get("approaching_75_at") else None,
             int(u["snipers_count"]),
+            int(u.get("curve_native_reserve") or 0),
+            int(u.get("curve_token_reserve") or 0),
             token.lower(),
         ))
     execute_values(
@@ -1236,16 +1240,19 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
             approaching_75 = v.approaching_75,
             approaching_75_block = v.approaching_75_block,
             approaching_75_at = v.approaching_75_at,
-            snipers_count = v.snipers_count
+            snipers_count = v.snipers_count,
+            curve_native_reserve = v.curve_native_reserve,
+            curve_token_reserve = v.curve_token_reserve
         FROM (VALUES %s) AS v(
             last_price_native, native_volume, token_volume, volume_usd, fees_usd,
             buy_count, sell_count, tx_count, circulating_supply, approaching_75,
-            approaching_75_block, approaching_75_at, snipers_count, token
+            approaching_75_block, approaching_75_at, snipers_count,
+            curve_native_reserve, curve_token_reserve, token
         )
         WHERE t.token = v.token
         """,
         data,
-        template="(%s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::boolean, %s::bigint, %s::bigint, %s::bigint, %s::text)",
+        template="(%s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::boolean, %s::bigint, %s::bigint, %s::bigint, %s::numeric, %s::numeric, %s::text)",
         page_size=1000,
     )
 
