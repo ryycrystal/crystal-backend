@@ -956,13 +956,14 @@ class State:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
-                        if batch is not None:
-                            batch.add_sniper(token, user_addr)
-                            lp.snipers += 1                                    
-                        else:
-                            inserted = storage.add_sniper_address(token, user_addr, cur=cur)
-                            if inserted:
-                                lp.snipers += 1
+                        # Insert directly even when batching: the table dedupes on
+                        # (token, user_address) and only this path reports whether the
+                        # row was new, so the counter cannot drift above the row count
+                        # when one address buys twice inside the window. Snipers only
+                        # occur in a 10-block window, so the write volume is trivial.
+                        inserted = storage.add_sniper_address(token, user_addr, cur=cur)
+                        if inserted:
+                            lp.snipers += 1
 
                 adapter = launchpad_adapters.get(lp.source)
                 curve = adapter.curve_state(ev) if adapter is not None else None
