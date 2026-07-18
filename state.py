@@ -758,22 +758,16 @@ class State:
                     lp.circulating_supply -= token_amt / 1e18
             
                 if lp.source == 0:
-                    nr = int(ev.get("native_reserve") or 0)
                     tr = int(ev.get("token_reserve") or 0)
-                    k = nr * tr
-                    if k > 0:
-                        initial_native = k // LAUNCHPAD_INITIAL_TOKEN_SUPPLY
-                        graduation_native = k // LAUNCHPAD_GRADUATED_TOKEN_SUPPLY
-                        raised_at_graduation = graduation_native - initial_native
-                        threshold = initial_native + (raised_at_graduation * 3) // 4
-                    else:
-                        threshold = 0
-                    if threshold > 0:
-                        if (not lp.approaching_75) and nr >= threshold:
+                    if tr > 0:
+                        curve_supply = LAUNCHPAD_INITIAL_TOKEN_SUPPLY - LAUNCHPAD_GRADUATED_TOKEN_SUPPLY
+                        threshold = (curve_supply * 3) // 4
+                        sold = LAUNCHPAD_INITIAL_TOKEN_SUPPLY - tr
+                        if (not lp.approaching_75) and sold >= threshold:
                             lp.approaching_75 = True
                             lp.approaching_75_block = blk
                             lp.approaching_75_at = ts
-                        elif (lp.approaching_75) and nr < threshold:
+                        elif (lp.approaching_75) and sold < threshold:
                             lp.approaching_75 = False
                             lp.approaching_75_block = 0
                             lp.approaching_75_at = 0
