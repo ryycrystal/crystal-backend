@@ -5,14 +5,12 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import chain as h
-from modules import launchpad as lp_mod
-import state
-
 # api.api and api.routes.launchpad are mutually importing; api.api must be
 # initialized first or importing the route module standalone raises ImportError.
 import api.api  # noqa: F401
-
+import state
+from core import chain as h
+from modules import launchpad as lp_mod
 
 ROUTER = h.CONTRACTS["ROUTER"].lower()
 TOKEN = "0x1f5bb433d52b9e9219a4decb4e9abc87541c7777"

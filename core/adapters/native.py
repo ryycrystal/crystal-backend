@@ -19,7 +19,6 @@ so token reserve and real balance coincide while on the curve.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
 
 from core.adapters.base import register
 from core.lifecycle import CurveState
@@ -39,7 +38,7 @@ class NativeLaunchpadAdapter:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def curve_state(self, ev: dict) -> Optional[CurveState]:
+    def curve_state(self, ev: dict) -> CurveState | None:
         """Map a LaunchpadTrade payload onto normalized curve state.
 
         ``token_reserve`` is authoritative on-chain state, so tokens_sold is
@@ -64,7 +63,7 @@ class NativeLaunchpadAdapter:
             token_reserve=token_reserve,
         )
 
-    def initial_price_native(self) -> Optional[Decimal]:
+    def initial_price_native(self) -> Decimal | None:
         """V0 / INITIAL_TOKEN_SUPPLY -- the curve's spot price before any trade.
 
         V0 is governance-settable, so it is read rather than assumed.

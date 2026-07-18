@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
 
 
 class TokenPhase(str, Enum):
@@ -103,7 +102,7 @@ class LifecycleSnapshot:
 
 def resolve_phase(
     *,
-    curve: Optional[CurveState],
+    curve: CurveState | None,
     has_trades: bool,
     graduated: bool = False,
     migrated: bool = False,
@@ -127,7 +126,7 @@ def resolve_phase(
 
 def snapshot(
     *,
-    curve: Optional[CurveState],
+    curve: CurveState | None,
     has_trades: bool,
     graduated: bool = False,
     migrated: bool = False,

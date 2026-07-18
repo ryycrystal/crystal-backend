@@ -10,11 +10,41 @@ import traceback
 import base64
 import json
 import core.storage as storage
+from core.lifecycle import CurveState, TokenPhase, resolve_phase
+from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
+
 from core import chain as h
 from api.x_api import router as x_router
 from core.storage import db_cursor
 
 getcontext().prec = 100
+# nad.fun sells 793,100,000 on its curve; ours sells 800,000,000
+_NADFUN_CURVE_SUPPLY = 793_100_000 * 10 ** 18
+
+
+def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> Dict[str, Any]:
+    """Derive lifecycle phase for API records.
+
+    Computed from stored fields rather than persisted, so it can never drift from
+    the data it describes. nad.fun hands liquidity to an external venue when it
+    completes, so its terminal state is MIGRATED; native tokens graduate onto a
+    Crystal market and stop at GRADUATED.
+    """
+    src = int(source or 0)
+    curve_supply = _NATIVE_CURVE_SUPPLY if src == 0 else _NADFUN_CURVE_SUPPLY
+    curve = CurveState(
+        tokens_sold=int(circulating_supply or 0) * 10 ** 18,
+        curve_supply=curve_supply,
+    )
+    done = bool(migrated)
+    phase = resolve_phase(
+        curve=curve,
+        has_trades=int(tx_count or 0) > 0,
+        graduated=done and src == 0,
+        migrated=done and src != 0,
+    )
+    return {"phase": phase.value, "progressBps": curve.progress_bps}
+
 
 log = logging.getLogger("api")
 
@@ -451,6 +481,12 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "social4": row[9],
             "market": row[16],
             "circulating_supply": str(int(row[25] or 0)),
+            **_lifecycle_fields(
+                source=int(row[10] or 0),
+                circulating_supply=int(row[25] or 0),
+                tx_count=int(row[24] or 0),
+                migrated=bool(row[13]),
+            ),
             "developer_tokens_created": int(row[30] or 0),
             "developer_tokens_graduated": int(row[31] or 0),
         }
@@ -705,6 +741,12 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
         "snipers": snipers_view,
         "market": market,
         "circulating_supply": str(int(circulating_supply or 0)),
+        **_lifecycle_fields(
+            source=source,
+            circulating_supply=circulating_supply,
+            tx_count=tx_count,
+            migrated=migrated,
+        ),
     }
 
 

@@ -1603,6 +1603,58 @@ class State:
             lp.volume_usd += usd_amount
 
         user = (ev.get("user") or "").lower()
+
+        # position flows must keep moving after graduation, or a graduated token's
+        # cost basis silently freezes. balance_token stays 0 here: balances are
+        # maintained from ERC-20 Transfer events, which fire on market trades too.
+        if user:
+            if is_buy:
+                token_bought_delta, token_sold_delta = int(token_amt), 0
+                native_spent_delta, native_received_delta = int(native_amt), 0
+                realized_delta = Decimal(-native_amt)
+                buy_delta, sell_delta = 1, 0
+            else:
+                token_bought_delta, token_sold_delta = 0, int(token_amt)
+                native_spent_delta, native_received_delta = 0, int(native_amt)
+                realized_delta = Decimal(native_amt)
+                buy_delta, sell_delta = 0, 1
+
+            if batch is not None:
+                batch.add_user_delta(user, int(native_amt), realized_delta)
+                batch.add_position_delta(
+                    user_address=user,
+                    token=lp_addr,
+                    token_bought_delta=token_bought_delta,
+                    token_sold_delta=token_sold_delta,
+                    native_spent_delta=native_spent_delta,
+                    native_received_delta=native_received_delta,
+                    balance_token_delta=0,
+                    realized_pnl_delta=realized_delta,
+                    trade_count_delta=1,
+                    buy_count_delta=buy_delta,
+                    sell_count_delta=sell_delta,
+                    last_price_native=lp.last_price_native,
+                )
+            else:
+                try:
+                    storage.upsert_position(
+                        user_address=user,
+                        token=lp_addr,
+                        token_bought_delta=token_bought_delta,
+                        token_sold_delta=token_sold_delta,
+                        native_spent_delta=native_spent_delta,
+                        native_received_delta=native_received_delta,
+                        balance_token_delta=0,
+                        realized_pnl_delta=realized_delta,
+                        trade_count_delta=1,
+                        buy_count_delta=buy_delta,
+                        sell_count_delta=sell_delta,
+                        last_price_native=lp.last_price_native,
+                        cur=cur,
+                    )
+                except Exception:
+                    pass
+
         token_state = {
             "last_price_native": lp.last_price_native,
             "native_volume": int(lp.native_volume),

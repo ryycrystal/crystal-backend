@@ -1,0 +1,42 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+# Scoped deliberately. These are the modules that pass today, so the gate is real
+# rather than a wall of pre-existing findings everyone learns to ignore. Widen the
+# list as other modules are cleaned up.
+include = [
+    "core/lifecycle.py",
+    "core/adapters/*.py",
+    "modules/launchpad.py",
+    "tests/test_lifecycle.py",
+    "tests/test_launchpad_native.py",
+    "tests/test_launchpad_integration.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # line length is handled by the formatter, not worth failing on
+    "UP042",  # TokenPhase is deliberately (str, Enum) so it serializes as a plain string
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests build synthetic fixtures and import lazily inside fixtures on purpose
+"tests/*" = ["B008", "E402"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+explicit_package_bases = true
+# Same reasoning as ruff: start where it is green and expand.
+files = [
+    "core/lifecycle.py",
+    "core/adapters/base.py",
+    "core/adapters/native.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Integration tests skip themselves unless TEST_DATABASE_URL is set:
+#   TEST_DATABASE_URL="postgresql://user:pass@host:5432/postgres?sslmode=disable" pytest -q
