@@ -40,7 +40,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # tests build synthetic fixtures and import lazily inside fixtures on purpose
-"tests/*" = ["B008", "E402"]
+"tests/*" = ["B008", "E402", "F811"]  # pytest fixtures shadow their imported names by design
 # api.api and the route modules are mutually importing, so routers are included
 # at the bottom on purpose -- the import order is load-bearing, not sloppiness
 "api/api.py" = ["E402"]

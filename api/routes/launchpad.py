@@ -1494,93 +1494,106 @@ def leaderboard(
 
 # windowed volume counts and change percentages for one token
 @router.get("/stats/{token_addr}")
+@ttl_cache("stats:token", ttl_seconds=0.5)
 def token_stats(token_addr: str) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
-    windows = {
-        "5m": 5 * 60,
-        "1h": 60 * 60,
-        "6h": 6 * 60 * 60,
-        "24h": 24 * 60 * 60,
+    now_ts = int(time.time())
+    bounds = {
+        "5m": now_ts - 5 * 60,
+        "1h": now_ts - 60 * 60,
+        "6h": now_ts - 6 * 60 * 60,
+        "24h": now_ts - 24 * 60 * 60,
     }
+    t5m, t1h, t6h, t24h = bounds["5m"], bounds["1h"], bounds["6h"], bounds["24h"]
 
     out: dict[str, Any] = {
         "type": "stats",
         "token": token_addr,
     }
 
-    now_ts = int(time.time())
+    # one scan of the 24h window covers every shorter window via FILTER, instead
+    # of a separate aggregate query per window
+    agg_sql = (
+        """
+        SELECT
+    """
+        + ",\n".join(
+            f"""
+            COALESCE(SUM(usd_amount) FILTER (WHERE timestamp > %(t{k})s), 0),
+            COALESCE(SUM(usd_amount) FILTER (WHERE timestamp > %(t{k})s AND is_buy), 0),
+            COALESCE(SUM(usd_amount) FILTER (WHERE timestamp > %(t{k})s AND NOT is_buy), 0),
+            COUNT(*) FILTER (WHERE timestamp > %(t{k})s AND is_buy),
+            COUNT(*) FILTER (WHERE timestamp > %(t{k})s AND NOT is_buy)
+        """
+            for k in ("5m", "1h", "6h", "24h")
+        )
+        + """
+        FROM launchpad_trades
+        WHERE token = %(tok)s AND timestamp > %(t24h)s AND timestamp <= %(now)s
+    """
+    )
+
+    # the reference price for every window, plus the newest and oldest trade, in a
+    # single round trip. each subquery is a one row index seek on (token, timestamp)
+    price_sql = """
+        SELECT
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s
+              ORDER BY timestamp ASC, log_index ASC LIMIT 1),
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s AND timestamp <= %(t5m)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s AND timestamp <= %(t1h)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s AND timestamp <= %(t6h)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+            (SELECT price_native FROM launchpad_trades
+              WHERE token = %(tok)s AND timestamp <= %(t24h)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1)
+    """
+
+    params = {
+        "tok": token_addr,
+        "now": now_ts,
+        "t5m": t5m,
+        "t1h": t1h,
+        "t6h": t6h,
+        "t24h": t24h,
+    }
 
     with db_cursor() as cur:
-        cur.execute(
-            """
-            SELECT price_native
-            FROM launchpad_trades
-            WHERE token = %s
-            ORDER BY timestamp ASC, log_index ASC
-            LIMIT 1
-            """,
-            (token_addr,),
-        )
-        first_row = cur.fetchone()
-    first_price = (first_row[0] if first_row else None) or None
+        cur.execute(agg_sql, params)
+        agg = cur.fetchone() or (0,) * 20
+        cur.execute(price_sql, params)
+        prices = cur.fetchone() or (None,) * 6
 
-    for label, secs in windows.items():
-        suffix = label
-        start_ts = now_ts - secs
+    latest_price = prices[0] or None
+    first_price = prices[1] or None
+    refs = {
+        "5m": prices[2] or None,
+        "1h": prices[3] or None,
+        "6h": prices[4] or None,
+        "24h": prices[5] or None,
+    }
 
-        with db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    COALESCE(SUM(usd_amount), 0),
-                    COALESCE(SUM(usd_amount) FILTER (WHERE is_buy = TRUE), 0),
-                    COALESCE(SUM(usd_amount) FILTER (WHERE is_buy = FALSE), 0),
-                    COUNT(*) FILTER (WHERE is_buy = TRUE),
-                    COUNT(*) FILTER (WHERE is_buy = FALSE)
-                FROM launchpad_trades
-                WHERE token = %s AND timestamp > %s AND timestamp <= %s
-                """,
-                (token_addr, start_ts, now_ts),
-            )
-            vol_row = cur.fetchone()
+    for i, suffix in enumerate(("5m", "1h", "6h", "24h")):
+        base = i * 5
+        volume_usd = agg[base] or Decimal(0)
+        buy_volume_usd = agg[base + 1] or Decimal(0)
+        sell_volume_usd = agg[base + 2] or Decimal(0)
+        buy_tx_count = agg[base + 3] or 0
+        sell_tx_count = agg[base + 4] or 0
 
-        volume_usd = vol_row[0] or Decimal(0)
-        buy_volume_usd = vol_row[1] or Decimal(0)
-        sell_volume_usd = vol_row[2] or Decimal(0)
-        buy_tx_count = vol_row[3] or 0
-        sell_tx_count = vol_row[4] or 0
-
-        with db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT price_native
-                FROM launchpad_trades
-                WHERE token = %s AND timestamp <= %s
-                ORDER BY timestamp DESC, log_index DESC
-                LIMIT 1
-                """,
-                (token_addr, start_ts),
-            )
-            prev_row = cur.fetchone()
-
-            cur.execute(
-                """
-                SELECT price_native
-                FROM launchpad_trades
-                WHERE token = %s AND timestamp > %s AND timestamp <= %s
-                ORDER BY timestamp DESC, log_index DESC
-                LIMIT 1
-                """,
-                (token_addr, start_ts, now_ts),
-            )
-            last_row = cur.fetchone()
-
-        prev_price = (prev_row[0] if prev_row else None) or None
-        last_price = (last_row[0] if last_row else None) or None
-
-        last_eff = last_price or prev_price or first_price
-        base_price = prev_price or first_price
+        # last_eff collapses to the newest trade overall: if one landed inside the
+        # window it is the newest, and if not the one before the window is
+        base_price = refs[suffix] or first_price
+        last_eff = latest_price or first_price
 
         if not base_price or last_eff is None:
             change_pct = 0.0
