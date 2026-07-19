@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from decimal import Decimal
 
 import pytest
 
@@ -649,3 +651,86 @@ def test_ath_backfills_from_existing_trades_on_migration(db):
     storage.init_db()
 
     assert _q(db, "SELECT ath_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0] == peak
+
+
+def _api_client():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import api.api  # noqa: F401
+    from api.routes.launchpad import router
+
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def test_trades_range_endpoint_spans_history_and_filters(db):
+    """Chart marks need more history than the fixed 50-trade window returns."""
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    for i in range(12):
+        _trade(st, native_reserve=(1100 + i * 50) * 10 ** 18, blk=101 + i, ts=1000 + i * 60,
+               txh=f"0xr{i}", log_idx=0)
+
+    c = _api_client()
+
+    body = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999}).json()
+    assert body["count"] == 12, "must return the whole range, not a fixed window"
+    times = [int(t["time"]) for t in body["trades"]]
+    assert times == sorted(times), "trades must be ascending for chart marks"
+
+    # a narrow window returns only what falls inside it
+    mid = c.get(f"/token/{TOKEN}/trades", params={"from": 1000 + 3 * 60, "to": 1000 + 6 * 60}).json()
+    assert mid["count"] == 4
+    assert all(1000 + 3 * 60 <= int(t["time"]) <= 1000 + 6 * 60 for t in mid["trades"])
+
+    # limit is honoured and flagged
+    small = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999, "limit": 5}).json()
+    assert small["count"] == 5
+    assert small["truncated"] is True
+
+    # server-side caller filter
+    none = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999,
+                                                  "callers": "0x000000000000000000000000000000000000dead"}).json()
+    assert none["count"] == 0
+    mine = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999, "callers": USER}).json()
+    assert mine["count"] == 12
+
+
+def test_trades_route_is_not_shadowed_by_the_chartres_route(db):
+    """/token/{addr}/{chartres} parses its second segment as an int, so it would
+    claim "trades" and 422 if it were registered first."""
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=1001, txh="0xz", log_idx=0)
+
+    c = _api_client()
+    r = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999})
+    assert r.status_code == 200, f"route shadowed by the chartres route: {r.status_code}"
+    assert "trades" in r.json()
+
+    assert c.get(f"/token/{TOKEN}/60").status_code == 200, "numeric resolutions must still work"
+
+
+def test_stats_exposes_the_reference_price_behind_each_change_pct(db):
+    """The client recomputes deltas against a live price, so it needs the exact
+    reference rather than inferring it back out of the percentage."""
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=int(time.time()) - 300, txh="0xs1", log_idx=0)
+    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=int(time.time()) - 10, txh="0xs2", log_idx=0)
+
+    c = _api_client()
+    body = c.get(f"/stats/{TOKEN}").json()
+
+    for w in ("5m", "1h", "6h", "24h"):
+        assert f"price_ref_{w}" in body, f"missing price_ref_{w}"
+        assert f"change_pct_{w}" in body
+
+    ref = Decimal(body["price_ref_1h"])
+    assert ref > 0
+    # the pair must be self-consistent: last/ref-1 reproduces the reported pct
+    last = Decimal(c.get(f"/token/{TOKEN}/60").json()["marketcap"])
+    implied = float((last / ref - 1) * 100)
+    assert abs(implied - body["change_pct_1h"]) < 0.01, (implied, body["change_pct_1h"])

@@ -208,6 +208,76 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
     }
 
 
+# Range-queryable trades, for chart marks that need to span more history than the
+# fixed window on /token/{addr}/{chartres} returns.
+# MUST stay registered above /token/{token_addr}/{chartres}: that route parses its
+# second segment as an int, so it would claim "trades" first and 422.
+@router.get("/token/{token_addr}/trades")
+def token_trades_range(
+    token_addr: str,
+    from_ts: int = Query(0, alias="from", ge=0),
+    to_ts: int = Query(0, alias="to", ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+    callers: str = Query("", description="comma-separated addresses; server-side filter"),
+) -> Dict[str, Any]:
+    token_addr = token_addr.lower()
+    if to_ts <= 0:
+        to_ts = int(time.time())
+    if from_ts > to_ts:
+        from_ts, to_ts = to_ts, from_ts
+
+    caller_list = [c.strip().lower() for c in callers.split(",") if c.strip()]
+
+    where = ["token = %s", "timestamp >= %s", "timestamp <= %s"]
+    params: List[Any] = [token_addr, int(from_ts), int(to_ts)]
+    if caller_list:
+        where.append("user_address = ANY(%s)")
+        params.append(caller_list)
+    params.append(int(limit))
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT timestamp, block_number, log_index, user_address, is_buy,
+                   native_amount, token_amount, usd_amount, price_native, txhash
+            FROM launchpad_trades
+            WHERE {' AND '.join(where)}
+            ORDER BY timestamp DESC, log_index DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+
+    rows.reverse()
+
+    trades = [
+        {
+            "time": str(int(r[0])),
+            "blockNumber": int(r[1]),
+            "logIndex": int(r[2]),
+            "caller": (r[3] or "").lower(),
+            "isBuy": bool(r[4]),
+            "nativeAmount": str(int(r[5] or 0)),
+            "tokenAmount": str(int(r[6] or 0)),
+            "usdAmount": _fmt_usd(r[7] or Decimal(0)),
+            "price": _scaled_price(r[8]),
+            "txhash": r[9],
+        }
+        for r in rows
+    ]
+
+    return {
+        "token": token_addr,
+        "from": int(from_ts),
+        "to": int(to_ts),
+        "limit": int(limit),
+        "count": len(trades),
+        "truncated": len(trades) >= limit,
+        "trades": trades,
+    }
+
+
 # Return token overview stats, holders, trades, and chart data for a launchpad token
 @router.get("/token/{token_addr}/{chartres}")
 def token_overview_graph(
@@ -1313,6 +1383,9 @@ def token_stats(token_addr: str) -> Dict[str, Any]:
         out[f"buy_tx_count_{suffix}"] = int(buy_tx_count)
         out[f"sell_tx_count_{suffix}"] = int(sell_tx_count)
         out[f"change_pct_{suffix}"] = change_pct
+        # same scale as `marketcap` and the chart's open/close, so the client can
+        # recompute the delta against a live price without a unit conversion
+        out[f"price_ref_{suffix}"] = _scaled_price(base_price) if base_price else "0"
 
     return out
 
