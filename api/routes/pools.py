@@ -1,18 +1,23 @@
 from __future__ import annotations
-from typing import Dict, Any
+
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Query
+
 import core.storage as storage
 
 router = APIRouter()
 
 
-def _pool_row_to_api(row) -> Dict[str, Any]:
+def _pool_row_to_api(row) -> dict[str, Any]:
     from api.api import _crystal_pool_row_to_api
+
     return _crystal_pool_row_to_api(row)
 
 
 def _sample_pool_chart_points(points: list[dict[str, Any]], max_points: int = 48) -> list[dict[str, Any]]:
     from api.api import _sample_evenly_by_time
+
     return _sample_evenly_by_time(points, max_points, lambda p: int((p or {}).get("timestamp") or 0))
 
 
@@ -25,7 +30,7 @@ def list_pools(
     order: str = Query("desc", description="asc | desc"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=50),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     search_norm = search if isinstance(search, str) else ""
     sort_norm = (sort if isinstance(sort, str) else "volume" or "volume").strip().lower()
     if sort_norm not in {"volume", "tvl", "apy"}:
@@ -58,7 +63,7 @@ def list_pools(
         sort_dir=order_norm,
     )
     total = int(rows[0][25] or 0) if rows and len(rows[0]) > 25 else 0
-    
+
     return {
         "ok": True,
         "pools": [_pool_row_to_api(r) for r in rows],
@@ -80,7 +85,7 @@ def get_pool(
     address: str,
     history_seconds: int = Query(24 * 3600, ge=3600, le=365 * 24 * 3600),
     history_limit: int = Query(500, ge=1, le=2000),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         history_seconds_i = int(history_seconds)
     except Exception:
@@ -104,8 +109,7 @@ def get_pool(
     tvl_history = _sample_pool_chart_points(tvl_history, 48)
     out["tvlHistory"] = tvl_history
     out["apyHistory"] = [
-        {"timestamp": int(p["timestamp"]), "apy": float(out.get("apy24h") or 0.0)}
-        for p in tvl_history
+        {"timestamp": int(p["timestamp"]), "apy": float(out.get("apy24h") or 0.0)} for p in tvl_history
     ]
-    
+
     return out

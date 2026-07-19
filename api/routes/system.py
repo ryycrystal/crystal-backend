@@ -1,20 +1,24 @@
 from __future__ import annotations
+
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Any
+
 from fastapi import APIRouter
+
 from api.api import _mon_price_usd, storage
 
 router = APIRouter()
 
+
 # Return the cached MON/USD reference price used by the backend
 @router.get("/debug/mon_price")
 def get_mon_price() -> Decimal:
-    return(_mon_price_usd())
+    return _mon_price_usd()
 
 
 # Return the last processed chain block for indexer sync checks
 @router.get("/sync")
-def get_sync_status() -> Dict[str, Any]:
+def get_sync_status() -> dict[str, Any]:
     last_block = storage.get_last_processed_block()
     return {
         "last_block": last_block,
@@ -23,5 +27,5 @@ def get_sync_status() -> Dict[str, Any]:
 
 # Return a simple health response for uptime checks
 @router.get("/health")
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     return {"ok": True}

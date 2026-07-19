@@ -1,18 +1,20 @@
 from __future__ import annotations
-from typing import Dict, Any
-from decimal import Decimal, getcontext
-from collections import deque
-import os
-import time
-import httpx
-import models
-import core.storage as storage
-import threading
-from core import chain as h
-from core import adapters as launchpad_adapters
-from core.adapters import native as native_adapter_mod
 
+import os
+import threading
+import time
+from collections import deque
+from decimal import Decimal, getcontext
+from typing import Any
+
+import httpx
 import psycopg2
+
+import core.storage as storage
+import models
+from core import adapters as launchpad_adapters
+from core import chain as h
+from core.adapters import native as native_adapter_mod
 
 getcontext().prec = 100
 
@@ -86,7 +88,7 @@ def _fetch_token_string(token: str, selector: str) -> str:
 
 _LAUNCHPAD_PARAMS_SELECTOR = "0xfef2c170"
 _LAUNCHPAD_PARAMS_TTL = 300
-_LAUNCHPAD_PARAMS_CACHE: Dict[str, Any] = {}
+_LAUNCHPAD_PARAMS_CACHE: dict[str, Any] = {}
 
 
 def _fetch_launchpad_initial_native_supply() -> int:
@@ -125,6 +127,7 @@ def _fetch_token_decimals(token: str) -> int | None:
         pass
     return None
 
+
 def _fetch_v2_quote_token(token: str) -> str:
     try:
         data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
@@ -132,36 +135,37 @@ def _fetch_v2_quote_token(token: str) -> str:
     except Exception:
         return WMON
 
+
 class State:
     def __init__(self) -> None:
         self._lock = threading.RLock()
 
-        self.launchpad_tokens: Dict[str, models.LaunchpadToken] = {}
-        self.launchpad_market_to_token: Dict[str, str] = {}
-        self.v3_pools: Dict[str, models.PoolInfo] = {}
-        self.token_to_v3_pool: Dict[str, str] = {}
+        self.launchpad_tokens: dict[str, models.LaunchpadToken] = {}
+        self.launchpad_market_to_token: dict[str, str] = {}
+        self.v3_pools: dict[str, models.PoolInfo] = {}
+        self.token_to_v3_pool: dict[str, str] = {}
 
-        self.addressToMarket: Dict[str, models.MarketInfo] = {}
-        self.tokenGraph: Dict[str, list[models.MarketInfo]] = {}
-        self.tokenToPrice: Dict[str, Decimal] = {}
+        self.addressToMarket: dict[str, models.MarketInfo] = {}
+        self.tokenGraph: dict[str, list[models.MarketInfo]] = {}
+        self.tokenToPrice: dict[str, Decimal] = {}
 
         self.allVaults: set[str] = set()
-        self.vaults: Dict[str, models.Vault] = {}
-        self.vaultBalancesDay: Dict[str, deque] = {}
-        self.vaultBalancesWeek: Dict[str, deque] = {}
-        self.vaultBalancesMonth: Dict[str, deque] = {}
-        self.vaultBalancesAllTime: Dict[str, deque] = {}
-        self.vaultToDeposits: Dict[str, list[models.VaultDeposit]] = {}
-        self.vaultToWithdraws: Dict[str, list[models.VaultWithdraw]] = {}
-        self.vaultToUsers: Dict[str, Dict[str, models.VaultUser]] = {}
+        self.vaults: dict[str, models.Vault] = {}
+        self.vaultBalancesDay: dict[str, deque] = {}
+        self.vaultBalancesWeek: dict[str, deque] = {}
+        self.vaultBalancesMonth: dict[str, deque] = {}
+        self.vaultBalancesAllTime: dict[str, deque] = {}
+        self.vaultToDeposits: dict[str, list[models.VaultDeposit]] = {}
+        self.vaultToWithdraws: dict[str, list[models.VaultWithdraw]] = {}
+        self.vaultToUsers: dict[str, dict[str, models.VaultUser]] = {}
 
-        self._block_timestamps: Dict[int, int] = {}
+        self._block_timestamps: dict[int, int] = {}
         self._last_head_block: int | None = None
         self._last_head_ts: int | None = None
 
         self.mon_price_usd = Decimal("0.03")
         self._seed_aux_prices()
-        
+
     def set_mon_price_usd(self, value) -> None:
         try:
             px = Decimal(value)
@@ -180,7 +184,7 @@ class State:
             storage.set_mon_price_usd(px)
         except Exception as e:
             print(f"[State] failed to persist mon_price_usd: {e!r}")
-        
+
     def rebuild_from_db(self) -> None:
         with self._lock:
             self.launchpad_tokens.clear()
@@ -277,10 +281,10 @@ class State:
                 )
                 self.v3_pools[pi.pool] = pi
                 self.token_to_v3_pool[pi.token_addr] = pi.pool
-                
+
                 if pool.lower() not in h.ADDRS:
                     h.ADDRS.append(pool.lower())
-                    
+
             try:
                 stored = storage.get_mon_price_usd()
                 if stored is not None and stored > 0:
@@ -457,8 +461,8 @@ class State:
             self.v3_pools.clear()
             self.token_to_v3_pool.clear()
             self._reset_aux_locked()
-            print(f"[State] Reset for reindex: cleared all in-memory state")
-              
+            print("[State] Reset for reindex: cleared all in-memory state")
+
     def ensure_v2_launchpad_token(
         self,
         token: str,
@@ -531,22 +535,23 @@ class State:
                     pass
 
             print(
-                f"[State] discovered nad.fun v2 token {token} "
-                f"name={name!r} symbol={symbol!r} quote={quote_token}",
+                f"[State] discovered nad.fun v2 token {token} name={name!r} symbol={symbol!r} quote={quote_token}",
                 flush=True,
             )
             return True
-                      
-    def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
+
+    def apply_token_created(
+        self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
+    ) -> None:
         with self._lock:
             src = (log_addr or "").lower()
             if not (h.is_nadfun_address(src) or src == h.CONTRACTS.get("ROUTER", "").lower()):
                 return
-            
-            token = ev.get("token","").lower()
+
+            token = ev.get("token", "").lower()
             if not token:
                 return
-            
+
             creator = ev.get("creator", "").lower()
             name = ev.get("name", "")
             symbol = ev.get("symbol", "")
@@ -558,7 +563,7 @@ class State:
             social4 = ev.get("social4", "")
             source = int(ev.get("source", 0))
             quote_token = (ev.get("quote_token") or WMON).lower()
-            
+
             if src == h.NADFUN_V2_ADDR:
                 storage.mark_nadfun_v2(token, cur=cur)
 
@@ -612,19 +617,16 @@ class State:
                 lp.source = source
                 lp.quote_token = quote_token
                 self.launchpad_tokens[token] = lp
-                
-                if (source == 1):
-                    lp.last_price_native = ev.get(
-                        "last_price_native",
-                        Decimal("0.00008387696")
-                    )
+
+                if source == 1:
+                    lp.last_price_native = ev.get("last_price_native", Decimal("0.00008387696"))
                 else:
                     adapter = launchpad_adapters.get(source)
                     if adapter is not None:
                         initial_price = adapter.initial_price_native()
                         if initial_price is not None and initial_price > 0:
                             lp.last_price_native = initial_price
-                
+
             storage.upsert_token_created(
                 token=token,
                 creator=creator,
@@ -641,9 +643,9 @@ class State:
                 created_at=ts,
                 last_price_native=lp.last_price_native,
                 quote_token=lp.quote_token,
-                cur=cur
+                cur=cur,
             )
-            
+
             if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
 
@@ -668,7 +670,7 @@ class State:
                     token_is_0=token_is_0,
                     cur=cur,
                 )
-             
+
     def handle_reorg(self, from_block: int, cur=None) -> list[str]:
         with self._lock:
             affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
@@ -706,7 +708,7 @@ class State:
                     )
 
                 if curve is not None:
-                    lp.circulating_supply = curve.tokens_sold // 10 ** 18
+                    lp.circulating_supply = curve.tokens_sold // 10**18
                     lp.approaching_75 = bool(curve.is_graduating)
                     if not lp.approaching_75:
                         lp.approaching_75_block = 0
@@ -808,7 +810,17 @@ class State:
         )
         return lp
 
-    def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
+    def apply_launchpad_trade(
+        self,
+        ev: dict,
+        blk: int,
+        ts: int,
+        txh: str,
+        log_idx: int,
+        _log_addr: str,
+        cur: psycopg2.extensions.cursor | None = None,
+        batch=None,
+    ) -> None:
         with self._lock:
             if txh:
                 try:
@@ -823,19 +835,19 @@ class State:
                 user = ev.get("user", "").lower()
                 if not token or not user:
                     return
-                
+
                 is_buy = bool(ev.get("is_buy", False))
                 amount_in = int(ev.get("amount_in", 0) or 0)
                 amount_out = int(ev.get("amount_out", 0) or 0)
                 if amount_in <= 0 and amount_out <= 0:
                     return
-                
+
                 native_amt = amount_in if is_buy else amount_out
                 token_amt = amount_out if is_buy else amount_in
-                
+
                 if native_amt <= 0 or token_amt <= 0:
                     return
-                
+
                 price_native = Decimal(0)
                 try:
                     reserve_native = Decimal(int(ev.get("native_reserve") or 0))
@@ -923,9 +935,9 @@ class State:
                     return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
-            
+
             lp.last_price_native = price_native
-                
+
             if not is_pool_swap:
                 if is_buy and blk <= lp.created_block + 10:
                     creator_addr = (lp.creator or "").lower()
@@ -947,7 +959,7 @@ class State:
                 if curve is not None:
                     lp.curve_native_reserve = int(curve.native_reserve)
                     lp.curve_token_reserve = int(curve.token_reserve)
-                    lp.circulating_supply = curve.tokens_sold // 10 ** 18
+                    lp.circulating_supply = curve.tokens_sold // 10**18
                     if (not lp.approaching_75) and curve.is_graduating:
                         lp.approaching_75 = True
                         lp.approaching_75_block = blk
@@ -972,7 +984,7 @@ class State:
                         lp.approaching_75 = False
                         lp.approaching_75_block = 0
                         lp.approaching_75_at = 0
-            
+
             lp.native_volume += native_amt
             lp.token_volume += token_amt
             lp.tx_count += 1
@@ -1008,11 +1020,10 @@ class State:
                 sell_count_delta = 1
 
             trade_count_delta = 1
-            
+
             usd_amount = volume_usd_trade
 
             if batch is not None:
-                                               
                 batch.add_trade(
                     block_number=blk,
                     log_index=log_idx,
@@ -1028,23 +1039,26 @@ class State:
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
                 )
-                batch.set_token_state(token, {
-                    "last_price_native": lp.last_price_native,
-                    "native_volume": int(lp.native_volume),
-                    "token_volume": int(lp.token_volume),
-                    "volume_usd": lp.volume_usd,
-                    "fees_usd": lp.fees_usd,
-                    "buy_count": lp.buy_count,
-                    "sell_count": lp.sell_count,
-                    "tx_count": lp.tx_count,
-                    "circulating_supply": lp.circulating_supply,
-                    "approaching_75": lp.approaching_75,
-                    "approaching_75_block": lp.approaching_75_block,
-                    "approaching_75_at": lp.approaching_75_at,
-                    "snipers_count": lp.snipers,
-                    "curve_native_reserve": int(lp.curve_native_reserve),
-                    "curve_token_reserve": int(lp.curve_token_reserve),
-                })
+                batch.set_token_state(
+                    token,
+                    {
+                        "last_price_native": lp.last_price_native,
+                        "native_volume": int(lp.native_volume),
+                        "token_volume": int(lp.token_volume),
+                        "volume_usd": lp.volume_usd,
+                        "fees_usd": lp.fees_usd,
+                        "buy_count": lp.buy_count,
+                        "sell_count": lp.sell_count,
+                        "tx_count": lp.tx_count,
+                        "circulating_supply": lp.circulating_supply,
+                        "approaching_75": lp.approaching_75,
+                        "approaching_75_block": lp.approaching_75_block,
+                        "approaching_75_at": lp.approaching_75_at,
+                        "snipers_count": lp.snipers,
+                        "curve_native_reserve": int(lp.curve_native_reserve),
+                        "curve_token_reserve": int(lp.curve_token_reserve),
+                    },
+                )
                 batch.add_user_delta(user, int(native_amt), realized_delta)
                 batch.add_position_delta(
                     user_address=user,
@@ -1064,7 +1078,6 @@ class State:
                     bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
                     batch.add_ohlcv(token, bucket_seconds, bucket_start, lp.last_price_native, int(native_amt))
             else:
-                                                         
                 storage.insert_trade(
                     block_number=blk,
                     log_index=log_idx,
@@ -1133,13 +1146,15 @@ class State:
                         native_amount=int(native_amt),
                         cur=cur,
                     )
-                
-    def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> str | None:
+
+    def apply_migrated(
+        self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
+    ) -> str | None:
         with self._lock:
             src = (log_addr or "").lower()
             if not (h.is_nadfun_address(src) or src == h.CONTRACTS.get("ROUTER", "").lower()):
                 return None
-            
+
             token = (ev.get("token") or "").lower()
             if not token:
                 return None
@@ -1153,7 +1168,7 @@ class State:
             lp.migrated_at = ts
 
             pool = (ev.get("pool") or "").lower()
-            
+
             if pool and pool not in self.v3_pools:
                 quote_token = (lp.quote_token or WMON).lower()
 
@@ -1169,7 +1184,7 @@ class State:
                         token_is_0=token_is_0,
                     )
                     self.token_to_v3_pool[token] = pool
-                    
+
                     storage.upsert_pool(
                         pool=pool,
                         token_addr=token,
@@ -1177,7 +1192,7 @@ class State:
                         token_is_0=token_is_0,
                         cur=cur,
                     )
-                    
+
             storage.mark_token_migrated(
                 token=token,
                 migrated_block=blk,
@@ -1185,17 +1200,19 @@ class State:
                 pool=pool or None,
                 cur=cur,
             )
-            
+
             if pool:
                 storage.clear_position(user_address=pool, token=token, cur=cur)
 
             creator = lp.creator.lower() if lp.creator else ""
-            if creator:               
+            if creator:
                 storage.increment_user_tokens_graduated(creator, cur=cur)
 
         return pool or None
-                       
-    def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
+
+    def apply_token_transfer(
+        self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
+    ) -> None:
         with self._lock:
             token = (ev.get("token") or "").lower()
             if not token:
@@ -1356,7 +1373,10 @@ class State:
         maddr = (getattr(mi, "market", "") or "").lower()
         if not maddr:
             return
-        for tok in (((getattr(mi, "baseAddress", "") or "").lower()), ((getattr(mi, "quoteAddress", "") or "").lower())):
+        for tok in (
+            ((getattr(mi, "baseAddress", "") or "").lower()),
+            ((getattr(mi, "quoteAddress", "") or "").lower()),
+        ):
             if not tok:
                 continue
             items = self.tokenGraph.setdefault(tok, [])
@@ -1380,7 +1400,9 @@ class State:
                 continue
             if not bool(getattr(other, "isCanonical", False)):
                 continue
-            if not self._same_pair_unordered(qa, ba, getattr(other, "quoteAddress", ""), getattr(other, "baseAddress", "")):
+            if not self._same_pair_unordered(
+                qa, ba, getattr(other, "quoteAddress", ""), getattr(other, "baseAddress", "")
+            ):
                 continue
             other.isCanonical = False
             self._remove_market_from_token_graph_locked(om)
@@ -1450,10 +1472,14 @@ class State:
                     if not self._same_pair_unordered(v.quote, v.base, mi.quoteAddress, mi.baseAddress):
                         continue
                     v.market = mi.market
-                    if (v.quote or "").lower() == (mi.quoteAddress or "").lower() and (v.base or "").lower() == (mi.baseAddress or "").lower():
+                    if (v.quote or "").lower() == (mi.quoteAddress or "").lower() and (v.base or "").lower() == (
+                        mi.baseAddress or ""
+                    ).lower():
                         v.quoteDecimals = int(mi.quoteDecimals or 0)
                         v.baseDecimals = int(mi.baseDecimals or 0)
-                    elif (v.quote or "").lower() == (mi.baseAddress or "").lower() and (v.base or "").lower() == (mi.quoteAddress or "").lower():
+                    elif (v.quote or "").lower() == (mi.baseAddress or "").lower() and (v.base or "").lower() == (
+                        mi.quoteAddress or ""
+                    ).lower():
                         v.quoteDecimals = int(mi.baseDecimals or 0)
                         v.baseDecimals = int(mi.quoteDecimals or 0)
 
@@ -1536,9 +1562,7 @@ class State:
         if price and price > 0:
             lp.last_price_native = price
             try:
-                storage.update_launchpad_token_price(
-                    token=lp_addr, last_price_native=price, cur=cur
-                )
+                storage.update_launchpad_token_price(token=lp_addr, last_price_native=price, cur=cur)
             except Exception:
                 pass
 
@@ -1684,7 +1708,9 @@ class State:
             except Exception:
                 pass
 
-    def apply_market_trade(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0) -> None:
+    def apply_market_trade(
+        self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0
+    ) -> None:
         if not ev:
             return
         with self._lock:
@@ -2227,7 +2253,9 @@ class State:
                 cur=cur,
             )
 
-    def apply_vault_deposit(self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0) -> None:
+    def apply_vault_deposit(
+        self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
+    ) -> None:
         if not ev:
             return
         with self._lock:
@@ -2312,7 +2340,9 @@ class State:
                 except Exception:
                     pass
 
-    def apply_vault_withdraw(self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0) -> None:
+    def apply_vault_withdraw(
+        self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
+    ) -> None:
         if not ev:
             return
         with self._lock:
@@ -2410,7 +2440,9 @@ class State:
             vobj = self.vaults.get(vaddr)
             if vobj is not None:
                 vobj.locked = False
-                storage.update_crystal_vault_fields(vault=vaddr, locked=False, updated_block=blk, updated_at=ts, cur=cur)
+                storage.update_crystal_vault_fields(
+                    vault=vaddr, locked=False, updated_block=blk, updated_at=ts, cur=cur
+                )
 
     def apply_vault_closed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
@@ -2452,7 +2484,9 @@ class State:
                     cur=cur,
                 )
 
-    def apply_vault_decrease_on_withdraw_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
+    def apply_vault_decrease_on_withdraw_changed(
+        self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None
+    ) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
                 return
@@ -2473,7 +2507,9 @@ class State:
         while dq and int(dq[0].get("timestamp", 0)) < cutoff:
             dq.popleft()
 
-    def record_vault_balance_sample(self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int) -> None:
+    def record_vault_balance_sample(
+        self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int
+    ) -> None:
         vaddr = (vault or "").lower()
         with self._lock:
             v = self.vaults.get(vaddr)

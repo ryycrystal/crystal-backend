@@ -1,10 +1,11 @@
 from __future__ import annotations
+
+import json
 import os
 import time
-import json
-import httpx
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -12,10 +13,11 @@ router = APIRouter()
 
 API_KEY = os.getenv("X_BEARER_TOKEN", "new1_455ca2672bbe4493808f4704350723cc")
 
-CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE: dict[str, dict[str, Any]] = {}
 CACHE_TTL_MS = 1000 * 60 * 15
 
-def _cache_get(key: str) -> Optional[Any]:
+
+def _cache_get(key: str) -> Any | None:
     item = CACHE.get(key)
     if not item:
         return None
@@ -41,7 +43,7 @@ def _respond(payload: Any, status: int = 200) -> JSONResponse:
     )
 
 
-def _normalize_verified_type(a: dict | None) -> Optional[str]:
+def _normalize_verified_type(a: dict | None) -> str | None:
     if not a:
         return None
     vt = str(a.get("verifiedType") or a.get("verified_type") or "").lower()
@@ -67,7 +69,7 @@ def _compute_verified_flag(a: dict | None) -> bool:
     )
 
 
-def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
+def _parse_input(input_s: str) -> dict[str, str] | None:
     s = (input_s or "").strip()
     if not s:
         return None
@@ -78,8 +80,9 @@ def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
             return {"kind": "user", "username": h}
 
     try:
-        from urllib.parse import urlparse
         import re
+        from urllib.parse import urlparse
+
         u = urlparse(s)
         host = (u.hostname or "").lower()
         if not (host.endswith("x.com") or host.endswith("twitter.com")):
@@ -102,7 +105,7 @@ def _parse_input(input_s: str) -> Optional[Dict[str, str]]:
         return None
 
 
-async def _fetch_with_retry(url: str, headers: Dict[str, str], retries: int = 1) -> Tuple[int, str]:
+async def _fetch_with_retry(url: str, headers: dict[str, str], retries: int = 1) -> tuple[int, str]:
     if not httpx:
         raise RuntimeError("httpx not installed; add `httpx` to requirements.txt")
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -115,6 +118,7 @@ async def _fetch_with_retry(url: str, headers: Dict[str, str], retries: int = 1)
 
 async def asyncio_sleep(sec: float) -> None:
     import asyncio
+
     await asyncio.sleep(sec)
 
 
@@ -195,15 +199,17 @@ async def x_get(req: Request):
             for m in media_items:
                 mtype = m.get("type")
                 if mtype == "photo":
-                    media.append({
-                        "type": "photo",
-                        "url": m.get("media_url_https") or m.get("media_url"),
-                    })
+                    media.append(
+                        {
+                            "type": "photo",
+                            "url": m.get("media_url_https") or m.get("media_url"),
+                        }
+                    )
                 elif mtype in ("video", "animated_gif"):
-                    variants = ((m.get("video_info") or {}).get("variants") or [])
+                    variants = (m.get("video_info") or {}).get("variants") or []
                     mp4s = [v for v in variants if (v.get("content_type") == "video/mp4")]
                     mp4s.sort(key=lambda v: v.get("bitrate", 0), reverse=True)
-                    url_pick = (mp4s[0]["url"] if mp4s else (m.get("url")))
+                    url_pick = mp4s[0]["url"] if mp4s else (m.get("url"))
                     media.append({"type": mtype, "url": url_pick})
 
             author = t.get("author")
@@ -253,7 +259,7 @@ async def x_get(req: Request):
             if not comm:
                 return _respond({"error": "Community not found"}, 404)
 
-            def parse_user(obj: Optional[dict]) -> Optional[dict]:
+            def parse_user(obj: dict | None) -> dict | None:
                 if not obj:
                     return None
                 u = obj.get("user") or obj

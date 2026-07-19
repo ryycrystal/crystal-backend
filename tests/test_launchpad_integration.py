@@ -26,9 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 RAW_URL = os.environ.get("TEST_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(
-    not RAW_URL, reason="set TEST_DATABASE_URL to run database integration tests"
-)
+pytestmark = pytest.mark.skipif(not RAW_URL, reason="set TEST_DATABASE_URL to run database integration tests")
 
 SCRATCH_DB = "crystal_lp_itest"
 
@@ -40,10 +38,10 @@ USER = "0x1234567890abcdef1234567890abcdef12345678"
 MARKET = "0x975c4885538ba5072c66f48d4c4c7253e388c3e0"
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
-INITIAL_TOKEN_SUPPLY = 10 ** 27
-GRADUATED_TOKEN_SUPPLY = 2 * 10 ** 26
+INITIAL_TOKEN_SUPPLY = 10**27
+GRADUATED_TOKEN_SUPPLY = 2 * 10**26
 CURVE_SUPPLY = INITIAL_TOKEN_SUPPLY - GRADUATED_TOKEN_SUPPLY
-V0 = 1000 * 10 ** 18
+V0 = 1000 * 10**18
 K = V0 * INITIAL_TOKEN_SUPPLY
 
 LAUNCHPAD_TABLES = (
@@ -100,9 +98,7 @@ def db():
     conn = psycopg2.connect(admin_url)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{SCRATCH_DB}';"
-        )
+        cur.execute(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{SCRATCH_DB}';")
         cur.execute(f"DROP DATABASE IF EXISTS {SCRATCH_DB};")
     conn.close()
 
@@ -120,6 +116,7 @@ def clean(db):
 
 
 # -- synthetic logs -----------------------------------------------------------
+
 
 def _ta(addr: str) -> str:
     return "0x" + addr.lower().removeprefix("0x").rjust(64, "0")
@@ -146,13 +143,7 @@ def _tc_data(strings) -> str:
 
 
 def _lt_data(is_buy, amount_in, amount_out, native_reserve, token_reserve) -> str:
-    return (
-        _w(1 if is_buy else 0)
-        + _w(amount_in)
-        + _w(amount_out)
-        + _w(native_reserve)
-        + _w(token_reserve)
-    )
+    return _w(1 if is_buy else 0) + _w(amount_in) + _w(amount_out) + _w(native_reserve) + _w(token_reserve)
 
 
 def _reserve_for(native_reserve: int) -> int:
@@ -184,8 +175,18 @@ def _create(st, token=TOKEN, blk=100, ts=1000, name="Tok", symbol="TOK"):
     return ev
 
 
-def _trade(st, token=TOKEN, native_reserve=1500 * 10 ** 18, blk=101, ts=1001,
-           txh="0xaa", log_idx=0, is_buy=True, amount_in=10 ** 18, amount_out=10 ** 20):
+def _trade(
+    st,
+    token=TOKEN,
+    native_reserve=1500 * 10**18,
+    blk=101,
+    ts=1001,
+    txh="0xaa",
+    log_idx=0,
+    is_buy=True,
+    amount_in=10**18,
+    amount_out=10**20,
+):
     from modules import launchpad as lp_mod
 
     ev = lp_mod.parse_launchpad_trade(
@@ -199,14 +200,26 @@ def _trade(st, token=TOKEN, native_reserve=1500 * 10 ** 18, blk=101, ts=1001,
 
 def _market_created_ev(token=TOKEN, market=MARKET, market_id=1):
     return {
-        "isCanonical": True, "marketType": 3, "market": market,
-        "quoteAsset": WMON, "baseAsset": token,
-        "quoteAddress": WMON, "baseAddress": token,
-        "quoteDecimals": 18, "baseDecimals": 18,
-        "quoteTicker": "WMON", "baseTicker": "TOK",
-        "quoteName": "Wrapped Monad", "baseName": "Tok",
-        "marketId": market_id, "scaleFactor": 9, "tickSize": 1,
-        "maxPrice": 10 ** 15, "minSize": 1, "takerFee": 99910, "makerRebate": 99995,
+        "isCanonical": True,
+        "marketType": 3,
+        "market": market,
+        "quoteAsset": WMON,
+        "baseAsset": token,
+        "quoteAddress": WMON,
+        "baseAddress": token,
+        "quoteDecimals": 18,
+        "baseDecimals": 18,
+        "quoteTicker": "WMON",
+        "baseTicker": "TOK",
+        "quoteName": "Wrapped Monad",
+        "baseName": "Tok",
+        "marketId": market_id,
+        "scaleFactor": 9,
+        "tickSize": 1,
+        "maxPrice": 10**15,
+        "minSize": 1,
+        "takerFee": 99910,
+        "makerRebate": 99995,
     }
 
 
@@ -245,17 +258,18 @@ def _token_row(db, token=TOKEN):
 
 # -- duplicate delivery -------------------------------------------------------
 
+
 def test_duplicate_log_delivery_is_idempotent(db):
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=2500 * 10 ** 18, txh="0xdup", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, txh="0xdup", log_idx=0)
     before = _token_row(db)
     trades_before = _q(db, "SELECT count(*) FROM launchpad_trades")[0][0]
 
     # exact same log delivered again
     st2 = _new_state()
     st2.rebuild_from_db()
-    _trade(st2, native_reserve=2500 * 10 ** 18, txh="0xdup", log_idx=0)
+    _trade(st2, native_reserve=2500 * 10**18, txh="0xdup", log_idx=0)
 
     assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == trades_before
     assert _token_row(db) == before
@@ -265,19 +279,20 @@ def test_duplicate_tx_with_multiple_logs(db):
     st = _new_state()
     _create(st)
     # two distinct logs in one transaction
-    _trade(st, native_reserve=1500 * 10 ** 18, txh="0xmulti", log_idx=0)
-    _trade(st, native_reserve=2000 * 10 ** 18, txh="0xmulti", log_idx=1)
+    _trade(st, native_reserve=1500 * 10**18, txh="0xmulti", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, txh="0xmulti", log_idx=1)
     assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xmulti'")[0][0] == 2
 
     # replaying the whole transaction adds nothing
     st2 = _new_state()
     st2.rebuild_from_db()
-    _trade(st2, native_reserve=1500 * 10 ** 18, txh="0xmulti", log_idx=0)
-    _trade(st2, native_reserve=2000 * 10 ** 18, txh="0xmulti", log_idx=1)
+    _trade(st2, native_reserve=1500 * 10**18, txh="0xmulti", log_idx=0)
+    _trade(st2, native_reserve=2000 * 10**18, txh="0xmulti", log_idx=1)
     assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xmulti'")[0][0] == 2
 
 
 # -- ordering -----------------------------------------------------------------
+
 
 def test_trade_before_creation_is_recovered_and_backfilled(db):
     """Out-of-order delivery: the trade arrives before TokenCreated."""
@@ -287,7 +302,7 @@ def test_trade_before_creation_is_recovered_and_backfilled(db):
     orig = state._fetch_token_string
     state._fetch_token_string = lambda tok, sel: ""
     try:
-        _trade(st, native_reserve=2500 * 10 ** 18, txh="0xooo", log_idx=0)
+        _trade(st, native_reserve=2500 * 10**18, txh="0xooo", log_idx=0)
         assert _q(db, "SELECT count(*) FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0] == 1
         assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 1
 
@@ -300,6 +315,7 @@ def test_trade_before_creation_is_recovered_and_backfilled(db):
 
 # -- lifecycle ----------------------------------------------------------------
 
+
 def test_created_to_active_on_first_trade(db):
     from core.adapters import native as native_mod
     from core.lifecycle import TokenPhase, resolve_phase
@@ -310,7 +326,7 @@ def test_created_to_active_on_first_trade(db):
     assert row[5] == 0  # tx_count
     assert resolve_phase(curve=None, has_trades=False) is TokenPhase.CREATED
 
-    ev = _trade(st, native_reserve=1500 * 10 ** 18, txh="0xact", log_idx=0)
+    ev = _trade(st, native_reserve=1500 * 10**18, txh="0xact", log_idx=0)
     row = _token_row(db)
     assert row[5] == 1
 
@@ -321,15 +337,15 @@ def test_created_to_active_on_first_trade(db):
 def test_repeated_graduation_events_are_stable(db):
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=2500 * 10 ** 18, txh="0xg", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, txh="0xg", log_idx=0)
 
     for _ in range(3):
         st.apply_migrated(102, 1002, {"token": TOKEN}, _router())
         st.apply_market_created(102, 1002, _market_created_ev(), _router())
 
     row = _token_row(db)
-    assert row[6] is True          # migrated
-    assert row[7] == MARKET        # market linked exactly once, same value
+    assert row[6] is True  # migrated
+    assert row[7] == MARKET  # market linked exactly once, same value
     assert st.launchpad_market_to_token[MARKET] == TOKEN
 
 
@@ -337,11 +353,11 @@ def test_graduation_partially_processed_then_replayed(db):
     """Migrated lands, MarketCreated is lost, then the whole tx is replayed."""
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=2500 * 10 ** 18, txh="0xpart", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, txh="0xpart", log_idx=0)
 
     st.apply_migrated(102, 1002, {"token": TOKEN}, _router())
     assert _token_row(db)[6] is True
-    assert _token_row(db)[7] in (None, "")   # market not linked yet
+    assert _token_row(db)[7] in (None, "")  # market not linked yet
 
     st2 = _new_state()
     st2.rebuild_from_db()
@@ -355,10 +371,11 @@ def test_graduation_partially_processed_then_replayed(db):
 
 # -- restart / replay ---------------------------------------------------------
 
+
 def test_restart_from_checkpoint_reproduces_state(db):
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=2500 * 10 ** 18, txh="0xr", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, txh="0xr", log_idx=0)
     persisted = _token_row(db)
 
     st2 = _new_state()
@@ -376,7 +393,7 @@ def test_restart_from_checkpoint_reproduces_state(db):
 def test_replaying_same_range_produces_no_changes(db):
     st = _new_state()
     _create(st)
-    for i, nr in enumerate((1500 * 10 ** 18, 2000 * 10 ** 18, 2500 * 10 ** 18)):
+    for i, nr in enumerate((1500 * 10**18, 2000 * 10**18, 2500 * 10**18)):
         _trade(st, native_reserve=nr, blk=101 + i, ts=1001 + i, txh=f"0xrep{i}", log_idx=0)
     snapshot = _token_row(db)
     trades = _q(db, "SELECT txhash, log_index, native_amount FROM launchpad_trades ORDER BY txhash, log_index")
@@ -384,7 +401,7 @@ def test_replaying_same_range_produces_no_changes(db):
     st2 = _new_state()
     st2.rebuild_from_db()
     _create(st2)
-    for i, nr in enumerate((1500 * 10 ** 18, 2000 * 10 ** 18, 2500 * 10 ** 18)):
+    for i, nr in enumerate((1500 * 10**18, 2000 * 10**18, 2500 * 10**18)):
         _trade(st2, native_reserve=nr, blk=101 + i, ts=1001 + i, txh=f"0xrep{i}", log_idx=0)
 
     assert _token_row(db) == snapshot
@@ -393,22 +410,24 @@ def test_replaying_same_range_produces_no_changes(db):
 
 # -- isolation ----------------------------------------------------------------
 
+
 def test_multiple_tokens_do_not_cross_contaminate(db):
     st = _new_state()
     _create(st, token=TOKEN, name="A", symbol="A")
     _create(st, token=TOKEN_B, name="B", symbol="B")
 
-    _trade(st, token=TOKEN, native_reserve=2500 * 10 ** 18, txh="0xa", log_idx=0)
-    _trade(st, token=TOKEN_B, native_reserve=1500 * 10 ** 18, txh="0xb", log_idx=0)
+    _trade(st, token=TOKEN, native_reserve=2500 * 10**18, txh="0xa", log_idx=0)
+    _trade(st, token=TOKEN_B, native_reserve=1500 * 10**18, txh="0xb", log_idx=0)
 
     a = _token_row(db, TOKEN)
     b = _token_row(db, TOKEN_B)
-    assert a[0] == 600_000_000 and a[1] is True      # A graduating
-    assert b[0] < 600_000_000 and b[1] is False      # B still active
-    assert a[2] != b[2]                              # separate reserves
+    assert a[0] == 600_000_000 and a[1] is True  # A graduating
+    assert b[0] < 600_000_000 and b[1] is False  # B still active
+    assert a[2] != b[2]  # separate reserves
 
 
 # -- failure handling ---------------------------------------------------------
+
 
 def test_transaction_rollback_leaves_no_partial_rows(db):
     """A failure inside an explicit transaction must not persist partial work."""
@@ -443,29 +462,30 @@ def test_crash_midway_through_block_then_reprocess(db):
     """First log of a block commits, second is lost, block is reprocessed."""
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=1500 * 10 ** 18, blk=105, ts=1005, txh="0xcrash", log_idx=0)
+    _trade(st, native_reserve=1500 * 10**18, blk=105, ts=1005, txh="0xcrash", log_idx=0)
     # log_index 1 never applied -- simulate the crash
 
     st2 = _new_state()
     st2.rebuild_from_db()
-    _trade(st2, native_reserve=1500 * 10 ** 18, blk=105, ts=1005, txh="0xcrash", log_idx=0)
-    _trade(st2, native_reserve=2500 * 10 ** 18, blk=105, ts=1005, txh="0xcrash", log_idx=1)
+    _trade(st2, native_reserve=1500 * 10**18, blk=105, ts=1005, txh="0xcrash", log_idx=0)
+    _trade(st2, native_reserve=2500 * 10**18, blk=105, ts=1005, txh="0xcrash", log_idx=1)
 
     assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xcrash'")[0][0] == 2
     row = _token_row(db)
-    assert int(row[2]) == 2500 * 10 ** 18   # reserve reflects the last log
+    assert int(row[2]) == 2500 * 10**18  # reserve reflects the last log
 
 
 # -- known gap ----------------------------------------------------------------
+
 
 def test_short_reorg_replaces_previously_indexed_blocks(db):
     import core.storage as storage
 
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    _trade(st, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
     storage.record_block_hash(109, "0xaaa")
-    _trade(st, native_reserve=1500 * 10 ** 18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
+    _trade(st, native_reserve=1500 * 10**18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
     storage.record_block_hash(110, "0xbbb")
 
     assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
@@ -483,15 +503,15 @@ def test_short_reorg_replaces_previously_indexed_blocks(db):
     assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xkeep'")[0][0] == 1
 
     row = _token_row(db)
-    assert int(row[4]) == 10 ** 18                      # native_volume back to one trade
-    assert int(row[5]) == 1                             # tx_count
-    assert int(row[2]) == 1400 * 10 ** 18               # curve reserve from surviving trade
-    assert row[1] is False                              # no longer graduating
+    assert int(row[4]) == 10**18  # native_volume back to one trade
+    assert int(row[5]) == 1  # tx_count
+    assert int(row[2]) == 1400 * 10**18  # curve reserve from surviving trade
+    assert row[1] is False  # no longer graduating
 
     # replaying the canonical block lands cleanly on the rebuilt state
-    _trade(st2, native_reserve=1800 * 10 ** 18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
+    _trade(st2, native_reserve=1800 * 10**18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
     assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
-    assert int(_token_row(db)[2]) == 1800 * 10 ** 18
+    assert int(_token_row(db)[2]) == 1800 * 10**18
 
 
 def test_sniper_count_does_not_exceed_distinct_snipers(db):
@@ -514,11 +534,11 @@ def test_sniper_count_does_not_exceed_distinct_snipers(db):
     try:
         with conn.cursor() as cur:
             # same address, two buys inside the 10-block window, batched
-            for i, nr in enumerate((1100 * 10 ** 18, 1200 * 10 ** 18)):
+            for i, nr in enumerate((1100 * 10**18, 1200 * 10**18)):
                 ev = lp_mod.parse_launchpad_trade(
                     _router(),
                     ["0x", _ta(TOKEN), _ta(USER)],
-                    _lt_data(True, 10 ** 18, 10 ** 20, nr, _reserve_for(nr)),
+                    _lt_data(True, 10**18, 10**20, nr, _reserve_for(nr)),
                 )
                 st.apply_launchpad_trade(ev, 101 + i, 1001 + i, f"0xsnipe{i}", 0, _router(), cur=cur, batch=batch)
             batch.flush(cur)
@@ -537,7 +557,7 @@ def test_sniper_window_excludes_late_buys_and_the_creator(db):
     _create(st, blk=100, ts=1000)
 
     # outside the 10-block window
-    _trade(st, native_reserve=1100 * 10 ** 18, blk=200, ts=1100, txh="0xlate", log_idx=0)
+    _trade(st, native_reserve=1100 * 10**18, blk=200, ts=1100, txh="0xlate", log_idx=0)
     assert _q(db, "SELECT count(*) FROM launchpad_snipers WHERE token=%s", (TOKEN,))[0][0] == 0
     assert int(_q(db, "SELECT snipers_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]) == 0
 
@@ -549,11 +569,11 @@ def test_deep_reorg_scan_finds_divergence_the_per_block_guard_misses(db):
 
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=1300 * 10 ** 18, blk=120, ts=1020, txh="0xb120", log_idx=0)
+    _trade(st, native_reserve=1300 * 10**18, blk=120, ts=1020, txh="0xb120", log_idx=0)
     storage.record_block_hash(120, "0x120good")
-    _trade(st, native_reserve=1400 * 10 ** 18, blk=121, ts=1021, txh="0xb121", log_idx=0)
+    _trade(st, native_reserve=1400 * 10**18, blk=121, ts=1021, txh="0xb121", log_idx=0)
     storage.record_block_hash(121, "0x121bad")
-    _trade(st, native_reserve=1500 * 10 ** 18, blk=122, ts=1022, txh="0xb122", log_idx=0)
+    _trade(st, native_reserve=1500 * 10**18, blk=122, ts=1022, txh="0xb122", log_idx=0)
     storage.record_block_hash(122, "0x122bad")
 
     rows = storage.get_recent_block_hashes(32)
@@ -564,14 +584,14 @@ def test_deep_reorg_scan_finds_divergence_the_per_block_guard_misses(db):
     rollback_from = None
     for number, stored in rows:
         if onchain[number] == stored:
-            break                      # canonical from here down -- scan stops
+            break  # canonical from here down -- scan stops
         rollback_from = number
     assert rollback_from == 121, "must roll back to the deepest divergent block"
 
     st.handle_reorg(rollback_from)
     remaining = {r[0] for r in _q(db, "SELECT txhash FROM launchpad_trades")}
     assert remaining == {"0xb120"}
-    assert int(_token_row(db)[2]) == 1300 * 10 ** 18
+    assert int(_token_row(db)[2]) == 1300 * 10**18
 
 
 def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
@@ -581,15 +601,16 @@ def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
 
     st = _new_state()
     _create(st)
-    _trade(st, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    _trade(st, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
     storage.record_block_hash(109, "0xaaa")
-    _trade(st, native_reserve=2500 * 10 ** 18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
     storage.record_block_hash(110, "0xbbb")
     st.handle_reorg(110)
     after_reorg = _token_row(db)
 
     # now index only the canonical chain from scratch
     import psycopg2
+
     conn = psycopg2.connect(db)
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -598,7 +619,7 @@ def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
 
     st2 = _new_state()
     _create(st2)
-    _trade(st2, native_reserve=1400 * 10 ** 18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
+    _trade(st2, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
     clean = _token_row(db)
 
     assert after_reorg == clean
@@ -614,23 +635,23 @@ def test_ath_is_persisted_and_never_regresses(db):
     def ath():
         return _q(db, "SELECT ath_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
 
-    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=1001, txh="0xa", log_idx=0)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xa", log_idx=0)
     first = ath()
     assert first > 0, "a trade must establish an ATH"
 
     # price up -> ATH follows
-    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=102, ts=1002, txh="0xb", log_idx=0)
     peak = ath()
     assert peak > first
 
     # price back down -> ATH holds at the peak
-    _trade(st, native_reserve=1200 * 10 ** 18, blk=103, ts=1003, txh="0xc", log_idx=0)
+    _trade(st, native_reserve=1200 * 10**18, blk=103, ts=1003, txh="0xc", log_idx=0)
     current = _q(db, "SELECT last_price_native FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
     assert ath() == peak, "ATH must not follow price down"
     assert current < peak
 
     # replaying the peak trade must not disturb it
-    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=102, ts=1002, txh="0xb", log_idx=0)
     assert ath() == peak
 
 
@@ -640,8 +661,8 @@ def test_ath_backfills_from_existing_trades_on_migration(db):
 
     st = _new_state()
     _create(st, blk=100, ts=1000)
-    _trade(st, native_reserve=2000 * 10 ** 18, blk=101, ts=1001, txh="0xa", log_idx=0)
-    _trade(st, native_reserve=1200 * 10 ** 18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=101, ts=1001, txh="0xa", log_idx=0)
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=1002, txh="0xb", log_idx=0)
 
     peak = _q(db, "SELECT MAX(price_native) FROM launchpad_trades WHERE token=%s", (TOKEN,))[0][0]
 
@@ -670,8 +691,7 @@ def test_trades_range_endpoint_spans_history_and_filters(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
     for i in range(12):
-        _trade(st, native_reserve=(1100 + i * 50) * 10 ** 18, blk=101 + i, ts=1000 + i * 60,
-               txh=f"0xr{i}", log_idx=0)
+        _trade(st, native_reserve=(1100 + i * 50) * 10**18, blk=101 + i, ts=1000 + i * 60, txh=f"0xr{i}", log_idx=0)
 
     c = _api_client()
 
@@ -691,8 +711,10 @@ def test_trades_range_endpoint_spans_history_and_filters(db):
     assert small["truncated"] is True
 
     # server-side caller filter
-    none = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999,
-                                                  "callers": "0x000000000000000000000000000000000000dead"}).json()
+    none = c.get(
+        f"/token/{TOKEN}/trades",
+        params={"from": 0, "to": 9_999_999_999, "callers": "0x000000000000000000000000000000000000dead"},
+    ).json()
     assert none["count"] == 0
     mine = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999, "callers": USER}).json()
     assert mine["count"] == 12
@@ -703,7 +725,7 @@ def test_trades_route_is_not_shadowed_by_the_chartres_route(db):
     claim "trades" and 422 if it were registered first."""
     st = _new_state()
     _create(st, blk=100, ts=1000)
-    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=1001, txh="0xz", log_idx=0)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xz", log_idx=0)
 
     c = _api_client()
     r = c.get(f"/token/{TOKEN}/trades", params={"from": 0, "to": 9_999_999_999})
@@ -718,8 +740,8 @@ def test_stats_exposes_the_reference_price_behind_each_change_pct(db):
     reference rather than inferring it back out of the percentage."""
     st = _new_state()
     _create(st, blk=100, ts=1000)
-    _trade(st, native_reserve=1100 * 10 ** 18, blk=101, ts=int(time.time()) - 300, txh="0xs1", log_idx=0)
-    _trade(st, native_reserve=2000 * 10 ** 18, blk=102, ts=int(time.time()) - 10, txh="0xs2", log_idx=0)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=int(time.time()) - 300, txh="0xs1", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=102, ts=int(time.time()) - 10, txh="0xs2", log_idx=0)
 
     c = _api_client()
     body = c.get(f"/stats/{TOKEN}").json()

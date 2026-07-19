@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
 
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
-                 
+
 @dataclass(slots=True)
 class LaunchpadToken:
     token: str
@@ -23,7 +24,7 @@ class LaunchpadToken:
     migrated_block: int = 0
     migrated_at: int = 0
     market: str = ""
-    source: int = 0                                               
+    source: int = 0
     quote_token: str = WMON
     last_price_native: Decimal = Decimal(0.000001)
     native_volume: int = 0
@@ -44,13 +45,14 @@ class LaunchpadToken:
     curve_native_reserve: int = 0
     curve_token_reserve: int = 0
 
-                                 
+
 @dataclass(slots=True)
 class PoolInfo:
     pool: str
     token_addr: str
     native_addr: str
     token_is_0: bool
+
 
 @dataclass(slots=True)
 class MarketInfo:
@@ -87,6 +89,7 @@ class MarketInfo:
     lastSyncBlock: int = 0
     lastSyncAt: int = 0
 
+
 @dataclass(slots=True)
 class Vault:
     vault: str
@@ -108,6 +111,7 @@ class Vault:
     lockup: int = 0
     decreaseOnWithdraw: bool = False
 
+
 @dataclass(slots=True)
 class VaultBalance:
     quoteBalance: int
@@ -115,6 +119,7 @@ class VaultBalance:
     timestamp: int
     usdValue: Decimal
     block: int = 0
+
 
 @dataclass(slots=True)
 class VaultDeposit:
@@ -125,6 +130,7 @@ class VaultDeposit:
     shares: int
     hash: str
 
+
 @dataclass(slots=True)
 class VaultWithdraw:
     user: str
@@ -133,6 +139,7 @@ class VaultWithdraw:
     baseAmount: int
     shares: int
     hash: str
+
 
 @dataclass(slots=True)
 class VaultUser:

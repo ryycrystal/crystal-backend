@@ -1,28 +1,29 @@
 from __future__ import annotations
-from decimal import Decimal, getcontext, ROUND_HALF_UP, InvalidOperation
-from typing import Dict, Any, List, Tuple
+
+import base64
+import json
+import logging
+import time
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, getcontext
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-import time
-import logging
-import traceback
-import base64
-import json
-import core.storage as storage
-from core.lifecycle import CurveState, TokenPhase, resolve_phase
-from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
 
-from core import chain as h
+import core.storage as storage
 from api.x_api import router as x_router
+from core import chain as h
+from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
+from core.lifecycle import CurveState, resolve_phase
 from core.storage import db_cursor
 
 getcontext().prec = 100
 # nad.fun sells 793,100,000 on its curve; ours sells 800,000,000
-_NADFUN_CURVE_SUPPLY = 793_100_000 * 10 ** 18
+_NADFUN_CURVE_SUPPLY = 793_100_000 * 10**18
 
 
-def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> Dict[str, Any]:
+def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict[str, Any]:
     """Derive lifecycle phase for API records.
 
     Computed from stored fields rather than persisted, so it can never drift from
@@ -33,7 +34,7 @@ def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> Dict
     src = int(source or 0)
     curve_supply = _NATIVE_CURVE_SUPPLY if src == 0 else _NADFUN_CURVE_SUPPLY
     curve = CurveState(
-        tokens_sold=int(circulating_supply or 0) * 10 ** 18,
+        tokens_sold=int(circulating_supply or 0) * 10**18,
         curve_supply=curve_supply,
     )
     done = bool(migrated)
@@ -50,9 +51,7 @@ log = logging.getLogger("api")
 
 if not log.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     handler.setFormatter(formatter)
     log.addHandler(handler)
 
@@ -62,6 +61,7 @@ log.propagate = False
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
+
 
 def _fmt(value) -> str:
     if value is None:
@@ -75,9 +75,9 @@ def _fmt(value) -> str:
         return "0"
     if d == d.to_integral_value():
         return str(int(d))
-    s = format(d, 'f')
-    if '.' in s:
-        s = s.rstrip('0').rstrip('.')
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
     return s if s else "0"
 
 
@@ -93,13 +93,13 @@ def _fmt_usd(value) -> str:
         return "0"
     if d == d.to_integral_value():
         return str(int(d))
-    s = format(d, 'f')
-    if '.' in s:
-        s = s.rstrip('0').rstrip('.')
+    s = format(d, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
     return s if s else "0"
 
 
-def _crystal_pool_row_to_api(row) -> Dict[str, Any]:
+def _crystal_pool_row_to_api(row) -> dict[str, Any]:
     (
         market,
         quote_address,
@@ -175,6 +175,7 @@ AGGREGATOR_ADDR = "0x0B79d71AE99528D1dB24A4148b5f4F865cc2b137".lower()
 _internal_addrs_cache: set[str] | None = None
 _internal_addrs_ts: float = 0
 
+
 def _internal_addrs() -> set[str]:
     global _internal_addrs_cache, _internal_addrs_ts
     now = time.time()
@@ -200,6 +201,7 @@ def _internal_addrs() -> set[str]:
 _nadfun_v2_cache: set[str] | None = None
 _nadfun_v2_ts: float = 0
 
+
 def _nadfun_v2_set() -> set[str]:
     global _nadfun_v2_cache, _nadfun_v2_ts
     now = time.time()
@@ -219,6 +221,7 @@ def _nadfun_version(token: str, source) -> int:
 
 from collections import OrderedDict
 from functools import wraps
+
 
 class TTLCache:
     def __init__(self, max_size: int = 1000):
@@ -267,16 +270,18 @@ def ttl_cache(prefix: str, ttl_seconds: int = 60):
             result = func(*args, **kwargs)
             _cache.set(cache_key, result, ttl_seconds)
             return result
+
         return wrapper
+
     return decorator
 
 
-def _encode_cursor(payload: Dict[str, Any]) -> str:
+def _encode_cursor(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str) -> Dict[str, Any]:
+def _decode_cursor(cursor: str) -> dict[str, Any]:
     if cursor is None:
         raise HTTPException(400, "invalid cursor")
     try:
@@ -331,7 +336,8 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
     excluded_list = [a.lower() for a in (excluded or set()) if a]
 
     with db_cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             WITH req AS (
                 SELECT token, LOWER(COALESCE(creator, '')) AS creator
                 FROM launchpad_tokens
@@ -384,14 +390,16 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
             LEFT JOIN holder_counts h ON h.token = r.token
             LEFT JOIN dev_holdings d ON d.token = r.token
             LEFT JOIN top10 t ON t.token = r.token
-        """, (
-            token_addrs,
-            token_addrs,
-            excluded_list if excluded_list else None,
-            excluded_list if excluded_list else None,
-            excluded_list if excluded_list else None,
-            excluded_list if excluded_list else None,
-        ))
+        """,
+            (
+                token_addrs,
+                token_addrs,
+                excluded_list if excluded_list else None,
+                excluded_list if excluded_list else None,
+                excluded_list if excluded_list else None,
+                excluded_list if excluded_list else None,
+            ),
+        )
         rows = cur.fetchall()
 
     result = {}
@@ -415,7 +423,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         return {}
 
     with db_cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT
                 token, creator, name, symbol, metadata_cid, description,
                 social1, social2, social3, social4, source,
@@ -430,7 +439,9 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             FROM launchpad_tokens t
             LEFT JOIN launchpad_users u ON u.address = t.creator
             WHERE token = ANY(%s)
-        """, (token_addrs,))
+        """,
+            (token_addrs,),
+        )
         rows = cur.fetchall()
 
     token_data = {}
@@ -505,7 +516,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
 
     return token_data
 
-def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, int, List[str]]:
+
+def _holders_for_token(token_addr: str, creator: str | None) -> tuple[int, int, int, list[str]]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
     excluded = _internal_addrs()
@@ -522,7 +534,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
         rows = cur.fetchall()
 
     dev_holding = 0
-    filtered: List[Tuple[int, str]] = []
+    filtered: list[tuple[int, str]] = []
 
     for ua, bal in rows:
         ua = ua.lower()
@@ -543,7 +555,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> Tuple[int, int, 
     return holder_count, dev_holding, top10_holding, top10_addresses
 
 
-def _serialize_token(token_addr: str) -> Dict[str, Any]:
+def _serialize_token(token_addr: str) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
     with db_cursor() as cur:
@@ -750,7 +762,7 @@ def _serialize_token(token_addr: str) -> Dict[str, Any]:
     }
 
 
-_PRICE_SCALE = Decimal(10 ** 9)
+_PRICE_SCALE = Decimal(10**9)
 _PRICE_QUANTUM = Decimal(1).scaleb(-9)
 
 
@@ -763,14 +775,14 @@ def _build_ohlcv_from_db(
     token_addr: str,
     bucket_seconds: int,
     max_buckets: int | None = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     if bucket_seconds <= 0:
         return []
 
     token_addr = token_addr.lower()
 
     limit_clause = ""
-    params: List[Any] = [token_addr, bucket_seconds]
+    params: list[Any] = [token_addr, bucket_seconds]
 
     if max_buckets is not None and max_buckets > 0:
         limit_clause = "ORDER BY bucket_start DESC LIMIT %s"
@@ -792,7 +804,7 @@ def _build_ohlcv_from_db(
 
     rows.reverse()
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
         out.append(
             {
@@ -819,8 +831,8 @@ app.add_middleware(
 app.include_router(x_router)
 
 
-
 _mon_price_cache: tuple[float, Decimal] | None = None
+
 
 def _mon_price_usd() -> Decimal:
     global _mon_price_cache
@@ -838,6 +850,7 @@ def _mon_price_usd() -> Decimal:
         return result
     except Exception:
         return Decimal("0.03")
+
 
 def _quote_price_usd(quote_token: str | None) -> Decimal:
     quote = (quote_token or WMON).lower()
@@ -898,10 +911,10 @@ def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
 
 
 from api.routes.launchpad import router as launchpad_router
-from api.routes.system import router as system_router
-from api.routes.vaults import router as vaults_router
 from api.routes.markets import router as markets_router
 from api.routes.pools import router as pools_router
+from api.routes.system import router as system_router
+from api.routes.vaults import router as vaults_router
 
 app.include_router(launchpad_router)
 app.include_router(system_router)

@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 from decimal import Decimal
 
 import psycopg2
 
-from .base import db_cursor, _clean_text
+from .base import _clean_text, db_cursor
+
 
 # add vault metadata and current config/state fields
 def upsert_crystal_vault(
@@ -92,6 +94,7 @@ def upsert_crystal_vault(
     else:
         cur.execute(sql, params)
 
+
 # update selected fields as necessary
 def update_crystal_vault_fields(
     *,
@@ -144,6 +147,7 @@ def update_crystal_vault_fields(
     else:
         cur.execute(sql, params)
 
+
 # insert vault deposit event
 def insert_crystal_vault_deposit(
     *,
@@ -182,6 +186,7 @@ def insert_crystal_vault_deposit(
     else:
         cur.execute(sql, params)
 
+
 # insert a vault withdrawal event
 def insert_crystal_vault_withdrawal(
     *,
@@ -219,6 +224,7 @@ def insert_crystal_vault_withdrawal(
             cur2.execute(sql, params)
     else:
         cur.execute(sql, params)
+
 
 # update per-user vault balances and counters from deposit/withdraw deltas
 def upsert_crystal_vault_user_delta(
@@ -266,6 +272,7 @@ def upsert_crystal_vault_user_delta(
     else:
         cur.execute(sql, params)
 
+
 # update vault balance snapshot for charts and tvl
 def upsert_crystal_vault_balance_sample(
     *,
@@ -302,6 +309,7 @@ def upsert_crystal_vault_balance_sample(
     else:
         cur.execute(sql, params)
 
+
 # load all vault rows for in-memory state rebuild on indexer startup
 def load_crystal_vaults_for_state():
     with db_cursor() as cur:
@@ -316,6 +324,7 @@ def load_crystal_vaults_for_state():
         )
         return cur.fetchall()
 
+
 # load all vault user aggregates for in-memory state rebuild
 def load_crystal_vault_users_for_state():
     with db_cursor() as cur:
@@ -326,6 +335,7 @@ def load_crystal_vault_users_for_state():
             """
         )
         return cur.fetchall()
+
 
 # fetch one vault's data by vault address
 def get_crystal_vault(vault: str):
@@ -343,6 +353,7 @@ def get_crystal_vault(vault: str):
         )
         return cur.fetchone()
 
+
 # fetch the latest balances for a vault
 def get_crystal_vault_latest_balance(vault: str):
     with db_cursor() as cur:
@@ -358,6 +369,7 @@ def get_crystal_vault_latest_balance(vault: str):
         )
         return cur.fetchone()
 
+
 # fetch one vault-user row
 def get_crystal_vault_user(vault: str, user_address: str):
     with db_cursor() as cur:
@@ -370,6 +382,7 @@ def get_crystal_vault_user(vault: str, user_address: str):
             (vault.lower(), user_address.lower()),
         )
         return cur.fetchone()
+
 
 # list paginated vault rows with optional search/filter/sort and user enrichment
 def list_crystal_vaults_page(
@@ -498,6 +511,7 @@ def list_crystal_vaults_page(
         rows = cur.fetchall()
     return rows
 
+
 # list recent vault deposits
 def list_crystal_vault_deposits(vault: str, limit: int = 50):
     with db_cursor() as cur:
@@ -512,6 +526,7 @@ def list_crystal_vault_deposits(vault: str, limit: int = 50):
             (vault.lower(), int(limit)),
         )
         return cur.fetchall()
+
 
 # list recent vault withdrawals
 def list_crystal_vault_withdrawals(vault: str, limit: int = 50):
@@ -528,6 +543,7 @@ def list_crystal_vault_withdrawals(vault: str, limit: int = 50):
         )
         return cur.fetchall()
 
+
 # list vault depositors ordered by recent activity
 def list_crystal_vault_users(vault: str):
     with db_cursor() as cur:
@@ -541,6 +557,7 @@ def list_crystal_vault_users(vault: str):
             (vault.lower(),),
         )
         return cur.fetchall()
+
 
 # list vault balance samples in ascending time order for charts
 def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, limit: int = 0):

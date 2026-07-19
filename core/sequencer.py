@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Dict, List, Callable, Optional
 
+import core.storage as storage
+import state as _st
 from core import chain as h
 from core import oracle
 from core.storage import db_cursor
-import core.storage as storage
-import state as _st
+
 
 class BatchAccumulator:
     def __init__(self):
@@ -35,21 +36,23 @@ class BatchAccumulator:
         native_reserve=0,
         token_reserve=0,
     ):
-        self.trades.append((
-            int(block_number),
-            int(log_index),
-            int(timestamp),
-            token,
-            user_address,
-            bool(is_buy),
-            int(native_amount),
-            int(token_amount),
-            usd_amount,
-            price_native,
-            txhash,
-            int(native_reserve or 0),
-            int(token_reserve or 0),
-        ))
+        self.trades.append(
+            (
+                int(block_number),
+                int(log_index),
+                int(timestamp),
+                token,
+                user_address,
+                bool(is_buy),
+                int(native_amount),
+                int(token_amount),
+                usd_amount,
+                price_native,
+                txhash,
+                int(native_reserve or 0),
+                int(token_reserve or 0),
+            )
+        )
 
     def set_token_state(self, token: str, state_dict: dict):
         self.token_updates[token.lower()] = state_dict
@@ -109,7 +112,9 @@ class BatchAccumulator:
         p["last_price_native"] = last_price_native
 
     def add_ohlcv(self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int):
-        self.ohlcv_data.append((token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount)))
+        self.ohlcv_data.append(
+            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount))
+        )
 
     def add_sniper(self, token: str, user: str):
         self.snipers.append((token.lower(), user.lower()))
@@ -133,13 +138,13 @@ class BatchAccumulator:
 class Sequencer:
     def __init__(self, global_state: _st.State) -> None:
         self._state = global_state
-        self._logs_by_block: Dict[int, List[dict]] = defaultdict(list)
+        self._logs_by_block: dict[int, list[dict]] = defaultdict(list)
         self._ready_blocks: set[int] = set()
         self._next_block: int | None = None
-        self._on_block: Optional[Callable[[int], None]] = None
+        self._on_block: Callable[[int], None] | None = None
         self._block_timestamps: dict[int, int] = {}
         self._missing_ts_warned: set[int] = set()
-    
+
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
 
@@ -226,12 +231,14 @@ class Sequencer:
             next_map.setdefault(from_addr, {})[to_addr] = parsed.get("amount") or 0
             prev_map.setdefault(to_addr, {})[from_addr] = parsed.get("amount") or 0
 
-            maps["ordered"].append({
-                "log_idx": log_idx,
-                "from": from_addr,
-                "to": to_addr,
-                "amount": parsed.get("amount") or 0,
-            })
+            maps["ordered"].append(
+                {
+                    "log_idx": log_idx,
+                    "from": from_addr,
+                    "to": to_addr,
+                    "amount": parsed.get("amount") or 0,
+                }
+            )
 
         for key, maps in transfer_maps.items():
             maps["ordered"].sort(key=lambda x: x["log_idx"])
@@ -266,7 +273,7 @@ class Sequencer:
         ordered = maps.get("ordered", [])
         if not ordered:
             if debug:
-                print(f"[DEBUG] No ordered transfers")
+                print("[DEBUG] No ordered transfers")
             return fallback_user
 
         is_buy = parsed.get("is_buy")
@@ -295,8 +302,7 @@ class Sequencer:
                 if t["amount"] > 0:
                     has_outgoing.add(t["from"])
 
-            candidates = [(addr, net) for addr, net in net_by_addr.items()
-                          if addr not in (pool, zero_addr) and net > 0]
+            candidates = [(addr, net) for addr, net in net_by_addr.items() if addr not in (pool, zero_addr) and net > 0]
 
             if candidates:
                 max_net = max(c[1] for c in candidates)
@@ -372,7 +378,7 @@ class Sequencer:
 
         return fallback_user
 
-    def _classify_pool_sync_kind(self, logs: List[dict], idx: int, txh, parsed_sync: dict | None) -> str | None:
+    def _classify_pool_sync_kind(self, logs: list[dict], idx: int, txh, parsed_sync: dict | None) -> str | None:
         if parsed_sync is None:
             return None
         market = (parsed_sync.get("market") or "").lower()
@@ -409,7 +415,7 @@ class Sequencer:
             return int(raw_ts, 16)
         return int(raw_ts or 0)
 
-    def _preload_missing_v2_tokens(self, blk: int, logs: List[dict], cur) -> None:
+    def _preload_missing_v2_tokens(self, blk: int, logs: list[dict], cur) -> None:
         v2_addr = h.NADFUN_V2_ADDR.lower()
         for log in logs:
             if (log.get("address") or "").lower() != v2_addr:
@@ -437,41 +443,45 @@ class Sequencer:
     def _process_block(
         self,
         blk: int,
-        logs: List[dict],
+        logs: list[dict],
         cur=None,
         counts_out: dict = None,
         batch: BatchAccumulator = None,
         record_processed: bool = True,
     ):
         logs = sorted(logs, key=self._log_index)
-        counts = counts_out if counts_out is not None else {
-            "MC": 0,
-            "MPC": 0,
-            "TR": 0,
-            "PMINT": 0,
-            "PBURN": 0,
-            "PSYNC": 0,
-            "TC": 0,
-            "LT": 0,
-            "MG": 0,
-            "VD": 0,
-            "VDP": 0,
-            "VWD": 0,
-            "VLOCK": 0,
-            "VUNLOCK": 0,
-            "VCLOSE": 0,
-            "VMAX": 0,
-            "VLOCKUP": 0,
-            "VDECR": 0,
-            "NFC": 0,
-            "NFB": 0,
-            "NFS": 0,
-            "NFPEN": 0,
-            "NFT": 0,
-            "V2SWAP": 0,
-            "TF": 0,
-            "V3SWAP": 0,
-        }
+        counts = (
+            counts_out
+            if counts_out is not None
+            else {
+                "MC": 0,
+                "MPC": 0,
+                "TR": 0,
+                "PMINT": 0,
+                "PBURN": 0,
+                "PSYNC": 0,
+                "TC": 0,
+                "LT": 0,
+                "MG": 0,
+                "VD": 0,
+                "VDP": 0,
+                "VWD": 0,
+                "VLOCK": 0,
+                "VUNLOCK": 0,
+                "VCLOSE": 0,
+                "VMAX": 0,
+                "VLOCKUP": 0,
+                "VDECR": 0,
+                "NFC": 0,
+                "NFB": 0,
+                "NFS": 0,
+                "NFPEN": 0,
+                "NFT": 0,
+                "V2SWAP": 0,
+                "TF": 0,
+                "V3SWAP": 0,
+            }
+        )
         seen = set()
 
         has_trades = False
@@ -534,7 +544,9 @@ class Sequencer:
                 f"NFPEN {counts['NFPEN']} NFT {counts['NFT']} TF {counts['TF']}"
             )
 
-    def _process_block_inner(self, blk: int, logs: List[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None):
+    def _process_block_inner(
+        self, blk: int, logs: list[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None
+    ):
         self._preload_missing_v2_tokens(blk, logs, cur)
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
 
@@ -566,13 +578,19 @@ class Sequencer:
             parsed = h.PARSERS[tag](log["address"].lower(), log["topics"], log["data"][2:])
 
             if tag == "MC":
-                self._state.apply_market_created(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+                self._state.apply_market_created(
+                    blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch
+                )
 
             elif tag == "MPC":
-                self._state.apply_market_params_changed(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch)
+                self._state.apply_market_params_changed(
+                    blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch
+                )
 
             elif tag == "TR":
-                self._state.apply_market_trade(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx)
+                self._state.apply_market_trade(
+                    blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx
+                )
 
             elif tag == "PSYNC":
                 sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)
@@ -605,7 +623,9 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
+                self._state.apply_launchpad_trade(
+                    parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
+                )
 
             elif tag in ("MG", "NFT"):
                 pool = self._state.apply_migrated(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
@@ -617,10 +637,14 @@ class Sequencer:
                 self._state.apply_vault_deployed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag == "VDP":
-                self._state.apply_vault_deposit(blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii)
+                self._state.apply_vault_deposit(
+                    blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii
+                )
 
             elif tag == "VWD":
-                self._state.apply_vault_withdraw(blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii)
+                self._state.apply_vault_withdraw(
+                    blk, blk_ts, txh, parsed, log["address"].lower(), cur=cur, batch=batch, log_idx=lii
+                )
 
             elif tag == "VLOCK":
                 self._state.apply_vault_locked(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
@@ -632,25 +656,39 @@ class Sequencer:
                 self._state.apply_vault_closed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
 
             elif tag == "VMAX":
-                self._state.apply_vault_max_shares_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+                self._state.apply_vault_max_shares_changed(
+                    blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch
+                )
 
             elif tag == "VLOCKUP":
-                self._state.apply_vault_lockup_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+                self._state.apply_vault_lockup_changed(
+                    blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch
+                )
 
             elif tag == "VDECR":
-                self._state.apply_vault_decrease_on_withdraw_changed(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+                self._state.apply_vault_decrease_on_withdraw_changed(
+                    blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch
+                )
 
             elif tag == "TF":
                 if parsed is not None:
                     token = (parsed.get("token") or "").lower()
                     mi = self._state.addressToMarket.get(token)
                     is_lp_token = bool(mi is not None and int(getattr(mi, "marketType", 0) or 0) > 1)
-                    if token not in self._state.launchpad_tokens and token not in self._state.token_to_v3_pool and not is_lp_token:
+                    if (
+                        token not in self._state.launchpad_tokens
+                        and token not in self._state.token_to_v3_pool
+                        and not is_lp_token
+                    ):
                         continue
                     if is_lp_token:
-                        self._state.apply_pool_transfer(blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch)
+                        self._state.apply_pool_transfer(
+                            blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch
+                        )
                     else:
-                        self._state.apply_token_transfer(parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch)
+                        self._state.apply_token_transfer(
+                            parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch
+                        )
 
             elif tag in ("V2SWAP", "V3SWAP"):
                 pool_addr = (log.get("address") or "").lower()
@@ -669,7 +707,9 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
 
-                self._state.apply_launchpad_trade(parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch)
+                self._state.apply_launchpad_trade(
+                    parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
+                )
 
     def process_chunk(
         self,
@@ -679,9 +719,32 @@ class Sequencer:
         cur,
     ) -> None:
         counts = {
-            "MC": 0, "MPC": 0, "TR": 0, "PMINT": 0, "PBURN": 0, "PSYNC": 0, "TC": 0, "LT": 0, "MG": 0,
-            "VD": 0, "VDP": 0, "VWD": 0, "VLOCK": 0, "VUNLOCK": 0, "VCLOSE": 0, "VMAX": 0, "VLOCKUP": 0, "VDECR": 0,
-            "NFC": 0, "NFB": 0, "NFS": 0, "NFPEN": 0, "NFT": 0, "TF": 0, "V2SWAP": 0, "V3SWAP": 0,
+            "MC": 0,
+            "MPC": 0,
+            "TR": 0,
+            "PMINT": 0,
+            "PBURN": 0,
+            "PSYNC": 0,
+            "TC": 0,
+            "LT": 0,
+            "MG": 0,
+            "VD": 0,
+            "VDP": 0,
+            "VWD": 0,
+            "VLOCK": 0,
+            "VUNLOCK": 0,
+            "VCLOSE": 0,
+            "VMAX": 0,
+            "VLOCKUP": 0,
+            "VDECR": 0,
+            "NFC": 0,
+            "NFB": 0,
+            "NFS": 0,
+            "NFPEN": 0,
+            "NFT": 0,
+            "TF": 0,
+            "V2SWAP": 0,
+            "V3SWAP": 0,
         }
 
         batch = BatchAccumulator()
@@ -719,5 +782,6 @@ class Sequencer:
             f"NFC {counts['NFC']} NFB {counts['NFB']} NFS {counts['NFS']} "
             f"NFPEN {counts['NFPEN']} NFT {counts['NFT']} TF {counts['TF']}"
         )
+
 
 SEQUENCER = Sequencer(_st.State())

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Dict, Any
 
 def _clean_str(s: str) -> str:
     return (s or "").replace("\x00", "")
@@ -8,23 +7,25 @@ def _clean_str(s: str) -> str:
 
 _ZERO_ADDR = "0x" + "0" * 40
 
+
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
+
 def chunks(s: str, n: int):
-    return (s[i:i+n] for i in range(0, len(s), n))
+    return (s[i : i + n] for i in range(0, len(s), n))
 
 
 def _u256_at(data: bytes, off: int) -> int:
     if off < 0 or len(data) < off + 32:
         return 0
-    return int.from_bytes(data[off: off + 32], "big")
+    return int.from_bytes(data[off : off + 32], "big")
 
 
 def _addr_at(data: bytes, off: int) -> str:
     if off < 0 or len(data) < off + 32:
         return _ZERO_ADDR
-    return "0x" + data[off + 12: off + 32].hex().lower()
+    return "0x" + data[off + 12 : off + 32].hex().lower()
 
 
 def _decode_dyn_str(data: bytes, base: int, rel: int) -> str:
@@ -37,7 +38,7 @@ def _decode_dyn_str(data: bytes, base: int, rel: int) -> str:
     if s_len < 0 or end > len(data):
         return ""
     try:
-        return _clean_str(data[start: end].decode("utf-8", errors="ignore"))
+        return _clean_str(data[start:end].decode("utf-8", errors="ignore"))
     except Exception:
         return ""
 
@@ -51,6 +52,7 @@ def _decode_token_meta(data: bytes, base: int) -> tuple[str, int, str, str]:
     name = _decode_dyn_str(data, base, name_rel)
     return token, decimals, ticker, name
 
+
 def parse_market_created(addr: str, tops: list[str], data_no0x: str):
     is_canonical = False
     if len(tops) > 1:
@@ -58,7 +60,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
             is_canonical = int(tops[1], 16) != 0
         except Exception:
             is_canonical = False
-            
+
     quote_asset = to_addr(tops[2]) if len(tops) > 2 else _ZERO_ADDR
     base_asset = to_addr(tops[3]) if len(tops) > 3 else _ZERO_ADDR
 
@@ -108,16 +110,17 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
         "makerRebate": maker_rebate,
     }
 
+
 def parse_trade(addr: str, tops: list[str], data_no0x: str) -> dict:
     market = to_addr(tops[1]).lower() if len(tops) > 1 else addr.lower()
     user = to_addr(tops[2]).lower() if len(tops) > 2 else ""
 
     words = list(chunks(data_no0x, 64))
-    
+
     def u(i: int, d: int = 0) -> int:
         return int(words[i], 16) if i < len(words) else d
 
-    is_buy = (u(0) != 0)
+    is_buy = u(0) != 0
     amount_in = u(1)
     amount_out = u(2)
     start_px = u(3)

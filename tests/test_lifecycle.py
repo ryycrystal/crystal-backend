@@ -26,6 +26,7 @@ def _curve(sold, supply=CURVE_SUPPLY):
 
 # --- lifecycle rules ----------------------------------------------------------
 
+
 def test_phase_progression_created_active_graduating():
     assert resolve_phase(curve=None, has_trades=False) is TokenPhase.CREATED
     assert resolve_phase(curve=_curve(0), has_trades=True) is TokenPhase.ACTIVE
@@ -40,10 +41,7 @@ def test_terminal_states_win_over_curve_progress():
     assert resolve_phase(curve=mid, has_trades=True, graduated=True) is TokenPhase.GRADUATED
     assert resolve_phase(curve=mid, has_trades=True, migrated=True) is TokenPhase.MIGRATED
     # migrated outranks graduated
-    assert (
-        resolve_phase(curve=mid, has_trades=True, graduated=True, migrated=True)
-        is TokenPhase.MIGRATED
-    )
+    assert resolve_phase(curve=mid, has_trades=True, graduated=True, migrated=True) is TokenPhase.MIGRATED
     # a full curve alone is still only "graduating"
     assert resolve_phase(curve=_curve(CURVE_SUPPLY), has_trades=True) is TokenPhase.GRADUATING
 
@@ -78,16 +76,17 @@ def test_snapshot_reports_full_progress_once_off_curve():
 
 # --- native adapter -----------------------------------------------------------
 
+
 def test_native_geometry_matches_the_contract():
-    assert INITIAL_TOKEN_SUPPLY == 10 ** 27
-    assert GRADUATED_TOKEN_SUPPLY == 2 * 10 ** 26
-    assert CURVE_SUPPLY == 8 * 10 ** 26
-    assert CURVE_SUPPLY // 10 ** 18 == 800_000_000
+    assert INITIAL_TOKEN_SUPPLY == 10**27
+    assert GRADUATED_TOKEN_SUPPLY == 2 * 10**26
+    assert CURVE_SUPPLY == 8 * 10**26
+    assert CURVE_SUPPLY // 10**18 == 800_000_000
 
 
 def test_native_adapter_normalizes_reserves():
     a = NativeLaunchpadAdapter()
-    v0 = 1000 * 10 ** 18
+    v0 = 1000 * 10**18
     k = v0 * INITIAL_TOKEN_SUPPLY
 
     # at creation: nothing sold
@@ -104,7 +103,7 @@ def test_native_adapter_normalizes_reserves():
     # 75% of tokens sold
     tr = INITIAL_TOKEN_SUPPLY - (CURVE_SUPPLY * 3 // 4)
     st = a.curve_state({"native_reserve": k // tr, "token_reserve": tr})
-    assert st.tokens_sold == 600_000_000 * 10 ** 18
+    assert st.tokens_sold == 600_000_000 * 10**18
     assert st.is_graduating is True
 
 
@@ -117,8 +116,8 @@ def test_native_adapter_rejects_unusable_events():
 
 
 def test_native_adapter_initial_price_and_routing():
-    a = NativeLaunchpadAdapter(lambda: 141_600 * 10 ** 18)
-    assert a.initial_price_native() == Decimal(141_600 * 10 ** 18) / Decimal(INITIAL_TOKEN_SUPPLY)
+    a = NativeLaunchpadAdapter(lambda: 141_600 * 10**18)
+    assert a.initial_price_native() == Decimal(141_600 * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY)
     assert a.graduates_to_market() is True
 
     # unknown V0 must not fabricate a price
@@ -127,13 +126,14 @@ def test_native_adapter_initial_price_and_routing():
 
 
 def test_native_geometry_helpers_recover_v0_and_threshold():
-    v0 = 49_300 * 10 ** 18
+    v0 = 49_300 * 10**18
     k = v0 * INITIAL_TOKEN_SUPPLY
     assert NativeLaunchpadAdapter.initial_native_reserve(k) == v0
     assert NativeLaunchpadAdapter.graduation_native_reserve(k) == 5 * v0
 
 
 # --- the model must not assume native geometry --------------------------------
+
 
 def test_api_lifecycle_fields_map_each_phase():
     """The API exposes phase derived from stored fields, so it cannot drift."""
@@ -151,18 +151,20 @@ def test_api_lifecycle_fields_map_each_phase():
     assert phase_of(source=1, circulating_supply=793_100_000, tx_count=9, migrated=True) == "migrated"
 
     # progress uses each source's own curve supply
-    assert api_mod._lifecycle_fields(
-        source=0, circulating_supply=600_000_000, tx_count=1, migrated=False
-    )["progressBps"] == 7_500
-    assert api_mod._lifecycle_fields(
-        source=1, circulating_supply=594_825_000, tx_count=1, migrated=False
-    )["progressBps"] == 7_500
+    assert (
+        api_mod._lifecycle_fields(source=0, circulating_supply=600_000_000, tx_count=1, migrated=False)["progressBps"]
+        == 7_500
+    )
+    assert (
+        api_mod._lifecycle_fields(source=1, circulating_supply=594_825_000, tx_count=1, migrated=False)["progressBps"]
+        == 7_500
+    )
 
 
 def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     """A source with a different supply split must get identical phase/progress
     semantics. If native constants ever leak into core.lifecycle, this fails."""
-    foreign_curve_supply = 793_100_000 * 10 ** 18  # nad.fun-shaped, deliberately not ours
+    foreign_curve_supply = 793_100_000 * 10**18  # nad.fun-shaped, deliberately not ours
     assert foreign_curve_supply != CURVE_SUPPLY
 
     quarter = _curve(foreign_curve_supply // 4, supply=foreign_curve_supply)
@@ -174,9 +176,7 @@ def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     assert resolve_phase(curve=three_quarters, has_trades=True) is TokenPhase.GRADUATING
 
     # and such a source can terminate in MIGRATED rather than GRADUATED
-    assert (
-        resolve_phase(curve=three_quarters, has_trades=True, migrated=True) is TokenPhase.MIGRATED
-    )
+    assert resolve_phase(curve=three_quarters, has_trades=True, migrated=True) is TokenPhase.MIGRATED
 
 
 def test_chart_prices_keep_sub_unit_movement():
@@ -189,8 +189,8 @@ def test_chart_prices_keep_sub_unit_movement():
     from api.api import _scaled_price
 
     getcontext().prec = 60
-    v0 = Decimal(1000 * 10 ** 18)
-    supply = Decimal(10 ** 27)
+    v0 = Decimal(1000 * 10**18)
+    supply = Decimal(10**27)
     k = v0 * supply
 
     def price(native_reserve: Decimal) -> Decimal:
@@ -198,7 +198,7 @@ def test_chart_prices_keep_sub_unit_movement():
         return native_reserve / Decimal(token_reserve)
 
     at_creation = price(v0)
-    after_buy = price(v0 + Decimal(10 ** 17 * 99_000 // 100_000))
+    after_buy = price(v0 + Decimal(10**17 * 99_000 // 100_000))
 
     assert _scaled_price(at_creation) == "1000"
     assert _scaled_price(after_buy) == "1000.198009801"
