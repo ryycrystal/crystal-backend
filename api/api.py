@@ -258,7 +258,7 @@ class TTLCache:
         return value, True
 
     # store a value with a ttl, evicting the oldest when full
-    def set(self, key: str, value: Any, ttl_seconds: int) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: float) -> None:
         if key in self._cache:
             del self._cache[key]
         elif len(self._cache) >= self._max_size:
@@ -278,7 +278,7 @@ _cache = TTLCache(max_size=2000)
 
 
 # decorator caching an endpoint result under a prefixed key
-def ttl_cache(prefix: str, ttl_seconds: int = 60):
+def ttl_cache(prefix: str, ttl_seconds: float = 60):
     # wrap the endpoint with a cache lookup and store
     def decorator(func):
         @wraps(func)
