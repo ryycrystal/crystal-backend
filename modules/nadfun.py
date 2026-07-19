@@ -314,10 +314,9 @@ def parse_nadfun_token_created(
 
     metadata_cid = ""
 
-    try:
-        last_price_native = Decimal("90000") / Decimal("1073000191")
-    except Exception:
-        last_price_native = Decimal(0)
+    # the creation price is v1 specific and each generation starts on a different
+    # curve, so the adapter for the token's source owns it now
+    last_price_native = Decimal(0)
 
     return {
         "token": token,

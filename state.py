@@ -117,8 +117,21 @@ def _fetch_launchpad_initial_native_supply() -> int:
     return int(cached) if cached is not None else 0
 
 
+# native launchpadFee is an inverted keep factor out of 100000, currently 99000
+# which is 1%. governance settable, so treat this as the deployed default rather
+# than a law -- the per trade path derives the real rate from the reserve delta
+NATIVE_FEE_RATE = Decimal("0.01")
+
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
 NADFUN_ADAPTERS = nadfun_geo.build_all()
+
+
+# fee fraction a source takes per trade, nad.fun v1 is 1% and v2 is 2% so a
+# single hardcoded rate halved v2 fees on every reorg recompute
+def _fee_rate_for_source(source) -> Decimal:
+    if nadfun_geo.is_nadfun_source(source):
+        return nadfun_geo.fee_rate_for(source)
+    return NATIVE_FEE_RATE
 
 
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
@@ -717,7 +730,7 @@ class State:
                 lp.native_volume = int(agg["native_volume"])
                 lp.token_volume = int(agg["token_volume"])
                 lp.volume_usd = Decimal(agg["volume_usd"] or 0)
-                lp.fees_usd = lp.volume_usd * Decimal("0.01")
+                lp.fees_usd = lp.volume_usd * _fee_rate_for_source(lp.source)
                 lp.tx_count = int(agg["tx_count"])
                 lp.buy_count = int(agg["buy_count"])
                 lp.sell_count = int(agg["sell_count"])

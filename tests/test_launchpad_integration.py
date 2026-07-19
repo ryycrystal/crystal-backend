@@ -1061,3 +1061,150 @@ def test_cost_basis_backfill_terminates_on_fully_sold_positions(db):
     storage.backfill_cost_basis()
 
     _x(db, "DELETE FROM launchpad_positions WHERE user_address = ANY(%s)", ([r[0] for r in rows],))
+
+
+NF_TOKEN = "0x9d11aa55e3cf4f2b8a7c1d6e0f3b2c5a4d8e7777"
+
+
+def _nadfun_seed(st, source, token=NF_TOKEN):
+    """Create a nad.fun token directly: its TokenCreated parser needs a full
+    on-chain payload, and these tests are about the trade path."""
+    import models
+
+    lp = models.LaunchpadToken(
+        token=token,
+        creator=CREATOR,
+        name="NF",
+        symbol="NF",
+        metadata_cid="",
+        description="",
+        social1="",
+        social2="",
+        social3="",
+        social4="",
+    )
+    lp.source = source
+    lp.created_block = 100
+    lp.created_at = 1000
+    lp.quote_token = WMON
+    st.launchpad_tokens[token] = lp
+
+    import core.storage as storage
+
+    storage.upsert_token_created(
+        token=token,
+        creator=CREATOR,
+        name="NF",
+        symbol="NF",
+        metadata_cid="",
+        description="",
+        social1="",
+        social2="",
+        social3="",
+        social4="",
+        source=source,
+        created_block=100,
+        created_at=1000,
+        last_price_native=0,
+        quote_token=WMON,
+    )
+    return lp
+
+
+def _nadfun_trade(
+    st,
+    source,
+    token_reserve,
+    native_reserve,
+    blk,
+    ts,
+    txh,
+    is_buy=True,
+    amount_in=10**18,
+    amount_out=10**20,
+    token=NF_TOKEN,
+):
+    ev = {
+        "token": token,
+        "user": USER,
+        "is_buy": is_buy,
+        "amount_in": amount_in,
+        "amount_out": amount_out,
+        "native_reserve": native_reserve,
+        "token_reserve": token_reserve,
+    }
+    st.apply_launchpad_trade(ev, blk, ts, txh, 0, _router())
+    return ev
+
+
+def test_nadfun_derived_supply_and_reserves_persist(db):
+    """Mocked storage cannot see persistence -- that is exactly what hid the
+    curve-reserve bug on native."""
+    from core.adapters import nadfun as nf
+
+    st = _new_state()
+    _nadfun_seed(st, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+
+    tr = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
+    _nadfun_trade(st, nf.SOURCE_V2, tr, 90_000 * 10**18, 101, 1001, "0xnf1")
+
+    row = _q(
+        db,
+        """
+        SELECT circulating_supply, curve_token_reserve, curve_native_reserve, source
+        FROM launchpad_tokens WHERE token = %s
+        """,
+        (NF_TOKEN,),
+    )[0]
+    assert int(row[3]) == nf.SOURCE_V2
+    assert int(row[1]) == tr, "nad.fun curve reserves must persist like native's"
+    assert int(row[2]) == 90_000 * 10**18
+    assert int(row[0]) == (geo["virtual_token_0"] - tr) // 10**18
+
+
+def test_reorg_recompute_uses_the_v2_fee_rate_not_a_flat_one_percent(db):
+    """v2 charges 2%. A hardcoded 1% halved a token's lifetime fees on reorg."""
+    import core.storage as storage
+    from core.adapters import nadfun as nf
+
+    st = _new_state()
+    lp = _nadfun_seed(st, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+
+    tr = geo["virtual_token_0"] - (geo["curve_supply"] // 8)
+    _nadfun_trade(st, nf.SOURCE_V2, tr, 80_000 * 10**18, 109, 1009, "0xnfkeep")
+    storage.record_block_hash(109, "0xaaa")
+
+    tr2 = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
+    _nadfun_trade(st, nf.SOURCE_V2, tr2, 90_000 * 10**18, 110, 1010, "0xnforphan")
+    storage.record_block_hash(110, "0xbbb")
+
+    st.handle_reorg(110)
+
+    assert lp.volume_usd > 0, "need volume for the fee assertion to mean anything"
+    expected = lp.volume_usd * nf.fee_rate_for(nf.SOURCE_V2)
+    assert lp.fees_usd == expected
+    # the old behaviour, kept explicit so a regression is unmistakable
+    assert lp.fees_usd != lp.volume_usd * Decimal("0.01")
+
+
+def test_nadfun_missing_sync_does_not_corrupt_persisted_supply(db):
+    """A CurveSync can be missed or lost across a restart. Supply must hold its
+    last derived value rather than read as a fully sold curve."""
+    from core.adapters import nadfun as nf
+
+    st = _new_state()
+    _nadfun_seed(st, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+
+    tr = geo["virtual_token_0"] - (geo["curve_supply"] // 3)
+    _nadfun_trade(st, nf.SOURCE_V2, tr, 85_000 * 10**18, 101, 1001, "0xnfa")
+    good = int(_q(db, "SELECT circulating_supply FROM launchpad_tokens WHERE token=%s", (NF_TOKEN,))[0][0])
+
+    _nadfun_trade(st, nf.SOURCE_V2, 0, 0, 102, 1002, "0xnfb")
+    after = int(_q(db, "SELECT circulating_supply FROM launchpad_tokens WHERE token=%s", (NF_TOKEN,))[0][0])
+    assert after == good, "a missing sync must not move persisted supply"
+
+    full = geo["virtual_token_0"] - geo["curve_supply"]
+    assert after != full // 10**18, "and must never read as a fully sold curve"
