@@ -13,6 +13,7 @@ WMON_DECIMALS = 18
 USDC_DECIMALS = 6
 
 
+# derive mon usd from a wmon usdc v3 swap, scaling for 18 vs 6 decimals
 def mon_price_from_v3swap(ev: dict[str, Any]) -> Decimal | None:
     try:
         mon_amount = int(ev.get("amount0") or 0)

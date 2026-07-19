@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 
+# drop null bytes and surrounding whitespace
 def _clean_str(s: str) -> str:
     return (s or "").replace("\x00", "")
 
@@ -8,26 +9,31 @@ def _clean_str(s: str) -> str:
 _ZERO_ADDR = "0x" + "0" * 40
 
 
+# last 20 bytes of a log topic as a hex address
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
 
+# split a hex payload into n char words
 def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
 
+# read one uint256 at a byte offset
 def _u256_at(data: bytes, off: int) -> int:
     if off < 0 or len(data) < off + 32:
         return 0
     return int.from_bytes(data[off : off + 32], "big")
 
 
+# read one address at a byte offset
 def _addr_at(data: bytes, off: int) -> str:
     if off < 0 or len(data) < off + 32:
         return _ZERO_ADDR
     return "0x" + data[off + 12 : off + 32].hex().lower()
 
 
+# follow a relative abi offset and decode the string there
 def _decode_dyn_str(data: bytes, base: int, rel: int) -> str:
     ptr = base + int(rel or 0)
     if ptr < 0 or len(data) < ptr + 32:
@@ -43,6 +49,7 @@ def _decode_dyn_str(data: bytes, base: int, rel: int) -> str:
         return ""
 
 
+# read one token's address decimals ticker and name
 def _decode_token_meta(data: bytes, base: int) -> tuple[str, int, str, str]:
     token = _addr_at(data, base + 0)
     decimals = _u256_at(data, base + 32)
@@ -53,6 +60,7 @@ def _decode_token_meta(data: bytes, base: int) -> tuple[str, int, str, str]:
     return token, decimals, ticker, name
 
 
+# decode a marketcreated log into both assets and market params
 def parse_market_created(addr: str, tops: list[str], data_no0x: str):
     is_canonical = False
     if len(tops) > 1:
@@ -111,12 +119,14 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
     }
 
 
+# decode a market trade log into direction amounts and price
 def parse_trade(addr: str, tops: list[str], data_no0x: str) -> dict:
     market = to_addr(tops[1]).lower() if len(tops) > 1 else addr.lower()
     user = to_addr(tops[2]).lower() if len(tops) > 2 else ""
 
     words = list(chunks(data_no0x, 64))
 
+    # read word i as a uint returning d when it is missing
     def u(i: int, d: int = 0) -> int:
         return int(words[i], 16) if i < len(words) else d
 
@@ -137,10 +147,12 @@ def parse_trade(addr: str, tops: list[str], data_no0x: str) -> dict:
     }
 
 
+# decode a marketparamschanged log into the new fee and size params
 def parse_market_params_changed(addr: str, tops: list[str], data_no0x: str) -> dict:
     market = to_addr(tops[1]).lower() if len(tops) > 1 else addr.lower()
     words = list(chunks(data_no0x, 64))
 
+    # read word i as a uint returning d when it is missing
     def u(i: int, d: int = 0) -> int:
         return int(words[i], 16) if i < len(words) else d
 

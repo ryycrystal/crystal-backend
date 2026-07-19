@@ -11,12 +11,14 @@ import core.storage as storage
 router = APIRouter()
 
 
+# coerce a db value into something json serialisable
 def _json_value(value):
     if isinstance(value, Decimal):
         return str(value)
     return value
 
 
+# shape one market row for the dump endpoint
 def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> dict[str, Any]:
     (
         market,
@@ -82,7 +84,7 @@ def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-# Return a full dump of indexed Crystal markets for inspection and debugging
+# full dump of indexed crystal markets for inspection
 @router.get("/markets/list")
 def list_markets_dump() -> dict[str, Any]:
     rows = storage.list_crystal_markets_dump()

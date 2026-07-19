@@ -32,10 +32,12 @@ _TOKEN_URI_SELECTOR = "0x3c130d90"
 _GET_QUOTE_TOKEN_SELECTOR = "0x3df8a468"
 
 
+# abi encode an address as a call argument
 def _abi_addr_arg(addr: str) -> str:
     return (addr or "").lower().removeprefix("0x").rjust(64, "0")
 
 
+# decode an abi encoded string return value
 def _decode_abi_string(result: str | None) -> str:
     if not result or not isinstance(result, str) or result == "0x":
         return ""
@@ -55,6 +57,7 @@ def _decode_abi_string(result: str | None) -> str:
         return ""
 
 
+# decode an abi encoded address return value
 def _decode_abi_address(result: str | None) -> str:
     if not result or not isinstance(result, str) or result == "0x":
         return ""
@@ -64,6 +67,7 @@ def _decode_abi_address(result: str | None) -> str:
     return ("0x" + data_hex[-40:]).lower()
 
 
+# one blocking eth_call against the http rpc
 def _eth_call(to: str, data: str) -> str:
     payload = {
         "jsonrpc": "2.0",
@@ -79,6 +83,7 @@ def _eth_call(to: str, data: str) -> str:
     return body.get("result") or "0x"
 
 
+# read a string getter such as name or symbol off a token
 def _fetch_token_string(token: str, selector: str) -> str:
     try:
         return _decode_abi_string(_eth_call(token, selector))
@@ -91,6 +96,7 @@ _LAUNCHPAD_PARAMS_TTL = 300
 _LAUNCHPAD_PARAMS_CACHE: dict[str, Any] = {}
 
 
+# read v0 from launchpadparams, cached with a ttl because it is governance settable and the setter emits no event
 def _fetch_launchpad_initial_native_supply() -> int:
     cached = _LAUNCHPAD_PARAMS_CACHE.get("initial_native_supply")
     fetched_at = _LAUNCHPAD_PARAMS_CACHE.get("fetched_at")
@@ -116,6 +122,7 @@ NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
 
 
+# read decimals off a token, none when it does not answer
 def _fetch_token_decimals(token: str) -> int | None:
     try:
         res = _eth_call(token, _ERC20_DECIMALS_SELECTOR)
@@ -128,6 +135,7 @@ def _fetch_token_decimals(token: str) -> int | None:
     return None
 
 
+# the quote token a v2 pair trades against
 def _fetch_v2_quote_token(token: str) -> str:
     try:
         data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
@@ -136,7 +144,9 @@ def _fetch_v2_quote_token(token: str) -> str:
         return WMON
 
 
+# all in memory indexer state and the handlers that mutate it
 class State:
+    # start with empty state and default prices
     def __init__(self) -> None:
         self._lock = threading.RLock()
 
@@ -166,6 +176,7 @@ class State:
         self.mon_price_usd = Decimal("0.03")
         self._seed_aux_prices()
 
+    # update the mon usd price and persist it
     def set_mon_price_usd(self, value) -> None:
         try:
             px = Decimal(value)
@@ -185,6 +196,7 @@ class State:
         except Exception as e:
             print(f"[State] failed to persist mon_price_usd: {e!r}")
 
+    # reload every token pool market and vault from storage on startup
     def rebuild_from_db(self) -> None:
         with self._lock:
             self.launchpad_tokens.clear()
@@ -454,6 +466,7 @@ class State:
                     lastWithdraw=int(last_withdraw or 0),
                 )
 
+    # clear state so a range can be reindexed from scratch
     def reset_for_reindex(self) -> None:
         with self._lock:
             self.launchpad_tokens.clear()
@@ -463,6 +476,7 @@ class State:
             self._reset_aux_locked()
             print("[State] Reset for reindex: cleared all in-memory state")
 
+    # create or complete a nadfun token row, fetching metadata when needed
     def ensure_v2_launchpad_token(
         self,
         token: str,
@@ -540,6 +554,7 @@ class State:
             )
             return True
 
+    # handle tokencreated, seeding the token and its initial price
     def apply_token_created(
         self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> None:
@@ -671,6 +686,7 @@ class State:
                     cur=cur,
                 )
 
+    # drop orphaned trades and recompute every affected token from what survives
     def handle_reorg(self, from_block: int, cur=None) -> list[str]:
         with self._lock:
             affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
@@ -746,6 +762,7 @@ class State:
                 )
             return affected
 
+    # true when a block already indexed now reports a different hash
     def detect_reorg(self, block_number: int, block_hash: str, cur=None) -> bool:
         if not block_hash:
             return False
@@ -755,6 +772,7 @@ class State:
             return False
         return bool(known) and known.lower() != block_hash.lower()
 
+    # stub a native token whose tokencreated was never seen
     def _ensure_native_launchpad_token_locked(self, token: str, blk: int, ts: int, cur=None):
         tok = (token or "").lower()
         if not tok:
@@ -810,6 +828,7 @@ class State:
         )
         return lp
 
+    # handle a bonding curve trade, updating price curve volume and positions
     def apply_launchpad_trade(
         self,
         ev: dict,
@@ -1147,6 +1166,7 @@ class State:
                         cur=cur,
                     )
 
+    # handle migrated, marking the token graduated
     def apply_migrated(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> str | None:
@@ -1210,6 +1230,7 @@ class State:
 
         return pool or None
 
+    # track holder balances from erc20 transfers
     def apply_token_transfer(
         self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> None:
@@ -1232,6 +1253,7 @@ class State:
             zero = "0x" + "0" * 40
             internal = {a.lower() for a in getattr(h, "ADDRS", [])}
 
+            # apply one holder balance delta skipping internal addresses
             def adjust(user: str, delta: int) -> None:
                 addr = (user or "").lower()
                 if not addr or addr == zero or delta == 0:
@@ -1274,22 +1296,26 @@ class State:
             adjust(from_addr, -amount)
             adjust(to_addr, amount)
 
+    # seed stablecoin prices under the lock
     def _seed_aux_prices(self) -> None:
         with self._lock:
             self._seed_aux_prices_locked()
 
+    # set known stablecoins to one dollar
     def _seed_aux_prices_locked(self) -> None:
         self.tokenToPrice.clear()
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd
 
+    # usd price for a quote token, mon for native equivalents
     def _quote_price_usd(self, quote_token: str) -> Decimal:
         quote = (quote_token or WMON).lower()
         if quote in NATIVE_EQUIV_QUOTES:
             return self.mon_price_usd if self.mon_price_usd > 0 else Decimal(0)
         return self.tokenToPrice.get(quote, Decimal(0))
 
+    # clear pools markets vaults and the price graph
     def _reset_aux_locked(self) -> None:
         self.addressToMarket.clear()
         self.tokenGraph.clear()
@@ -1307,6 +1333,7 @@ class State:
         self._last_head_ts = None
         self._seed_aux_prices_locked()
 
+    # record the newest seen block and its timestamp
     def note_head(self, blk: int, ts: int | None) -> None:
         with self._lock:
             self._last_head_block = int(blk)
@@ -1314,12 +1341,14 @@ class State:
                 self._last_head_ts = int(ts)
                 self._block_timestamps[int(blk)] = int(ts)
 
+    # remember one blocks timestamp
     def note_block_timestamp(self, blk: int, ts: int | None) -> None:
         if ts is None:
             return
         with self._lock:
             self._block_timestamps[int(blk)] = int(ts)
 
+    # best known timestamp for a block
     def block_ts(self, block: int) -> int:
         with self._lock:
             t = self._block_timestamps.get(int(block))
@@ -1327,15 +1356,18 @@ class State:
                 return int(t)
             return int(self._last_head_ts or 0)
 
+    # the newest block and timestamp seen
     def head_block_and_ts(self) -> tuple[int | None, int | None]:
         with self._lock:
             return self._last_head_block, self._last_head_ts
 
+    # log index of a raw log as an int
     @staticmethod
     def _raw_log_index(raw_log: dict) -> int:
         li = raw_log.get("logIndex")
         return int(li, 16) if isinstance(li, str) else int(li or 0)
 
+    # price a token at one dollar when it looks like a stablecoin
     def _maybe_seed_stable_price_locked(self, token: str, ticker: str, name: str) -> None:
         token_l = (token or "").lower()
         if not token_l:
@@ -1345,6 +1377,7 @@ class State:
         if t in _STABLE_TICKERS or n in _STABLE_TICKERS or " usd" in n or n.startswith("usd"):
             self.tokenToPrice[token_l] = Decimal(1)
 
+    # true when two markets trade the same asset pair either way round
     @staticmethod
     def _same_pair_unordered(a_quote: str, a_base: str, b_quote: str, b_base: str) -> bool:
         aq = (a_quote or "").lower()
@@ -1355,6 +1388,7 @@ class State:
             return False
         return (aq == bq and ab == bb) or (aq == bb and ab == bq)
 
+    # unlink a market from the price graph
     def _remove_market_from_token_graph_locked(self, market_addr: str) -> None:
         maddr = (market_addr or "").lower()
         if not maddr:
@@ -1367,6 +1401,7 @@ class State:
             else:
                 self.tokenGraph.pop(tok, None)
 
+    # link a market into the price graph for both assets
     def _add_market_to_token_graph_locked(self, mi: models.MarketInfo) -> None:
         if mi is None:
             return
@@ -1384,6 +1419,7 @@ class State:
                 continue
             items.append(mi)
 
+    # swap in a new canonical market for a pair
     def _replace_canonical_pair_market_locked(self, mi: models.MarketInfo) -> None:
         if mi is None or not bool(getattr(mi, "isCanonical", False)):
             return
@@ -1409,6 +1445,7 @@ class State:
         self._remove_market_from_token_graph_locked(maddr)
         self._add_market_to_token_graph_locked(mi)
 
+    # handle marketcreated, linking a graduated launchpad token to its market
     def apply_market_created(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -1521,6 +1558,7 @@ class State:
                     cur=cur,
                 )
 
+    # handle marketparamschanged, updating fees and sizes
     def apply_market_params_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -1551,6 +1589,7 @@ class State:
                 cur=cur,
             )
 
+    # keep a graduated tokens price volume positions and bars moving on its market
     def _record_graduated_launchpad_trade_locked(
         self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
     ) -> None:
@@ -1708,6 +1747,7 @@ class State:
             except Exception:
                 pass
 
+    # handle a market trade, routing graduated launchpad tokens back to their row
     def apply_market_trade(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0
     ) -> None:
@@ -1758,6 +1798,7 @@ class State:
         if changed_tokens:
             self._refresh_pools_for_price_tokens(changed_tokens, blk=blk, ts=ts, cur=cur)
 
+    # taker fee of a pool as a decimal rate
     @staticmethod
     def _pool_fee_rate(mi: models.MarketInfo) -> Decimal:
         try:
@@ -1772,6 +1813,7 @@ class State:
         except Exception:
             return Decimal(0)
 
+    # usd prices for both pool assets, decimal adjusted
     def _pool_effective_usd_prices_locked(
         self,
         mi: models.MarketInfo,
@@ -1791,6 +1833,7 @@ class State:
                 pq = (b_units * pb) / q_units
         return pq, pb
 
+    # usd value of both pool reserves
     def _pool_tvl_usd_locked(self, mi: models.MarketInfo, reserve_quote: int, reserve_base: int) -> Decimal:
         try:
             qd = int(getattr(mi, "quoteDecimals", 0) or 0)
@@ -1803,6 +1846,7 @@ class State:
         except Exception:
             return Decimal(0)
 
+    # usd notional of one pool trade
     def _pool_trade_volume_usd_locked(
         self,
         mi: models.MarketInfo,
@@ -1835,6 +1879,7 @@ class State:
         except Exception:
             return Decimal(0)
 
+    # recompute tvl and yields for pools holding a repriced token
     def _refresh_pools_for_price_tokens(self, tokens, *, blk: int, ts: int, cur=None) -> None:
         token_set = {str(t or "").lower() for t in (tokens or set()) if str(t or "").strip()}
         if not token_set:
@@ -1922,6 +1967,7 @@ class State:
                     cur=cur,
                 )
 
+    # handle a pool sync, updating reserves tvl and volume
     def apply_pool_sync(
         self,
         blk: int,
@@ -2056,6 +2102,7 @@ class State:
                 cur=cur,
             )
 
+    # track lp share balances from pool token transfers
     def apply_pool_transfer(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -2108,6 +2155,7 @@ class State:
                 cur=cur,
             )
 
+    # propagate usd prices outward from known ones across the market graph
     def sweep(self) -> set[str]:
         with self._lock:
             changed: set[str] = set()
@@ -2148,11 +2196,13 @@ class State:
                         q.append(ba)
             return changed
 
+    # usd price for a token as a float
     def token_price(self, token: str) -> float:
         with self._lock:
             v = self.tokenToPrice.get((token or "").lower())
             return float(v) if v is not None else 0.0
 
+    # handle a new vault deployment
     def apply_vault_deployed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -2253,6 +2303,7 @@ class State:
                 cur=cur,
             )
 
+    # handle a vault deposit and its share issuance
     def apply_vault_deposit(
         self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
     ) -> None:
@@ -2340,6 +2391,7 @@ class State:
                 except Exception:
                     pass
 
+    # handle a vault withdrawal and its share burn
     def apply_vault_withdraw(
         self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
     ) -> None:
@@ -2422,6 +2474,7 @@ class State:
                 cur=cur,
             )
 
+    # mark a vault locked
     def apply_vault_locked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2432,6 +2485,7 @@ class State:
                 vobj.locked = True
                 storage.update_crystal_vault_fields(vault=vaddr, locked=True, updated_block=blk, updated_at=ts, cur=cur)
 
+    # mark a vault unlocked
     def apply_vault_unlocked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2444,6 +2498,7 @@ class State:
                     vault=vaddr, locked=False, updated_block=blk, updated_at=ts, cur=cur
                 )
 
+    # mark a vault closed
     def apply_vault_closed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2454,6 +2509,7 @@ class State:
                 vobj.closed = True
                 storage.update_crystal_vault_fields(vault=vaddr, closed=True, updated_block=blk, updated_at=ts, cur=cur)
 
+    # update a vaults share cap
     def apply_vault_max_shares_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2469,6 +2525,7 @@ class State:
                     cur=cur,
                 )
 
+    # update a vaults lockup period
     def apply_vault_lockup_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2484,6 +2541,7 @@ class State:
                     cur=cur,
                 )
 
+    # update whether a vault decreases on withdraw
     def apply_vault_decrease_on_withdraw_changed(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None
     ) -> None:
@@ -2501,12 +2559,14 @@ class State:
                     cur=cur,
                 )
 
+    # drop history entries older than the horizon
     @staticmethod
     def _prune_history(dq: deque, now_ts: int, horizon: int) -> None:
         cutoff = max(0, int(now_ts) - int(horizon))
         while dq and int(dq[0].get("timestamp", 0)) < cutoff:
             dq.popleft()
 
+    # store one sampled vault balance and its usd value
     def record_vault_balance_sample(
         self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int
     ) -> None:
@@ -2559,6 +2619,7 @@ class State:
                 usd_value=Decimal(str(usd_value)),
             )
 
+    # replay cached logs to rebuild pool market and vault state
     def rebuild_aux_from_cached_logs(
         self,
         batch_size: int = 2000,

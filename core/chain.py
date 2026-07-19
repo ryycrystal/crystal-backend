@@ -16,6 +16,7 @@ load_env()
 decimal.getcontext().prec = 100
 
 
+# decode an erc20 transfer log into from to and amount
 def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
     from_addr = lp.to_addr(tops[1]) if len(tops) > 1 else "0x" + "0" * 40
     to_addr = lp.to_addr(tops[2]) if len(tops) > 2 else "0x" + "0" * 40
@@ -35,6 +36,7 @@ def _parse_transfer(addr: str, tops: list[str], data_no0x: str) -> dict:
     }
 
 
+# read one contract address from env falling back to a default
 def _addr_from_env(default: str, *names: str) -> str:
     for name in names:
         val = os.getenv(name)
@@ -43,6 +45,7 @@ def _addr_from_env(default: str, *names: str) -> str:
     return default.lower()
 
 
+# read a comma separated address list from env
 def _addrs_from_env(defaults: list[str], *names: str) -> list[str]:
     values: list[str] = []
     for name in names:
@@ -167,10 +170,12 @@ PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
 NADFUN_V2_DIRECT_TRADE_TOPICS = {n.V2_BUY_TOPIC, n.V2_SELL_TOPIC}
 
 
+# true if the address belongs to any known nadfun contract
 def is_nadfun_address(addr: str) -> bool:
     return (addr or "").lower() in NADFUN_ADDRS
 
 
+# last 20 bytes of a topic as a lowercase address
 def _topic_addr(topic: str) -> str:
     if not isinstance(topic, str):
         return ""
@@ -180,6 +185,7 @@ def _topic_addr(topic: str) -> str:
     return ("0x" + hex_topic[-40:]).lower()
 
 
+# learn pool addresses announced by creation and migration events
 def register_dynamic_addresses_from_log(raw_log: dict) -> None:
     topics = raw_log.get("topics") or []
     if not topics:
@@ -200,6 +206,7 @@ def register_dynamic_addresses_from_log(raw_log: dict) -> None:
         ADDRS.append(pool)
 
 
+# gate a decoded log by whether its emitter is allowed for that tag
 def accepts_log_for_indexing(tag: str, addr: str) -> bool:
     addr = (addr or "").lower()
     if tag in ROUTER_EVENT_TAGS:
@@ -223,6 +230,7 @@ _last_rpc_ts = 0.0
 _rpc_lock = asyncio.Lock()
 
 
+# mark one in flight request as finished
 async def ack(ws, rid, stash: list[dict] | None = None):
     deferred: list[dict] = []
     while True:
@@ -240,6 +248,7 @@ async def ack(ws, rid, stash: list[dict] | None = None):
             deferred.append(resp)
 
 
+# block until the request budget allows another call
 async def rate_gate() -> None:
     global _last_rpc_ts
     async with _rpc_lock:

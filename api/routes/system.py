@@ -10,13 +10,13 @@ from api.api import _mon_price_usd, storage
 router = APIRouter()
 
 
-# Return the cached MON/USD reference price used by the backend
+# the cached mon usd reference price used across the backend
 @router.get("/debug/mon_price")
 def get_mon_price() -> Decimal:
     return _mon_price_usd()
 
 
-# Return the last processed chain block for indexer sync checks
+# last processed chain block, for sync checks
 @router.get("/sync")
 def get_sync_status() -> dict[str, Any]:
     last_block = storage.get_last_processed_block()
@@ -25,7 +25,7 @@ def get_sync_status() -> dict[str, Any]:
     }
 
 
-# Return a simple health response for uptime checks
+# simple health response for uptime checks
 @router.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True}

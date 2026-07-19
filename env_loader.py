@@ -6,6 +6,7 @@ from pathlib import Path
 _LOADED = False
 
 
+# load key value pairs from a dotenv file into the environment
 def load_env(path: str = ".env") -> None:
     global _LOADED
     if _LOADED:

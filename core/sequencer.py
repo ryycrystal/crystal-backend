@@ -11,7 +11,9 @@ from core import oracle
 from core.storage import db_cursor
 
 
+# buffers one block worth of writes so they flush in a single round trip
 class BatchAccumulator:
+    # start with empty buffers
     def __init__(self):
         self.trades: list[tuple] = []
         self.token_updates: dict[str, dict] = {}
@@ -20,6 +22,7 @@ class BatchAccumulator:
         self.ohlcv_data: list[tuple] = []
         self.snipers: list[tuple[str, str]] = []
 
+    # queue one trade row and its token aggregate update
     def add_trade(
         self,
         block_number: int,
@@ -54,9 +57,11 @@ class BatchAccumulator:
             )
         )
 
+    # record the latest aggregate state for a token
     def set_token_state(self, token: str, state_dict: dict):
         self.token_updates[token.lower()] = state_dict
 
+    # accumulate per user volume and realized pnl
     def add_user_delta(self, address: str, native_amount: int, realized_delta, trade_count_delta: int = 1):
         addr = address.lower()
         if addr not in self.user_updates:
@@ -70,6 +75,7 @@ class BatchAccumulator:
         u["realized_delta"] += Decimal(realized_delta)
         u["trade_count_delta"] += trade_count_delta
 
+    # accumulate one users position change for a token
     def add_position_delta(
         self,
         user_address: str,
@@ -111,14 +117,17 @@ class BatchAccumulator:
         p["sell_count_delta"] += int(sell_count_delta)
         p["last_price_native"] = last_price_native
 
+    # queue an ohlcv bar update at one resolution
     def add_ohlcv(self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int):
         self.ohlcv_data.append(
             (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount))
         )
 
+    # queue a sniper row for a token
     def add_sniper(self, token: str, user: str):
         self.snipers.append((token.lower(), user.lower()))
 
+    # write every buffered row and clear the buffers
     def flush(self, cur):
         storage.insert_trades_batch(self.trades, cur)
         storage.update_tokens_batch(self.token_updates, cur)
@@ -135,7 +144,9 @@ class BatchAccumulator:
         self.snipers.clear()
 
 
+# orders incoming logs by block and dispatches them into state
 class Sequencer:
+    # bind the sequencer to the shared indexer state
     def __init__(self, global_state: _st.State) -> None:
         self._state = global_state
         self._logs_by_block: dict[int, list[dict]] = defaultdict(list)
@@ -145,12 +156,15 @@ class Sequencer:
         self._block_timestamps: dict[int, int] = {}
         self._missing_ts_warned: set[int] = set()
 
+    # register a callback fired after each processed block
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
 
+    # set the next block the sequencer expects
     def set_next_block(self, blk: int) -> None:
         self._next_block = blk
 
+    # drop buffered logs and rewind to a block
     def reset_pending(self, next_block: int | None = None) -> None:
         self._logs_by_block.clear()
         self._ready_blocks.clear()
@@ -158,11 +172,13 @@ class Sequencer:
         self._missing_ts_warned.clear()
         self._next_block = next_block
 
+    # log index of a raw log as an int
     @staticmethod
     def _log_index(raw_log: dict) -> int:
         li = raw_log.get("logIndex")
         return int(li, 16) if isinstance(li, str) else int(li or 0)
 
+    # buffer one raw log for its block
     def add_log(self, raw_log: dict) -> None:
         blk = int(raw_log["blockNumber"], 16) if isinstance(raw_log["blockNumber"], str) else raw_log["blockNumber"]
         if self._next_block is not None and blk < self._next_block:
@@ -175,6 +191,7 @@ class Sequencer:
             self._next_block = blk
         self._drain()
 
+    # mark a block as seen and record its timestamp
     def note_block(self, blk: int, block_timestamp: int | None = None) -> None:
         if block_timestamp is not None:
             self._block_timestamps[int(blk)] = int(block_timestamp)
@@ -183,6 +200,7 @@ class Sequencer:
             self._next_block = blk
         self._drain()
 
+    # process every buffered block that is ready in order
     def _drain(self) -> None:
         while self._next_block is not None and self._next_block in self._ready_blocks:
             logs = self._logs_by_block.pop(self._next_block, [])
@@ -196,6 +214,7 @@ class Sequencer:
                     print(f"[SQ] Persist Error: {e!r}")
             self._next_block += 1
 
+    # index a blocks erc20 transfers by token and tx for user resolution
     def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
         transfer_maps: dict[tuple[str, str], dict] = {}
 
@@ -245,6 +264,7 @@ class Sequencer:
 
         return transfer_maps
 
+    # find the real trader behind a pool swap using its transfers
     def _resolve_trade_user(
         self,
         txh: str,
@@ -378,6 +398,7 @@ class Sequencer:
 
         return fallback_user
 
+    # decide whether a pool sync belongs to a mint burn or swap
     def _classify_pool_sync_kind(self, logs: list[dict], idx: int, txh, parsed_sync: dict | None) -> str | None:
         if parsed_sync is None:
             return None
@@ -407,6 +428,7 @@ class Sequencer:
             return None
         return "mint" if nxt_tag == "PMINT" else "burn"
 
+    # best known timestamp for a log in a block
     def _timestamp_for_block_log(self, blk: int, log: dict) -> int:
         raw_ts = log.get("blockTimestamp")
         if raw_ts is None:
@@ -415,6 +437,7 @@ class Sequencer:
             return int(raw_ts, 16)
         return int(raw_ts or 0)
 
+    # fetch metadata for v2 tokens seen for the first time
     def _preload_missing_v2_tokens(self, blk: int, logs: list[dict], cur) -> None:
         v2_addr = h.NADFUN_V2_ADDR.lower()
         for log in logs:
@@ -440,6 +463,7 @@ class Sequencer:
             except Exception as e:
                 print(f"[SQ] Failed to discover nad.fun v2 token {token}: {e!r}", flush=True)
 
+    # process one block inside a transaction with reorg and idempotency guards
     def _process_block(
         self,
         blk: int,
@@ -501,9 +525,9 @@ class Sequencer:
                 block_hash = str(bh).lower()
                 break
 
+        # a re indexed block with a different hash means the chain replaced it, so
+        # drop the orphaned rows before re indexing
         def _reorg_guard(c):
-            # a block we already indexed coming back with a different hash means
-            # the chain replaced it; drop the orphaned rows before re-indexing
             if not block_hash:
                 return
             try:
@@ -513,6 +537,7 @@ class Sequencer:
             except Exception as e:
                 print(f"[SQ] reorg check failed at {blk}: {e!r}", flush=True)
 
+        # record the block and its hash once its logs are committed
         def _mark_processed(c):
             if not record_processed:
                 return
@@ -544,6 +569,7 @@ class Sequencer:
                 f"NFPEN {counts['NFPEN']} NFT {counts['NFT']} TF {counts['TF']}"
             )
 
+    # dispatch every log in a block to its handler
     def _process_block_inner(
         self, blk: int, logs: list[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None
     ):
@@ -711,6 +737,7 @@ class Sequencer:
                     parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
                 )
 
+    # process a range of blocks and report per event counts
     def process_chunk(
         self,
         chunk_start: int,
