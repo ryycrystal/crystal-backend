@@ -806,3 +806,83 @@ def test_nadfun_sell_volume_is_gross(monkeypatch):
 
     assert lp.native_volume == vol_after_buy + gross, "nad.fun sells must record gross"
     assert lp.native_volume != vol_after_buy + net
+
+
+# a pool swap must not crash the block: prev_native_reserve is only assigned on the
+# curve path, so reading it unconditionally for the fee took the indexer down in prod
+def test_pool_swap_trade_does_not_crash_on_missing_curve_reserve(monkeypatch):
+    import models
+
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    pool = "0x697be25fe455c09b1aa6fccba95a028bad57ba5c"
+    st.v3_pools[pool] = models.PoolInfo(pool=pool, token_addr=TOKEN, native_addr=WMON, token_is_0=True)
+    lp = st.launchpad_tokens[TOKEN]
+    lp.source = 1
+    lp.curve_native_reserve = 0
+
+    ev = {
+        "pool": pool,
+        "user": USER,
+        "amount0": -(50 * 10**18),
+        "amount1": 2 * 10**18,
+        "sqrt_price_x96": 0,
+    }
+
+    # before the fix this raised UnboundLocalError and killed the whole block
+    st.apply_launchpad_trade(ev, 200, 2000, "0xpoolswap", 0, pool)
+
+    assert lp.tx_count >= 1, "the pool swap should have been recorded"
+
+
+def test_recovered_token_takes_the_source_of_the_emitting_contract(monkeypatch):
+    """A trade for a token whose TokenCreated was never seen used to be recovered
+    as native regardless of origin. A nad.fun curve measured against native
+    geometry understates supply by ~19% and nothing surfaces it."""
+    from core import chain as chain_mod
+    from core.adapters import nadfun as nf
+
+    monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "REC")
+
+    cases = [
+        (ROUTER, 0),
+        (chain_mod.NADFUN_ADDR, nf.SOURCE_V1),
+        (chain_mod.NADFUN_V2_ADDR, nf.SOURCE_V2),
+    ]
+    for emitter, expected in cases:
+        st = _fresh_state(monkeypatch)
+        tok = f"0xbbbb0000000000000000000000000000000{expected:05d}"
+        lp = st._ensure_launchpad_token_locked(tok, 100, 1000, log_addr=emitter)
+        assert lp is not None
+        assert lp.source == expected, f"{emitter} recovered as source {lp.source}, expected {expected}"
+
+
+def test_recovered_nadfun_token_measures_against_its_own_geometry(monkeypatch):
+    """The concrete failure: the same reserve read as native vs v2."""
+    from core import chain as chain_mod
+    from core.adapters import nadfun as nf
+
+    monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "REC")
+    st = _fresh_state(monkeypatch)
+    tok = "0xbbbb000000000000000000000000000000009999"
+
+    token_reserve = 739_907_148_069_805_834_792_342_062  # real MONISTABLE reserve
+    ev = {
+        "token": tok,
+        "user": USER,
+        "is_buy": True,
+        "amount_in": 10**18,
+        "amount_out": 10**20,
+        "native_reserve": 100_336_684_398_399_559_704_313,
+        "token_reserve": token_reserve,
+    }
+    st.apply_launchpad_trade(ev, 101, 1001, "0xrec", 0, chain_mod.NADFUN_V2_ADDR)
+
+    lp = st.launchpad_tokens[tok]
+    assert lp.source == nf.SOURCE_V2
+    expected = (nf.V2_VIRTUAL_TOKEN_0 - token_reserve) // 10**18
+    assert lp.circulating_supply == expected == 320_661_851
+    # prod still carries 320,661,852 here: the accumulated value, one token off
+    # what the reserve actually says, which is the drift derivation removes
+    assert lp.circulating_supply != (10**27 - token_reserve) // 10**18 == 260_092_851

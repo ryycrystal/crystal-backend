@@ -270,18 +270,6 @@ def init_db() -> None:
         )
         cur.execute(
             """
-            UPDATE launchpad_positions
-            SET cost_basis_native = GREATEST(
-                    native_spent
-                    - CASE WHEN token_bought > 0
-                           THEN native_spent * LEAST(token_sold, token_bought) / token_bought
-                           ELSE 0 END,
-                    0)
-            WHERE cost_basis_native = 0 AND native_spent > 0;
-            """
-        )
-        cur.execute(
-            """
             CREATE INDEX IF NOT EXISTS idx_positions_token_balance
             ON launchpad_positions (token, balance_token DESC)
             WHERE balance_token > 0;
@@ -764,3 +752,47 @@ def init_db() -> None:
               AND EXISTS (SELECT 1 FROM nadfun_v2_tokens v WHERE v.token = t.token);
             """
         )
+
+
+# one time cost basis backfill, kept out of init_db so a table wide UPDATE never
+# runs inside the DDL sequence where it can deadlock against a concurrent reader
+def backfill_cost_basis() -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM launchpad_positions
+            WHERE cost_basis_native = 0 AND native_spent > 0
+              AND ROUND(GREATEST(native_spent - CASE WHEN token_bought > 0 THEN native_spent * LEAST(token_sold, token_bought) / token_bought ELSE 0 END, 0)) > 0
+            LIMIT 1;
+            """
+        )
+        if cur.fetchone() is None:
+            return
+
+    while True:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                WITH batch AS (
+                    SELECT user_address, token
+                    FROM launchpad_positions
+                    WHERE cost_basis_native = 0 AND native_spent > 0
+                      AND ROUND(GREATEST(native_spent - CASE WHEN token_bought > 0 THEN native_spent * LEAST(token_sold, token_bought) / token_bought ELSE 0 END, 0)) > 0
+                    LIMIT 5000
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE launchpad_positions p
+                SET cost_basis_native = GREATEST(
+                        p.native_spent
+                        - CASE WHEN p.token_bought > 0
+                               THEN p.native_spent * LEAST(p.token_sold, p.token_bought) / p.token_bought
+                               ELSE 0 END,
+                        0)
+                FROM batch b
+                WHERE p.user_address = b.user_address AND p.token = b.token;
+                """
+            )
+            done = cur.rowcount or 0
+        if done <= 0:
+            return
+        print(f"[DB] cost basis backfill: {done} positions", flush=True)

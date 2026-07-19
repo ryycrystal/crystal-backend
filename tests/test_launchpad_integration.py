@@ -924,3 +924,140 @@ def test_nadfun_v2_tokens_backfill_to_source_2(db):
 
     _x(db, "DELETE FROM nadfun_v2_tokens WHERE token=%s", (v2_token,))
     _x(db, "DELETE FROM launchpad_tokens WHERE token = ANY(%s)", ([v1_token, v2_token],))
+
+
+# holders must be searchable across the whole set, not just the visible page
+def test_holders_endpoint_searches_and_paginates_server_side(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    from modules import launchpad as lp_mod
+
+    # 60 holders so the old hard 50 cap would hide some
+    for i in range(60):
+        user = "0x" + f"{i:040x}"
+        ev = lp_mod.parse_launchpad_trade(
+            _router(),
+            ["0x", _ta(TOKEN), _ta(user)],
+            _lt_data(True, 10**18, (i + 1) * 10**18, (1100 + i) * 10**18, _reserve_for((1100 + i) * 10**18)),
+        )
+        st.apply_launchpad_trade(ev, 101 + i, 1001 + i, f"0xh{i}", 0, _router())
+        _x(
+            db,
+            "UPDATE launchpad_positions SET balance_token = %s WHERE user_address = %s AND token = %s",
+            ((i + 1) * 10**18, user, TOKEN),
+        )
+
+    c = _api_client()
+
+    body = c.get(f"/holders/{TOKEN}", params={"limit": 50}).json()
+    assert body["total"] == 60, "total must count every holder, not the page"
+    assert body["count"] == 50
+    balances = [int(h["balance_token"]) for h in body["holders"]]
+    assert balances == sorted(balances, reverse=True), "top holders means largest first"
+
+    # the 60th holder is unreachable in the first page but must be findable
+    page2 = c.get(f"/holders/{TOKEN}", params={"limit": 50, "offset": 50}).json()
+    assert page2["count"] == 10
+
+    # server side search reaches holders outside the first page
+    target = "0x" + f"{3:040x}"
+    hit = c.get(f"/holders/{TOKEN}", params={"q": target[-6:]}).json()
+    assert hit["total"] >= 1
+    assert any(h["account"]["id"] == target for h in hit["holders"])
+
+    # a search with no matches is distinguishable from a token with no holders
+    miss = c.get(f"/holders/{TOKEN}", params={"q": "zzzzzz"}).json()
+    assert miss["total"] == 0 and miss["count"] == 0
+
+
+# the lock must wait out a rolling deploy rather than exiting on first refusal
+def test_advisory_lock_retries_before_giving_up(db):
+    import core.storage as storage
+    from core.storage import base as sb
+
+    held = storage.acquire_indexer_lock()
+    try:
+        t0 = time.monotonic()
+        try:
+            sb.acquire_indexer_lock(wait_seconds=4)
+            raise AssertionError("second acquire should not succeed while held")
+        except RuntimeError as exc:
+            assert "still holds" in str(exc)
+        waited = time.monotonic() - t0
+        assert waited >= 3.5, f"should have retried for ~4s, only waited {waited:.1f}s"
+    finally:
+        storage.release_indexer_lock(held)
+
+    # once released it is takeable again
+    again = storage.acquire_indexer_lock(wait_seconds=5)
+    storage.release_indexer_lock(again)
+
+
+def test_cost_basis_backfill_terminates_on_fully_sold_positions(db):
+    """A fully sold position has a correct basis of zero, which is the same value
+    the predicate selects on -- it was rewritten and re-selected forever, so the
+    indexer never got past the backfill and stopped indexing entirely."""
+    import core.storage as storage
+
+    rows = [
+        # (user, token, native_spent, token_bought, token_sold, expect_basis_zero)
+        ("0xu1", "0xt1", 10**18, 100, 100, True),  # fully sold -> basis 0
+        ("0xu2", "0xt2", 10**18, 100, 200, True),  # oversold   -> basis 0
+        ("0xu3", "0xt3", 10**18, 100, 0, False),  # untouched  -> basis = spend
+        ("0xu4", "0xt4", 10**18, 100, 50, False),  # half sold  -> partial basis
+    ]
+    for user, tok, spent, bought, sold, _ in rows:
+        _x(
+            db,
+            """
+            INSERT INTO launchpad_positions
+                (user_address, token, native_spent, token_bought, token_sold, cost_basis_native)
+            VALUES (%s, %s, %s, %s, %s, 0)
+            ON CONFLICT (user_address, token) DO UPDATE SET
+                native_spent = EXCLUDED.native_spent,
+                token_bought = EXCLUDED.token_bought,
+                token_sold = EXCLUDED.token_sold,
+                cost_basis_native = 0
+            """,
+            (user, tok, spent, bought, sold),
+        )
+
+    # without the guard this never returns; a worker bounds it so the suite fails
+    # instead of hanging the run
+    import threading
+
+    done = threading.Event()
+    err = []
+
+    def run():
+        try:
+            storage.backfill_cost_basis()
+        except Exception as exc:
+            err.append(exc)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert done.wait(timeout=30), "backfill did not terminate: it re-selects rows whose basis is legitimately 0"
+    assert not err, err
+
+    got = dict(
+        ((u, tk), int(b))
+        for u, tk, b in _q(
+            db,
+            "SELECT user_address, token, cost_basis_native FROM launchpad_positions WHERE user_address = ANY(%s)",
+            ([r[0] for r in rows],),
+        )
+    )
+    for user, tok, spent, bought, sold, zero in rows:
+        if zero:
+            assert got[(user, tok)] == 0, f"{user} fully sold, basis must be 0"
+        else:
+            assert got[(user, tok)] > 0, f"{user} still holds, basis must be positive"
+
+    # second run is a no-op now that nothing matches
+    storage.backfill_cost_basis()
+
+    _x(db, "DELETE FROM launchpad_positions WHERE user_address = ANY(%s)", ([r[0] for r in rows],))

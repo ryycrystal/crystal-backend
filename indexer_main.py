@@ -201,6 +201,7 @@ async def main() -> None:
             print("[IDX] Acquired Postgres advisory indexer lock", flush=True)
 
         storage.init_db()
+        storage.backfill_cost_basis()
 
         if args.mode == "bootstrap":
             if _dump_exists(args.dump_dir):
