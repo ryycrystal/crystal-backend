@@ -23,14 +23,8 @@ getcontext().prec = 100
 _NADFUN_CURVE_SUPPLY = 793_100_000 * 10**18
 
 
+# derive phase and progress from stored fields so they cannot drift from the data
 def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict[str, Any]:
-    """Derive lifecycle phase for API records.
-
-    Computed from stored fields rather than persisted, so it can never drift from
-    the data it describes. nad.fun hands liquidity to an external venue when it
-    completes, so its terminal state is MIGRATED; native tokens graduate onto a
-    Crystal market and stop at GRADUATED.
-    """
     src = int(source or 0)
     curve_supply = _NATIVE_CURVE_SUPPLY if src == 0 else _NADFUN_CURVE_SUPPLY
     curve = CurveState(
@@ -63,6 +57,7 @@ LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 
 
+# format a decimal as a trimmed plain string, 0 when empty or invalid
 def _fmt(value) -> str:
     if value is None:
         return "0"
@@ -81,6 +76,7 @@ def _fmt(value) -> str:
     return s if s else "0"
 
 
+# format a usd decimal to 8dp as a trimmed plain string
 def _fmt_usd(value) -> str:
     if value is None:
         return "0"
@@ -99,6 +95,7 @@ def _fmt_usd(value) -> str:
     return s if s else "0"
 
 
+# shape one crystal pool row for the api
 def _crystal_pool_row_to_api(row) -> dict[str, Any]:
     (
         market,
@@ -176,6 +173,7 @@ _internal_addrs_cache: set[str] | None = None
 _internal_addrs_ts: float = 0
 
 
+# cached set of addresses excluded from holder counts
 def _internal_addrs() -> set[str]:
     global _internal_addrs_cache, _internal_addrs_ts
     now = time.time()
@@ -202,6 +200,7 @@ _nadfun_v2_cache: set[str] | None = None
 _nadfun_v2_ts: float = 0
 
 
+# cached set of nadfun tokens on the v2 curve
 def _nadfun_v2_set() -> set[str]:
     global _nadfun_v2_cache, _nadfun_v2_ts
     now = time.time()
@@ -213,6 +212,7 @@ def _nadfun_v2_set() -> set[str]:
     return s
 
 
+# 1 or 2 for a nadfun token, 0 for any other source
 def _nadfun_version(token: str, source) -> int:
     if int(source or 0) != 1:
         return 0
@@ -223,11 +223,14 @@ from collections import OrderedDict
 from functools import wraps
 
 
+# small in process lru cache with per entry expiry
 class TTLCache:
+    # start empty with a max entry count
     def __init__(self, max_size: int = 1000):
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
 
+    # value and hit flag, missing once expired
     def get(self, key: str) -> tuple[Any, bool]:
         if key not in self._cache:
             return None, False
@@ -238,6 +241,7 @@ class TTLCache:
         self._cache.move_to_end(key)
         return value, True
 
+    # store a value with a ttl, evicting the oldest when full
     def set(self, key: str, value: Any, ttl_seconds: int) -> None:
         if key in self._cache:
             del self._cache[key]
@@ -245,9 +249,11 @@ class TTLCache:
             self._cache.popitem(last=False)
         self._cache[key] = (value, time.time() + ttl_seconds)
 
+    # drop one key
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)
 
+    # drop every entry
     def clear(self) -> None:
         self._cache.clear()
 
@@ -255,9 +261,12 @@ class TTLCache:
 _cache = TTLCache(max_size=2000)
 
 
+# decorator caching an endpoint result under a prefixed key
 def ttl_cache(prefix: str, ttl_seconds: int = 60):
+    # wrap the endpoint with a cache lookup and store
     def decorator(func):
         @wraps(func)
+        # look the key up, calling through and storing on a miss
         def wrapper(*args, **kwargs):
             key_parts = [str(a) for a in args]
             if kwargs:
@@ -276,11 +285,13 @@ def ttl_cache(prefix: str, ttl_seconds: int = 60):
     return decorator
 
 
+# encode a pagination cursor as base64 json
 def _encode_cursor(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
+# decode a base64 json pagination cursor
 def _decode_cursor(cursor: str) -> dict[str, Any]:
     if cursor is None:
         raise HTTPException(400, "invalid cursor")
@@ -300,6 +311,7 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
         raise HTTPException(400, "invalid cursor")
 
 
+# read the sort key and token out of a positions cursor
 def _parse_positions_cursor(cursor: str):
     obj = _decode_cursor(cursor)
     try:
@@ -314,6 +326,7 @@ def _parse_positions_cursor(cursor: str):
         raise HTTPException(400, "invalid positions cursor")
 
 
+# read the block and log index out of a history cursor
 def _parse_history_cursor(cursor: str):
     obj = _decode_cursor(cursor)
     try:
@@ -329,6 +342,7 @@ def _parse_history_cursor(cursor: str):
         raise HTTPException(400, "invalid history cursor")
 
 
+# holder counts and dev holdings for many tokens in one query
 def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = None) -> dict[str, dict]:
     if not token_addrs:
         return {}
@@ -418,6 +432,7 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
     return result
 
 
+# serialize many tokens for list endpoints in one round trip
 def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[str, dict]:
     if not token_addrs:
         return {}
@@ -517,6 +532,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
     return token_data
 
 
+# holder count, dev holding, top10 share and top10 addresses
 def _holders_for_token(token_addr: str, creator: str | None) -> tuple[int, int, int, list[str]]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
@@ -555,6 +571,7 @@ def _holders_for_token(token_addr: str, creator: str | None) -> tuple[int, int, 
     return holder_count, dev_holding, top10_holding, top10_addresses
 
 
+# full api record for a single token
 def _serialize_token(token_addr: str) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
@@ -766,11 +783,13 @@ _PRICE_SCALE = Decimal(10**9)
 _PRICE_QUANTUM = Decimal(1).scaleb(-9)
 
 
+# price scaled to marketcap units as a string, keeping 9 decimals
 def _scaled_price(p: Any) -> str:
     scaled = (p or Decimal(0)) * _PRICE_SCALE
     return format(scaled.quantize(_PRICE_QUANTUM).normalize(), "f")
 
 
+# read stored ohlcv bars for a token at one resolution
 def _build_ohlcv_from_db(
     token_addr: str,
     bucket_seconds: int,
@@ -834,6 +853,7 @@ app.include_router(x_router)
 _mon_price_cache: tuple[float, Decimal] | None = None
 
 
+# latest mon usd price from storage
 def _mon_price_usd() -> Decimal:
     global _mon_price_cache
     now = time.time()
@@ -852,6 +872,7 @@ def _mon_price_usd() -> Decimal:
         return Decimal("0.03")
 
 
+# usd price for a quote token, mon for native equivalents
 def _quote_price_usd(quote_token: str | None) -> Decimal:
     quote = (quote_token or WMON).lower()
     if quote in NATIVE_EQUIV_QUOTES:
@@ -859,6 +880,7 @@ def _quote_price_usd(quote_token: str | None) -> Decimal:
     return Decimal(0)
 
 
+# thin a series down to at most n points spread over time
 def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
     pts = [it for it in (items or []) if it is not None]
     if max_points <= 0 or len(pts) <= max_points:

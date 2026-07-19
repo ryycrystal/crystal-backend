@@ -1,22 +1,17 @@
-"""Normalized token lifecycle.
-
-A single internal representation that every launchpad integration maps into.
-Source-specific geometry (virtual reserve offsets, supply splits, graduation
-rules) lives in that source's adapter; nothing in this module may assume a
-particular launchpad.
-
-Lifecycle:
-
-    created -> active -> graduating -> graduated [-> migrated]
-
-    created     token exists, no trades observed yet
-    active      trading on the bonding curve / vAMM
-    graduating  past GRADUATING_THRESHOLD_BPS of the curve supply
-    graduated   left the curve; trading routes to a market
-    migrated    terminal state for sources that hand liquidity to an external
-                venue after graduating (nad.fun). Native tokens never enter it:
-                they graduate onto a Crystal market and stop there.
-"""
+# normalized token lifecycle, the single internal representation every launchpad
+# integration maps into
+#
+# source specific geometry (virtual reserve offsets, supply splits, graduation
+# rules) lives in that source's adapter, nothing here may assume a launchpad
+#
+# created -> active -> graduating -> graduated [-> migrated]
+#
+#   created     token exists, no trades observed yet
+#   active      trading on the bonding curve or vamm
+#   graduating  past the graduating threshold of the curve supply
+#   graduated   left the curve, trading routes to a market
+#   migrated    terminal state for sources that hand liquidity to an external
+#               venue after graduating, native tokens never enter it
 
 from __future__ import annotations
 
@@ -25,6 +20,7 @@ from decimal import Decimal
 from enum import Enum
 
 
+# the five phases any launchpad token can be in
 class TokenPhase(str, Enum):
     CREATED = "created"
     ACTIVE = "active"
@@ -33,57 +29,47 @@ class TokenPhase(str, Enum):
     MIGRATED = "migrated"
 
 
-# A token is "graduating" once this much of the curve supply has been sold.
+# a token is graduating once this much of the curve supply has been sold
 GRADUATING_THRESHOLD_BPS = 7_500
 
 BPS_DENOMINATOR = 10_000
 
 
+# source agnostic bonding curve state in raw on chain integers
 @dataclass(frozen=True)
 class CurveState:
-    """Normalized bonding-curve state.
-
-    Adapters are responsible for expressing their own geometry in these terms.
-    ``tokens_sold`` and ``curve_supply`` are the only fields the lifecycle rules
-    depend on, which keeps progress and phase identical across sources even when
-    the underlying curves differ.
-
-    All amounts are raw on-chain integers (no decimal scaling).
-    """
-
     tokens_sold: int
     curve_supply: int
     native_reserve: int = 0
     token_reserve: int = 0
 
+    # share of curve supply sold in basis points clamped to 0 10000
     @property
     def progress_bps(self) -> int:
-        """Share of the curve supply sold, in basis points, clamped to [0, 10000]."""
         if self.curve_supply <= 0:
             return 0
         raw = (self.tokens_sold * BPS_DENOMINATOR) // self.curve_supply
         return max(0, min(BPS_DENOMINATOR, raw))
 
+    # true once past the graduating threshold
     @property
     def is_graduating(self) -> bool:
         return self.progress_bps >= GRADUATING_THRESHOLD_BPS
 
+    # true once the whole curve supply is sold
     @property
     def is_complete(self) -> bool:
         return self.curve_supply > 0 and self.tokens_sold >= self.curve_supply
 
+    # native per whole token from the reserve ratio
     @property
     def spot_price_native(self) -> Decimal:
-        """Native per whole token.
-
-        Both reserves carry the same decimal scaling, so the ratio is already a
-        per-whole-token price.
-        """
         if self.native_reserve <= 0 or self.token_reserve <= 0:
             return Decimal(0)
         return Decimal(self.native_reserve) / Decimal(self.token_reserve)
 
 
+# resolved phase plus progress for one token at one point in time
 @dataclass(frozen=True)
 class LifecycleSnapshot:
     phase: TokenPhase
@@ -91,15 +77,18 @@ class LifecycleSnapshot:
     tokens_sold: int
     curve_supply: int
 
+    # true while the token still trades on its curve
     @property
     def is_on_curve(self) -> bool:
         return self.phase in (TokenPhase.CREATED, TokenPhase.ACTIVE, TokenPhase.GRADUATING)
 
+    # progress as a 0 to 1 decimal
     @property
     def progress_ratio(self) -> Decimal:
         return Decimal(self.progress_bps) / Decimal(BPS_DENOMINATOR)
 
 
+# pick a phase, terminal states win then curve progress then trade activity
 def resolve_phase(
     *,
     curve: CurveState | None,
@@ -107,12 +96,6 @@ def resolve_phase(
     graduated: bool = False,
     migrated: bool = False,
 ) -> TokenPhase:
-    """Terminal states win, then curve progress, then trade activity.
-
-    ``graduated`` and ``migrated`` are facts reported by the adapter from chain
-    events; they are never inferred from curve progress, because a curve can sit
-    at 100% for a block before the graduation event is observed.
-    """
     if migrated:
         return TokenPhase.MIGRATED
     if graduated:
@@ -124,6 +107,7 @@ def resolve_phase(
     return TokenPhase.CREATED
 
 
+# build a full lifecycle snapshot from curve state and observed flags
 def snapshot(
     *,
     curve: CurveState | None,
@@ -133,7 +117,6 @@ def snapshot(
 ) -> LifecycleSnapshot:
     phase = resolve_phase(curve=curve, has_trades=has_trades, graduated=graduated, migrated=migrated)
     if curve is None:
-        # off the curve (or not yet observed): a graduated token is fully sold
         done = phase in (TokenPhase.GRADUATED, TokenPhase.MIGRATED)
         return LifecycleSnapshot(
             phase=phase,

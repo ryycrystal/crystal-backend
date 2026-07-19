@@ -37,6 +37,7 @@ CRYSTAL_GRADUATION_SUPPLY = _NATIVE_CURVE_SUPPLY // 10**18
 NADFUN_GRADUATION_SUPPLY = 793_100_000
 
 
+# fraction of the curve sold, using each source own curve supply
 def _graduation_pct(circulating, source) -> float:
     try:
         denom = CRYSTAL_GRADUATION_SUPPLY if int(source or 0) == 0 else NADFUN_GRADUATION_SUPPLY
@@ -45,7 +46,7 @@ def _graduation_pct(circulating, source) -> float:
         return 0.0
 
 
-# Return grouped launchpad token lists for recent created, approaching, and graduated tokens
+# grouped token lists for recently created approaching and graduated tokens
 @router.get("/tokens")
 @ttl_cache("tokens:list", ttl_seconds=3)
 def list_tokens() -> dict[str, list[dict[str, Any]]]:
@@ -114,6 +115,7 @@ def list_tokens() -> dict[str, list[dict[str, Any]]]:
     circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
     token_data = _batch_serialize_tokens(all_token_addrs, excluded)
 
+    # attach graduation progress to a serialized token
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
         if data:
@@ -136,6 +138,7 @@ def list_tokens() -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+# one query for a token core row, holders, 24h stats and creator counts
 def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> dict | None:
     excluded_list = list(excluded)
     with db_cursor() as cur:
@@ -245,10 +248,9 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
     }
 
 
-# Range-queryable trades, for chart marks that need to span more history than the
-# fixed window on /token/{addr}/{chartres} returns.
-# MUST stay registered above /token/{token_addr}/{chartres}: that route parses its
-# second segment as an int, so it would claim "trades" first and 422.
+# trades in a time range, for chart marks that span more history than the fixed
+# window returns, must stay registered above the chartres route because that route
+# parses its second segment as an int and would claim trades and 422
 @router.get("/token/{token_addr}/trades")
 def token_trades_range(
     token_addr: str,
@@ -315,7 +317,7 @@ def token_trades_range(
     }
 
 
-# Return token overview stats, holders, trades, and chart data for a launchpad token
+# token overview, holders, recent trades and chart data in one payload
 @router.get("/token/{token_addr}/{chartres}")
 def token_overview_graph(
     token_addr: str,
@@ -842,7 +844,7 @@ def token_overview_graph(
         log.info("token_overview_graph token=%s chartres=%s dt_ms=%.1f", token_addr, chartres, dt)
 
 
-# Return the legacy user portfolio summary and positions for launchpad trading activity
+# legacy user portfolio summary and positions
 @router.get("/user/{user_addr}")
 def user_portfolio(user_addr: str) -> dict[str, Any]:
     user_addr = user_addr.lower()
@@ -994,7 +996,7 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
     }
 
 
-# Return aggregated portfolio metrics for a user across launchpad positions
+# aggregated portfolio metrics for one user
 @router.get("/portfolio/{address}")
 def portfolio_summary(address: str) -> dict[str, Any]:
     user_addr = address.lower()
@@ -1053,7 +1055,7 @@ def portfolio_summary(address: str) -> dict[str, Any]:
     }
 
 
-# Return paginated portfolio positions for a user with sorting and cursor support
+# paginated portfolio positions with sorting and cursor support
 @router.get("/portfolio/{address}/positions")
 def portfolio_positions(
     address: str,
@@ -1195,7 +1197,7 @@ def portfolio_positions(
     }
 
 
-# Return paginated launchpad trade history for a user
+# paginated trade history for one user
 @router.get("/portfolio/{address}/history")
 def portfolio_history(
     address: str,
@@ -1305,7 +1307,7 @@ def portfolio_history(
     }
 
 
-# Return ranked launchpad users by PnL, volume, or winrate metrics
+# ranked users by pnl volume or winrate
 @router.get("/leaderboard")
 def leaderboard(
     search: str = Query(None, description="Filter by address prefix"),
@@ -1377,7 +1379,7 @@ def leaderboard(
     return {"users": users}
 
 
-# Return token-level stats and holder breakdown summary for a launchpad token
+# windowed volume counts and change percentages for one token
 @router.get("/stats/{token_addr}")
 def token_stats(token_addr: str) -> dict[str, Any]:
     token_addr = token_addr.lower()
@@ -1485,7 +1487,7 @@ def token_stats(token_addr: str) -> dict[str, Any]:
     return out
 
 
-# Return recent trades for one or more user addresses across launchpad tokens
+# recent trades for one or more user addresses
 @router.get("/trades/{addresses}")
 def trades_for_addresses(addresses: str) -> dict[str, Any]:
     addrs = {a.strip().lower() for a in addresses.split(",") if a.strip()}
@@ -1550,7 +1552,7 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
     }
 
 
-# Return OHLCV chart data for a launchpad token at the requested resolution
+# ohlcv bars for one token at the requested resolution
 @router.get("/chart/{token_addr}/{chartres}")
 def chart_only(
     token_addr: str,
@@ -1596,7 +1598,7 @@ def chart_only(
     }
 
 
-# Return total launchpad trading volume and trade count for a user
+# total traded volume and trade count for one user
 @router.get("/volume/{user_addr}")
 def user_volume(user_addr: str) -> dict[str, Any]:
     user_addr = user_addr.lower()
@@ -1637,7 +1639,7 @@ def user_volume(user_addr: str) -> dict[str, Any]:
     }
 
 
-# Search launchpad tokens and optionally sort the results by a ranked metric
+# search tokens by name or symbol with optional ranked sorting
 @router.get("/search/query")
 @ttl_cache("tokens:search", ttl_seconds=3)
 def search_tokens_api(

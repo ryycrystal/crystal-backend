@@ -16,6 +16,7 @@ from replay_dump import dump_bounds, replay_dump_range
 DEFAULT_START_BLOCK = 37709836
 
 
+# command line options for the indexer run modes
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crystal indexer startup coordinator")
     parser.add_argument(
@@ -55,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# rebuild in memory state and return the last processed block
 def _load_state_from_db() -> int:
     print("[IDX] Loading derived state from DB...", flush=True)
     SEQUENCER._state.rebuild_from_db()
@@ -70,12 +72,14 @@ def _load_state_from_db() -> int:
     return int(last_blk) if last_blk is not None else 0
 
 
+# true when a dump directory holds a readable manifest
 def _dump_exists(dump_dir: str | None) -> bool:
     if not dump_dir:
         return False
     return (Path(dump_dir) / "manifest.json").exists()
 
 
+# replay a block range out of an on disk log dump
 def _replay_dump(
     *,
     dump_dir: str,
@@ -119,6 +123,7 @@ def _replay_dump(
     )
 
 
+# follow the chain while writing every fetched log to disk
 async def _run_live_dump(args: argparse.Namespace, start_block: int) -> None:
     dump_args = argparse.Namespace(
         start=start_block,
@@ -149,6 +154,7 @@ async def _run_live_dump(args: argparse.Namespace, start_block: int) -> None:
             await asyncio.sleep(5.0)
 
 
+# start the live stream and its background workers
 async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     print(f"[IDX] Starting live stream from block {start_block}", flush=True)
     await nadfun.start_metadata_worker(storage)
@@ -169,6 +175,7 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     await asyncio.gather(*tasks)
 
 
+# pick the block to resume from given db state and cli overrides
 async def _live_start_block(args: argparse.Namespace, last_db: int) -> int:
     if not args.from_current_block:
         return (last_db + 1) if last_db else args.start_block
@@ -181,6 +188,7 @@ async def _live_start_block(args: argparse.Namespace, last_db: int) -> int:
     return head
 
 
+# entrypoint, dispatches to the mode named on the command line
 async def main() -> None:
     args = parse_args()
 

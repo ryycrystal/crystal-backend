@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import db_cursor
 
 
+# create every table index and column migration, safe to run repeatedly
 def init_db() -> None:
     with db_cursor() as cur:
         cur.execute(

@@ -23,31 +23,37 @@ missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
 
 
+# read one uint256 at a byte offset
 def _u256_at(buf: bytes, off: int) -> int:
     if off < 0 or (off + 32) > len(buf):
         return 0
     return int.from_bytes(buf[off : off + 32], "big")
 
 
+# abi encode a uint256
 def _abi_u256(n: int) -> bytes:
     return int(n).to_bytes(32, "big")
 
 
+# abi encode an address
 def _abi_addr(addr: str) -> bytes:
     h = str(addr or "").lower().replace("0x", "")[-40:].rjust(40, "0")
     return (b"\x00" * 12) + bytes.fromhex(h)
 
 
+# abi encode a bool
 def _abi_bool(v: bool) -> bytes:
     return _abi_u256(1 if v else 0)
 
 
+# abi encode a dynamic bytes argument
 def _abi_bytes(data: bytes) -> bytes:
     d = data or b""
     pad = (-len(d)) % 32
     return _abi_u256(len(d)) + d + (b"\x00" * pad)
 
 
+# build multicall3 aggregate3 calldata for a batch of calls
 def _encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
     elems = []
     for target, calldata in calls:
@@ -65,6 +71,7 @@ def _encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
     return "0x" + payload.hex()
 
 
+# decode multicall3 aggregate3 output into success and return bytes
 def _decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, bytes]]:
     if not isinstance(data_hex, str) or not data_hex.startswith("0x"):
         return []
@@ -95,6 +102,7 @@ def _decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, byte
     return out
 
 
+# decode a vault getbalances return into quote and base
 def _decode_vault_get_balances_return(ret: bytes) -> tuple[int, int] | None:
     if not isinstance(ret, (bytes, bytearray)):
         return None
@@ -103,6 +111,7 @@ def _decode_vault_get_balances_return(ret: bytes) -> tuple[int, int] | None:
     return (quote_bal, base_bal)
 
 
+# sample vault balances one rpc call at a time
 async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
     for vaddr in vaults:
         try:
@@ -123,6 +132,7 @@ async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num:
             continue
 
 
+# sample every vault balance in one multicall, falling back to serial
 async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
     for i in range(0, len(vaults), VAULT_SAMPLER_MULTICALL_CHUNK):
         chunk = vaults[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
@@ -149,12 +159,14 @@ async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_n
             await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)
 
 
+# record a block whose logs still need fetching
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
         missing_set.add(blk)
 
 
+# drop missing block entries that are older than the retention window
 def _clear_stale_blocks(current_head: int):
     global missing_blocks, missing_set
     seq_next = SEQUENCER._next_block
@@ -173,6 +185,7 @@ def _clear_stale_blocks(current_head: int):
     missing_set = new_set
 
 
+# fetch and queue every indexed log for one block
 async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) -> bool:
     try:
         logs = await backfill.fetch_logs_http(blk, blk)
@@ -213,6 +226,7 @@ async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) ->
     return True
 
 
+# background loop that backfills blocks the stream missed
 async def _gap_worker(event_counts, should_exit_flag: list):
     while not should_exit_flag[0]:
         if not missing_blocks:
@@ -330,6 +344,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             await asyncio.sleep(5.0)
 
 
+# one websocket session, subscribing to heads and draining logs until it drops
 async def _stream_once(prev_last_head: int | None) -> int | None:
     connect_kwargs = dict(
         ping_interval=20,
@@ -369,6 +384,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         last_head_block_ts: int | None = None
         first_head_seen = False
 
+        # force a reconnect when no new head arrives within the timeout
         async def watchdog():
             nonlocal last_head_ts, last_head_num
             while not should_exit[0]:
@@ -491,6 +507,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         return last_head_num
 
 
+# follow the chain forever, reconnecting whenever the socket drops
 async def stream_logs(start_block: int | None = None):
     last_seen = None
     delay = 0.5
@@ -514,6 +531,7 @@ async def stream_logs(start_block: int | None = None):
         delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
 
 
+# periodically snapshot vault balances so account value has history
 async def vault_sampler(state):
     while True:
         try:
@@ -557,8 +575,8 @@ REORG_CHECK_INTERVAL = 20
 REORG_CHECK_DEPTH = 32
 
 
+# rebuild state for a block range after a rollback
 async def _reindex_range(frm: int, to: int) -> None:
-    """Re-feed a block range through the sequencer after a rollback."""
     if to < frm:
         return
     logs = await backfill.fetch_logs_http(frm, to)
@@ -596,16 +614,10 @@ async def _reindex_range(frm: int, to: int) -> None:
         SEQUENCER.note_block(blk, block_timestamp=blk_ts)
 
 
+# catch reorgs the per block guard misses by walking the indexed tail newest first
+# and comparing stored hashes against the chain, a reorg replaces a contiguous
+# suffix so the first match ends the scan
 async def reorg_watcher(state):
-    """Catch reorgs the per-block guard cannot see.
-
-    The guard in _process_block only fires when an already-indexed block is
-    delivered again. If the indexer simply advances past a reorged range it never
-    re-reads those blocks, so orphaned rows would persist forever. This walks the
-    indexed tail newest-first and compares stored hashes against the chain; a
-    reorg replaces a contiguous suffix, so the first match ends the scan (the
-    common case costs one RPC call).
-    """
     while True:
         await asyncio.sleep(REORG_CHECK_INTERVAL)
         try:
