@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from urllib.parse import quote
@@ -92,23 +93,40 @@ def _get_pool() -> ThreadedConnectionPool:
 
 
 # take the postgres advisory lock so only one indexer runs at a time
-def acquire_indexer_lock() -> psycopg2.extensions.connection:
+def acquire_indexer_lock(wait_seconds: float = 90.0) -> psycopg2.extensions.connection:
     pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        conn.autocommit = True
-        cur = conn.cursor()
+    deadline = time.monotonic() + max(wait_seconds, 0.0)
+    attempt = 0
+
+    while True:
+        attempt += 1
+        conn = pool.getconn()
         try:
-            cur.execute("SELECT pg_try_advisory_lock(%s);", (_ADVISORY_LOCK_KEY,))
-            row = cur.fetchone()
-            if not row or not bool(row[0]):
-                raise RuntimeError("[DB] Another indexer already holds the advisory lock")
-        finally:
-            cur.close()
-        return conn
-    except Exception:
+            conn.autocommit = True
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT pg_try_advisory_lock(%s);", (_ADVISORY_LOCK_KEY,))
+                row = cur.fetchone()
+                got = bool(row and row[0])
+            finally:
+                cur.close()
+            if got:
+                if attempt > 1:
+                    print(f"[DB] advisory lock acquired after {attempt} attempts", flush=True)
+                return conn
+        except Exception:
+            pool.putconn(conn)
+            raise
+
         pool.putconn(conn)
-        raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"[DB] Another indexer still holds the advisory lock after {wait_seconds:g}s")
+        print(
+            f"[DB] advisory lock held by another indexer, retrying ({remaining:.0f}s left)",
+            flush=True,
+        )
+        time.sleep(min(3.0, max(remaining, 0.1)))
 
 
 # release the advisory lock and return its connection to the pool

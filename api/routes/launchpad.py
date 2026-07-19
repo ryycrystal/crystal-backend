@@ -53,6 +53,110 @@ def _graduation_pct(circulating, source) -> float:
         return 0.0
 
 
+# paginated holders for one token, searchable by address across the whole set
+@router.get("/holders/{token_addr}")
+def token_holders(
+    token_addr: str,
+    q: str = Query("", description="address substring, matched server side"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("balance", pattern="^(balance|pnl)$"),
+) -> dict[str, Any]:
+    token_addr = token_addr.lower()
+    excluded = _internal_addrs()
+    needle = (q or "").strip().lower()
+
+    where = ["token = %s", "balance_token > 0", "user_address <> ALL(%s)"]
+    params: list[Any] = [token_addr, list(excluded)]
+    if needle:
+        where.append("user_address LIKE %s")
+        params.append(f"%{needle}%")
+    clause = " AND ".join(where)
+
+    order = "balance_token DESC" if sort == "balance" else "total_pnl_native DESC"
+
+    with db_cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM launchpad_positions WHERE {clause}", tuple(params))
+        row = cur.fetchone()
+        total = int(row[0]) if row else 0
+
+        cur.execute(
+            f"""
+            SELECT user_address, balance_token, native_spent, native_received,
+                   realized_pnl_native, unrealized_pnl_native, total_pnl_native,
+                   trade_count, buy_count, sell_count, token_bought, token_sold
+            FROM launchpad_positions
+            WHERE {clause}
+            ORDER BY {order}
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params + [int(limit), int(offset)]),
+        )
+        rows = cur.fetchall()
+
+    core = _get_token_core_stats(token_addr, int(time.time()) - 86400, excluded)
+    last_price_native = (core or {}).get("last_price_native") or Decimal(0)
+    quote_price_usd = _quote_price_usd((core or {}).get("quote_token"))
+    symbol = (core or {}).get("symbol") or ""
+    name = (core or {}).get("name") or ""
+
+    holders: list[dict[str, Any]] = []
+    for (
+        user_address,
+        balance_token,
+        native_spent,
+        native_received,
+        realized_pnl_native,
+        unrealized_pnl_native,
+        total_pnl_native,
+        trade_count,
+        buy_count,
+        sell_count,
+        token_bought,
+        token_sold,
+    ) in rows:
+        balance_token = int(balance_token or 0)
+        realized_pnl = realized_pnl_native or Decimal(0)
+        unrealized_pnl = unrealized_pnl_native or Decimal(0)
+        total_pnl = total_pnl_native or (realized_pnl + unrealized_pnl)
+        current_value_native = Decimal(balance_token) * last_price_native
+
+        holders.append(
+            {
+                "account": {"id": user_address},
+                "token": token_addr,
+                "symbol": symbol,
+                "name": name,
+                "balance_token": str(balance_token),
+                "balance_native": _fmt(current_value_native),
+                "balance_usd": _fmt_usd(current_value_native * quote_price_usd / (Decimal(10) ** 18))
+                if quote_price_usd > 0
+                else "0",
+                "native_spent": str(int(native_spent or 0)),
+                "native_received": str(int(native_received or 0)),
+                "realized_pnl_native": _fmt(realized_pnl),
+                "unrealized_pnl_native": _fmt(unrealized_pnl),
+                "total_pnl_native": _fmt(total_pnl),
+                "trade_count": int(trade_count or 0),
+                "buy_count": int(buy_count or 0),
+                "sell_count": int(sell_count or 0),
+                "tokenBought": str(int(token_bought or 0)),
+                "tokenSold": str(int(token_sold or 0)),
+            }
+        )
+
+    return {
+        "token": token_addr,
+        "query": needle,
+        "sort": sort,
+        "limit": int(limit),
+        "offset": int(offset),
+        "total": total,
+        "count": len(holders),
+        "holders": holders,
+    }
+
+
 # grouped token lists for recently created approaching and graduated tokens
 @router.get("/tokens")
 @ttl_cache("tokens:list", ttl_seconds=3)

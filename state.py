@@ -788,10 +788,20 @@ class State:
         return bool(known) and known.lower() != block_hash.lower()
 
     # stub a native token whose tokencreated was never seen
-    def _ensure_native_launchpad_token_locked(self, token: str, blk: int, ts: int, cur=None):
+    def _ensure_launchpad_token_locked(self, token: str, blk: int, ts: int, log_addr: str = "", cur=None):
         tok = (token or "").lower()
         if not tok:
             return None
+
+        # the emitting contract decides the source, assuming native would measure
+        # a nad.fun curve against native geometry and understate supply silently
+        src = (log_addr or "").lower()
+        if src == h.NADFUN_V2_ADDR:
+            source = nadfun_geo.SOURCE_V2
+        elif h.is_nadfun_address(src):
+            source = nadfun_geo.SOURCE_V1
+        else:
+            source = 0
 
         name = _fetch_token_string(tok, _ERC20_NAME_SELECTOR)
         symbol = _fetch_token_string(tok, _ERC20_SYMBOL_SELECTOR)
@@ -810,7 +820,7 @@ class State:
         )
         lp.created_block = int(blk)
         lp.created_at = int(ts or 0)
-        lp.source = 0
+        lp.source = source
         lp.quote_token = WMON
         self.launchpad_tokens[tok] = lp
 
@@ -837,7 +847,7 @@ class State:
             pass
 
         print(
-            f"[State] recovered native launchpad token {tok} from a trade at block {blk} "
+            f"[State] recovered source-{source} launchpad token {tok} from a trade at block {blk} "
             f"(TokenCreated not seen) name={name!r} symbol={symbol!r}",
             flush=True,
         )
@@ -961,12 +971,13 @@ class State:
                     price_native = Decimal(0)
 
             self._basis_reset_if_new_block(blk)
+            prev_native_reserve = 0
 
             lp = self.launchpad_tokens.get(token)
             if lp is None:
                 if is_pool_swap:
                     return
-                lp = self._ensure_native_launchpad_token_locked(token, blk, ts, cur=cur)
+                lp = self._ensure_launchpad_token_locked(token, blk, ts, log_addr=_log_addr, cur=cur)
                 if lp is None:
                     return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
