@@ -673,3 +673,136 @@ def test_pinned_cache_without_timestamp_never_expires(monkeypatch):
 
     monkeypatch.setattr(state, "_eth_call", boom)
     assert state._fetch_launchpad_initial_native_supply() == V0
+
+
+def _nadfun_trade(st, token, source, token_reserve, native_reserve, blk, ts, txh, is_buy=True):
+    ev = {
+        "token": token,
+        "user": USER,
+        "is_buy": is_buy,
+        "amount_in": 10**18,
+        "amount_out": 10**20,
+        "native_reserve": native_reserve,
+        "token_reserve": token_reserve,
+    }
+    st.apply_launchpad_trade(ev, blk, ts, txh, 0, ROUTER)
+    return ev
+
+
+def _seed_nadfun_token(st, token, source):
+    import models as models_mod
+
+    lp = models_mod.LaunchpadToken(
+        token=token,
+        creator=CREATOR,
+        name="n",
+        symbol="s",
+        metadata_cid="",
+        description="",
+        social1="",
+        social2="",
+        social3="",
+        social4="",
+    )
+    lp.source = source
+    lp.created_block = 100
+    lp.created_at = 1000
+    lp.quote_token = WMON
+    st.launchpad_tokens[token] = lp
+    return lp
+
+
+def test_nadfun_supply_is_derived_not_accumulated(monkeypatch):
+    """A running sum cannot self-correct after a missed event. Derived supply
+    lands on the same value regardless of how many trades were seen."""
+    from core.adapters import nadfun as nf
+
+    st = _fresh_state(monkeypatch)
+    tok = "0xaaaa000000000000000000000000000000000001"
+    lp = _seed_nadfun_token(st, tok, nf.SOURCE_V2)
+
+    geo = nf.geometry_for(nf.SOURCE_V2)
+    half_sold = geo["virtual_token_0"] - (geo["curve_supply"] // 2)
+    _nadfun_trade(st, tok, nf.SOURCE_V2, half_sold, 10**18, 101, 1001, "0xn1")
+
+    assert lp.circulating_supply == (geo["curve_supply"] // 2) // 10**18
+    assert lp.curve_token_reserve == half_sold, "reserves must persist for nad.fun too"
+    assert lp.curve_native_reserve == 10**18
+
+
+def test_missing_curve_sync_leaves_nadfun_supply_untouched(monkeypatch):
+    """Reserves ride on a separate log. If it is missed, supply must hold its
+    last derived value rather than accumulate on top of it or read fully sold."""
+    from core.adapters import nadfun as nf
+
+    st = _fresh_state(monkeypatch)
+    tok = "0xaaaa000000000000000000000000000000000002"
+    lp = _seed_nadfun_token(st, tok, nf.SOURCE_V2)
+
+    geo = nf.geometry_for(nf.SOURCE_V2)
+    quarter = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
+    _nadfun_trade(st, tok, nf.SOURCE_V2, quarter, 10**18, 101, 1001, "0xn1")
+    derived = lp.circulating_supply
+    assert derived > 0
+
+    # next trade arrives with no sync behind it
+    _nadfun_trade(st, tok, nf.SOURCE_V2, 0, 0, 102, 1002, "0xn2")
+    assert lp.circulating_supply == derived, "a missing sync must not move supply"
+
+    # and it self-corrects on the next trade that does carry reserves
+    half = geo["virtual_token_0"] - (geo["curve_supply"] // 2)
+    _nadfun_trade(st, tok, nf.SOURCE_V2, half, 10**18, 103, 1003, "0xn3")
+    assert lp.circulating_supply == (geo["curve_supply"] // 2) // 10**18
+
+
+def test_each_nadfun_generation_uses_its_own_threshold(monkeypatch):
+    """v2 measured against v1's supply fired approaching_75 at 73.5%."""
+    from core.adapters import nadfun as nf
+
+    for src in nf.SOURCES:
+        st = _fresh_state(monkeypatch)
+        tok = f"0xaaaa00000000000000000000000000000000{src:04d}"
+        lp = _seed_nadfun_token(st, tok, src)
+        geo = nf.geometry_for(src)
+
+        below = geo["virtual_token_0"] - (geo["curve_supply"] * 74 // 100)
+        _nadfun_trade(st, tok, src, below, 10**18, 101, 1001, f"0xa{src}")
+        assert lp.approaching_75 is False, f"source {src} fired early"
+
+        above = geo["virtual_token_0"] - (geo["curve_supply"] * 76 // 100)
+        _nadfun_trade(st, tok, src, above, 10**18, 102, 1002, f"0xb{src}")
+        assert lp.approaching_75 is True, f"source {src} never fired"
+
+
+def test_nadfun_sell_volume_is_gross(monkeypatch):
+    """The gross-volume fix reads the persisted curve reserve, which nad.fun
+    never had until it went through the adapter. A sell reports the user's net
+    payout, so the virtual native delta is the gross notional."""
+    from core.adapters import nadfun as nf
+
+    st = _fresh_state(monkeypatch)
+    tok = "0xaaaa000000000000000000000000000000000003"
+    lp = _seed_nadfun_token(st, tok, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+
+    # establish a reserve
+    quarter = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
+    _nadfun_trade(st, tok, nf.SOURCE_V2, quarter, 10_000 * 10**18, 101, 1001, "0xg1")
+    assert lp.curve_native_reserve == 10_000 * 10**18
+    vol_after_buy = lp.native_volume
+
+    # sell: virtual native falls by 100, user is paid 99 net
+    gross, net = 100 * 10**18, 99 * 10**18
+    ev = {
+        "token": tok,
+        "user": USER,
+        "is_buy": False,
+        "amount_in": 10**20,
+        "amount_out": net,
+        "native_reserve": 10_000 * 10**18 - gross,
+        "token_reserve": quarter + 10**20,
+    }
+    st.apply_launchpad_trade(ev, 102, 1002, "0xg2", 0, ROUTER)
+
+    assert lp.native_volume == vol_after_buy + gross, "nad.fun sells must record gross"
+    assert lp.native_volume != vol_after_buy + net

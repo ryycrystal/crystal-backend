@@ -14,6 +14,7 @@ import core.storage as storage
 import models
 from core import adapters as launchpad_adapters
 from core import chain as h
+from core.adapters import nadfun as nadfun_geo
 from core.adapters import native as native_adapter_mod
 
 getcontext().prec = 100
@@ -117,6 +118,7 @@ def _fetch_launchpad_initial_native_supply() -> int:
 
 
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
+NADFUN_ADAPTERS = nadfun_geo.build_all()
 
 
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
@@ -174,6 +176,8 @@ class State:
         self._last_head_ts: int | None = None
 
         self.mon_price_usd = Decimal("0.03")
+        self._basis_overlay: dict[tuple[str, str], list] = {}
+        self._basis_block: int = -1
         self._seed_aux_prices()
 
     # update the mon usd price and persist it
@@ -579,7 +583,10 @@ class State:
             source = int(ev.get("source", 0))
             quote_token = (ev.get("quote_token") or WMON).lower()
 
+            # each nad.fun generation is a different curve, so it gets its own
+            # internal source, the api still reports source 1 for both
             if src == h.NADFUN_V2_ADDR:
+                source = nadfun_geo.SOURCE_V2
                 storage.mark_nadfun_v2(token, cur=cur)
 
             lp = self.launchpad_tokens.get(token)
@@ -633,14 +640,11 @@ class State:
                 lp.quote_token = quote_token
                 self.launchpad_tokens[token] = lp
 
-                if source == 1:
-                    lp.last_price_native = ev.get("last_price_native", Decimal("0.00008387696"))
-                else:
-                    adapter = launchpad_adapters.get(source)
-                    if adapter is not None:
-                        initial_price = adapter.initial_price_native()
-                        if initial_price is not None and initial_price > 0:
-                            lp.last_price_native = initial_price
+                adapter = launchpad_adapters.get(source)
+                if adapter is not None:
+                    initial_price = adapter.initial_price_native()
+                    if initial_price is not None and initial_price > 0:
+                        lp.last_price_native = initial_price
 
             storage.upsert_token_created(
                 token=token,
@@ -664,8 +668,10 @@ class State:
             if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
 
+            # only sources that hand liquidity to an external venue carry a pool
+            # on creation, so the presence of one is the condition, not the source
             pool = (ev.get("pool") or "").lower()
-            if source == 1 and pool and quote_token and token != quote_token:
+            if pool and quote_token and token != quote_token:
                 lp.market = pool
                 lp.quote_token = quote_token
                 token_is_0 = token < quote_token
@@ -689,6 +695,15 @@ class State:
     # drop orphaned trades and recompute every affected token from what survives
     def handle_reorg(self, from_block: int, cur=None) -> list[str]:
         with self._lock:
+            # nad.fun reserves arrive on a separate log held in module state, any
+            # sync still waiting belongs to the orphaned chain
+            try:
+                from modules import nadfun as _nf
+
+                _nf.clear_pending_syncs()
+            except Exception:
+                pass
+
             affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
 
             for token in affected:
@@ -945,6 +960,8 @@ class State:
                 except Exception:
                     price_native = Decimal(0)
 
+            self._basis_reset_if_new_block(blk)
+
             lp = self.launchpad_tokens.get(token)
             if lp is None:
                 if is_pool_swap:
@@ -966,8 +983,8 @@ class State:
                         if inserted:
                             lp.snipers += 1
 
+                prev_native_reserve = int(getattr(lp, "curve_native_reserve", 0) or 0)
                 if not is_buy:
-                    prev_native_reserve = int(getattr(lp, "curve_native_reserve", 0) or 0)
                     new_native_reserve = int(ev.get("native_reserve") or 0)
                     if prev_native_reserve > new_native_reserve > 0:
                         native_amt = prev_native_reserve - new_native_reserve
@@ -987,22 +1004,18 @@ class State:
                         lp.approaching_75 = False
                         lp.approaching_75_block = 0
                         lp.approaching_75_at = 0
-                elif is_buy:
-                    lp.circulating_supply += token_amt / 1e18
-                else:
-                    lp.circulating_supply -= token_amt / 1e18
-
-                if curve is not None:
-                    pass
-                elif lp.source == 1:
-                    if (not lp.approaching_75) and lp.circulating_supply >= 594_825_000:
-                        lp.approaching_75 = True
-                        lp.approaching_75_block = blk
-                        lp.approaching_75_at = ts
-                    elif (lp.approaching_75) and lp.circulating_supply < 594_825_000:
-                        lp.approaching_75 = False
-                        lp.approaching_75_block = 0
-                        lp.approaching_75_at = 0
+                elif adapter is None:
+                    # only sources without an adapter still accumulate, a running
+                    # sum desyncs permanently on one missed event and cannot
+                    # self correct, so it is a last resort not a fallback
+                    if is_buy:
+                        lp.circulating_supply += token_amt / 1e18
+                    else:
+                        lp.circulating_supply -= token_amt / 1e18
+                # adapter present but the event carried no curve state: the
+                # CurveSync was missed, reordered or lost across a restart, so
+                # supply and the threshold keep their last derived values and
+                # self correct on the next trade that does carry reserves
 
             lp.native_volume += native_amt
             lp.token_volume += token_amt
@@ -1017,26 +1030,33 @@ class State:
             if quote_price > 0:
                 volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
                 lp.volume_usd += volume_usd_trade
-                lp.fees_usd += volume_usd_trade * Decimal("0.01")
+                fee_native = self._trade_fee_native(is_buy, native_amt, prev_native_reserve, ev)
+                if fee_native > 0:
+                    lp.fees_usd += (Decimal(fee_native) / (Decimal(10) ** 18)) * quote_price
 
+            cost_basis_delta = 0
             if is_buy:
                 token_bought_delta = int(token_amt)
                 token_sold_delta = 0
                 native_spent_delta = int(native_amt)
                 native_received_delta = 0
                 balance_token_delta = 0
-                realized_delta = Decimal(-native_amt)
+                realized_delta = Decimal(0)
+                cost_basis_delta = int(native_amt)
                 buy_count_delta = 1
                 sell_count_delta = 0
+                self._basis_apply_buy(user, token, int(token_amt), int(native_amt), cur=cur)
             else:
                 token_bought_delta = 0
                 token_sold_delta = int(token_amt)
                 native_spent_delta = 0
                 native_received_delta = int(native_amt)
                 balance_token_delta = 0
-                realized_delta = Decimal(native_amt)
                 buy_count_delta = 0
                 sell_count_delta = 1
+                released = self._basis_apply_sell(user, token, int(token_amt), cur=cur)
+                realized_delta = Decimal(native_amt) - Decimal(released)
+                cost_basis_delta = -int(released)
 
             trade_count_delta = 1
 
@@ -1092,6 +1112,7 @@ class State:
                     buy_count_delta=buy_count_delta,
                     sell_count_delta=sell_count_delta,
                     last_price_native=lp.last_price_native,
+                    cost_basis_delta=cost_basis_delta,
                 )
                 for bucket_seconds in INTERVALS:
                     bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
@@ -1152,6 +1173,7 @@ class State:
                     buy_count_delta=buy_count_delta,
                     sell_count_delta=sell_count_delta,
                     last_price_native=lp.last_price_native,
+                    cost_basis_delta=cost_basis_delta,
                     cur=cur,
                 )
 
@@ -1307,6 +1329,68 @@ class State:
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd
+
+    # fee actually taken on one curve trade, derived from the native reserve delta
+    # rather than assumed, so a governance fee change is picked up immediately
+    def _trade_fee_native(self, is_buy: bool, native_amt: int, prev_native_reserve: int, ev: dict) -> int:
+        try:
+            new_reserve = int(ev.get("native_reserve") or 0)
+        except (TypeError, ValueError):
+            return 0
+        if new_reserve <= 0 or prev_native_reserve <= 0:
+            return 0
+        if is_buy:
+            credited = new_reserve - prev_native_reserve
+            if credited <= 0 or credited > native_amt:
+                return 0
+            return native_amt - credited
+        debited = prev_native_reserve - new_reserve
+        if debited <= 0 or debited < native_amt:
+            return 0
+        return debited - native_amt
+
+    # open tokens and cost basis for a position, cached per block so several
+    # trades by the same user in one block stay consistent before the batch flush
+    def _basis_for(self, user: str, token: str, cur=None) -> list:
+        key = ((user or "").lower(), (token or "").lower())
+        entry = self._basis_overlay.get(key)
+        if entry is None:
+            try:
+                open_tokens, cost_basis = storage.get_position_basis(key[0], key[1], cur=cur)
+            except Exception:
+                open_tokens, cost_basis = 0, 0
+            entry = [int(open_tokens), int(cost_basis)]
+            self._basis_overlay[key] = entry
+        return entry
+
+    # drop the per block basis cache when the block advances
+    def _basis_reset_if_new_block(self, blk: int) -> None:
+        if blk != self._basis_block:
+            self._basis_block = blk
+            self._basis_overlay.clear()
+
+    # a buy adds its full cost to the basis
+    def _basis_apply_buy(self, user: str, token: str, token_amt: int, native_amt: int, cur=None) -> None:
+        entry = self._basis_for(user, token, cur=cur)
+        entry[0] += int(token_amt)
+        entry[1] += int(native_amt)
+
+    # a sell releases the basis share of the tokens leaving the position
+    def _basis_apply_sell(self, user: str, token: str, token_amt: int, cur=None) -> int:
+        entry = self._basis_for(user, token, cur=cur)
+        open_tokens, cost_basis = entry[0], entry[1]
+        sold = int(token_amt)
+        if open_tokens <= 0 or cost_basis <= 0 or sold <= 0:
+            entry[0] = max(open_tokens - sold, 0)
+            return 0
+        if sold >= open_tokens:
+            entry[0] = 0
+            entry[1] = 0
+            return cost_basis
+        released = (cost_basis * sold) // open_tokens
+        entry[0] = open_tokens - sold
+        entry[1] = cost_basis - released
+        return released
 
     # usd price for a quote token, mon for native equivalents
     def _quote_price_usd(self, quote_token: str) -> Decimal:
@@ -1630,16 +1714,22 @@ class State:
         user = (ev.get("user") or "").lower()
 
         if user:
+            self._basis_reset_if_new_block(blk)
+            cost_basis_delta = 0
             if is_buy:
                 token_bought_delta, token_sold_delta = int(token_amt), 0
                 native_spent_delta, native_received_delta = int(native_amt), 0
-                realized_delta = Decimal(-native_amt)
+                realized_delta = Decimal(0)
+                cost_basis_delta = int(native_amt)
                 buy_delta, sell_delta = 1, 0
+                self._basis_apply_buy(user, lp_addr, int(token_amt), int(native_amt), cur=cur)
             else:
                 token_bought_delta, token_sold_delta = 0, int(token_amt)
                 native_spent_delta, native_received_delta = 0, int(native_amt)
-                realized_delta = Decimal(native_amt)
                 buy_delta, sell_delta = 0, 1
+                released = self._basis_apply_sell(user, lp_addr, int(token_amt), cur=cur)
+                realized_delta = Decimal(native_amt) - Decimal(released)
+                cost_basis_delta = -int(released)
 
             if batch is not None:
                 batch.add_user_delta(user, int(native_amt), realized_delta)
@@ -1656,6 +1746,7 @@ class State:
                     buy_count_delta=buy_delta,
                     sell_count_delta=sell_delta,
                     last_price_native=lp.last_price_native,
+                    cost_basis_delta=cost_basis_delta,
                 )
             else:
                 try:
@@ -1672,6 +1763,7 @@ class State:
                         buy_count_delta=buy_delta,
                         sell_count_delta=sell_delta,
                         last_price_native=lp.last_price_native,
+                        cost_basis_delta=cost_basis_delta,
                         cur=cur,
                     )
                 except Exception:

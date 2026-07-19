@@ -264,6 +264,24 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE launchpad_positions
+            ADD COLUMN IF NOT EXISTS cost_basis_native NUMERIC(78, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            UPDATE launchpad_positions
+            SET cost_basis_native = GREATEST(
+                    native_spent
+                    - CASE WHEN token_bought > 0
+                           THEN native_spent * LEAST(token_sold, token_bought) / token_bought
+                           ELSE 0 END,
+                    0)
+            WHERE cost_basis_native = 0 AND native_spent > 0;
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_positions_token_balance
             ON launchpad_positions (token, balance_token DESC)
             WHERE balance_token > 0;
@@ -733,5 +751,16 @@ def init_db() -> None:
             (
                 token TEXT PRIMARY KEY
             );
+            """
+        )
+
+        # each nad.fun generation is its own curve, so v2 tokens move to source 2,
+        # must run after nadfun_v2_tokens exists
+        cur.execute(
+            """
+            UPDATE launchpad_tokens t
+            SET source = 2
+            WHERE t.source = 1
+              AND EXISTS (SELECT 1 FROM nadfun_v2_tokens v WHERE v.token = t.token);
             """
         )

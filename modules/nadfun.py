@@ -365,6 +365,14 @@ def parse_nadfun_sync(
 
 
 # take the stashed reserves for a token, zeros when none are pending
+# drop every un-consumed CurveSync, a rolled back sync must not pair with a
+# trade that gets replayed on the canonical chain
+def clear_pending_syncs() -> int:
+    n = len(_PENDING_SYNC)
+    _PENDING_SYNC.clear()
+    return n
+
+
 def _consume_sync_for_token(token: str) -> dict:
     sync = _PENDING_SYNC.pop(token.lower(), None)
     if not sync:

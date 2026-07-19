@@ -756,3 +756,171 @@ def test_stats_exposes_the_reference_price_behind_each_change_pct(db):
     last = Decimal(c.get(f"/token/{TOKEN}/60").json()["marketcap"])
     implied = float((last / ref - 1) * 100)
     assert abs(implied - body["change_pct_1h"]) < 0.01, (implied, body["change_pct_1h"])
+
+
+# realized pnl must be cost basis, not cash flow
+def test_realized_pnl_is_zero_until_tokens_are_sold(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xcb1", log_idx=0)
+
+    row = _q(
+        db,
+        "SELECT realized_pnl_native, cost_basis_native, native_spent FROM launchpad_positions WHERE token=%s",
+        (TOKEN,),
+    )[0]
+    realized, basis, spent = row
+    assert realized == 0, f"a position that has only bought has realized nothing, got {realized}"
+    assert int(basis) == int(spent) > 0, "the whole spend should sit in the cost basis"
+
+
+# selling half releases half the basis and books the difference
+def test_realized_pnl_uses_cost_basis_on_a_partial_sell(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    # buy 100 tokens for 1 MON
+    _trade(
+        st,
+        native_reserve=1100 * 10**18,
+        blk=101,
+        ts=1001,
+        txh="0xcb2",
+        log_idx=0,
+        is_buy=True,
+        amount_in=10**18,
+        amount_out=100 * 10**18,
+    )
+    basis0 = int(_q(db, "SELECT cost_basis_native FROM launchpad_positions WHERE token=%s", (TOKEN,))[0][0])
+    assert basis0 == 10**18
+
+    # sell 50 of them; the sell leg is gross from the reserve delta
+    _trade(
+        st,
+        native_reserve=1050 * 10**18,
+        blk=102,
+        ts=1002,
+        txh="0xcb3",
+        log_idx=0,
+        is_buy=False,
+        amount_in=50 * 10**18,
+        amount_out=6 * 10**17,
+    )
+
+    realized, basis1, sold = _q(
+        db,
+        "SELECT realized_pnl_native, cost_basis_native, token_sold FROM launchpad_positions WHERE token=%s",
+        (TOKEN,),
+    )[0]
+    assert int(sold) == 50 * 10**18
+    # half the tokens left, so half the basis was released
+    assert int(basis1) == basis0 // 2, f"expected half the basis to remain, got {basis1}"
+    proceeds = 1100 * 10**18 - 1050 * 10**18
+    assert Decimal(realized) == Decimal(proceeds) - Decimal(basis0 // 2)
+
+
+# closing the position releases the whole basis
+def test_closing_a_position_releases_the_entire_basis(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(
+        st,
+        native_reserve=1100 * 10**18,
+        blk=101,
+        ts=1001,
+        txh="0xcb4",
+        log_idx=0,
+        is_buy=True,
+        amount_in=10**18,
+        amount_out=100 * 10**18,
+    )
+    _trade(
+        st,
+        native_reserve=1000 * 10**18,
+        blk=102,
+        ts=1002,
+        txh="0xcb5",
+        log_idx=0,
+        is_buy=False,
+        amount_in=100 * 10**18,
+        amount_out=9 * 10**17,
+    )
+
+    realized, basis = _q(
+        db, "SELECT realized_pnl_native, cost_basis_native FROM launchpad_positions WHERE token=%s", (TOKEN,)
+    )[0]
+    assert int(basis) == 0, "a fully closed position holds no cost basis"
+    # bought for 1 MON, curve returned 100 MON of reserve delta on the way out
+    proceeds = 1100 * 10**18 - 1000 * 10**18
+    assert Decimal(realized) == Decimal(proceeds) - Decimal(10**18)
+
+
+# fees come from the reserve delta so a governance fee change is picked up at once
+def test_fee_accrual_follows_the_actual_on_chain_rate(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    st.mon_price_usd = Decimal(1)
+    st.tokenToPrice[WMON] = Decimal(1)
+
+    from modules import launchpad as lp_mod
+
+    # seed the previous reserve
+    _trade(st, native_reserve=1000 * 10**18, blk=101, ts=1001, txh="0xfe0", log_idx=0)
+    lp = st.launchpad_tokens[TOKEN]
+    fees_before = lp.fees_usd
+
+    # a 10 MON buy credited at a 5% fee: only 9.5 reaches the curve
+    gross_in = 10 * 10**18
+    credited = int(gross_in * 95 / 100)
+    new_reserve = 1000 * 10**18 + credited
+    ev = lp_mod.parse_launchpad_trade(
+        _router(),
+        ["0x", _ta(TOKEN), _ta(USER)],
+        _lt_data(True, gross_in, 10**20, new_reserve, _reserve_for(new_reserve)),
+    )
+    st.apply_launchpad_trade(ev, 102, 1002, "0xfe1", 0, _router())
+
+    charged = lp.fees_usd - fees_before
+    expected = Decimal(gross_in - credited) / Decimal(10**18)
+    assert abs(charged - expected) < Decimal("0.0001"), f"expected {expected} got {charged}"
+    # the old hardcoded 1% would have booked 0.1
+    assert abs(charged - Decimal("0.1")) > Decimal("0.01"), "fee must not be a hardcoded 1%"
+
+
+def test_nadfun_v2_tokens_backfill_to_source_2(db):
+    """v2 tokens indexed before the split carry source 1. The migration moves
+    them using the marker table, and must be safe to re-run."""
+    import core.storage as storage
+
+    v1_token = "0x1111111111111111111111111111111111111111"
+    v2_token = "0x2222222222222222222222222222222222222222"
+
+    for tok in (v1_token, v2_token):
+        _x(
+            db,
+            """
+            INSERT INTO launchpad_tokens (token, creator, name, symbol, source, created_block, created_at)
+            VALUES (%s, %s, 'n', 's', 1, 1, 1)
+            ON CONFLICT (token) DO UPDATE SET source = 1
+            """,
+            (tok, CREATOR),
+        )
+    _x(db, "INSERT INTO nadfun_v2_tokens (token) VALUES (%s) ON CONFLICT DO NOTHING", (v2_token,))
+
+    def source_of(tok):
+        return int(_q(db, "SELECT source FROM launchpad_tokens WHERE token=%s", (tok,))[0][0])
+
+    assert source_of(v2_token) == 1
+
+    storage.init_db()
+
+    assert source_of(v2_token) == 2, "a v2 token must move to its own source"
+    assert source_of(v1_token) == 1, "a v1 token must be left alone"
+
+    # idempotent
+    storage.init_db()
+    assert source_of(v2_token) == 2
+    assert source_of(v1_token) == 1
+
+    _x(db, "DELETE FROM nadfun_v2_tokens WHERE token=%s", (v2_token,))
+    _x(db, "DELETE FROM launchpad_tokens WHERE token = ANY(%s)", ([v1_token, v2_token],))

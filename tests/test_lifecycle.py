@@ -204,3 +204,149 @@ def test_chart_prices_keep_sub_unit_movement():
     assert _scaled_price(after_buy) == "1000.198009801"
     assert _scaled_price(at_creation) != _scaled_price(after_buy), "candles must not flatten"
     assert _scaled_price(None) == "0"
+
+
+def test_nadfun_geometry_matches_chain_verified_constants():
+    """Recovered from CurveSync logs on graduated tokens. The k values reproduce
+    exactly, which is what confirms them -- the published mainnet docs describe a
+    later deployment (180,000 virtual MON) that is neither v1 nor v2."""
+    from core.adapters import nadfun as nf
+
+    assert nf.V1_VIRTUAL_NATIVE_0 == 90_000 * 10**18
+    assert nf.V1_VIRTUAL_TOKEN_0 == 1_073_000_191 * 10**18
+    assert nf.V1_CURVE_SUPPLY // 10**18 == 793_100_000
+
+    assert nf.V2_VIRTUAL_NATIVE_0 == 70_000 * 10**18
+    assert nf.V2_VIRTUAL_TOKEN_0 == 1_060_569_000 * 10**18
+    assert nf.V2_GRADUATION_VIRTUAL_NATIVE == 295_000 * 10**18
+
+    # v2 k must equal what the chain reported for TAD and BTS
+    assert (nf.V2_VIRTUAL_NATIVE_0 // 10**18) * (nf.V2_VIRTUAL_TOKEN_0 // 10**18) == 74_239_830_000_000
+
+    # observed graduation state on TAD: virt_tok 251,660,440.68
+    assert abs(nf.V2_GRADUATION_VIRTUAL_TOKEN / 1e18 - 251_660_440.68) < 0.01
+    # and the accumulated supply every graduated v2 token converged on
+    assert abs(nf.V2_CURVE_SUPPLY / 1e18 - 808_908_559.32) < 0.01
+
+    # the generations genuinely differ, which is the whole reason for two sources
+    assert nf.V1_CURVE_SUPPLY != nf.V2_CURVE_SUPPLY
+
+
+def test_each_generation_gets_its_own_progress_denominator():
+    """v2 sold against v1's 793,100,000 reads ~2% high, which is what made
+    approaching_75 fire at 73.5% instead of 75%."""
+    import api.api as api_mod
+    from core.adapters import nadfun as nf
+
+    # v2's curve supply is not a whole number of tokens, so 75% of it rounds
+    # down to just under the threshold -- one more whole token crosses it
+    v2_three_quarters = -(-(nf.V2_CURVE_SUPPLY * 3 // 4) // 10**18)
+    assert (
+        api_mod._lifecycle_fields(
+            source=nf.SOURCE_V2, circulating_supply=v2_three_quarters, tx_count=1, migrated=False
+        )["progressBps"]
+        == 7_500
+    )
+
+    v1_three_quarters = (nf.V1_CURVE_SUPPLY * 3 // 4) // 10**18
+    assert (
+        api_mod._lifecycle_fields(
+            source=nf.SOURCE_V1, circulating_supply=v1_three_quarters, tx_count=1, migrated=False
+        )["progressBps"]
+        == 7_500
+    )
+
+    # the old shared denominator is what the bug looked like
+    stale = api_mod._lifecycle_fields(
+        source=nf.SOURCE_V1, circulating_supply=v2_three_quarters, tx_count=1, migrated=False
+    )["progressBps"]
+    assert stale > 7_500, "v2 supply against v1 geometry must read high"
+
+
+def test_api_reports_source_1_for_every_nadfun_generation():
+    """The frontend maps source === 1 onto "nadfun". Reporting 2 would silently
+    reclassify every v2 token as crystal, with the wrong curve and trade path."""
+    import api.api as api_mod
+    from core.adapters import nadfun as nf
+
+    assert api_mod._api_source(nf.SOURCE_V1) == 1
+    assert api_mod._api_source(nf.SOURCE_V2) == 1
+    assert api_mod._api_source(0) == 0
+
+    # the generation still reaches the client, just via nadfunVersion
+    assert api_mod._nadfun_version("0xabc", nf.SOURCE_V2) == 2
+    assert api_mod._nadfun_version("0xabc", nf.SOURCE_V1) == 1
+    assert api_mod._nadfun_version("0xabc", 0) == 0
+
+
+def test_true_source_round_trips_through_the_wire_contract():
+    """graduation pct is computed from serialized tokens, so it must recover the
+    generation from nadfunVersion rather than the flattened source."""
+    import api.api  # noqa: F401
+    from api.routes.launchpad import _graduation_pct, _true_source
+    from core.adapters import nadfun as nf
+
+    assert _true_source({"source": 1, "nadfunVersion": 2}) == nf.SOURCE_V2
+    assert _true_source({"source": 1, "nadfunVersion": 1}) == nf.SOURCE_V1
+    assert _true_source({"source": 0, "nadfunVersion": 0}) == 0
+
+    v2_full = nf.V2_CURVE_SUPPLY // 10**18
+    pct = _graduation_pct(v2_full, _true_source({"source": 1, "nadfunVersion": 2}))
+    assert abs(pct - 1.0) < 1e-6, f"a fully sold v2 curve must read 100%, got {pct}"
+
+
+def test_nadfun_adapter_derives_supply_from_reserves():
+    from core.adapters import nadfun as nf
+
+    for src in nf.SOURCES:
+        a = nf.NadfunLaunchpadAdapter(src)
+        geo = nf.geometry_for(src)
+
+        at_creation = a.curve_state(
+            {"token_reserve": geo["virtual_token_0"], "native_reserve": geo["virtual_native_0"]}
+        )
+        assert at_creation.tokens_sold == 0
+        assert at_creation.progress_bps == 0
+
+        sold_all = geo["virtual_token_0"] - geo["curve_supply"]
+        at_graduation = a.curve_state({"token_reserve": sold_all, "native_reserve": 1})
+        assert at_graduation.progress_bps == 10_000
+        assert at_graduation.is_complete is True
+
+        # v2's curve supply is not a whole number of wei, so floor(75%) can land
+        # a hair under -- check either side of the boundary rather than on it
+        just_under = geo["virtual_token_0"] - (geo["curve_supply"] * 74 // 100)
+        assert a.curve_state({"token_reserve": just_under, "native_reserve": 1}).is_graduating is False
+        just_over = geo["virtual_token_0"] - (geo["curve_supply"] * 76 // 100)
+        assert a.curve_state({"token_reserve": just_over, "native_reserve": 1}).is_graduating is True
+
+        # nad.fun hands liquidity to an external venue
+        assert a.graduates_to_market() is False
+
+
+def test_nadfun_adapter_refuses_to_invent_a_curve_without_reserves():
+    """Reserves ride on a separate CurveSync log. Treating a missing one as
+    token_reserve=0 would report the whole curve sold."""
+    from core.adapters import nadfun as nf
+
+    a = nf.NadfunLaunchpadAdapter(nf.SOURCE_V2)
+    assert a.curve_state({}) is None
+    assert a.curve_state({"token_reserve": 0, "native_reserve": 0}) is None
+    assert a.curve_state({"token_reserve": None}) is None
+    assert a.curve_state({"token_reserve": "junk"}) is None
+    # above the starting reserve is impossible on this curve
+    assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 + 1}) is None
+
+
+def test_v1_adapter_reproduces_the_old_hardcoded_initial_price():
+    """state.py carried Decimal("0.00008387696") for every nad.fun token. It was
+    v1's 90,000/1,073,000,191 all along, and it is what broke change_pct."""
+    from decimal import Decimal
+
+    from core.adapters import nadfun as nf
+
+    price = nf.NadfunLaunchpadAdapter(nf.SOURCE_V1).initial_price_native()
+    assert abs(price - Decimal("0.00008387696")) < Decimal("1e-11")
+
+    # v2 starts on a different curve, so it must not share that price
+    assert nf.NadfunLaunchpadAdapter(nf.SOURCE_V2).initial_price_native() != price
