@@ -23,8 +23,8 @@ from decimal import Decimal
 from core.adapters.base import register
 from core.lifecycle import CurveState
 
-INITIAL_TOKEN_SUPPLY = 10 ** 27
-GRADUATED_TOKEN_SUPPLY = 2 * 10 ** 26
+INITIAL_TOKEN_SUPPLY = 10**27
+GRADUATED_TOKEN_SUPPLY = 2 * 10**26
 CURVE_SUPPLY = INITIAL_TOKEN_SUPPLY - GRADUATED_TOKEN_SUPPLY
 
 

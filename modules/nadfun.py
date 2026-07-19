@@ -5,15 +5,14 @@ import os
 import time
 from collections import deque
 from decimal import Decimal, getcontext
-from typing import Dict, Optional
 from urllib.parse import urlparse
 
 import httpx
 
 getcontext().prec = 100
 
-_PENDING_SYNC: Dict[str, dict] = {}
-_FAILED_HOSTS: Dict[str, float] = {}
+_PENDING_SYNC: dict[str, dict] = {}
+_FAILED_HOSTS: dict[str, float] = {}
 METADATA_QUEUE: list[tuple[str, str]] = []
 _METADATA_CLIENT: httpx.AsyncClient | None = None
 
@@ -59,11 +58,13 @@ async def _get_metadata_client() -> httpx.AsyncClient:
         )
     return _METADATA_CLIENT
 
+
 def _get_semaphore() -> asyncio.Semaphore:
     global _SEMAPHORE
     if _SEMAPHORE is None:
         _SEMAPHORE = asyncio.Semaphore(_CONCURRENCY_LIMIT)
     return _SEMAPHORE
+
 
 async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None, str, str]:
     try:
@@ -84,20 +85,25 @@ async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None
             resp = await client.get(token_uri)
             resp.raise_for_status()
             meta = resp.json()
-            return ({
-                "token": token,
-                "name": meta.get("name", ""),
-                "symbol": meta.get("symbol", ""),
-                "description": meta.get("description", ""),
-                "image_uri": meta.get("image_uri", ""),
-                "website": meta.get("website", ""),
-                "twitter": meta.get("twitter", ""),
-                "telegram": meta.get("telegram", ""),
-            }, token, token_uri)
-        except Exception as e:
+            return (
+                {
+                    "token": token,
+                    "name": meta.get("name", ""),
+                    "symbol": meta.get("symbol", ""),
+                    "description": meta.get("description", ""),
+                    "image_uri": meta.get("image_uri", ""),
+                    "website": meta.get("website", ""),
+                    "twitter": meta.get("twitter", ""),
+                    "telegram": meta.get("telegram", ""),
+                },
+                token,
+                token_uri,
+            )
+        except Exception:
             if host:
                 _FAILED_HOSTS[host] = time.monotonic()
             return (None, token, token_uri)
+
 
 async def process_metadata_queue() -> list[dict]:
     if not METADATA_QUEUE:
@@ -119,6 +125,7 @@ async def process_metadata_queue() -> list[dict]:
 
 _METADATA_WORKER_RUNNING = False
 _STORAGE_MODULE = None
+
 
 async def start_metadata_worker(storage_module) -> None:
     global _METADATA_WORKER_RUNNING, _STORAGE_MODULE
@@ -202,11 +209,11 @@ async def process_metadata_queue_immediate(storage_module=None) -> int:
 
     return len(valid_results)
 
-                                                       
+
 def _to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
-                                                                                   
+
 def _word(data_hex: str, index: int) -> int:
     if not data_hex:
         return 0
@@ -216,11 +223,11 @@ def _word(data_hex: str, index: int) -> int:
         return 0
     return int(data_hex[start:end], 16)
 
-                                                                     
+
 def _chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
-                                                                             
+
 def _decode_string(data_hex: str, word_index: int) -> str:
     if not data_hex:
         return ""
@@ -251,7 +258,7 @@ def _decode_string(data_hex: str, word_index: int) -> str:
     except Exception:
         return ""
 
-                                                                     
+
 def _int256_from_hex(x: str) -> int:
     if x.startswith("0x"):
         x = x[2:]
@@ -262,18 +269,7 @@ def _int256_from_hex(x: str) -> int:
         n -= 2**256
     return n
 
-              
-                    
-                  
-                 
-                
-                  
-                    
-                              
-                                
-                             
-    
-                                                
+
 def parse_nadfun_token_created(
     _addr: str,
     topics: list[str],
@@ -302,7 +298,7 @@ def parse_nadfun_token_created(
         if qlen == 1 or (_METADATA_LOG_EVERY > 0 and qlen % _METADATA_LOG_EVERY == 0):
             print(f"[Metadata] Queued {token[:10]}... queue size={qlen}")
 
-    metadata_cid = ""                                                             
+    metadata_cid = ""
 
     try:
         last_price_native = Decimal("90000") / Decimal("1073000191")
@@ -326,19 +322,12 @@ def parse_nadfun_token_created(
         "last_price_native": last_price_native,
     }
 
-            
-                  
-                           
-                             
-                              
-                               
-    
-                                                                                  
+
 def parse_nadfun_sync(
     _addr: str,
     topics: list[str],
     data_no0x: str,
-) -> Optional[dict]:
+) -> dict | None:
     if len(topics) < 2:
         return None
 
@@ -359,7 +348,7 @@ def parse_nadfun_sync(
 
     return None
 
-                                                                    
+
 def _consume_sync_for_token(token: str) -> dict:
     sync = _PENDING_SYNC.pop(token.lower(), None)
     if not sync:
@@ -377,19 +366,13 @@ def _consume_sync_for_token(token: str) -> dict:
         "real_token_reserve": int(sync.get("real_token_reserve", 0)),
     }
 
-           
-                
-                   
-                            
-                              
-    
-                                                                                         
+
 def _parse_nadfun_trade(
     _addr: str,
     topics: list[str],
     data_no0x: str,
     is_buy: bool,
-) -> Optional[dict]:
+) -> dict | None:
     if len(topics) < 3:
         return None
 
@@ -421,25 +404,18 @@ def parse_nadfun_buy(
     _addr: str,
     topics: list[str],
     data_no0x: str,
-) -> Optional[dict]:
+) -> dict | None:
     return _parse_nadfun_trade(_addr, topics, data_no0x, True)
 
-            
-                
-                   
-                            
-                              
-    
-                                                                                         
+
 def parse_nadfun_sell(
     _addr: str,
     topics: list[str],
     data_no0x: str,
-) -> Optional[dict]:
+) -> dict | None:
     return _parse_nadfun_trade(_addr, topics, data_no0x, False)
 
-                             
-                                            
+
 def parse_nadfun_graduated(
     _addr: str,
     topics: list[str],
@@ -447,10 +423,7 @@ def parse_nadfun_graduated(
 ) -> dict:
     token = _to_addr(topics[1]).lower() if len(topics) > 1 else ""
     pool = _to_addr(topics[2]).lower() if len(topics) > 2 else ""
-    return {
-        "token": token, 
-        "pool": pool
-    }
+    return {"token": token, "pool": pool}
 
 
 def parse_nadfun_sniping_penalty(
@@ -467,17 +440,7 @@ def parse_nadfun_sniping_penalty(
         "penalty_bps": _word(data_no0x, 1),
     }
 
-       
-                   
-                      
-                   
-                   
-                         
-                      
-              
-    
-                                                                                                                
-                                                                             
+
 def parse_v3_trade(addr, tops, data):
     pool = addr.lower()
     sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""
@@ -488,7 +451,7 @@ def parse_v3_trade(addr, tops, data):
     else:
         hex_data = data
 
-    words = list(_chunks(hex_data, 64)) 
+    words = list(_chunks(hex_data, 64))
 
     if len(words) < 5:
         return {

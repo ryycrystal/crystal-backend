@@ -2,15 +2,14 @@ from __future__ import annotations
 
 from .base import db_cursor
 
+
 def init_db() -> None:
     with db_cursor() as cur:
-
         cur.execute(
             """
             CREATE EXTENSION IF NOT EXISTS pg_trgm;
             """
         )
-        
 
         cur.execute(
             """
@@ -18,7 +17,7 @@ def init_db() -> None:
             (
                 number       BIGINT PRIMARY KEY,
                 processed_at TIMESTAMPTZ NOT NULL DEFAULT Now()
-            ); 
+            );
             """
         )
         cur.execute(
@@ -30,10 +29,9 @@ def init_db() -> None:
             )
             """
         )
-        
 
         cur.execute(
-           """
+            """
             CREATE TABLE IF NOT EXISTS launchpad_trades
             (
                 id            BIGSERIAL PRIMARY KEY,
@@ -49,18 +47,18 @@ def init_db() -> None:
                 price_native  NUMERIC(50, 18) NOT NULL,
                 txhash        TEXT NOT NULL,
                 UNIQUE (txhash, log_index)
-            ); 
-           """ 
+            );
+           """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_trades_token_ts 
+            CREATE INDEX IF NOT EXISTS idx_trades_token_ts
             ON launchpad_trades (token, timestamp DESC);
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_trades_user_ts 
+            CREATE INDEX IF NOT EXISTS idx_trades_user_ts
             ON launchpad_trades (user_address, timestamp DESC);
             """
         )
@@ -76,7 +74,6 @@ def init_db() -> None:
             ON launchpad_trades (user_address, token);
             """
         )
-        
 
         cur.execute(
             """
@@ -113,7 +110,7 @@ def init_db() -> None:
                 approaching_75_block BIGINT,
                 approaching_75_at    BIGINT,
                 quote_token          TEXT NOT NULL DEFAULT '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'
-            ); 
+            );
             """
         )
         cur.execute(
@@ -178,20 +175,20 @@ def init_db() -> None:
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_tokens_creator 
-            ON launchpad_tokens (creator); 
+            CREATE INDEX IF NOT EXISTS idx_tokens_creator
+            ON launchpad_tokens (creator);
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_tokens_created_at 
-            ON launchpad_tokens (created_at DESC); 
+            CREATE INDEX IF NOT EXISTS idx_tokens_created_at
+            ON launchpad_tokens (created_at DESC);
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_tokens_migrated_at 
-            ON launchpad_tokens (migrated, migrated_at DESC); 
+            CREATE INDEX IF NOT EXISTS idx_tokens_migrated_at
+            ON launchpad_tokens (migrated, migrated_at DESC);
             """
         )
         cur.execute(
@@ -222,7 +219,6 @@ def init_db() -> None:
             WHERE approaching_75 = TRUE AND migrated = FALSE;
             """
         )
-        
 
         cur.execute(
             """
@@ -234,10 +230,9 @@ def init_db() -> None:
                 total_native_volume       NUMERIC(50, 0) NOT NULL DEFAULT 0,
                 total_realized_pnl_native NUMERIC(50, 18) NOT NULL DEFAULT 0,
                 total_trades              BIGINT NOT NULL DEFAULT 0
-            ); 
+            );
             """
         )
-        
 
         cur.execute(
             """
@@ -257,13 +252,13 @@ def init_db() -> None:
                 buy_count             BIGINT NOT NULL DEFAULT 0,
                 sell_count            BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_address, token)
-            ); 
+            );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_positions_user 
-            ON launchpad_positions (user_address); 
+            CREATE INDEX IF NOT EXISTS idx_positions_user
+            ON launchpad_positions (user_address);
             """
         )
         cur.execute(
@@ -313,7 +308,6 @@ def init_db() -> None:
             """
         )
 
-
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_pools
@@ -322,16 +316,15 @@ def init_db() -> None:
                 token_addr  TEXT NOT NULL,
                 native_addr TEXT NOT NULL,
                 token_is_0  BOOLEAN NOT NULL
-            ); 
+            );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_pools_token 
-            ON launchpad_pools (token_addr); 
+            CREATE INDEX IF NOT EXISTS idx_pools_token
+            ON launchpad_pools (token_addr);
             """
         )
-        
 
         cur.execute(
             """
@@ -346,16 +339,15 @@ def init_db() -> None:
                 close_price    NUMERIC(50, 18) NOT NULL,
                 quote_volume   NUMERIC(50, 0) NOT NULL,
                 PRIMARY KEY (token, resolution_sec, bucket_start)
-            ); 
+            );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_ohlcv_token_res_time 
-            ON launchpad_ohlcv (token, resolution_sec, bucket_start DESC); 
+            CREATE INDEX IF NOT EXISTS idx_ohlcv_token_res_time
+            ON launchpad_ohlcv (token, resolution_sec, bucket_start DESC);
             """
         )
-        
 
         cur.execute(
             """
@@ -369,16 +361,15 @@ def init_db() -> None:
                 volume_native         NUMERIC(50, 0) NOT NULL DEFAULT 0,
                 trade_count           BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_address, day)
-            ); 
+            );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_daily_pnl_user_day 
-            ON launchpad_daily_pnl (user_address, day); 
+            CREATE INDEX IF NOT EXISTS idx_daily_pnl_user_day
+            ON launchpad_daily_pnl (user_address, day);
             """
         )
-        
 
         cur.execute(
             """
@@ -387,22 +378,21 @@ def init_db() -> None:
                 token        TEXT NOT NULL,
                 user_address TEXT NOT NULL,
                 PRIMARY KEY (token, user_address)
-            ); 
+            );
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_snipers_token 
-            ON launchpad_snipers (token); 
+            CREATE INDEX IF NOT EXISTS idx_snipers_token
+            ON launchpad_snipers (token);
             """
         )
         cur.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_snipers_user 
-            ON launchpad_snipers (user_address); 
+            CREATE INDEX IF NOT EXISTS idx_snipers_user
+            ON launchpad_snipers (user_address);
             """
         )
-        
 
         cur.execute(
             """
@@ -744,5 +734,3 @@ def init_db() -> None:
             );
             """
         )
-
-

@@ -1,5 +1,4 @@
 import os
-import os
 import sys
 import types
 from contextlib import contextmanager
@@ -8,9 +7,10 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fastapi import HTTPException
+
 import api.routes.pools as pool_api
 import core.storage.pools as pool_storage
-from fastapi import HTTPException
 from modules import pools
 
 
@@ -290,7 +290,7 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
             updated_block=None,
             updated_at=None,
         )
-    (sql1, params1), = up_none.exec_calls
+    ((sql1, params1),) = up_none.exec_calls
     assert "INSERT INTO crystal_pools" in sql1 and "ON CONFLICT (market)" in sql1
     assert params1[0] == "0xpool"
     assert params1[1:4] == (10, 20, None)
@@ -330,7 +330,7 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
     uts_none = _SqlCur()
     with patch.object(pool_storage, "db_cursor", side_effect=lambda: _yield_cursor(uts_none)):
         pool_storage.update_crystal_pool_total_shares("0xPOOL", 99, updated_block=None, updated_at=None)
-    (uts_sql, uts_params), = uts_none.exec_calls
+    ((uts_sql, uts_params),) = uts_none.exec_calls
     assert "INSERT INTO crystal_pools (market, total_shares, updated_block, updated_at)" in uts_sql
     assert uts_params == ("0xpool", 99, None, None)
 
@@ -355,7 +355,7 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
             volume_usd="7.7",
             fees_usd="0.7",
         )
-    (sync_sql, sync_params), = sync_none.exec_calls
+    ((sync_sql, sync_params),) = sync_none.exec_calls
     assert "INSERT INTO crystal_pool_sync_events" in sync_sql
     assert sync_params[:10] == (1, 2, 3, "0xpool", "0xhash", "trade", 4, 5, None, 6)
     assert sync_params[10] == Decimal("7.7")
@@ -391,7 +391,7 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
             tvl_usd="16.5",
             txhash="0xTX",
         )
-    (tvl_sql, tvl_params), = tvl_none.exec_calls
+    ((tvl_sql, tvl_params),) = tvl_none.exec_calls
     assert "INSERT INTO crystal_pool_tvl_samples" in tvl_sql
     assert tvl_params[:7] == ("0xpool", 11, 12, 13, 14, 15, Decimal("16.5"))
     assert tvl_params[7] == "0xtx"
@@ -419,7 +419,7 @@ def test_pool_storage_write_helpers_sql_and_cursor_paths():
             last_transfer=None,
             updated_block=44,
         )
-    (lp_sql, lp_params), = lp_none.exec_calls
+    ((lp_sql, lp_params),) = lp_none.exec_calls
     assert "INSERT INTO crystal_pool_lp_users" in lp_sql
     assert lp_params == ("0xpool", "0xuser", -5, None, 44, -5, None, 44)
 
@@ -453,11 +453,14 @@ def test_pools_route_helper_and_list_endpoint():
     fake_api._crystal_pool_row_to_api.assert_called_once_with(("row",))
 
     rows = [tuple(["a"] * 25 + [2]), tuple(["b"] * 25 + [2])]
-    with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=rows) as list_store, patch.object(
-        pool_api, "_pool_row_to_api", side_effect=[{"id": "a"}, {"id": "b"}]
-    ) as helper:
+    with (
+        patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=rows) as list_store,
+        patch.object(pool_api, "_pool_row_to_api", side_effect=[{"id": "a"}, {"id": "b"}]) as helper,
+    ):
         out = pool_api.list_pools()
-    list_store.assert_called_once_with(search="", token_addresses=[], page=1, limit=50, sort_by="volume", sort_dir="desc")
+    list_store.assert_called_once_with(
+        search="", token_addresses=[], page=1, limit=50, sort_by="volume", sort_dir="desc"
+    )
     assert out["ok"] is True
     assert out["pools"] == [{"id": "a"}, {"id": "b"}]
     assert out["count"] == 2 and out["total"] == 2 and out["page"] == 1 and out["limit"] == 50
@@ -472,13 +475,17 @@ def test_pools_route_helper_and_list_endpoint():
 
     with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]) as list_store2:
         out2 = pool_api.list_pools(search="mon", tokens="0xAA,0xBB", sort="tvl", order="asc", page=3, limit=7)
-    list_store2.assert_called_once_with(search="mon", token_addresses=["0xaa", "0xbb"], page=3, limit=7, sort_by="tvl", sort_dir="asc")
+    list_store2.assert_called_once_with(
+        search="mon", token_addresses=["0xaa", "0xbb"], page=3, limit=7, sort_by="tvl", sort_dir="asc"
+    )
     assert out2["count"] == 0 and out2["total"] == 0 and out2["hasMore"] is False
     assert out2["tokens"] == ["0xaa", "0xbb"]
 
     with patch.object(pool_api.storage, "list_crystal_pools_with_state", return_value=[]) as list_store3:
         out3 = pool_api.list_pools(tokens="  , 0xAA ,, ")
-    list_store3.assert_called_once_with(search="", token_addresses=["0xaa"], page=1, limit=50, sort_by="volume", sort_dir="desc")
+    list_store3.assert_called_once_with(
+        search="", token_addresses=["0xaa"], page=1, limit=50, sort_by="volume", sort_dir="desc"
+    )
     assert out3["tokens"] == ["0xaa"]
 
 
@@ -490,13 +497,15 @@ def test_pools_route_get_pool_success_and_history_building():
         "apy24h": 0.12,
     }
     samples = [(4000, Decimal("10.5")), (5000, Decimal("11.0"))]
-    with patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row) as get_one, patch.object(
-        pool_api, "_pool_row_to_api", return_value=dict(api_row)
-    ) as helper, patch.object(
-        pool_api.storage,
-        "list_crystal_pool_tvl_samples",
-        return_value=samples,
-    ) as list_hist:
+    with (
+        patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row) as get_one,
+        patch.object(pool_api, "_pool_row_to_api", return_value=dict(api_row)) as helper,
+        patch.object(
+            pool_api.storage,
+            "list_crystal_pool_tvl_samples",
+            return_value=samples,
+        ) as list_hist,
+    ):
         out = pool_api.get_pool("0xPOOL", history_seconds=1000, history_limit=7)
 
     get_one.assert_called_once_with("0xPOOL")
@@ -508,21 +517,21 @@ def test_pools_route_get_pool_success_and_history_building():
 
 def test_pools_route_get_pool_fallback_params_no_since_and_not_found():
     row = _pool_row_25(updated_at=0, last_sync_at=0)
-    with patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row), patch.object(
-        pool_api, "_pool_row_to_api", return_value={"market": "0xpool", "updatedAt": 0, "apy24h": 0}
-    ), patch.object(
-        pool_api.storage, "list_crystal_pool_tvl_samples", return_value=[]
-    ) as list_hist:
+    with (
+        patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row),
+        patch.object(pool_api, "_pool_row_to_api", return_value={"market": "0xpool", "updatedAt": 0, "apy24h": 0}),
+        patch.object(pool_api.storage, "list_crystal_pool_tvl_samples", return_value=[]) as list_hist,
+    ):
         out = pool_api.get_pool("0xPOOL", history_seconds="bad", history_limit="bad")
     list_hist.assert_called_once_with("0xpool", since_ts=None, limit=500)
     assert out["tvlHistory"] == []
     assert out["apyHistory"] == []
 
-    with patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row), patch.object(
-        pool_api, "_pool_row_to_api", return_value={"market": "0xpool", "updatedAt": 100, "apy24h": 0}
-    ), patch.object(
-        pool_api.storage, "list_crystal_pool_tvl_samples", return_value=[]
-    ) as list_hist2:
+    with (
+        patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row),
+        patch.object(pool_api, "_pool_row_to_api", return_value={"market": "0xpool", "updatedAt": 100, "apy24h": 0}),
+        patch.object(pool_api.storage, "list_crystal_pool_tvl_samples", return_value=[]) as list_hist2,
+    ):
         pool_api.get_pool("0xPOOL", history_seconds=0, history_limit=1)
     list_hist2.assert_called_once_with("0xpool", since_ts=None, limit=1)
 

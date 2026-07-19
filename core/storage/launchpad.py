@@ -1,13 +1,14 @@
 from __future__ import annotations
-from typing import Optional
+
 from decimal import Decimal
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
 
-from .base import db_cursor, _clean_text
+from .base import db_cursor
 
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+
 
 def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
     if cur is None:
@@ -48,15 +49,16 @@ def record_blocks_processed_batch(block_numbers: list[int], cur: psycopg2.extens
             execute_values(cur2, query, rows, page_size=10000)
     else:
         execute_values(cur, query, rows, page_size=10000)
-        
-def get_last_processed_block() -> Optional[str]:
+
+
+def get_last_processed_block() -> str | None:
     with db_cursor() as cur:
         cur.execute("SELECT MAX(number) FROM launchpad_blocks;")
         row = cur.fetchone()
-    
+
     if row is None:
         return None
-    
+
     last = row[0]
     return int(last) if last is not None else None
 
@@ -76,7 +78,7 @@ def insert_trade(
     txhash: str,
     native_reserve=0,
     token_reserve=0,
-    cur: psycopg2.extensions.cursor | None = None
+    cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -154,6 +156,7 @@ def insert_trade(
             ),
         )
 
+
 def record_block_hash(block_number: int, block_hash: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     sql = """
         INSERT INTO launchpad_blocks (number, block_hash)
@@ -182,12 +185,6 @@ def get_processed_block_hash(block_number: int, cur: psycopg2.extensions.cursor 
 
 
 def rollback_launchpad_from_block(from_block: int, cur: psycopg2.extensions.cursor | None = None) -> list[str]:
-    """Drop everything indexed at or after ``from_block`` and report the tokens hit.
-
-    Used when a reorg replaces blocks we already indexed. Trades are the source of
-    truth for token aggregates, so removing the orphaned rows lets the affected
-    tokens be recomputed exactly rather than adjusted by guesswork.
-    """
     def _run(c):
         c.execute(
             "SELECT DISTINCT token FROM launchpad_trades WHERE block_number >= %s;",
@@ -205,7 +202,6 @@ def rollback_launchpad_from_block(from_block: int, cur: psycopg2.extensions.curs
 
 
 def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | None = None) -> dict:
-    """Recompute a token's trade-derived totals from the surviving trade rows."""
     tok = (token or "").lower()
 
     def _run(c):
@@ -252,12 +248,6 @@ def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | No
 
 
 def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | None = None) -> bool:
-    """Has this exact log already been applied?
-
-    launchpad_trades is UNIQUE (txhash, log_index), so the row is the natural
-    idempotency key. Token aggregates (volume, tx_count, ...) are running sums,
-    so they must not be advanced a second time for a log already accounted for.
-    """
     tx = (txhash or "").lower()
     if not tx:
         return False
@@ -288,7 +278,7 @@ def update_token_after_trade(
     snipers_count: int,
     curve_native_reserve=0,
     curve_token_reserve=0,
-    cur: psycopg2.extensions.cursor | None = None
+    cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -378,17 +368,14 @@ def update_token_after_trade(
             ),
         )
 
+
 def update_user_on_trade(
-    *,
-    address: str,
-    native_amount: int,
-    realized_delta,
-    cur: psycopg2.extensions.cursor | None = None
+    *, address: str, native_amount: int, realized_delta, cur: psycopg2.extensions.cursor | None = None
 ) -> None:
     addr = address.lower()
     if not addr:
         return
-    
+
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -435,6 +422,7 @@ def update_user_on_trade(
             ),
         )
 
+
 def upsert_position(
     *,
     user_address: str,
@@ -449,7 +437,7 @@ def upsert_position(
     buy_count_delta: int,
     sell_count_delta: int,
     last_price_native,
-    cur: psycopg2.extensions.cursor | None = None
+    cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     addr = user_address.lower()
     tok = token.lower()
@@ -577,6 +565,7 @@ def upsert_position(
             ),
         )
 
+
 def upsert_ohlcv(
     *,
     token: str,
@@ -651,7 +640,8 @@ def upsert_ohlcv(
                 int(abs(native_amount)),
             ),
         )
-        
+
+
 def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.cursor | None = None) -> bool:
     tok = token.lower()
     addr = user_address.lower()
@@ -697,7 +687,7 @@ def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.c
                 """,
                 (tok,),
             )
-            
+
     return inserted
 
 
@@ -835,11 +825,12 @@ def upsert_token_created(
             ),
         )
 
+
 def increment_user_tokens_created(address: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     addr = address.lower()
     if not addr:
         return
-    
+
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -861,18 +852,19 @@ def increment_user_tokens_created(address: str, cur: psycopg2.extensions.cursor 
             """,
             (addr,),
         )
-        
+
+
 def mark_token_migrated(
     *,
     token: str,
     migrated_block: int,
     migrated_at: int,
-    pool: Optional[str],
+    pool: str | None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     tok = token.lower()
     pool_addr = (pool or "").lower() or None
-    
+
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -900,6 +892,7 @@ def mark_token_migrated(
             """,
             (int(migrated_block), int(migrated_at), pool_addr, tok),
         )
+
 
 def update_launchpad_token_market(
     *,
@@ -973,11 +966,12 @@ def update_token_metadata_batch(metadata_list: list[dict]) -> None:
                 ),
             )
 
-def increment_user_tokens_graduated(address: str,     cur: psycopg2.extensions.cursor | None = None) -> None:
+
+def increment_user_tokens_graduated(address: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     addr = address.lower()
     if not addr:
         return
-    
+
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -999,7 +993,8 @@ def increment_user_tokens_graduated(address: str,     cur: psycopg2.extensions.c
             """,
             (addr,),
         )
-    
+
+
 def upsert_pool(
     *,
     pool: str,
@@ -1064,7 +1059,8 @@ def load_all_pools():
             FROM launchpad_pools
         """)
         return cur.fetchall()
-    
+
+
 def load_tokens_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -1107,7 +1103,7 @@ def load_tokens_for_state():
             """
         )
         return cur.fetchall()
-        
+
 
 def search_tokens(query: str, limit: int = 20):
     q = (query or "").strip().lower()
@@ -1152,17 +1148,30 @@ def search_tokens(query: str, limit: int = 20):
             LIMIT %s;
             """,
             (
-                q, q, q,
-                prefix, prefix, prefix,
-                contains, contains, contains,
-                q, q, q,
-                contains, contains, contains,
-                q, q, q,
+                q,
+                q,
+                q,
+                prefix,
+                prefix,
+                prefix,
+                contains,
+                contains,
+                contains,
+                q,
+                q,
+                q,
+                contains,
+                contains,
+                contains,
+                q,
+                q,
+                q,
                 limit,
             ),
         )
         return cur.fetchall()
-    
+
+
 def set_mon_price_usd(value) -> None:
     val = Decimal(value)
     with db_cursor() as cur:
@@ -1176,6 +1185,7 @@ def set_mon_price_usd(value) -> None:
             (val,),
         )
 
+
 def get_mon_price_usd():
     with db_cursor() as cur:
         cur.execute(
@@ -1188,6 +1198,7 @@ def get_mon_price_usd():
         row = cur.fetchone()
     return row[0] if row else None
 
+
 def load_holder_denylist() -> list[str]:
     try:
         with db_cursor() as cur:
@@ -1195,6 +1206,7 @@ def load_holder_denylist() -> list[str]:
             return [r[0].lower() for r in cur.fetchall() if r[0]]
     except Exception:
         return []
+
 
 def mark_nadfun_v2(token: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     tok = (token or "").lower()
@@ -1207,6 +1219,7 @@ def mark_nadfun_v2(token: str, cur: psycopg2.extensions.cursor | None = None) ->
     else:
         cur.execute(sql, (tok,))
 
+
 def load_nadfun_v2_tokens() -> list[str]:
     try:
         with db_cursor() as cur:
@@ -1214,6 +1227,7 @@ def load_nadfun_v2_tokens() -> list[str]:
             return [r[0].lower() for r in cur.fetchall() if r[0]]
     except Exception:
         return []
+
 
 def clear_position(
     *,
@@ -1268,6 +1282,7 @@ def write_block_logs(block_number: int, logs: list[dict], cur: psycopg2.extensio
             (block_number, Json(logs)),
         )
 
+
 def write_block_logs_batch(blocks: dict[int, list[dict]], cur) -> None:
     if not blocks:
         return
@@ -1280,6 +1295,7 @@ def write_block_logs_batch(blocks: dict[int, list[dict]], cur) -> None:
         """,
         data,
     )
+
 
 def get_block_logs(block_number: int) -> list[dict] | None:
     with db_cursor() as cur:
@@ -1295,6 +1311,7 @@ def get_block_logs(block_number: int) -> list[dict] | None:
     if not row:
         return None
     return row[0] or []
+
 
 def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int, list[dict]]:
     result: dict[int, list[dict]] = {}
@@ -1323,6 +1340,7 @@ def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int
             result[int(num)] = logs or []
     return result
 
+
 def insert_trades_batch(trades: list[tuple], cur) -> None:
     if not trades:
         return
@@ -1347,25 +1365,27 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
         return
     data = []
     for token, u in token_updates.items():
-        data.append((
-            u["last_price_native"],
-            int(u["native_volume"]),
-            int(u["token_volume"]),
-            u["volume_usd"],
-            u["fees_usd"],
-            int(u["buy_count"]),
-            int(u["sell_count"]),
-            int(u["tx_count"]),
-            u["circulating_supply"],
-            bool(u["approaching_75"]),
-            int(u["approaching_75_block"]) if u.get("approaching_75_block") else None,
-            int(u["approaching_75_at"]) if u.get("approaching_75_at") else None,
-            int(u["snipers_count"]),
-            int(u.get("curve_native_reserve") or 0),
-            int(u.get("curve_token_reserve") or 0),
-            u["last_price_native"],
-            token.lower(),
-        ))
+        data.append(
+            (
+                u["last_price_native"],
+                int(u["native_volume"]),
+                int(u["token_volume"]),
+                u["volume_usd"],
+                u["fees_usd"],
+                int(u["buy_count"]),
+                int(u["sell_count"]),
+                int(u["tx_count"]),
+                u["circulating_supply"],
+                bool(u["approaching_75"]),
+                int(u["approaching_75_block"]) if u.get("approaching_75_block") else None,
+                int(u["approaching_75_at"]) if u.get("approaching_75_at") else None,
+                int(u["snipers_count"]),
+                int(u.get("curve_native_reserve") or 0),
+                int(u.get("curve_token_reserve") or 0),
+                u["last_price_native"],
+                token.lower(),
+            )
+        )
     execute_values(
         cur,
         """
@@ -1403,7 +1423,10 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
 def update_users_batch(user_updates: dict[str, dict], cur) -> None:
     if not user_updates:
         return
-    data = [(addr, int(u["native_volume_delta"]), u["realized_delta"], u["trade_count_delta"]) for addr, u in user_updates.items()]
+    data = [
+        (addr, int(u["native_volume_delta"]), u["realized_delta"], u["trade_count_delta"])
+        for addr, u in user_updates.items()
+    ]
     execute_values(
         cur,
         """
@@ -1427,22 +1450,24 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         balance_insert = max(int(p["balance_token_delta"]), 0)
         unrealized_insert = Decimal(balance_insert) * Decimal(p["last_price_native"])
         total_insert = Decimal(p["realized_pnl_delta"]) + unrealized_insert
-        data.append((
-            addr,
-            tok,
-            int(p["token_bought_delta"]),
-            int(p["token_sold_delta"]),
-            int(p["native_spent_delta"]),
-            int(p["native_received_delta"]),
-            int(p["balance_token_delta"]),
-            p["realized_pnl_delta"],
-            unrealized_insert,
-            total_insert,
-            int(p["trade_count_delta"]),
-            int(p["buy_count_delta"]),
-            int(p["sell_count_delta"]),
-            p["last_price_native"],
-        ))
+        data.append(
+            (
+                addr,
+                tok,
+                int(p["token_bought_delta"]),
+                int(p["token_sold_delta"]),
+                int(p["native_spent_delta"]),
+                int(p["native_received_delta"]),
+                int(p["balance_token_delta"]),
+                p["realized_pnl_delta"],
+                unrealized_insert,
+                total_insert,
+                int(p["trade_count_delta"]),
+                int(p["buy_count_delta"]),
+                int(p["sell_count_delta"]),
+                p["last_price_native"],
+            )
+        )
     execute_values(
         cur,
         """
@@ -1499,10 +1524,7 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
             agg["close"] = price_native
             agg["volume"] += int(abs(native_amount))
 
-    data = [
-        (k[0], k[1], k[2], v["open"], v["high"], v["low"], v["close"], v["volume"])
-        for k, v in aggregated.items()
-    ]
+    data = [(k[0], k[1], k[2], v["open"], v["high"], v["low"], v["close"], v["volume"]) for k, v in aggregated.items()]
     execute_values(
         cur,
         """
@@ -1582,15 +1604,7 @@ def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
     return int(row[0]), int(row[1])
 
 
-
-
 def get_recent_block_hashes(limit: int = 32, cur: psycopg2.extensions.cursor | None = None) -> list[tuple]:
-    """Most recently indexed blocks, newest first, as (number, block_hash).
-
-    Used to verify the tail of the chain still matches what we indexed. A reorg
-    replaces a contiguous suffix, so walking newest-first lets the check stop at
-    the first block that still matches.
-    """
     sql = """
         SELECT number, block_hash
         FROM launchpad_blocks

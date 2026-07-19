@@ -1,18 +1,16 @@
 import os
 import sys
-from contextlib import ExitStack
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import api.api as _api_root
+from fastapi import HTTPException
+
 import api.routes.vaults as vault_api
 import core.storage.vaults as vault_storage
-from fastapi import HTTPException
-from modules import markets
-from modules import vaults
+from modules import markets, vaults
 
 
 def _u256(n: int) -> bytes:
@@ -402,9 +400,12 @@ def test_parse_vault_deposit_withdraw_and_status_events_and_admin_changes():
         "vault": vault_addr,
         "lockup": 999,
     }
-    assert vaults.parse_vault_decrease_on_withdraw_changed("0xfactory", ["0x0", _topic_addr(vault_addr)], body_one)[
-        "decreaseOnWithdraw"
-    ] is True
+    assert (
+        vaults.parse_vault_decrease_on_withdraw_changed("0xfactory", ["0x0", _topic_addr(vault_addr)], body_one)[
+            "decreaseOnWithdraw"
+        ]
+        is True
+    )
     assert vaults.parse_vault_decrease_on_withdraw_changed("0xfactory", ["0x0"], "") == {
         "vault": "",
         "decreaseOnWithdraw": False,
@@ -529,7 +530,9 @@ def test_vault_user_summary_not_found_and_fallback_snapshot():
 
     latest_row = (100, 1000, 10, 20, 12.34)
     with ExitStack() as st:
-        st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(circulating_shares=0)))
+        st.enter_context(
+            patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(circulating_shares=0))
+        )
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=latest_row))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=None))
         st.enter_context(patch.object(vault_api.storage, "list_crystal_vault_deposits", return_value=[]))
@@ -553,7 +556,9 @@ def test_vault_user_summary_not_found_and_fallback_snapshot():
 
 def test_vault_user_summary_handles_missing_latest_balance_row():
     with ExitStack() as st:
-        st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(circulating_shares=10)))
+        st.enter_context(
+            patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(circulating_shares=10))
+        )
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=None))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=(1, 0, 0, 123, 0)))
         st.enter_context(patch.object(vault_api.storage, "list_crystal_vault_deposits", return_value=[]))
@@ -836,7 +841,11 @@ def test_vault_refresh_balance_success_and_user_projection():
     with ExitStack() as st:
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=(50, 0, 0, 400, 0)))
-        st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=(123, 456, 1000, 5000, 42.25)))
+        st.enter_context(
+            patch.object(
+                vault_api.storage, "get_crystal_vault_latest_balance", return_value=(123, 456, 1000, 5000, 42.25)
+            )
+        )
         st.enter_context(patch.object(vault_api, "State", return_value=fake_state))
         post = st.enter_context(patch.object(vault_api.httpx, "post", side_effect=responses))
         out = vault_api.vault_refresh_balance("0xVAULT", user="0xUSER")
@@ -892,7 +901,9 @@ def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timest
     with ExitStack() as st:
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=None))
-        st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=(10, 321, 1, 2, 9.5)))
+        st.enter_context(
+            patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=(10, 321, 1, 2, 9.5))
+        )
         st.enter_context(patch.object(vault_api, "State", side_effect=RuntimeError("state rebuild failed")))
         st.enter_context(patch.object(vault_api.httpx, "post", side_effect=ok_fallback_ts))
         st.enter_context(patch.object(vault_api.time, "time", return_value=321.0))
@@ -1003,14 +1014,18 @@ def test_vault_history_accepts_string_timeframes():
     now_ts = 2_100_000_000
     with patch.object(vault_api.time, "time", return_value=float(now_ts)):
         with patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(vault="0xv")):
-            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]) as m:
+            with patch.object(
+                vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]
+            ) as m:
                 out = vault_api.vault_history("0xV", "1w", limit=0)
     m.assert_called_once_with("0xv", start_ts=now_ts - (7 * 86400), limit=0)
     assert out["info"]["timeframe"] == "week"
 
     with patch.object(vault_api.time, "time", return_value=float(now_ts)):
         with patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(vault="0xv")):
-            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]) as m2:
+            with patch.object(
+                vault_api.storage, "list_crystal_vault_balance_samples", return_value=[(1, 1000, 0, 0, 1.0)]
+            ) as m2:
                 out2 = vault_api.vault_history("0xV", "all-time", limit=0)
     m2.assert_called_once_with("0xv", start_ts=None, limit=0)
     assert out2["info"]["timeframe"] == "all"
@@ -1065,7 +1080,7 @@ def test_vault_storage_upsert_vault_sql_and_cursor_paths():
             updated_block=300,
             updated_at=400,
         )
-    (sql, params), = fake.exec_calls
+    ((sql, params),) = fake.exec_calls
     assert "INSERT INTO crystal_vaults" in sql
     assert params[0] == "0xvault"
     assert params[1] == "0xquote"
@@ -1128,7 +1143,7 @@ def test_vault_storage_update_fields_sql_and_cursor_paths():
             updated_block=11,
             updated_at=22,
         )
-    (sql, params), = fake.exec_calls
+    ((sql, params),) = fake.exec_calls
     assert "UPDATE crystal_vaults" in sql
     assert params[:-1] == (True, False, 123, 456, 789, True, "0xMARKET", 6, 18, 11, 22)
     assert params[-1] == "0xvault"
@@ -1168,7 +1183,7 @@ def test_vault_storage_event_and_user_write_helpers_sql_and_cursor_paths():
             base_amount=6,
             txhash="0xHASH",
         )
-    (dep_sql, dep_params), = dep_cur.exec_calls
+    ((dep_sql, dep_params),) = dep_cur.exec_calls
     assert "INSERT INTO crystal_vault_deposits" in dep_sql
     assert dep_params == (1, 2, 3, "0xvault", "0xuser", 4, 5, 6, "0xhash")
     dep_direct = MagicMock()
@@ -1199,7 +1214,7 @@ def test_vault_storage_event_and_user_write_helpers_sql_and_cursor_paths():
             base_amount=12,
             txhash="0xHASH2",
         )
-    (wd_sql, wd_params), = wd_cur.exec_calls
+    ((wd_sql, wd_params),) = wd_cur.exec_calls
     assert "INSERT INTO crystal_vault_withdrawals" in wd_sql
     assert wd_params == (7, 8, 9, "0xvault", "0xuser", 10, 11, 12, "0xhash2")
     wd_direct = MagicMock()
@@ -1228,7 +1243,7 @@ def test_vault_storage_event_and_user_write_helpers_sql_and_cursor_paths():
             last_deposit=123,
             last_withdraw=456,
         )
-    (user_sql, user_params), = user_cur.exec_calls
+    ((user_sql, user_params),) = user_cur.exec_calls
     assert "INSERT INTO crystal_vault_users" in user_sql
     assert user_params == ("0xvault", "0xuser", 5, 1, 2, 123, 456, 5)
     user_direct = MagicMock()
@@ -1255,7 +1270,7 @@ def test_vault_storage_event_and_user_write_helpers_sql_and_cursor_paths():
             base_balance=102,
             usd_value="12.34",
         )
-    (bal_sql, bal_params), = bal_cur.exec_calls
+    ((bal_sql, bal_params),) = bal_cur.exec_calls
     assert "INSERT INTO crystal_vault_balance_samples" in bal_sql
     assert bal_params[:5] == ("0xvault", 99, 100, 101, 102)
     assert bal_params[5] == Decimal("12.34")

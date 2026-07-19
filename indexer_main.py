@@ -6,13 +6,12 @@ import os
 from pathlib import Path
 
 import backfill
-import export_logs
-from core.stream import stream_logs, vault_sampler, reorg_watcher
-from core.sequencer import SEQUENCER
 import core.storage as storage
+import export_logs
+from core.sequencer import SEQUENCER
+from core.stream import reorg_watcher, stream_logs, vault_sampler
 from modules import nadfun
 from replay_dump import dump_bounds, replay_dump_range
-
 
 DEFAULT_START_BLOCK = 37709836
 
@@ -32,11 +31,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-block", type=lambda x: int(x, 0), default=DEFAULT_START_BLOCK)
     parser.add_argument("--dump-dir", default=None, help="directory created by export_logs.py")
     parser.add_argument("--dump-end", type=lambda x: int(x, 0), default=None, help="last dump block to replay")
-    parser.add_argument("--allow-missing-timestamps", action="store_true", help="allow dump logs without blockTimestamp")
-    parser.add_argument("--live-dump-dir", default=None, help="continuously append full-chain logs to this dump directory")
+    parser.add_argument(
+        "--allow-missing-timestamps", action="store_true", help="allow dump logs without blockTimestamp"
+    )
+    parser.add_argument(
+        "--live-dump-dir", default=None, help="continuously append full-chain logs to this dump directory"
+    )
     parser.add_argument("--live-dump-batch", type=int, default=100, help="blocks per live dump eth_getLogs request")
-    parser.add_argument("--live-dump-rps", type=float, default=5.0, help="max RPC requests per second for live dump follower")
-    parser.add_argument("--live-dump-indexed-only", action="store_true", help="live dump only backend-indexed topics instead of all logs")
+    parser.add_argument(
+        "--live-dump-rps", type=float, default=5.0, help="max RPC requests per second for live dump follower"
+    )
+    parser.add_argument(
+        "--live-dump-indexed-only",
+        action="store_true",
+        help="live dump only backend-indexed topics instead of all logs",
+    )
     parser.add_argument("--no-indexer-lock", action="store_true", help="disable Postgres advisory lock guard")
     parser.add_argument(
         "--from-current-block",
@@ -95,8 +104,7 @@ def _replay_dump(
         return start - 1
 
     print(
-        f"[IDX] Replaying dump {dump_dir} blocks {replay_start}-{replay_end} "
-        f"reset={reset}",
+        f"[IDX] Replaying dump {dump_dir} blocks {replay_start}-{replay_end} reset={reset}",
         flush=True,
     )
     return replay_dump_range(
@@ -153,8 +161,7 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     ]
     if args.live_dump_dir:
         print(
-            f"[DUMP] Starting live full-log dump follower at {args.live_dump_dir} "
-            f"from block {start_block}",
+            f"[DUMP] Starting live full-log dump follower at {args.live_dump_dir} from block {start_block}",
             flush=True,
         )
         tasks.append(asyncio.create_task(_run_live_dump(args, start_block)))
@@ -168,8 +175,7 @@ async def _live_start_block(args: argparse.Namespace, last_db: int) -> int:
 
     head = await backfill.get_head_http()
     print(
-        f"[IDX] --from-current-block set: DB last processed block is {last_db or 'none'}; "
-        f"RPC head is {head}",
+        f"[IDX] --from-current-block set: DB last processed block is {last_db or 'none'}; RPC head is {head}",
         flush=True,
     )
     return head

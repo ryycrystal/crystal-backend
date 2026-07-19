@@ -5,7 +5,6 @@ import sys
 import urllib.parse
 import urllib.request
 
-
 ZERO = "0x0000000000000000000000000000000000000000"
 
 
@@ -101,7 +100,10 @@ def _check_vaults(base_url: str, vault_addr: str | None):
     _assert(isinstance(summary.get("userBalance"), dict), "vault summary missing userBalance")
     _assert(_is_num(summary.get("tvlUsd", 0.0)), "vault summary tvlUsd not numeric")
     _assert(_is_num(summary["latestBalance"].get("usdValue", 0.0)), "vault latestBalance.usdValue not numeric")
-    _assert(abs(float(summary.get("tvlUsd", 0.0)) - float(summary["latestBalance"].get("usdValue", 0.0))) < 1e-9, "vault tvlUsd != latestBalance.usdValue")
+    _assert(
+        abs(float(summary.get("tvlUsd", 0.0)) - float(summary["latestBalance"].get("usdValue", 0.0))) < 1e-9,
+        "vault tvlUsd != latestBalance.usdValue",
+    )
     if summary.get("snapshot") is not None:
         snap = summary["snapshot"]
         _assert(isinstance(snap.get("tvl"), list), "vault snapshot.tvl must be list")
@@ -120,7 +122,10 @@ def _check_vaults(base_url: str, vault_addr: str | None):
     try:
         refreshed = _post_json(base_url, f"/vaults/{chosen}/refresh-balance", {"user": ZERO})
         _assert(isinstance(refreshed, dict), "refresh-balance must return object")
-        _assert("vaultBalance" in refreshed or "latestBalance" in refreshed or "ok" in refreshed, "refresh-balance unexpected shape")
+        _assert(
+            "vaultBalance" in refreshed or "latestBalance" in refreshed or "ok" in refreshed,
+            "refresh-balance unexpected shape",
+        )
         print(f"[smoke] /vaults/{{addr}}/refresh-balance ok vault={chosen}")
     except Exception as e:
         print(f"[smoke] refresh-balance skipped ({e})")
@@ -140,14 +145,25 @@ def _check_pools(base_url: str, pool_addr: str | None):
 
     chosen = pool_addr.lower() if pool_addr else None
     if not chosen and lst["pools"]:
-        chosen = str((lst["pools"][0].get("address") or lst["pools"][0].get("market") or "")).lower()
+        chosen = str(lst["pools"][0].get("address") or lst["pools"][0].get("market") or "").lower()
     if not chosen:
         print("[smoke] pool detail skipped (no pools)")
         return
 
     pool = _get_json(base_url, f"/pools/{chosen}")
     _assert(isinstance(pool, dict), "pool detail must be object")
-    for k in ("market", "reserveQuote", "reserveBase", "tvlUsd", "volume24hUsd", "fees24hUsd", "apy24hPercent", "dailyYieldPercent", "tvlHistory", "apyHistory"):
+    for k in (
+        "market",
+        "reserveQuote",
+        "reserveBase",
+        "tvlUsd",
+        "volume24hUsd",
+        "fees24hUsd",
+        "apy24hPercent",
+        "dailyYieldPercent",
+        "tvlHistory",
+        "apyHistory",
+    ):
         _assert(k in pool, f"pool detail missing {k}")
     int(str(pool["reserveQuote"]))
     int(str(pool["reserveBase"]))

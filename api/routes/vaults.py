@@ -1,8 +1,11 @@
 from __future__ import annotations
-from typing import Dict, Any
+
+from typing import Any
+
 import httpx
-from fastapi import APIRouter, Query, HTTPException
-from api.api import storage, time, _sample_evenly_by_time, ttl_cache
+from fastapi import APIRouter, HTTPException, Query
+
+from api.api import _sample_evenly_by_time, storage, time, ttl_cache
 from state import RPC_HTTP, State
 
 router = APIRouter()
@@ -58,10 +61,10 @@ def _rpc_jsonrpc_sync(method: str, params: list[Any]) -> dict:
     return data
 
 
-from decimal import Decimal
 import threading as _threading
+from decimal import Decimal
 
-_STATE_CACHE: Dict[str, Any] = {"state": None, "ts": 0.0}
+_STATE_CACHE: dict[str, Any] = {"state": None, "ts": 0.0}
 _STATE_CACHE_LOCK = _threading.Lock()
 _STATE_CACHE_TTL = 30.0
 
@@ -161,6 +164,7 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
         },
     }
 
+
 # endpoint for vault list used by /earn/vaults
 @router.get("/vaults/list")
 @ttl_cache("vaults:list", ttl_seconds=3)
@@ -175,7 +179,7 @@ def list_vaults(
     include_snapshot: bool = Query(True),
     snapshot_timeframe: str = Query("1", description="1|2|3|4 or 1d|1w|1m|all-time"),
     snapshot_points: int = Query(48, ge=0, le=200),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     status_norm = (status if isinstance(status, str) else "all" or "all").strip().lower()
     if status_norm not in {"all", "active", "closed"}:
         raise HTTPException(status_code=400, detail="invalid status")
@@ -314,20 +318,36 @@ def list_vaults(
         "vaults": items,
     }
 
+
 # endpoint for forcing an immediate rpc balance read for a vault
 @router.post("/vaults/{address}/refresh-balance")
 def vault_refresh_balance(
     address: str,
     user: str | None = Query(None, description="optional user address for user balance projection"),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     vaddr = (address or "").lower()
     v = storage.get_crystal_vault(vaddr)
     if not v:
         raise HTTPException(status_code=404, detail="vault not found")
     (
-        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
-        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
-        lockup, decrease_on_withdraw,
+        vault_addr,
+        quote,
+        base,
+        market,
+        owner,
+        name,
+        description,
+        social1,
+        social2,
+        social3,
+        locked,
+        closed,
+        max_shares,
+        circulating_shares,
+        quote_decimals,
+        base_decimals,
+        lockup,
+        decrease_on_withdraw,
     ) = v
 
     try:
@@ -409,6 +429,7 @@ def vault_refresh_balance(
         "source": "rpc",
     }
 
+
 # endpoint for complete vaults/{address} page
 @router.get("/vaults/{address}/{user}")
 def vault_user_summary(
@@ -416,16 +437,31 @@ def vault_user_summary(
     user: str,
     history_limit: int = Query(50, ge=1, le=500),
     snapshot_timeframe: str = Query("1", description="1|2|3|4 or 1d|1w|1m|all-time"),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     vaddr = address.lower()
     uaddr = user.lower()
     v = storage.get_crystal_vault(vaddr)
     if not v:
         return {"ok": False, "error": "vault not found", "vault": vaddr}
     (
-        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
-        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
-        lockup, decrease_on_withdraw,
+        vault_addr,
+        quote,
+        base,
+        market,
+        owner,
+        name,
+        description,
+        social1,
+        social2,
+        social3,
+        locked,
+        closed,
+        max_shares,
+        circulating_shares,
+        quote_decimals,
+        base_decimals,
+        lockup,
+        decrease_on_withdraw,
     ) = v
 
     latest_row = storage.get_crystal_vault_latest_balance(vaddr)
@@ -490,15 +526,17 @@ def vault_user_summary(
     depositors = []
     for d in depositors_raw:
         shares = int(d[1] or 0)
-        depositors.append({
-            "address": str(d[0]).lower(),
-            "shares": shares,
-            "sharePct": (shares / circ) if circ > 0 else 0.0,
-            "deposits": int(d[2] or 0),
-            "withdraws": int(d[3] or 0),
-            "lastDeposit": int(d[4] or 0),
-            "lastWithdraw": int(d[5] or 0),
-        })
+        depositors.append(
+            {
+                "address": str(d[0]).lower(),
+                "shares": shares,
+                "sharePct": (shares / circ) if circ > 0 else 0.0,
+                "deposits": int(d[2] or 0),
+                "withdraws": int(d[3] or 0),
+                "lastDeposit": int(d[4] or 0),
+                "lastWithdraw": int(d[5] or 0),
+            }
+        )
 
     timeframe_i = _parse_timeframe(snapshot_timeframe)
     snapshot = _vault_snapshot_from_samples(vaddr, timeframe=timeframe_i, points=0)
@@ -551,22 +589,38 @@ def vault_user_summary(
         "snapshot": snapshot,
     }
 
+
 # endpoint for vault history charts (used when timeframe is changed while staying on the same vault)
 @router.get("/vaults/{address}/history/{timeframe}")
 def vault_history(
     address: str,
     timeframe: str,
     limit: int = Query(0, ge=0, le=2000),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     vaddr = address.lower()
     v = storage.get_crystal_vault(vaddr)
     if not v:
         raise HTTPException(status_code=404, detail="vault not found")
     timeframe_i = _parse_timeframe(timeframe)
     (
-        vault_addr, quote, base, market, owner, name, description, social1, social2, social3,
-        locked, closed, max_shares, circulating_shares, quote_decimals, base_decimals,
-        lockup, decrease_on_withdraw,
+        vault_addr,
+        quote,
+        base,
+        market,
+        owner,
+        name,
+        description,
+        social1,
+        social2,
+        social3,
+        locked,
+        closed,
+        max_shares,
+        circulating_shares,
+        quote_decimals,
+        base_decimals,
+        lockup,
+        decrease_on_withdraw,
     ) = v
 
     now_ts = int(time.time())

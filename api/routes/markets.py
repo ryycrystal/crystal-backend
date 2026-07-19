@@ -1,8 +1,11 @@
 from __future__ import annotations
+
+from collections.abc import Sequence
 from decimal import Decimal
-from typing import Dict, Any, Sequence
+from typing import Any
 
 from fastapi import APIRouter
+
 import core.storage as storage
 
 router = APIRouter()
@@ -14,7 +17,7 @@ def _json_value(value):
     return value
 
 
-def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> Dict[str, Any]:
+def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> dict[str, Any]:
     (
         market,
         is_canonical,
@@ -81,7 +84,7 @@ def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> Dict[str, Any]:
 
 # Return a full dump of indexed Crystal markets for inspection and debugging
 @router.get("/markets/list")
-def list_markets_dump() -> Dict[str, Any]:
+def list_markets_dump() -> dict[str, Any]:
     rows = storage.list_crystal_markets_dump()
     markets = [_crystal_market_dump_row_to_api(r) for r in rows]
     return {"count": len(markets), "markets": markets}

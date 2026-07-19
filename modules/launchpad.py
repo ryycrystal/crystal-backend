@@ -1,19 +1,9 @@
-
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
 
 def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
-
-
-
-
-
-
-
-
-
 
 
 def parse_launchpad_trade(_addr, tops, data):
@@ -37,18 +27,6 @@ def parse_launchpad_trade(_addr, tops, data):
         "native_reserve": native_reserve,
         "token_reserve": token_reserve,
     }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def parse_token_created(_addr, tops, data):
@@ -107,9 +85,6 @@ def parse_token_created(_addr, tops, data):
     }
 
 
-
 def parse_migrated(_addr, tops, _data):
     token = to_addr(tops[1]).lower()
-    return {
-        "token": token
-    }
+    return {"token": token}

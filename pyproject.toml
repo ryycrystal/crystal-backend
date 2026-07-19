@@ -2,28 +2,49 @@
 line-length = 120
 target-version = "py312"
 
-# Scoped deliberately. These are the modules that pass today, so the gate is real
-# rather than a wall of pre-existing findings everyone learns to ignore. Widen the
-# list as other modules are cleaned up.
+# Everything that ships in the launch image (native + nad.fun launchpads) plus the
+# tests. Dev-only tooling (backfill, export_logs, replay_dump, db_snapshot,
+# replay_benchmark) is deliberately out of scope.
 include = [
-    "core/lifecycle.py",
+    "state.py",
+    "models.py",
+    "main.py",
+    "indexer_main.py",
+    "env_loader.py",
+    "core/*.py",
     "core/adapters/*.py",
-    "modules/launchpad.py",
-    "tests/test_lifecycle.py",
-    "tests/test_launchpad_native.py",
-    "tests/test_launchpad_integration.py",
+    "core/storage/*.py",
+    "modules/*.py",
+    "api/*.py",
+    "api/routes/*.py",
+    "tests/*.py",
 ]
+
+[tool.ruff.format]
+# the reason this exists: blank lines between defs were inconsistent (some one
+# line apart, some two). the formatter makes that deterministic rather than a
+# thing anyone has to notice in review.
+quote-style = "double"
+indent-style = "space"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
 ignore = [
     "E501",   # line length is handled by the formatter, not worth failing on
     "UP042",  # TokenPhase is deliberately (str, Enum) so it serializes as a plain string
+    "B905",   # zip(strict=) would change behaviour on ragged inputs, not a mechanical fix
+    "B904",   # raise-from inside except: cosmetic, not worth churning error paths for
+    "B007",   # unused loop variables, all verified harmless
+    "F841",   # unused locals, all verified harmless (no dropped results)
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # tests build synthetic fixtures and import lazily inside fixtures on purpose
 "tests/*" = ["B008", "E402"]
+# api.api and the route modules are mutually importing, so routers are included
+# at the bottom on purpose -- the import order is load-bearing, not sloppiness
+"api/api.py" = ["E402"]
+"api/routes/*.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"

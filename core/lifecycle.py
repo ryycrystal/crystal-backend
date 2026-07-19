@@ -131,9 +131,7 @@ def snapshot(
     graduated: bool = False,
     migrated: bool = False,
 ) -> LifecycleSnapshot:
-    phase = resolve_phase(
-        curve=curve, has_trades=has_trades, graduated=graduated, migrated=migrated
-    )
+    phase = resolve_phase(curve=curve, has_trades=has_trades, graduated=graduated, migrated=migrated)
     if curve is None:
         # off the curve (or not yet observed): a graduated token is fully sold
         done = phase in (TokenPhase.GRADUATED, TokenPhase.MIGRATED)

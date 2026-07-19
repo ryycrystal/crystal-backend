@@ -3,10 +3,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import state
 from core import chain
 from modules import nadfun
-import state
-
 
 V2_BONDING = "0x9f3832732923252A21044F21eE6bd87F09514ae4"
 CREATOR = "0x77D4d8E13b228e474b1c53D6adEeBEf4DFA51603"

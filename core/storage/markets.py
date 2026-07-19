@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Optional
+
 from decimal import Decimal
 
 import psycopg2
-from psycopg2.extras import Json, execute_values
 
-from .base import db_cursor, _clean_text
+from .base import _clean_text, db_cursor
+
 
 def upsert_crystal_market(
     *,
@@ -366,5 +366,3 @@ def get_crystal_pool_market(market: str):
             ((market or "").lower(),),
         )
         return cur.fetchone()
-
-

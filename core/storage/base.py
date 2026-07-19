@@ -1,20 +1,20 @@
 from __future__ import annotations
-from typing import Optional, Iterator
-from contextlib import contextmanager
-from decimal import Decimal
 
 import os
 import threading
-import psycopg2
+from collections.abc import Iterator
+from contextlib import contextmanager
 from urllib.parse import quote
 
+import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from psycopg2.extras import Json, execute_values
+
 from env_loader import load_env
 
 load_env()
 
-def _build_database_url() -> Optional[str]:
+
+def _build_database_url() -> str | None:
     url = os.getenv("DATABASE_URL")
     if url:
         return url
@@ -35,11 +35,11 @@ def _build_database_url() -> Optional[str]:
     return None
 
 
-_DATABASE_URL: Optional[str] = _build_database_url()
+_DATABASE_URL: str | None = _build_database_url()
 _DB_MIN_CONN: int = int(os.getenv("DB_MIN_CONN", "1"))
 _DB_MAX_CONN: int = int(os.getenv("DB_MAX_CONN", "25"))
 
-_POOL: Optional[ThreadedConnectionPool] = None
+_POOL: ThreadedConnectionPool | None = None
 _POOL_LOCK = threading.Lock()
 _ADVISORY_LOCK_KEY: int = 18910274772340076
 
@@ -53,14 +53,14 @@ def _clean_text(value) -> str:
 
 def init_pool() -> None:
     global _POOL
-    
+
     if _DATABASE_URL is None:
         raise RuntimeError("[DB] Missing DB URL")
-    
+
     with _POOL_LOCK:
         if _POOL is not None:
             return
-        
+
         _POOL = ThreadedConnectionPool(
             minconn=_DB_MIN_CONN,
             maxconn=_DB_MAX_CONN,
@@ -70,7 +70,7 @@ def init_pool() -> None:
 
 def close_pool() -> None:
     global _POOL
-    
+
     with _POOL_LOCK:
         if _POOL is not None:
             _POOL.closeall()
@@ -79,7 +79,7 @@ def close_pool() -> None:
 
 def _get_pool() -> ThreadedConnectionPool:
     global _POOL
-    
+
     if _POOL is None:
         raise RuntimeError("[DB] Uninitialized connection pool")
 
@@ -122,18 +122,17 @@ def release_indexer_lock(conn: psycopg2.extensions.connection | None) -> None:
         pool.putconn(conn)
 
 
-
 @contextmanager
 def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
     pool = _get_pool()
     conn = pool.getconn()
-    
+
     try:
         if conn.autocommit:
             conn.autocommit = False
-        
+
         cur = conn.cursor()
-        
+
         try:
             yield cur
             conn.commit()
@@ -144,5 +143,3 @@ def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
             cur.close()
     finally:
         pool.putconn(conn)
-    
-

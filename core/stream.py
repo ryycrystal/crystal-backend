@@ -1,11 +1,15 @@
-import json, asyncio, time, uuid, websockets
+import asyncio
+import json
+import time
+import uuid
 from collections import deque
 
-from core import chain as h
-from core.sequencer import SEQUENCER
-import core.storage as storage
+import websockets
 
 import backfill
+import core.storage as storage
+from core import chain as h
+from core.sequencer import SEQUENCER
 
 HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = 100
@@ -22,7 +26,7 @@ missing_set: set[int] = set()
 def _u256_at(buf: bytes, off: int) -> int:
     if off < 0 or (off + 32) > len(buf):
         return 0
-    return int.from_bytes(buf[off:off + 32], "big")
+    return int.from_bytes(buf[off : off + 32], "big")
 
 
 def _abi_u256(n: int) -> bytes:
@@ -87,7 +91,7 @@ def _decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, byte
         if bstart > len(buf):
             out.append((success, b""))
             continue
-        out.append((success, buf[bstart:min(bend, len(buf))]))
+        out.append((success, buf[bstart : min(bend, len(buf))]))
     return out
 
 
@@ -121,7 +125,7 @@ async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num:
 
 async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
     for i in range(0, len(vaults), VAULT_SAMPLER_MULTICALL_CHUNK):
-        chunk = vaults[i:i + VAULT_SAMPLER_MULTICALL_CHUNK]
+        chunk = vaults[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
         try:
             data = _encode_multicall3_aggregate3([(v, GET_BALANCES_CALLDATA) for v in chunk])
             call_resp = await backfill.http_jsonrpc(
@@ -232,16 +236,22 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             async with websockets.connect(h.WS_URL, max_size=None, open_timeout=15, close_timeout=5) as gap_ws:
                 rid = str(uuid.uuid4())
                 await h.rate_gate()
-                await gap_ws.send(json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": rid,
-                    "method": "eth_getLogs",
-                    "params": [{
-                        "fromBlock": hex(blk_start),
-                        "toBlock": hex(blk_end),
-                        "topics": [h.TOPICS],
-                    }],
-                }))
+                await gap_ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": rid,
+                            "method": "eth_getLogs",
+                            "params": [
+                                {
+                                    "fromBlock": hex(blk_start),
+                                    "toBlock": hex(blk_end),
+                                    "topics": [h.TOPICS],
+                                }
+                            ],
+                        }
+                    )
+                )
                 resp = await asyncio.wait_for(h.ack(gap_ws, rid), timeout=30.0)
 
             by_block: dict[int, list[dict]] = {}
@@ -290,7 +300,7 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                 _add_missing(blk)
             raise
 
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             print(f"[Backfill] WS timeout for range {blk_start}-{blk_end}, retrying", flush=True)
             for blk in range(blk_start, blk_end + 1):
                 _add_missing(blk)
@@ -335,17 +345,17 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         heads_sub = (await h.ack(ws, 1, prefetched_msgs))["result"]
 
         await ws.send(
-            json.dumps({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "eth_subscribe",
-                "params": [
-                    "logs",
-                    {
-                        "topics": [h.TOPICS]
-                    },
-                ],
-            })
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "eth_subscribe",
+                    "params": [
+                        "logs",
+                        {"topics": [h.TOPICS]},
+                    ],
+                }
+            )
         )
         logs_sub = (await h.ack(ws, 2, prefetched_msgs))["result"]
 
@@ -375,7 +385,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                     should_exit[0] = True
                     try:
                         await asyncio.wait_for(ws.close(), timeout=5.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         print("[WS] Close timed out, forcing", flush=True)
                     return
 
@@ -399,7 +409,9 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                 if sid == heads_sub:
                     blk = int(res["number"], 16)
                     ts_hex = res.get("timestamp")
-                    blk_ts = int(ts_hex, 16) if isinstance(ts_hex, str) else (int(ts_hex) if ts_hex is not None else None)
+                    blk_ts = (
+                        int(ts_hex, 16) if isinstance(ts_hex, str) else (int(ts_hex) if ts_hex is not None else None)
+                    )
 
                     if last_head_num is not None:
                         for key in event_counts:
@@ -471,7 +483,7 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                     await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.CancelledError:
                     pass
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     print(f"[WS] {name} did not exit cleanly", flush=True)
                 except Exception as e:
                     print(f"[WS] {name} error on exit: {e!r}", flush=True)
@@ -524,7 +536,7 @@ async def vault_sampler(state):
             blk_num = int(blk_hex, 16)
             ts = 0
             try:
-                ts = int(getattr(state, "block_ts")(blk_num))
+                ts = int(state.block_ts(blk_num))
             except Exception:
                 ts = 0
             if ts <= 0:

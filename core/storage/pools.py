@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
 
 import psycopg2
 
@@ -30,6 +29,7 @@ def load_crystal_pool_states_for_state():
         )
         return cur.fetchall()
 
+
 # fetch one lp pool state row by market address
 def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None = None):
     sql = """
@@ -55,6 +55,7 @@ def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None =
             return cur2.fetchone()
     cur.execute(sql, ((market or "").lower(),))
     return cur.fetchone()
+
 
 # upsert current lp pool reserves and rolling metrics
 def upsert_crystal_pool_state(
@@ -132,6 +133,7 @@ def upsert_crystal_pool_state(
     else:
         cur.execute(sql, params)
 
+
 # update only the lp token total supply for a pool
 def update_crystal_pool_total_shares(
     market: str,
@@ -159,6 +161,7 @@ def update_crystal_pool_total_shares(
             cur2.execute(sql, params)
     else:
         cur.execute(sql, params)
+
 
 # insert a sync event with volume and fees
 def insert_crystal_pool_sync_event(
@@ -215,6 +218,7 @@ def insert_crystal_pool_sync_event(
     else:
         cur.execute(sql, params)
 
+
 # sum trade-only sync volume and fees since a timestamp
 def sum_crystal_pool_trade_metrics_since(
     market: str,
@@ -237,6 +241,7 @@ def sum_crystal_pool_trade_metrics_since(
             return cur2.fetchone()
     cur.execute(sql, params)
     return cur.fetchone()
+
 
 # compute a time-weighted average tvl over a window using pool tvl samples
 def time_weighted_avg_crystal_pool_tvl_since(
@@ -315,6 +320,7 @@ def time_weighted_avg_crystal_pool_tvl_since(
     row = cur.fetchone()
     return row[0] if row else 0
 
+
 # insert a pool tvl sample point for charting and averaging
 def insert_crystal_pool_tvl_sample(
     *,
@@ -363,6 +369,7 @@ def insert_crystal_pool_tvl_sample(
     else:
         cur.execute(sql, params)
 
+
 # list recent pool tvl samples ordered oldest to newest for api charts
 def list_crystal_pool_tvl_samples(
     market: str,
@@ -382,7 +389,7 @@ def list_crystal_pool_tvl_samples(
         FROM (
             SELECT timestamp, tvl_usd
             FROM crystal_pool_tvl_samples
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             ORDER BY timestamp DESC, block_number DESC, log_index DESC
             LIMIT %s
         ) q
@@ -391,6 +398,7 @@ def list_crystal_pool_tvl_samples(
     with db_cursor() as cur:
         cur.execute(sql, tuple(params))
         return cur.fetchall()
+
 
 # apply an lp transfer delta to a user's lp share balance for a pool
 def upsert_crystal_pool_lp_user_delta(
@@ -434,6 +442,7 @@ def upsert_crystal_pool_lp_user_delta(
             cur2.execute(sql, params)
     else:
         cur.execute(sql, params)
+
 
 # list amm-enabled pools joined with current indexed state and metrics
 def list_crystal_pools_with_state(
@@ -537,6 +546,7 @@ def list_crystal_pools_with_state(
             tuple(params + [limit_i, offset_i]),
         )
         return cur.fetchall()
+
 
 # fetch one amm-enabled pool joined with current indexed state and metrics
 def get_crystal_pool_with_state(market: str):

@@ -1,8 +1,8 @@
 import uvicorn
 from fastapi import FastAPI
 
-from api.api import app as api_app
 import core.storage as storage
+from api.api import app as api_app
 
 app: FastAPI = api_app
 
