@@ -223,8 +223,16 @@ def test_nadfun_geometry_matches_chain_verified_constants():
     # v2 k must equal what the chain reported for TAD and BTS
     assert (nf.V2_VIRTUAL_NATIVE_0 // 10**18) * (nf.V2_VIRTUAL_TOKEN_0 // 10**18) == 74_239_830_000_000
 
-    # observed graduation state on TAD: virt_tok 251,660,440.68
-    assert abs(nf.V2_GRADUATION_VIRTUAL_TOKEN / 1e18 - 251_660_440.68) < 0.01
+    # TAD's exact reserve at graduation, to the wei -- the curve ceils the token
+    # reserve, and flooring here left a completed v2 curve reading 9999
+    assert nf.V2_GRADUATION_VIRTUAL_TOKEN == 251_660_440_677_966_101_694_915_255
+    assert nf.V2_VIRTUAL_TOKEN_0 - nf.V2_GRADUATION_VIRTUAL_TOKEN == nf.V2_CURVE_SUPPLY
+
+    at_graduation = nf.NadfunLaunchpadAdapter(nf.SOURCE_V2).curve_state(
+        {"token_reserve": nf.V2_GRADUATION_VIRTUAL_TOKEN, "native_reserve": nf.V2_GRADUATION_VIRTUAL_NATIVE}
+    )
+    assert at_graduation.progress_bps == 10_000, "a fully sold v2 curve must read 100%"
+    assert at_graduation.is_complete is True
     # and the accumulated supply every graduated v2 token converged on
     assert abs(nf.V2_CURVE_SUPPLY / 1e18 - 808_908_559.32) < 0.01
 
@@ -350,3 +358,29 @@ def test_v1_adapter_reproduces_the_old_hardcoded_initial_price():
 
     # v2 starts on a different curve, so it must not share that price
     assert nf.NadfunLaunchpadAdapter(nf.SOURCE_V2).initial_price_native() != price
+
+
+def test_fee_rates_match_what_the_chain_charges():
+    """Measured from real trades, not assumed:
+      v1 REDNIT  reserve delta 0.98950500 -> user received 0.97960995  = 1%
+      v2 BTS     amount in 4,000 -> reserve delta 3,920                = 2%
+    A single hardcoded 1% halved v2 fees on every reorg recompute."""
+    from decimal import Decimal
+
+    import state as state_mod
+    from core.adapters import nadfun as nf
+
+    assert nf.fee_rate_for(nf.SOURCE_V1) == Decimal("0.01")
+    assert nf.fee_rate_for(nf.SOURCE_V2) == Decimal("0.02")
+    assert nf.fee_rate_for(nf.SOURCE_V1) != nf.fee_rate_for(nf.SOURCE_V2)
+
+    # the reorg recompute must consult the source, not a constant
+    assert state_mod._fee_rate_for_source(nf.SOURCE_V1) == Decimal("0.01")
+    assert state_mod._fee_rate_for_source(nf.SOURCE_V2) == Decimal("0.02")
+    assert state_mod._fee_rate_for_source(0) == state_mod.NATIVE_FEE_RATE
+
+    # the exact v1 arithmetic that established the rate
+    gross = Decimal("0.98950500")
+    assert gross * (1 - nf.fee_rate_for(nf.SOURCE_V1)) == Decimal("0.97960995")
+    # and the v2 arithmetic
+    assert Decimal(4000) * (1 - nf.fee_rate_for(nf.SOURCE_V2)) == Decimal(3920)

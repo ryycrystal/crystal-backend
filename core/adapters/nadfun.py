@@ -42,19 +42,29 @@ V2_VIRTUAL_NATIVE_0 = 70_000 * WAD
 V2_VIRTUAL_TOKEN_0 = 1_060_569_000 * WAD
 V2_GRADUATION_VIRTUAL_NATIVE = 295_000 * WAD
 V2_K = V2_VIRTUAL_NATIVE_0 * V2_VIRTUAL_TOKEN_0
-V2_GRADUATION_VIRTUAL_TOKEN = V2_K // V2_GRADUATION_VIRTUAL_NATIVE
+# the curve ceils the token reserve the same way crystal's does, flooring here
+# left tokens_sold one wei short of the supply so a completed v2 curve read 9999
+V2_GRADUATION_VIRTUAL_TOKEN = -(-V2_K // V2_GRADUATION_VIRTUAL_NATIVE)
 V2_CURVE_SUPPLY = V2_VIRTUAL_TOKEN_0 - V2_GRADUATION_VIRTUAL_TOKEN
+
+# fee taken on each trade, measured from real trades rather than assumed:
+#   v1  REDNIT   reserve delta 0.98950500 -> user got 0.97960995  = 1%
+#   v2  BTS      amount in 4,000 -> reserve delta 3,920           = 2%
+V1_FEE_RATE = Decimal("0.01")
+V2_FEE_RATE = Decimal("0.02")
 
 _GEOMETRY = {
     SOURCE_V1: {
         "virtual_native_0": V1_VIRTUAL_NATIVE_0,
         "virtual_token_0": V1_VIRTUAL_TOKEN_0,
         "curve_supply": V1_CURVE_SUPPLY,
+        "fee_rate": V1_FEE_RATE,
     },
     SOURCE_V2: {
         "virtual_native_0": V2_VIRTUAL_NATIVE_0,
         "virtual_token_0": V2_VIRTUAL_TOKEN_0,
         "curve_supply": V2_CURVE_SUPPLY,
+        "fee_rate": V2_FEE_RATE,
     },
 }
 
@@ -75,6 +85,12 @@ def geometry_for(source) -> dict | None:
     return _GEOMETRY.get(int(source or 0))
 
 
+# fraction taken as fee on each trade, for a source id
+def fee_rate_for(source) -> Decimal:
+    geo = _GEOMETRY.get(int(source or 0))
+    return geo["fee_rate"] if geo else Decimal(0)
+
+
 # tokens the curve sells before graduating, for a source id
 def curve_supply_for(source) -> int:
     geo = _GEOMETRY.get(int(source or 0))
@@ -91,6 +107,7 @@ class NadfunLaunchpadAdapter:
         self.virtual_native_0 = int(geo["virtual_native_0"])
         self.virtual_token_0 = int(geo["virtual_token_0"])
         self.curve_supply = int(geo["curve_supply"])
+        self.fee_rate = geo["fee_rate"]
 
     # normalize a trade into curve state using the reserves the CurveSync carried
     def curve_state(self, ev: dict) -> CurveState | None:
