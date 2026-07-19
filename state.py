@@ -90,12 +90,6 @@ _LAUNCHPAD_PARAMS_CACHE: Dict[str, Any] = {}
 
 
 def _fetch_launchpad_initial_native_supply() -> int:
-    """launchpadParams().launchpadInitialNativeSupply (first return word).
-
-    This is the curve's initial VIRTUAL native reserve, so the price of a freshly
-    created token is V0 / INITIAL_TOKEN_SUPPLY. It is governance-settable, so it
-    must be read rather than assumed.
-    """
     cached = _LAUNCHPAD_PARAMS_CACHE.get("initial_native_supply")
     fetched_at = _LAUNCHPAD_PARAMS_CACHE.get("fetched_at")
     if cached is not None and (fetched_at is None or (time.time() - fetched_at) < _LAUNCHPAD_PARAMS_TTL):
@@ -130,7 +124,6 @@ def _fetch_token_decimals(token: str) -> int | None:
     except Exception:
         pass
     return None
-
 
 def _fetch_v2_quote_token(token: str) -> str:
     try:
@@ -169,7 +162,6 @@ class State:
         self.mon_price_usd = Decimal("0.03")
         self._seed_aux_prices()
         
-            
     def set_mon_price_usd(self, value) -> None:
         try:
             px = Decimal(value)
@@ -466,8 +458,7 @@ class State:
             self.token_to_v3_pool.clear()
             self._reset_aux_locked()
             print(f"[State] Reset for reindex: cleared all in-memory state")
-
-               
+              
     def ensure_v2_launchpad_token(
         self,
         token: str,
@@ -545,8 +536,7 @@ class State:
                 flush=True,
             )
             return True
-
-                          
+                      
     def apply_token_created(self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             src = (log_addr or "").lower()
@@ -678,18 +668,8 @@ class State:
                     token_is_0=token_is_0,
                     cur=cur,
                 )
-
-                     
+             
     def handle_reorg(self, from_block: int, cur=None) -> list[str]:
-        """Discard blocks orphaned by a reorg and rebuild the affected tokens.
-
-        Token aggregates are running sums, so they cannot be un-applied
-        incrementally. Trades are the source of truth: drop the orphaned rows,
-        then recompute each affected token exactly from what survives. Curve
-        state comes from the last surviving trade's reserves, and the derived
-        fields go back through the adapter so no source-specific geometry leaks
-        in here.
-        """
         with self._lock:
             affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
 
@@ -765,7 +745,6 @@ class State:
             return affected
 
     def detect_reorg(self, block_number: int, block_hash: str, cur=None) -> bool:
-        """True when a block we already indexed now has a different hash."""
         if not block_hash:
             return False
         try:
@@ -775,12 +754,6 @@ class State:
         return bool(known) and known.lower() != block_hash.lower()
 
     def _ensure_native_launchpad_token_locked(self, token: str, blk: int, ts: int, cur=None):
-        """Create a stub for a native launchpad token whose TokenCreated we never saw.
-
-        Without this a LaunchpadTrade for an unknown token is dropped silently and
-        permanently (backfill starting mid-range, a gap, or a reorg). A later
-        TokenCreated backfills creator/name/symbol onto this stub.
-        """
         tok = (token or "").lower()
         if not tok:
             return None
@@ -837,9 +810,6 @@ class State:
 
     def apply_launchpad_trade(self, ev: dict, blk: int, ts: int, txh: str, log_idx: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
-            # Trade rows dedupe on (txhash, log_index), but volume / tx_count /
-            # volume_usd are running sums that would be advanced twice if the same
-            # log were delivered again, inflating volume on any replay.
             if txh:
                 try:
                     if storage.trade_exists(txh, log_idx, cur=cur):
@@ -961,11 +931,6 @@ class State:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()
                     if user_addr and user_addr != creator_addr:
-                        # Insert directly even when batching: the table dedupes on
-                        # (token, user_address) and only this path reports whether the
-                        # row was new, so the counter cannot drift above the row count
-                        # when one address buys twice inside the window. Snipers only
-                        # occur in a 10-block window, so the write volume is trivial.
                         inserted = storage.add_sniper_address(token, user_addr, cur=cur)
                         if inserted:
                             lp.snipers += 1
@@ -980,12 +945,8 @@ class State:
                 curve = adapter.curve_state(ev) if adapter is not None else None
 
                 if curve is not None:
-                    # keep the last observed reserves so the next trade can derive
-                    # its fee from the native delta after a restart
                     lp.curve_native_reserve = int(curve.native_reserve)
                     lp.curve_token_reserve = int(curve.token_reserve)
-                    # normalized path: the adapter owns the curve geometry, the
-                    # lifecycle model owns the progress/phase rules
                     lp.circulating_supply = curve.tokens_sold // 10 ** 18
                     if (not lp.approaching_75) and curve.is_graduating:
                         lp.approaching_75 = True
@@ -1172,8 +1133,7 @@ class State:
                         native_amount=int(native_amt),
                         cur=cur,
                     )
-
-                                  
+                
     def apply_migrated(self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> str | None:
         with self._lock:
             src = (log_addr or "").lower()
@@ -1234,8 +1194,7 @@ class State:
                 storage.increment_user_tokens_graduated(creator, cur=cur)
 
         return pool or None
-
-                                        
+                       
     def apply_token_transfer(self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None) -> None:
         with self._lock:
             token = (ev.get("token") or "").lower()
@@ -1569,15 +1528,6 @@ class State:
     def _record_graduated_launchpad_trade_locked(
         self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
     ) -> None:
-        """Keep a graduated launchpad token's price, trades and volume continuous.
-
-        Before this, a token that graduated stopped producing launchpad_trades rows
-        entirely: total and windowed volume froze at the graduation block while the
-        token kept trading on its Crystal market.
-
-        The launchpad token is the market's base and WMON the quote, so a buy is
-        quote-in/base-out -- the same convention the bonding-curve event uses.
-        """
         lp = self.launchpad_tokens.get(lp_addr)
         if lp is None:
             return
@@ -1616,9 +1566,6 @@ class State:
 
         user = (ev.get("user") or "").lower()
 
-        # position flows must keep moving after graduation, or a graduated token's
-        # cost basis silently freezes. balance_token stays 0 here: balances are
-        # maintained from ERC-20 Transfer events, which fire on market trades too.
         if user:
             if is_buy:
                 token_bought_delta, token_sold_delta = int(token_amt), 0
@@ -1699,8 +1646,6 @@ class State:
             "approaching_75_block": lp.approaching_75_block,
             "approaching_75_at": lp.approaching_75_at,
             "snipers_count": lp.snipers,
-            # unchanged post-graduation: the curve is gone, but the last observed
-            # reserves must not be zeroed by this write
             "curve_native_reserve": int(lp.curve_native_reserve),
             "curve_token_reserve": int(lp.curve_token_reserve),
         }
@@ -1769,9 +1714,6 @@ class State:
             except Exception:
                 return
 
-            # Launchpad-owned markets only. launchpad_market_to_token is populated
-            # solely from MarketCreated events whose base/quote is a known launchpad
-            # token, so ordinary Crystal markets never reach this.
             lp_addr = self.launchpad_market_to_token.get(market)
             if lp_addr and (mi.baseAddress or "").lower() == lp_addr:
                 self._record_graduated_launchpad_trade_locked(
