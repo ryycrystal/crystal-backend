@@ -436,6 +436,34 @@ def update_user_on_trade(
         )
 
 
+# open token count and cost basis for one position, zeros when it does not exist
+def get_position_basis(user_address: str, token: str, cur=None) -> tuple[int, int]:
+    addr = (user_address or "").lower()
+    tok = (token or "").lower()
+    if not addr or not tok:
+        return 0, 0
+
+    def _run(c):
+        c.execute(
+            """
+            SELECT token_bought, token_sold, cost_basis_native
+            FROM launchpad_positions
+            WHERE user_address = %s AND token = %s
+            """,
+            (addr, tok),
+        )
+        row = c.fetchone()
+        if not row:
+            return 0, 0
+        open_tokens = int(row[0] or 0) - int(row[1] or 0)
+        return max(open_tokens, 0), int(row[2] or 0)
+
+    if cur is None:
+        with db_cursor() as c2:
+            return _run(c2)
+    return _run(cur)
+
+
 # apply one position delta for a user and token
 def upsert_position(
     *,
@@ -451,6 +479,7 @@ def upsert_position(
     buy_count_delta: int,
     sell_count_delta: int,
     last_price_native,
+    cost_basis_delta: int = 0,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     addr = user_address.lower()
@@ -467,6 +496,7 @@ def upsert_position(
     bc = int(buy_count_delta)
     sc = int(sell_count_delta)
 
+    cb = int(cost_basis_delta)
     balance_insert = max(bd, 0)
     unrealized_insert = Decimal(balance_insert) * Decimal(last_price_native)
     total_insert = Decimal(realized_pnl_delta) + unrealized_insert
@@ -488,9 +518,10 @@ def upsert_position(
                     total_pnl_native,
                     trade_count,
                     buy_count,
-                    sell_count
+                    sell_count,
+                    cost_basis_native
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_address, token) DO UPDATE
                 SET
                     token_bought = launchpad_positions.token_bought + EXCLUDED.token_bought,
@@ -502,6 +533,7 @@ def upsert_position(
                     trade_count = launchpad_positions.trade_count + EXCLUDED.trade_count,
                     buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                     sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
+                    cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
                     unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s,
                     total_pnl_native = (
                         launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
@@ -521,6 +553,7 @@ def upsert_position(
                     tc,
                     bc,
                     sc,
+                    cb,
                     last_price_native,
                     last_price_native,
                 ),
@@ -541,9 +574,10 @@ def upsert_position(
                 total_pnl_native,
                 trade_count,
                 buy_count,
-                sell_count
+                sell_count,
+                cost_basis_native
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_address, token) DO UPDATE
             SET
                 token_bought = launchpad_positions.token_bought + EXCLUDED.token_bought,
@@ -555,6 +589,7 @@ def upsert_position(
                 trade_count = launchpad_positions.trade_count + EXCLUDED.trade_count,
                 buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                 sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
+                cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
                 unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s,
                 total_pnl_native = (
                     launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
@@ -574,6 +609,7 @@ def upsert_position(
                 tc,
                 bc,
                 sc,
+                cb,
                 last_price_native,
                 last_price_native,
             ),
@@ -1506,6 +1542,7 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
                 int(p["trade_count_delta"]),
                 int(p["buy_count_delta"]),
                 int(p["sell_count_delta"]),
+                int(p.get("cost_basis_delta") or 0),
                 p["last_price_native"],
             )
         )
@@ -1515,7 +1552,7 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         INSERT INTO launchpad_positions (
             user_address, token, token_bought, token_sold, native_spent, native_received,
             balance_token, realized_pnl_native, unrealized_pnl_native, total_pnl_native,
-            trade_count, buy_count, sell_count
+            trade_count, buy_count, sell_count, cost_basis_native
         )
         VALUES %s
         ON CONFLICT (user_address, token) DO UPDATE SET
@@ -1527,9 +1564,10 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
             realized_pnl_native = launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native,
             trade_count = launchpad_positions.trade_count + EXCLUDED.trade_count,
             buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
-            sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count
+            sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
+            cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0)
         """,
-        [(d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12]) for d in data],
+        [(d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13]) for d in data],
         page_size=1000,
     )
     for (addr, tok), p in position_updates.items():

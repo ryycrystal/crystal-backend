@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from api.api import (
+    _api_source,
     _batch_serialize_tokens,
     _build_ohlcv_from_db,
     _encode_cursor,
@@ -30,17 +31,23 @@ from api.api import (
 
 router = APIRouter()
 
-from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
-
-# single source of truth: the native adapter owns our curve geometry
-CRYSTAL_GRADUATION_SUPPLY = _NATIVE_CURVE_SUPPLY // 10**18
-NADFUN_GRADUATION_SUPPLY = 793_100_000
+from api.api import _curve_supply_for
 
 
-# fraction of the curve sold, using each source own curve supply
+# recover the true internal source from a serialized token, the wire reports
+# source 1 for every nad.fun generation so nadfunVersion carries the generation
+def _true_source(data) -> int:
+    v = int(data.get("nadfunVersion") or 0)
+    return v if v in (1, 2) else int(data.get("source") or 0)
+
+
+# fraction of the curve sold, each source and nad.fun generation sells a
+# different amount so the denominator comes from that source geometry
 def _graduation_pct(circulating, source) -> float:
     try:
-        denom = CRYSTAL_GRADUATION_SUPPLY if int(source or 0) == 0 else NADFUN_GRADUATION_SUPPLY
+        denom = _curve_supply_for(source) // 10**18
+        if denom <= 0:
+            return 0.0
         return float(circulating or 0) / denom
     except Exception:
         return 0.0
@@ -119,7 +126,7 @@ def list_tokens() -> dict[str, list[dict[str, Any]]]:
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
         if data:
-            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(token_addr), data.get("source"))
+            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(token_addr), _true_source(data))
         return data
 
     recent_graduated_out = [with_graduation_pct(t) for t, _ in grad_rows if t in token_data]
@@ -716,6 +723,7 @@ def token_overview_graph(
                         "name": row[1],
                         "symbol": row[2],
                         "metadataCID": row[3] or "",
+                        "imageUrl": row[3] or "",
                         "lastPriceNativePerTokenWad": str(dev_price_wad),
                         "marketcap": str(dev_price_wad),
                         "migrated": bool(row[5]),
@@ -723,7 +731,7 @@ def token_overview_graph(
                         "holders": int(row[10] or 0),
                         "timestamp": str(int(row[6] or 0)),
                         "market": row[7] or None,
-                        "source": int(row[8] or 0),
+                        "source": _api_source(row[8]),
                     }
                 )
 
@@ -795,6 +803,7 @@ def token_overview_graph(
             "athMarketcap": ath_marketcap,
             "athMarketcapUsd": ath_marketcap * quote_price_usd if quote_price_usd > 0 else Decimal(0),
             "metadataCID": metadata_cid_val,
+            "imageUrl": metadata_cid_val,
             "migrated": migrated_flag,
             "migratedAt": migrated_at,
             "migratedMarket": market,
@@ -828,7 +837,7 @@ def token_overview_graph(
                 tx_count=int(core.get("tx_count") or 0),
                 migrated=migrated_flag,
             ),
-            "source": int(source or 0),
+            "source": _api_source(source),
             "nadfunVersion": _nadfun_version(token_addr, source),
             "quoteToken": quote_token,
             "quote_token": quote_token,
@@ -957,7 +966,7 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
                 "token_bought": str(token_bought),
                 "token_sold": str(token_sold),
                 "market": market or None,
-                "source": int(source or 0),
+                "source": _api_source(source),
             }
         )
 
@@ -1172,7 +1181,7 @@ def portfolio_positions(
                 "buy_count": int(buy_count or 0),
                 "sell_count": int(sell_count or 0),
                 "market": market,
-                "source": int(source or 0),
+                "source": _api_source(source),
             }
         )
 
@@ -1673,7 +1682,7 @@ def search_tokens_api(
         for t in token_addrs:
             if t in token_data:
                 data = token_data[t]
-                data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), data.get("source"))
+                data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), _true_source(data))
                 results.append(data)
 
         return {"query": query, "sort": None, "count": len(results), "results": results}
@@ -1778,7 +1787,7 @@ def search_tokens_api(
     for t in sorted_addrs:
         if t in token_data:
             data = token_data[t]
-            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), data.get("source"))
+            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), _true_source(data))
             results.append(data)
 
     return {"query": query, "sort": sort, "count": len(results), "results": results}

@@ -14,19 +14,31 @@ from fastapi.middleware.gzip import GZipMiddleware
 import core.storage as storage
 from api.x_api import router as x_router
 from core import chain as h
+from core.adapters import nadfun as _nadfun_geo
 from core.adapters.native import CURVE_SUPPLY as _NATIVE_CURVE_SUPPLY
 from core.lifecycle import CurveState, resolve_phase
 from core.storage import db_cursor
 
 getcontext().prec = 100
-# nad.fun sells 793,100,000 on its curve; ours sells 800,000,000
-_NADFUN_CURVE_SUPPLY = 793_100_000 * 10**18
+
+
+# the generation each nad.fun curve belongs to, kept off the wire because the
+# frontend maps source === 1 onto "nadfun"
+def _api_source(source) -> int:
+    return 1 if _nadfun_geo.is_nadfun_source(source) else int(source or 0)
+
+
+# curve supply for a source, each nad.fun generation sells a different amount
+def _curve_supply_for(source) -> int:
+    if _nadfun_geo.is_nadfun_source(source):
+        return _nadfun_geo.curve_supply_for(source)
+    return _NATIVE_CURVE_SUPPLY
 
 
 # derive phase and progress from stored fields so they cannot drift from the data
 def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict[str, Any]:
     src = int(source or 0)
-    curve_supply = _NATIVE_CURVE_SUPPLY if src == 0 else _NADFUN_CURVE_SUPPLY
+    curve_supply = _curve_supply_for(src)
     curve = CurveState(
         tokens_sold=int(circulating_supply or 0) * 10**18,
         curve_supply=curve_supply,
@@ -214,9 +226,13 @@ def _nadfun_v2_set() -> set[str]:
 
 # 1 or 2 for a nadfun token, 0 for any other source
 def _nadfun_version(token: str, source) -> int:
-    if int(source or 0) != 1:
-        return 0
-    return 2 if (token or "").lower() in _nadfun_v2_set() else 1
+    src = int(source or 0)
+    if _nadfun_geo.is_nadfun_source(src):
+        return _nadfun_geo.version_of(src)
+    # tokens indexed before source 2 existed still resolve through the marker table
+    if src == 1:
+        return 2 if (token or "").lower() in _nadfun_v2_set() else 1
+    return 0
 
 
 from collections import OrderedDict
@@ -477,7 +493,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "created_ts": row[12],
             "creator": creator,
             "metadata_cid": row[4],
-            "source": int(row[10] or 0),
+            "imageUrl": row[4],
+            "source": _api_source(row[10]),
             "nadfunVersion": _nadfun_version(token, row[10]),
             "quote_token": quote_token,
             "quote_asset": quote_token,
@@ -733,7 +750,8 @@ def _serialize_token(token_addr: str) -> dict[str, Any]:
         "created_ts": created_at,
         "creator": creator,
         "metadata_cid": metadata_cid,
-        "source": int(source or 0),
+        "imageUrl": metadata_cid,
+        "source": _api_source(source),
         "nadfunVersion": _nadfun_version(token, source),
         "quote_token": quote_token,
         "quote_asset": quote_token,

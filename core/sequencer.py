@@ -90,6 +90,7 @@ class BatchAccumulator:
         buy_count_delta: int,
         sell_count_delta: int,
         last_price_native,
+        cost_basis_delta: int = 0,
     ):
         key = (user_address.lower(), token.lower())
         if key not in self.position_updates:
@@ -103,6 +104,7 @@ class BatchAccumulator:
                 "trade_count_delta": 0,
                 "buy_count_delta": 0,
                 "sell_count_delta": 0,
+                "cost_basis_delta": 0,
                 "last_price_native": Decimal(0),
             }
         p = self.position_updates[key]
@@ -115,6 +117,7 @@ class BatchAccumulator:
         p["trade_count_delta"] += int(trade_count_delta)
         p["buy_count_delta"] += int(buy_count_delta)
         p["sell_count_delta"] += int(sell_count_delta)
+        p["cost_basis_delta"] += int(cost_basis_delta)
         p["last_price_native"] = last_price_native
 
     # queue an ohlcv bar update at one resolution
