@@ -11,6 +11,8 @@ from decimal import Decimal
 
 import pytest
 
+import core.storage as storage
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 RAW_URL = os.environ.get("TEST_DATABASE_URL")
@@ -119,3 +121,61 @@ def test_stats_on_an_untraded_token_is_all_zero(db):
         assert body[f"buy_tx_count_{w}"] == 0
         assert body[f"change_pct_{w}"] == 0.0
         assert body[f"price_ref_{w}"] == "0"
+
+
+# the watermark tells a client which live trades are already counted here
+def test_stats_watermarks_track_indexed_data(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    now = int(time.time())
+
+    c = _api_client()
+
+    # no trades: watermark is zero, not a fabricated "now"
+    body = c.get(f"/stats/{TOKEN}").json()
+    assert body["as_of_ts"] == 0
+    assert "as_of_block" in body
+
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=now - 300, txh="0xwm1", log_idx=0)
+    storage.record_block_processed(101)
+    import api.api as api_mod
+
+    api_mod._cache.clear()
+    body = c.get(f"/stats/{TOKEN}").json()
+    assert body["as_of_ts"] == now - 300, "watermark must equal the newest indexed trade"
+
+    # a newer trade advances it
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=now - 10, txh="0xwm2", log_idx=0)
+    storage.record_block_processed(102)
+    api_mod._cache.clear()
+    body = c.get(f"/stats/{TOKEN}").json()
+    assert body["as_of_ts"] == now - 10
+    assert body["as_of_block"] >= 102, "block watermark must reach the processed block"
+
+
+# same-second trades are why as_of_block exists: as_of_ts alone cannot separate them
+def test_as_of_block_disambiguates_same_second_trades(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    now = int(time.time())
+
+    # two trades sharing a timestamp, in different blocks
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=now - 5, txh="0xss1", log_idx=0)
+    storage.record_block_processed(101)
+    c = _api_client()
+    body = c.get(f"/stats/{TOKEN}").json()
+    ts_after_first = body["as_of_ts"]
+    block_after_first = body["as_of_block"]
+
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=now - 5, txh="0xss2", log_idx=0)
+    storage.record_block_processed(102)
+    import api.api as api_mod
+
+    api_mod._cache.clear()
+    body = c.get(f"/stats/{TOKEN}").json()
+
+    # the timestamp cannot tell the two apart...
+    assert body["as_of_ts"] == ts_after_first
+    # ...but the block watermark advanced, so a client keying on block stays exact
+    assert body["as_of_block"] > block_after_first
+    assert body["buy_tx_count_5m"] == 2, "both trades are counted"

@@ -961,3 +961,7 @@ app.include_router(system_router)
 app.include_router(vaults_router)
 app.include_router(markets_router)
 app.include_router(pools_router)
+
+from api.ws import router as ws_router  # noqa: E402
+
+app.include_router(ws_router)
