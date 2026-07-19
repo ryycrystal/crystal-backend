@@ -437,6 +437,10 @@ def token_overview_graph(
         "",
         description="comma-separated list of addresses to track for trackedtrades",
     ),
+    series: bool = Query(
+        True,
+        description="set false to omit series.klines, which the client already has after first load",
+    ),
 ) -> dict[str, Any]:
     t0 = time.time()
     excluded = _internal_addrs()
@@ -497,7 +501,9 @@ def token_overview_graph(
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
-        series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
+        # the full chart history is roughly half this payload and the client keeps its
+        # own bars after first load, so let it opt out on every subsequent poll
+        series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
 
         holders_list: list[dict[str, Any]] = []
 
@@ -955,6 +961,36 @@ def token_overview_graph(
     finally:
         dt = (time.time() - t0) * 1000
         log.info("token_overview_graph token=%s chartres=%s dt_ms=%.1f", token_addr, chartres, dt)
+
+
+# many wallets in one round trip, so a multi wallet view stops fanning out N requests
+# MUST stay registered above /user/{user_addr} or that route claims the bare path
+@router.get("/user")
+def users_portfolio_batch(
+    addresses: str = Query("", description="comma separated wallet addresses, max 25"),
+    token: str = Query("", description="optional, restrict positions to one token"),
+) -> dict[str, Any]:
+    addrs: list[str] = []
+    for a in (addresses or "").split(","):
+        a = a.strip().lower()
+        if a and a not in addrs:
+            addrs.append(a)
+    if not addrs:
+        return {"users": {}, "count": 0}
+    if len(addrs) > 25:
+        raise HTTPException(status_code=400, detail="max 25 addresses")
+
+    tok = (token or "").strip().lower()
+
+    out: dict[str, Any] = {}
+    for a in addrs:
+        body = user_portfolio(a)
+        if tok:
+            body = dict(body)
+            body["positions"] = [p for p in body.get("positions", []) if (p.get("token") or "").lower() == tok]
+        out[a] = body
+
+    return {"users": out, "count": len(out), "token": tok or None}
 
 
 # legacy user portfolio summary and positions

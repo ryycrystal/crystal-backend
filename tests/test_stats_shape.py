@@ -4,6 +4,7 @@ the frontend copies keys verbatim and reads them by string template, so the
 rewrite must produce an identical payload to the per window implementation.
 """
 
+import json
 import os
 import sys
 import time
@@ -20,6 +21,7 @@ pytestmark = pytest.mark.skipif(not RAW_URL, reason="set TEST_DATABASE_URL")
 
 from tests.test_launchpad_integration import (  # noqa: E402
     TOKEN,
+    USER,
     _api_client,
     _create,
     _new_state,
@@ -179,3 +181,53 @@ def test_as_of_block_disambiguates_same_second_trades(db):
     # ...but the block watermark advanced, so a client keying on block stays exact
     assert body["as_of_block"] > block_after_first
     assert body["buy_tx_count_5m"] == 2, "both trades are counted"
+
+
+# series is roughly half the token payload and the client discards it after first load
+def test_series_can_be_omitted(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    now = int(time.time())
+    for i in range(6):
+        _trade(
+            st, native_reserve=(1100 + i * 40) * 10**18, blk=101 + i, ts=now - 600 + i * 60, txh=f"0xser{i}", log_idx=0
+        )
+
+    c = _api_client()
+    full = c.get(f"/token/{TOKEN}/60").json()
+    slim = c.get(f"/token/{TOKEN}/60", params={"series": "false"}).json()
+
+    assert len(full["series"]["klines"]) > 0, "default must still include the chart"
+    assert slim["series"]["klines"] == [], "series=false must drop the bars"
+    # the key stays present so the client shape never changes
+    assert "series" in slim and "klines" in slim["series"]
+    # everything else survives
+    assert slim["marketcap"] == full["marketcap"]
+    assert len(slim["trades"]) == len(full["trades"])
+    assert len(json.dumps(slim)) < len(json.dumps(full)), "slim payload must be smaller"
+
+
+# one request for many wallets instead of N
+def test_batch_user_endpoint(db):
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xbu1", log_idx=0)
+
+    c = _api_client()
+    other = "0x000000000000000000000000000000000000dead"
+    body = c.get("/user", params={"addresses": f"{USER},{other},{USER}"}).json()
+
+    assert body["count"] == 2, "duplicates must collapse"
+    assert USER in body["users"]
+    assert other in body["users"]
+    assert "summary" in body["users"][USER]
+    assert "positions" in body["users"][USER]
+
+    # token filter narrows the positions
+    scoped = c.get("/user", params={"addresses": USER, "token": TOKEN}).json()
+    assert all((p.get("token") or "").lower() == TOKEN for p in scoped["users"][USER]["positions"])
+
+    # empty input is not an error
+    assert c.get("/user", params={"addresses": ""}).json()["count"] == 0
+    # and the per-wallet route still works
+    assert c.get(f"/user/{USER}").status_code == 200

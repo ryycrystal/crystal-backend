@@ -35,16 +35,46 @@ def test_welcome_declares_capabilities(client):
         assert set(msg["implemented"]) == set(IMPLEMENTED_CHANNELS)
 
 
-# subscribing splits what is live from what is declared but not built
-def test_subscribe_separates_implemented_from_pending(client):
+# every declared channel is now implemented, so nothing lands in pending
+def test_subscribe_accepts_all_declared_channels(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
-        ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN_A, "channels": ["stats", "holders"]}))
+        ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN_A, "channels": list(KNOWN_CHANNELS)}))
         reply = ws.receive_json()
         assert reply["op"] == "subscribed"
         assert reply["token"] == TOKEN_A
-        assert reply["channels"] == ["stats"]
-        assert reply["not_yet_implemented"] == ["holders"]
+        assert set(reply["channels"]) == set(KNOWN_CHANNELS)
+        assert reply["not_yet_implemented"] == []
+
+
+# positions are per wallet, so the subscribe frame carries the wallet set
+def test_positions_subscription_carries_addresses(client):
+    wallet = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "token": TOKEN_A,
+                    "channels": ["positions"],
+                    "addresses": [wallet, "not-an-address"],
+                }
+            )
+        )
+        reply = ws.receive_json()
+        assert reply["addresses"] == [wallet], "malformed addresses must be dropped"
+        assert "warning" not in reply
+
+
+# subscribing to positions without wallets is useless, so say so rather than go quiet
+def test_positions_without_addresses_warns(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN_A, "channels": ["positions"]}))
+        reply = ws.receive_json()
+        assert reply["addresses"] == []
+        assert "warning" in reply
 
 
 # a bad address must be refused rather than silently accepted
