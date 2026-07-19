@@ -1544,6 +1544,10 @@ def token_stats(token_addr: str) -> dict[str, Any]:
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s
               ORDER BY timestamp ASC, log_index ASC LIMIT 1),
+            (SELECT timestamp FROM launchpad_trades
+              WHERE token = %(tok)s
+              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+            (SELECT MAX(number) FROM launchpad_blocks),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s AND timestamp <= %(t5m)s
               ORDER BY timestamp DESC, log_index DESC LIMIT 1),
@@ -1571,15 +1575,19 @@ def token_stats(token_addr: str) -> dict[str, Any]:
         cur.execute(agg_sql, params)
         agg = cur.fetchone() or (0,) * 20
         cur.execute(price_sql, params)
-        prices = cur.fetchone() or (None,) * 6
+        prices = cur.fetchone() or (None,) * 8
 
     latest_price = prices[0] or None
     first_price = prices[1] or None
+    # watermarks: how far the numbers below actually reach, so a client holding live
+    # trades knows which of them are already counted here
+    out["as_of_ts"] = int(prices[2] or 0)
+    out["as_of_block"] = int(prices[3] or 0)
     refs = {
-        "5m": prices[2] or None,
-        "1h": prices[3] or None,
-        "6h": prices[4] or None,
-        "24h": prices[5] or None,
+        "5m": prices[4] or None,
+        "1h": prices[5] or None,
+        "6h": prices[6] or None,
+        "24h": prices[7] or None,
     }
 
     for i, suffix in enumerate(("5m", "1h", "6h", "24h")):
