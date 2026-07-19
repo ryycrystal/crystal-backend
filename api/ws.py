@@ -27,7 +27,10 @@ router = APIRouter()
 # channels a client may subscribe to. stats is implemented; the rest are declared
 # so a client subscribing early gets an explicit "not yet" rather than silence
 KNOWN_CHANNELS = ("stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
-IMPLEMENTED_CHANNELS = ("stats",)
+IMPLEMENTED_CHANNELS = ("stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
+
+# channels that send the whole object every time rather than a diff
+SNAPSHOT_CHANNELS = ("stats", "dev_tokens")
 
 # how often the fanout task checks whether the indexer has moved
 POLL_INTERVAL_SECONDS = 0.25
@@ -42,6 +45,8 @@ class Subscriber:
         self.socket = socket
         # token -> set of channel names
         self.subscriptions: dict[str, set[str]] = {}
+        # wallets this client wants positions for, positions are per wallet
+        self.addresses: set[str] = set()
         self.last_seen = time.time()
         self.send_lock = asyncio.Lock()
 
@@ -68,9 +73,21 @@ class Hub:
     def __init__(self) -> None:
         self.subscribers: set[Subscriber] = set()
         self.lock = asyncio.Lock()
-        # token -> last watermark we broadcast for, so we only push on change
-        self._last_sent: dict[str, int] = {}
+        # (token, channel) -> last watermark broadcast, so we only push on change
+        self._last_sent: dict[tuple[str, str], int] = {}
+        # (token, channel) -> monotonic frame counter. a client that sees a gap knows
+        # it missed a delta and must re-baseline, which is the only thing that makes
+        # delta channels safe across a reconnect
+        self._seq: dict[tuple[str, str], int] = {}
+        # (token, channel) -> last emitted rows, keyed, so deltas can be diffed
+        self._prev_rows: dict[tuple[str, str], dict[str, dict]] = {}
         self._task: asyncio.Task | None = None
+
+    # next frame number for a channel
+    def _next_seq(self, token: str, channel: str) -> int:
+        key = (token, channel)
+        self._seq[key] = self._seq.get(key, 0) + 1
+        return self._seq[key]
 
     # register a new socket
     async def add(self, sub: Subscriber) -> None:
@@ -85,9 +102,10 @@ class Hub:
             live = set()
             for s in self.subscribers:
                 live |= s.tokens()
-            for token in list(self._last_sent):
-                if token not in live:
-                    self._last_sent.pop(token, None)
+            for key in list(self._last_sent):
+                if key[0] not in live:
+                    self._last_sent.pop(key, None)
+                    self._prev_rows.pop(key, None)
 
     # every token at least one client is subscribed to
     async def active_tokens(self) -> set[str]:
@@ -119,23 +137,156 @@ class Hub:
                 if not tokens:
                     continue
                 for token in tokens:
-                    await self._maybe_push_stats(token)
+                    await self._push_token(token)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # a failure here must never kill the fanout loop
                 continue
 
-    # send stats for one token, but only if it actually changed
-    async def _maybe_push_stats(self, token: str) -> None:
+    # push every channel that has a subscriber and whose data actually moved
+    async def _push_token(self, token: str) -> None:
+        from api.ws_data import indexer_watermark
+
+        watermark = await asyncio.to_thread(indexer_watermark)
+        async with self.lock:
+            wanted: set[str] = set()
+            for sub in self.subscribers:
+                wanted |= sub.subscriptions.get(token, set())
+
+        for channel in wanted:
+            key = (token, channel)
+            # positions depend on the wallet set, so they cannot be skipped on
+            # watermark alone -- a client can add an address at any time
+            if channel != "positions" and self._last_sent.get(key) == watermark:
+                continue
+            self._last_sent[key] = watermark
+            fn = {
+                "stats": self._push_stats,
+                "trades": self._push_trades,
+                "holders": self._push_holders,
+                "top_traders": self._push_top_traders,
+                "dev_tokens": self._push_dev_tokens,
+                "positions": self._push_positions,
+            }.get(channel)
+            if fn is not None:
+                await fn(token, watermark)
+
+    # wrap a channel body in the envelope every frame carries
+    def _envelope(self, token: str, channel: str, watermark: int, kind: str) -> dict[str, Any]:
+        return {
+            "channel": channel,
+            "token": token,
+            "as_of_block": watermark,
+            "seq": self._next_seq(token, channel),
+            "kind": kind,
+        }
+
+    # diff keyed rows against what was last sent, returning upserts and removals
+    def _diff_rows(self, token: str, channel: str, rows: dict[str, dict]) -> tuple[list[dict], list[str]]:
+        key = (token, channel)
+        prev = self._prev_rows.get(key)
+        self._prev_rows[key] = rows
+        if prev is None:
+            # first frame for this channel is everything, sent as a snapshot
+            return list(rows.values()), []
+        upserts = [v for k, v in rows.items() if prev.get(k) != v]
+        removed = [k for k in prev if k not in rows]
+        return upserts, removed
+
+    # stats: an aggregate, so the whole object every time
+    async def _push_stats(self, token: str, watermark: int) -> None:
         from api.routes.launchpad import token_stats
 
         body = await asyncio.to_thread(token_stats, token)
-        watermark = int(body.get("as_of_block") or 0)
-        if self._last_sent.get(token) == watermark:
+        env = self._envelope(token, "stats", watermark, "snapshot")
+        await self.broadcast(token, "stats", {**env, **body})
+
+    # trades: append only, ids are stable, removals happen only on a reorg
+    async def _push_trades(self, token: str, watermark: int) -> None:
+        from api.ws_data import recent_trades
+
+        rows = await asyncio.to_thread(recent_trades, token)
+        keyed = {r["id"]: r for r in rows}
+        added, removed = self._diff_rows(token, "trades", keyed)
+        if not added and not removed:
             return
-        self._last_sent[token] = watermark
-        await self.broadcast(token, "stats", {"channel": "stats", **body})
+        first = len(self._prev_rows.get((token, "trades"), {})) == len(added) and not removed
+        env = self._envelope(token, "trades", watermark, "snapshot" if first else "delta")
+        payload = {**env, "added": added}
+        if removed:
+            payload["removed"] = removed
+        await self.broadcast(token, "trades", payload)
+
+    # holders: upsert by address, and a holder reaching zero must be removed
+    # explicitly or it lingers in the client list forever
+    async def _push_holders(self, token: str, watermark: int) -> None:
+        from api.ws_data import top_holders
+
+        rows = await asyncio.to_thread(top_holders, token)
+        keyed = {r["address"]: r for r in rows}
+        upserts, removed = self._diff_rows(token, "holders", keyed)
+        if not upserts and not removed:
+            return
+        env = self._envelope(token, "holders", watermark, "delta")
+        payload = {**env, "upserts": upserts}
+        if removed:
+            payload["removed"] = removed
+        await self.broadcast(token, "holders", payload)
+
+    # top traders: same rows as holders but ordered by the client, which is the only
+    # side that knows the live price
+    async def _push_top_traders(self, token: str, watermark: int) -> None:
+        from api.ws_data import top_traders
+
+        rows = await asyncio.to_thread(top_traders, token)
+        keyed = {r["address"]: r for r in rows}
+        upserts, removed = self._diff_rows(token, "top_traders", keyed)
+        if not upserts and not removed:
+            return
+        env = self._envelope(token, "top_traders", watermark, "delta")
+        payload = {**env, "upserts": upserts}
+        if removed:
+            payload["removed"] = removed
+        await self.broadcast(token, "top_traders", payload)
+
+    # dev tokens: small and slow moving, so the whole array on change
+    async def _push_dev_tokens(self, token: str, watermark: int) -> None:
+        from api.ws_data import dev_tokens
+
+        rows = await asyncio.to_thread(dev_tokens, token)
+        key = (token, "dev_tokens")
+        if self._prev_rows.get(key) == {"all": {"rows": rows}}:
+            return
+        self._prev_rows[key] = {"all": {"rows": rows}}
+        env = self._envelope(token, "dev_tokens", watermark, "snapshot")
+        await self.broadcast(token, "dev_tokens", {**env, "devTokens": rows})
+
+    # positions are per wallet, so they fan out per subscriber rather than per token
+    async def _push_positions(self, token: str, watermark: int) -> None:
+        from api.ws_data import positions_for
+
+        async with self.lock:
+            targets = [s for s in self.subscribers if s.wants(token, "positions") and s.addresses]
+        for sub in targets:
+            wanted = sorted(sub.addresses)
+            rows = await asyncio.to_thread(positions_for, token, wanted)
+            keyed = {r["address"]: r for r in rows}
+            key = (token, f"positions:{id(sub)}")
+            prev = self._prev_rows.get(key)
+            self._prev_rows[key] = keyed
+            if prev is None:
+                upserts, removed = list(keyed.values()), []
+            else:
+                upserts = [v for k, v in keyed.items() if prev.get(k) != v]
+                removed = [k for k in prev if k not in keyed]
+            if not upserts and not removed:
+                continue
+            env = self._envelope(token, "positions", watermark, "delta")
+            payload = {**env, "upserts": upserts}
+            if removed:
+                payload["removed"] = removed
+            await sub.send(payload)
 
 
 HUB = Hub()
@@ -158,12 +309,24 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
     pending = [c for c in channels if c not in IMPLEMENTED_CHANNELS]
     sub.subscriptions.setdefault(token, set()).update(accepted)
 
-    return {
+    addresses = msg.get("addresses") or []
+    if isinstance(addresses, list):
+        for a in addresses:
+            a = str(a or "").lower().strip()
+            if a.startswith("0x") and len(a) == 42:
+                sub.addresses.add(a)
+
+    reply = {
         "op": "subscribed",
         "token": token,
         "channels": accepted,
         "not_yet_implemented": pending,
     }
+    if "positions" in accepted:
+        reply["addresses"] = sorted(sub.addresses)
+        if not sub.addresses:
+            reply["warning"] = "positions needs an addresses array, none were accepted"
+    return reply
 
 
 # remove channels, and the token entirely once nothing is left on it
