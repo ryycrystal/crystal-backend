@@ -201,6 +201,7 @@ async def main() -> None:
 
         storage.init_db()
         storage.backfill_cost_basis()
+        storage.backfill_realized_pnl()
 
         if args.mode == "bootstrap":
             if _dump_exists(args.dump_dir):

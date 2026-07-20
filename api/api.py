@@ -50,7 +50,13 @@ def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict
         graduated=done and src == 0,
         migrated=done and src != 0,
     )
-    return {"phase": phase.value, "progressBps": curve.progress_bps}
+    bps = curve.progress_bps
+    # circulating_supply is stored floored to whole tokens while the v2 curve supply
+    # is fractional, so a fully sold v2 curve lands one unit short and reads 99.99%
+    # next to a native token's 100%. a token that has left the curve is done
+    if done:
+        bps = 10000
+    return {"phase": phase.value, "progressBps": bps}
 
 
 log = logging.getLogger("api")
@@ -799,6 +805,10 @@ def _serialize_token(token_addr: str) -> dict[str, Any]:
 
 _PRICE_SCALE = Decimal(10**9)
 _PRICE_QUANTUM = Decimal(1).scaleb(-9)
+
+# token balances are raw wei while prices are per whole token, so their product is
+# wei denominated and has to come back down before it means dollars
+_WEI = Decimal(10) ** 18
 
 
 # price scaled to marketcap units as a string, keeping 9 decimals

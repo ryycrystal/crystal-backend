@@ -725,6 +725,16 @@ class State:
                 cur=cur,
             )
 
+            # persist the uri so the metadata sweep can retry this token later. the
+            # fetch queue lives in memory, so without this a restart or a host that
+            # is down through every retry leaves the token blank permanently
+            token_uri = (ev.get("token_uri") or "").strip()
+            if token_uri:
+                try:
+                    storage.set_token_uri(token, token_uri, cur=cur)
+                except Exception:
+                    pass
+
             if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
 

@@ -740,15 +740,18 @@ def upsert_token_created(
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (token) DO UPDATE
                 SET
-                    creator = EXCLUDED.creator,
-                    name = EXCLUDED.name,
-                    symbol = EXCLUDED.symbol,
-                    metadata_cid = EXCLUDED.metadata_cid,
-                    description = EXCLUDED.description,
-                    social1 = EXCLUDED.social1,
-                    social2 = EXCLUDED.social2,
-                    social3 = EXCLUDED.social3,
-                    social4 = EXCLUDED.social4,
+                    -- the nad.fun create event carries empty strings for everything
+                    -- the metadata worker fills in later, so overwriting on replay
+                    -- wiped the image, description and socials off the token
+                    creator = COALESCE(NULLIF(EXCLUDED.creator, ''), launchpad_tokens.creator),
+                    name = COALESCE(NULLIF(EXCLUDED.name, ''), launchpad_tokens.name),
+                    symbol = COALESCE(NULLIF(EXCLUDED.symbol, ''), launchpad_tokens.symbol),
+                    metadata_cid = COALESCE(NULLIF(EXCLUDED.metadata_cid, ''), launchpad_tokens.metadata_cid),
+                    description = COALESCE(NULLIF(EXCLUDED.description, ''), launchpad_tokens.description),
+                    social1 = COALESCE(NULLIF(EXCLUDED.social1, ''), launchpad_tokens.social1),
+                    social2 = COALESCE(NULLIF(EXCLUDED.social2, ''), launchpad_tokens.social2),
+                    social3 = COALESCE(NULLIF(EXCLUDED.social3, ''), launchpad_tokens.social3),
+                    social4 = COALESCE(NULLIF(EXCLUDED.social4, ''), launchpad_tokens.social4),
                     source = EXCLUDED.source,
                     created_block = EXCLUDED.created_block,
                     created_at = EXCLUDED.created_at,
@@ -796,15 +799,17 @@ def upsert_token_created(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (token) DO UPDATE
             SET
-                creator = EXCLUDED.creator,
-                name = EXCLUDED.name,
-                symbol = EXCLUDED.symbol,
-                metadata_cid = EXCLUDED.metadata_cid,
-                description = EXCLUDED.description,
-                social1 = EXCLUDED.social1,
-                social2 = EXCLUDED.social2,
-                social3 = EXCLUDED.social3,
-                social4 = EXCLUDED.social4,
+                -- same guard as the pooled variant: an empty value from the create
+                -- event must never overwrite what the metadata worker filled in
+                creator = COALESCE(NULLIF(EXCLUDED.creator, ''), launchpad_tokens.creator),
+                name = COALESCE(NULLIF(EXCLUDED.name, ''), launchpad_tokens.name),
+                symbol = COALESCE(NULLIF(EXCLUDED.symbol, ''), launchpad_tokens.symbol),
+                metadata_cid = COALESCE(NULLIF(EXCLUDED.metadata_cid, ''), launchpad_tokens.metadata_cid),
+                description = COALESCE(NULLIF(EXCLUDED.description, ''), launchpad_tokens.description),
+                social1 = COALESCE(NULLIF(EXCLUDED.social1, ''), launchpad_tokens.social1),
+                social2 = COALESCE(NULLIF(EXCLUDED.social2, ''), launchpad_tokens.social2),
+                social3 = COALESCE(NULLIF(EXCLUDED.social3, ''), launchpad_tokens.social3),
+                social4 = COALESCE(NULLIF(EXCLUDED.social4, ''), launchpad_tokens.social4),
                 source = EXCLUDED.source,
                 created_block = EXCLUDED.created_block,
                 created_at = EXCLUDED.created_at,
@@ -1836,3 +1841,60 @@ def tokens_changed_since(tokens: list[str], *, since_block: int = 0, since_ts: i
             args,
         )
         return {(r[0] or "").lower() for r in cur.fetchall()}
+
+
+# remember where a token's metadata came from, so a failed fetch can be retried
+# after a restart. the in memory queue does not survive one
+def set_token_uri(token: str, token_uri: str, cur=None) -> None:
+    tok = (token or "").lower()
+    uri = (token_uri or "").strip()
+    if not tok or not uri:
+        return
+
+    def _run(c):
+        c.execute(
+            "UPDATE launchpad_tokens SET token_uri = %s WHERE token = %s AND COALESCE(token_uri, '') = ''",
+            (uri, tok),
+        )
+
+    if cur is None:
+        with db_cursor() as c2:
+            _run(c2)
+    else:
+        _run(cur)
+
+
+# tokens that still have no image or description but do have somewhere to fetch it
+# from. drives the sweep that makes metadata self healing across restarts
+def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token, token_uri
+            FROM launchpad_tokens
+            WHERE COALESCE(metadata_cid, '') = ''
+              AND COALESCE(token_uri, '') <> ''
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [((r[0] or "").lower(), r[1] or "") for r in cur.fetchall()]
+
+
+# tokens with no metadata and no uri to fetch it from. these predate the uri being
+# persisted, so the sweep has to recover the uri from the token contract first
+def tokens_missing_uri(limit: int = 200) -> list[str]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token
+            FROM launchpad_tokens
+            WHERE COALESCE(metadata_cid, '') = ''
+              AND COALESCE(token_uri, '') = ''
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [(r[0] or "").lower() for r in cur.fetchall()]

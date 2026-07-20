@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from api.api import (
+    _WEI,
     _api_source,
     _batch_serialize_tokens,
     _build_ohlcv_from_db,
@@ -129,9 +130,7 @@ def token_holders(
                 "name": name,
                 "balance_token": str(balance_token),
                 "balance_native": _fmt(current_value_native),
-                "balance_usd": _fmt_usd(current_value_native * quote_price_usd / (Decimal(10) ** 18))
-                if quote_price_usd > 0
-                else "0",
+                "balance_usd": _fmt_usd(current_value_native * quote_price_usd / _WEI) if quote_price_usd > 0 else "0",
                 "native_spent": str(int(native_spent or 0)),
                 "native_received": str(int(native_received or 0)),
                 "realized_pnl_native": _fmt(realized_pnl),
@@ -578,8 +577,8 @@ def token_overview_graph(
             current_value_native = Decimal(balance_token) * last_price_native
 
             if quote_price_usd > 0:
-                balance_usd = current_value_native * quote_price_usd
-                total_pnl_usd = total_pnl * quote_price_usd
+                balance_usd = current_value_native * quote_price_usd / _WEI
+                total_pnl_usd = total_pnl * quote_price_usd / _WEI
             else:
                 balance_usd = Decimal(0)
                 total_pnl_usd = Decimal(0)
@@ -662,8 +661,8 @@ def token_overview_graph(
             current_value_native = Decimal(balance_token) * last_price_native
 
             if quote_price_usd > 0:
-                balance_usd = current_value_native * quote_price_usd
-                total_pnl_usd = total_pnl * quote_price_usd
+                balance_usd = current_value_native * quote_price_usd / _WEI
+                total_pnl_usd = total_pnl * quote_price_usd / _WEI
             else:
                 balance_usd = Decimal(0)
                 total_pnl_usd = Decimal(0)
@@ -749,7 +748,7 @@ def token_overview_graph(
                         "block": str(int(ts_tr)),
                         "id": f"{txhash}-{log_index}",
                         "isBuy": is_buy_flag,
-                        "priceNativePerTokenWad": str(price_native or Decimal(0)),
+                        "priceNativePerTokenWad": _scaled_price(price_native),
                     }
                 }
             )
@@ -796,7 +795,7 @@ def token_overview_graph(
                             "block": str(int(ts_tr)),
                             "id": f"{txhash}-{log_index}",
                             "isBuy": is_buy_flag,
-                            "priceNativePerTokenWad": str(price_native or Decimal(0)),
+                            "priceNativePerTokenWad": _scaled_price(price_native),
                         }
                     }
                 )
@@ -924,16 +923,16 @@ def token_overview_graph(
             "devTokensTotal": dev_tokens_total,
             "id": token_addr,
             "initialSupply": str(10**18),
-            "lastPriceNativePerTokenWad": str(last_price_wad),
-            "lastPriceQuotePerTokenWad": str(last_price_wad),
+            "lastPriceNativePerTokenWad": _scaled_price(last_price_native),
+            "lastPriceQuotePerTokenWad": _scaled_price(last_price_native),
             "lastUpdatedAt": str(last_timestamp),
             "market": market,
-            "marketcap": marketcap_native_raw,
-            "marketcap_quote": marketcap_native_raw,
-            "marketcap_usd": marketcap_usd,
+            "marketcap": _fmt(marketcap_native_raw),
+            "marketcap_quote": _fmt(marketcap_native_raw),
+            "marketcap_usd": _fmt_usd(marketcap_usd),
             "athPriceNative": _fmt(ath_price_native),
-            "athMarketcap": ath_marketcap,
-            "athMarketcapUsd": ath_marketcap * quote_price_usd if quote_price_usd > 0 else Decimal(0),
+            "athMarketcap": _fmt(ath_marketcap),
+            "athMarketcapUsd": _fmt_usd(ath_marketcap * quote_price_usd) if quote_price_usd > 0 else "0",
             "metadataCID": metadata_cid_val,
             "imageUrl": metadata_cid_val,
             "migrated": migrated_flag,
@@ -1110,8 +1109,8 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
         total_trades += int(trade_count or 0)
 
         if mon_price > 0:
-            current_value_usd = current_value_native * mon_price
-            total_pnl_usd = total_pnl * mon_price
+            current_value_usd = current_value_native * mon_price / _WEI
+            total_pnl_usd = total_pnl * mon_price / _WEI
         else:
             current_value_usd = Decimal(0)
             total_pnl_usd = Decimal(0)
@@ -1147,9 +1146,10 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
     )
 
     if mon_price > 0:
-        total_value_usd = total_value_native * mon_price
+        # these totals accumulate wei denominated values, same as the per row ones
+        total_value_usd = total_value_native * mon_price / _WEI
         total_pnl_native_val = total_realized_pnl + total_unrealized_pnl
-        total_pnl_usd = total_pnl_native_val * mon_price
+        total_pnl_usd = total_pnl_native_val * mon_price / _WEI
     else:
         total_value_usd = Decimal(0)
         total_pnl_native_val = total_realized_pnl + total_unrealized_pnl
@@ -1214,8 +1214,9 @@ def portfolio_summary(address: str) -> dict[str, Any]:
 
     total_pnl = realized_pnl + unrealized_pnl
 
-    portfolio_value_usd = portfolio_value * mon_price if mon_price > 0 else Decimal(0)
-    total_pnl_usd = total_pnl * mon_price if mon_price > 0 else Decimal(0)
+    # balance_token is wei, so the summed value is wei denominated too
+    portfolio_value_usd = portfolio_value * mon_price / _WEI if mon_price > 0 else Decimal(0)
+    total_pnl_usd = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
 
     return {
         "address": user_addr,
@@ -1328,8 +1329,8 @@ def portfolio_positions(
         total_pnl = total_pnl_native or (realized_pnl + unrealized_pnl)
 
         current_value_native = Decimal(balance_token) * last_price_native
-        current_value_usd = current_value_native * mon_price if mon_price > 0 else Decimal(0)
-        total_pnl_usd = total_pnl * mon_price if mon_price > 0 else Decimal(0)
+        current_value_usd = current_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
+        total_pnl_usd = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
 
         positions.append(
             {
@@ -1741,7 +1742,7 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                     "block": str(int(ts_tr)),
                     "id": f"{txhash}-{log_index}",
                     "isBuy": is_buy_flag,
-                    "priceNativePerTokenWad": str(price_native or Decimal(0)),
+                    "priceNativePerTokenWad": _scaled_price(price_native),
                 }
             }
         )

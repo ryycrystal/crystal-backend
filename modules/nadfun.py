@@ -26,6 +26,10 @@ _SEMAPHORE: asyncio.Semaphore | None = None
 _RETRY_QUEUE: deque[tuple[str, str, int, float]] = deque()
 _MAX_RETRY_QUEUE_SIZE = 10000
 _MAX_RETRIES = 5
+
+# tokens per pass whose uri is read back off chain, bounded so the recovery of a
+# large historical backlog is spread out instead of hammering the rpc at once
+_URI_RECOVERY_BATCH = int(os.getenv("URI_RECOVERY_BATCH", "100"))
 _BACKOFF_SCHEDULE = [30, 60, 120, 240, 480]
 
 V2_CREATE_TOPIC = "0xac11ceed5187dce8e72afc92116e2aebbbd4fb263cb4021374a5df1b90c89936"
@@ -141,10 +145,22 @@ async def start_metadata_worker(storage_module) -> None:
     _STORAGE_MODULE = storage_module
 
     # loop forever draining the metadata queue
+    _SWEEP_EVERY_SECONDS = 300
+    last_sweep = 0.0
+
     async def worker():
+        nonlocal last_sweep
         while True:
             try:
                 now = time.monotonic()
+                # periodically recover tokens stranded by a restart or exhausted retries
+                if now - last_sweep > _SWEEP_EVERY_SECONDS:
+                    last_sweep = now
+                    mod = _STORAGE_MODULE or storage_module
+                    # recover uris first so tokens that never had one stored become
+                    # visible to the sweep on this same pass
+                    await recover_missing_uris(mod)
+                    await sweep_missing_metadata(mod)
                 retry_batch = []
                 temp_hold = []
                 while _RETRY_QUEUE:
@@ -325,6 +341,10 @@ def parse_nadfun_token_created(
         "quote_token": quote_token,
         "name": name,
         "symbol": symbol,
+        # carried so state can persist it. the queue above is in memory, so a
+        # restart with a fetch still pending otherwise loses the uri for good and
+        # the self healing sweep can never reach the token
+        "token_uri": token_uri,
         "metadata_cid": metadata_cid,
         "description": description,
         "social1": website,
@@ -550,3 +570,56 @@ def parse_v2_pair_swap(addr, tops, data):
         "amount1": amount1_in - amount1_out,
         "sqrt_price_x96": 0,
     }
+
+
+# re-queue tokens that still have no metadata but do have a uri to fetch from.
+# the queue is in memory, so a restart mid fetch strands a token forever otherwise,
+# and retries are exhausted after about fifteen minutes with no path back
+# tokens created before the uri was persisted have nothing for the sweep to fetch,
+# so recover it from the token contract. bounded per pass to stay polite to the rpc
+async def recover_missing_uris(storage_module, limit: int = _URI_RECOVERY_BATCH) -> int:
+    from state import _TOKEN_URI_SELECTOR, _fetch_token_string
+
+    try:
+        tokens = await asyncio.to_thread(storage_module.tokens_missing_uri, limit)
+    except Exception:
+        return 0
+
+    recovered = 0
+    for token in tokens:
+        try:
+            uri = await asyncio.to_thread(_fetch_token_string, token, _TOKEN_URI_SELECTOR)
+        except Exception:
+            continue
+        if not uri:
+            continue
+        try:
+            await asyncio.to_thread(storage_module.set_token_uri, token, uri)
+        except Exception:
+            continue
+        recovered += 1
+
+    if recovered:
+        print(f"[Metadata] recovered {recovered} token uris from chain", flush=True)
+    return recovered
+
+
+async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
+    try:
+        rows = await asyncio.to_thread(storage_module.tokens_missing_metadata, limit)
+    except Exception:
+        return 0
+
+    pending = {t for t, _ in METADATA_QUEUE}
+    pending |= {t for t, _, _, _ in _RETRY_QUEUE}
+
+    queued = 0
+    for token, uri in rows:
+        if token in pending or not uri:
+            continue
+        METADATA_QUEUE.append((token, uri))
+        queued += 1
+
+    if queued:
+        print(f"[Metadata] sweep re-queued {queued} tokens missing metadata", flush=True)
+    return queued
