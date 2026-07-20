@@ -596,6 +596,12 @@ class State:
             storage.mark_nadfun_v2(token, cur=cur)
 
             if token_uri:
+                # persist the uri before queuing: the queue is in memory, so a restart
+                # while a fetch is pending would otherwise lose it permanently
+                try:
+                    storage.set_token_uri(token, token_uri, cur=cur)
+                except Exception:
+                    pass
                 try:
                     from modules import nadfun
 
@@ -1684,6 +1690,12 @@ class State:
         if quote_price > 0:
             usd_amount = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
             lp.volume_usd += usd_amount
+            # a graduated token keeps earning, at the market's taker fee rather
+            # than the launchpad's. leaving this out meant a native token accrued
+            # no fees at all once it graduated, which is most of its lifetime
+            fee_rate = self._pool_fee_rate(mi)
+            if fee_rate > 0:
+                lp.fees_usd += usd_amount * fee_rate
 
         user = (ev.get("user") or "").lower()
 
@@ -1808,6 +1820,28 @@ class State:
                     usd_amount=usd_amount,
                     price_native=lp.last_price_native,
                     txhash=txh or "",
+                    cur=cur,
+                )
+                # the batch path persists token_state; this one used to write the
+                # trade row and drop it, so post-graduation volume, tx counts and
+                # fees lived only in memory and vanished on the next restart
+                storage.update_token_after_trade(
+                    token=lp_addr,
+                    last_price_native=lp.last_price_native,
+                    native_volume=int(lp.native_volume),
+                    token_volume=int(lp.token_volume),
+                    volume_usd=lp.volume_usd,
+                    fees_usd=lp.fees_usd,
+                    buy_count=lp.buy_count,
+                    sell_count=lp.sell_count,
+                    tx_count=lp.tx_count,
+                    circulating_supply=lp.circulating_supply,
+                    approaching_75=lp.approaching_75,
+                    approaching_75_block=lp.approaching_75_block,
+                    approaching_75_at=lp.approaching_75_at,
+                    snipers_count=lp.snipers,
+                    curve_native_reserve=int(lp.curve_native_reserve),
+                    curve_token_reserve=int(lp.curve_token_reserve),
                     cur=cur,
                 )
             except Exception:

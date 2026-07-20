@@ -1109,3 +1109,135 @@ def test_detail_endpoint_distinguishes_24h_from_lifetime_volume(db):
     # the ambiguous originals still exist and still mean 24h
     assert int(body["volumeNative"]) == day
     assert body["volumeUsd"] == body["volume24hUsd"]
+
+
+def test_post_graduation_native_trades_persist_to_the_token_row(db):
+    """The non-batch path wrote the trade row and dropped the token aggregate, so
+    post-graduation volume lived only in memory and vanished on restart. cz showed
+    20.2020 MON / 6 tx on its row against 40.5661 MON / 15 trades."""
+    st = _new_state()
+    _create(st)
+    _trade(st, native_reserve=2500 * 10**18, blk=101, ts=1001, txh="0xcurve", log_idx=0)
+
+    st.apply_market_created(102, 1002, _market_created_ev(), _router())
+    st.apply_migrated(103, 1003, {"token": TOKEN}, _router())
+
+    before_native, before_tx = _q(db, "SELECT native_volume, tx_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[
+        0
+    ]
+
+    mi = st.addressToMarket.get(MARKET)
+    assert mi is not None, "market must be registered for the graduated path"
+    st._record_graduated_launchpad_trade_locked(
+        lp_addr=TOKEN,
+        mi=mi,
+        ev={"is_buy": True, "amount_in": 3 * 10**18, "amount_out": 150 * 10**18, "user": USER},
+        blk=104,
+        ts=1004,
+        txh="0xpostgrad",
+        log_idx=0,
+        cur=None,
+        batch=None,
+    )
+
+    after_native, after_tx = _q(db, "SELECT native_volume, tx_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0]
+
+    assert int(after_native) == int(before_native) + 3 * 10**18, "post-graduation volume must persist"
+    assert int(after_tx) == int(before_tx) + 1, "post-graduation tx count must persist"
+
+    # and the row must agree with the trade rows, which is the invariant that caught this
+    rows_native = int(
+        _q(db, "SELECT COALESCE(SUM(native_amount),0) FROM launchpad_trades WHERE token=%s", (TOKEN,))[0][0]
+    )
+    rows_n = int(_q(db, "SELECT COUNT(*) FROM launchpad_trades WHERE token=%s", (TOKEN,))[0][0])
+    assert int(after_native) == rows_native
+    assert int(after_tx) == rows_n
+
+
+def test_graduated_native_trades_accrue_the_market_fee(db):
+    """A graduated token keeps earning at the market's taker fee. It previously
+    accrued nothing, which is most of a native token's lifetime fees."""
+    st = _new_state()
+    _create(st)
+    _trade(st, native_reserve=2500 * 10**18, blk=101, ts=1001, txh="0xc2", log_idx=0)
+    st.apply_market_created(102, 1002, _market_created_ev(), _router())
+    st.apply_migrated(103, 1003, {"token": TOKEN}, _router())
+
+    lp = st.launchpad_tokens[TOKEN]
+    fees_before = lp.fees_usd
+    mi = st.addressToMarket.get(MARKET)
+    assert mi is not None
+
+    st._record_graduated_launchpad_trade_locked(
+        lp_addr=TOKEN,
+        mi=mi,
+        ev={"is_buy": True, "amount_in": 5 * 10**18, "amount_out": 250 * 10**18, "user": USER},
+        blk=104,
+        ts=1004,
+        txh="0xfee",
+        log_idx=0,
+        cur=None,
+        batch=None,
+    )
+
+    assert lp.fees_usd > fees_before, "a graduated token must keep accruing fees"
+    rate = st._pool_fee_rate(mi)
+    assert rate > 0
+    expected = (Decimal(5 * 10**18) / Decimal(10**18)) * st._quote_price_usd(lp.quote_token) * rate
+    assert abs((lp.fees_usd - fees_before) - expected) < Decimal("1e-24")
+
+
+def test_token_aggregates_reconcile_with_their_trade_rows(db):
+    """The invariant that exposed the post-graduation persistence bug: a token's
+    stored aggregate must equal the sum of its own trade rows, across the curve
+    and past graduation alike. Checked per source so a regression on one path
+    cannot hide behind the other."""
+    from core.adapters import nadfun as nf
+
+    # native, through the curve and out the other side
+    st = _new_state()
+    _create(st)
+    _trade(st, native_reserve=1400 * 10**18, blk=101, ts=1001, txh="0xr1", log_idx=0)
+    _trade(st, native_reserve=2500 * 10**18, blk=102, ts=1002, txh="0xr2", log_idx=0)
+    st.apply_market_created(103, 1003, _market_created_ev(), _router())
+    st.apply_migrated(104, 1004, {"token": TOKEN}, _router())
+    mi = st.addressToMarket.get(MARKET)
+    st._record_graduated_launchpad_trade_locked(
+        lp_addr=TOKEN,
+        mi=mi,
+        ev={"is_buy": True, "amount_in": 2 * 10**18, "amount_out": 90 * 10**18, "user": USER},
+        blk=105,
+        ts=1005,
+        txh="0xr3",
+        log_idx=0,
+        cur=None,
+        batch=None,
+    )
+    st._record_graduated_launchpad_trade_locked(
+        lp_addr=TOKEN,
+        mi=mi,
+        ev={"is_buy": False, "amount_in": 40 * 10**18, "amount_out": 10**18, "user": USER},
+        blk=106,
+        ts=1006,
+        txh="0xr4",
+        log_idx=0,
+        cur=None,
+        batch=None,
+    )
+
+    # nad.fun, on the curve
+    _nadfun_seed(st, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+    _nadfun_trade(
+        st, nf.SOURCE_V2, geo["virtual_token_0"] - (geo["curve_supply"] // 7), 80_000 * 10**18, 107, 1007, "0xr5"
+    )
+
+    for tok, label in ((TOKEN, "native"), (NF_TOKEN, "nad.fun")):
+        row_native, row_tx = _q(db, "SELECT native_volume, tx_count FROM launchpad_tokens WHERE token=%s", (tok,))[0]
+        sum_native, sum_n = _q(
+            db,
+            "SELECT COALESCE(SUM(native_amount),0), COUNT(*) FROM launchpad_trades WHERE token=%s",
+            (tok,),
+        )[0]
+        assert int(row_native) == int(sum_native), f"{label}: native_volume {row_native} != trade rows {sum_native}"
+        assert int(row_tx) == int(sum_n), f"{label}: tx_count {row_tx} != trade rows {sum_n}"
