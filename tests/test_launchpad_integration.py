@@ -73,6 +73,9 @@ def db():
     conn = psycopg2.connect(admin_url)
     conn.autocommit = True
     with conn.cursor() as cur:
+        # terminate first: a session surviving an interrupted run would otherwise
+        # block the drop and fail every test in the module
+        cur.execute(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{SCRATCH_DB}';")
         cur.execute(f"DROP DATABASE IF EXISTS {SCRATCH_DB};")
         cur.execute(f"CREATE DATABASE {SCRATCH_DB};")
     conn.close()

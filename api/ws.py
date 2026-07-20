@@ -42,6 +42,14 @@ IDLE_TIMEOUT_SECONDS = 300
 # token sweep uses several, so unbounded fanout would starve the rest of the api
 MAX_CONCURRENT_TOKEN_PUSHES = 6
 
+# how many times a snapshot read is retried when a block lands mid-query. bounded so
+# a busy token cannot spin here forever, the last attempt is served either way
+SNAPSHOT_READ_ATTEMPTS = 3
+
+# stamped into the stats body by the rest handler, so they move every block regardless
+# of whether the token did. excluded when deciding if a stats frame is worth sending
+_STATS_VOLATILE = frozenset({"as_of_block", "as_of_ts"})
+
 
 # one connected client and everything it asked for
 class Subscriber:
@@ -55,8 +63,17 @@ class Subscriber:
         # diff state cannot answer this: a client joining a token another client is
         # already watching has no state of its own and must be sent a full snapshot
         self.primed: set[tuple[str, str]] = set()
+        # per connection frame counter. hub level numbering made a reconnecting
+        # client see a jump and re-fetch REST even though its snapshot was complete
+        self._seq: dict[tuple[str, str], int] = {}
         self.last_seen = time.time()
         self.send_lock = asyncio.Lock()
+
+    # next frame number for this socket on this channel
+    def next_seq(self, token: str, channel: str) -> int:
+        key = (token, channel)
+        self._seq[key] = self._seq.get(key, 0) + 1
+        return self._seq[key]
 
     # tokens this client cares about
     def tokens(self) -> set[str]:
@@ -83,20 +100,10 @@ class Hub:
         self.lock = asyncio.Lock()
         # (token, channel) -> last watermark broadcast, so we only push on change
         self._last_sent: dict[tuple[str, str], int] = {}
-        # (token, channel) -> monotonic frame counter. a client that sees a gap knows
-        # it missed a delta and must re-baseline, which is the only thing that makes
-        # delta channels safe across a reconnect
-        self._seq: dict[tuple[str, str], int] = {}
         # (token, channel) -> last emitted rows, keyed, so deltas can be diffed
         self._prev_rows: dict[tuple[str, str], dict[str, dict]] = {}
         self._task: asyncio.Task | None = None
         self._push_sem = asyncio.Semaphore(MAX_CONCURRENT_TOKEN_PUSHES)
-
-    # next frame number for a channel
-    def _next_seq(self, token: str, channel: str) -> int:
-        key = (token, channel)
-        self._seq[key] = self._seq.get(key, 0) + 1
-        return self._seq[key]
 
     # register a new socket
     async def add(self, sub: Subscriber) -> None:
@@ -115,6 +122,16 @@ class Hub:
                 if key[0] not in live:
                     self._last_sent.pop(key, None)
                     self._prev_rows.pop(key, None)
+            if not self.subscribers:
+                self._stop_task()
+
+    # stop the fanout loop once nobody is listening. left running it ticks every
+    # 250ms and holds a pooled connection for no reader
+    def _stop_task(self) -> None:
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     # every token at least one client is subscribed to
     async def active_tokens(self) -> set[str]:
@@ -134,23 +151,36 @@ class Hub:
     async def broadcast(self, token: str, channel: str, payload: dict[str, Any]) -> None:
         async with self.lock:
             targets = [s for s in self.subscribers if s.wants(token, channel) and (token, channel) in s.primed]
-        dead = [s for s in targets if not await s.send(payload)]
+        dead = []
+        for s in targets:
+            framed = {**payload, "seq": s.next_seq(token, channel)}
+            if not await s.send(framed):
+                dead.append(s)
         for s in dead:
             await self.remove(s)
 
     # send one subscriber the current full state of a channel and mark it primed.
     # called on subscribe so a late joiner never waits for the next change
     async def send_snapshot(self, sub: Subscriber, token: str, channel: str) -> None:
-        body = await self._channel_snapshot(token, channel)
-        if body is None:
-            return
-        watermark = await asyncio.to_thread(_watermark)
-        env = self._envelope(token, channel, watermark, "snapshot")
-        if await sub.send({**env, **body}):
+        # a block landing while the snapshot query runs is broadcast only to sockets
+        # already primed, and the hub's diff state has moved past it, so this socket
+        # would never see that change again. retry until the watermark holds still
+        # across the read, which means no delta could have been missed
+        for _ in range(SNAPSHOT_READ_ATTEMPTS):
+            before = await asyncio.to_thread(_watermark)
+            body = await self._channel_snapshot(token, channel, sub)
+            if body is None:
+                return
+            after = await asyncio.to_thread(_watermark)
+            if after == before:
+                break
+        env = self._envelope(token, channel, before, "snapshot")
+        frame = {**env, **body, "seq": sub.next_seq(token, channel)}
+        if await sub.send(frame):
             sub.primed.add((token, channel))
 
     # the full current contents of one channel, shaped exactly like its push
-    async def _channel_snapshot(self, token: str, channel: str) -> dict[str, Any] | None:
+    async def _channel_snapshot(self, token: str, channel: str, sub: Subscriber) -> dict[str, Any] | None:
         from api import ws_data as d
 
         if channel == "stats":
@@ -169,7 +199,10 @@ class Hub:
         if channel == "dev_tokens":
             return {"devTokens": await asyncio.to_thread(d.dev_tokens, token)}
         if channel == "positions":
-            addrs = sorted({a for s in self.subscribers if s.wants(token, "positions") for a in s.addresses})
+            # only this socket's own wallets. taking the union across every
+            # subscriber sent each client the positions of everyone else watching
+            # the same token
+            addrs = sorted(sub.addresses)
             return {"upserts": await asyncio.to_thread(d.positions_for, token, addrs)}
         return None
 
@@ -234,7 +267,6 @@ class Hub:
             "channel": channel,
             "token": token,
             "as_of_block": watermark,
-            "seq": self._next_seq(token, channel),
             "kind": kind,
         }
 
@@ -271,23 +303,34 @@ class Hub:
         from api.routes.launchpad import token_stats
 
         body = await asyncio.to_thread(token_stats, token)
+        # the watermark guard upstream only asks whether the chain advanced, and monad
+        # produces a block roughly every 400ms, so an idle token resent this whole
+        # object forever. suppress on the body the way the token channel already does
+        # token_stats stamps its own as_of_block/as_of_ts into the body, so the object
+        # differs every block even when nothing about the token moved. compare on the
+        # substantive fields only, or an idle token resends this forever
+        key = (token, "stats")
+        material = {k: v for k, v in body.items() if k not in _STATS_VOLATILE}
+        if self._prev_rows.get(key) == {"all": material}:
+            return
+        self._prev_rows[key] = {"all": material}
         env = self._envelope(token, "stats", watermark, "snapshot")
         await self.broadcast(token, "stats", {**env, **body})
 
-    # trades: append only, ids are stable, removals happen only on a reorg
+    # trades: append only, ids are stable. the diff's removals are an artefact of the
+    # 50 row window scrolling, not deletions, and forwarding them told the client to
+    # drop trades that still exist. monad has single slot finality so there is no
+    # reorg case left to carry
     async def _push_trades(self, token: str, watermark: int) -> None:
         from api.ws_data import recent_trades
 
         rows = await asyncio.to_thread(recent_trades, token)
         keyed = {r["id"]: r for r in rows}
-        added, removed = self._diff_rows(token, "trades", keyed)
-        if not added and not removed:
+        added, _evicted = self._diff_rows(token, "trades", keyed)
+        if not added:
             return
         env = self._envelope(token, "trades", watermark, "delta")
-        payload = {**env, "added": added}
-        if removed:
-            payload["removed"] = removed
-        await self.broadcast(token, "trades", payload)
+        await self.broadcast(token, "trades", {**env, "added": added})
 
     # holders: upsert by address, and a holder reaching zero must be removed
     # explicitly or it lingers in the client list forever
@@ -365,7 +408,7 @@ class Hub:
             if not upserts and not removed:
                 continue
             env = self._envelope(token, "positions", watermark, "delta")
-            payload = {**env, "upserts": upserts}
+            payload = {**env, "upserts": upserts, "seq": sub.next_seq(token, "positions")}
             if removed:
                 payload["removed"] = removed
             await sub.send(payload)
@@ -397,12 +440,22 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
     pending = [c for c in channels if c not in IMPLEMENTED_CHANNELS]
     sub.subscriptions.setdefault(token, set()).update(accepted)
 
-    addresses = msg.get("addresses") or []
-    if isinstance(addresses, list):
-        for a in addresses:
-            a = str(a or "").lower().strip()
-            if a.startswith("0x") and len(a) == 42:
-                sub.addresses.add(a)
+    # an addresses array replaces the set rather than adding to it. unioning meant a
+    # user who switched wallets kept receiving, and the page kept showing, the
+    # position of the wallet they had just left
+    if "addresses" in msg:
+        addresses = msg.get("addresses") or []
+        if isinstance(addresses, list):
+            wanted = set()
+            for a in addresses:
+                a = str(a or "").lower().strip()
+                if a.startswith("0x") and len(a) == 42:
+                    wanted.add(a)
+            if wanted != sub.addresses:
+                sub.addresses = wanted
+                # the baseline is stale for a different wallet set
+                for tok, _ch in list(sub.primed):
+                    sub.primed.discard((tok, "positions"))
 
     reply = {
         "op": "subscribed",
@@ -424,8 +477,11 @@ async def _apply_unsubscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, 
     if token not in sub.subscriptions:
         return {"op": "unsubscribed", "token": token, "channels": []}
     if not channels:
-        for ch in sub.subscriptions.pop(token, set()):
+        dropped = sub.subscriptions.pop(token, set())
+        for ch in dropped:
             sub.primed.discard((token, ch))
+        if "positions" in dropped and not sub.subscriptions:
+            sub.addresses.clear()
         return {"op": "unsubscribed", "token": token, "channels": "all"}
     sub.subscriptions[token] -= set(channels)
     for ch in channels:
@@ -468,7 +524,7 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                 # baseline immediately rather than waiting for the next change, so a
                 # client joining a token others already watch is never left empty
                 tok = reply.get("token")
-                for ch in reply.get("channels") or []:
+                for ch in (reply.get("channels") or []) if tok else []:
                     # a failed baseline must not drop the socket: the client is still
                     # subscribed and the next change will reach it
                     with contextlib.suppress(Exception):

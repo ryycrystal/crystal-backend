@@ -19,6 +19,23 @@ TOKEN_A = "0x1f5bb433d52b9e9219a4decb4e9abc87541c7777"
 TOKEN_B = "0x2c6dd544e63cae0330b5edc5f0bcd108652c8888"
 
 
+# the hub starts a background fanout task on first connect. left running it keeps a
+# pooled connection and its 250ms tick alive, which stops the module fixture from
+# dropping the scratch database and breaks every test that follows
+@pytest.fixture(autouse=True)
+def _stop_hub():
+    yield
+    from api.ws import HUB
+
+    HUB.subscribers.clear()
+    task = getattr(HUB, "_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    HUB._task = None
+    HUB._prev_rows.clear()
+    HUB._last_sent.clear()
+
+
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient

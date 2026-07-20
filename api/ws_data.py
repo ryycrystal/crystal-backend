@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 from typing import Any
 
 from api.api import (
+    _WEI,
     _fmt,
     _fmt_usd,
     _internal_addrs,
@@ -72,8 +74,18 @@ def recent_trades(token: str) -> list[dict[str, Any]]:
     return out
 
 
+# last traded price for a token, used to value positions
+def _last_price(token: str) -> Decimal:
+    with db_cursor() as cur:
+        cur.execute("SELECT last_price_native FROM launchpad_tokens WHERE token = %s", (token,))
+        row = cur.fetchone()
+    return (row[0] if row and row[0] is not None else Decimal(0)) or Decimal(0)
+
+
 # shared row shape for the position derived channels
-def _position_rows(token: str, where: str, params: tuple, limit: int) -> list[dict[str, Any]]:
+def _position_rows(
+    token: str, where: str, params: tuple, limit: int, order_by: str = "balance_token DESC"
+) -> list[dict[str, Any]]:
     with db_cursor() as cur:
         cur.execute(
             f"""
@@ -83,7 +95,7 @@ def _position_rows(token: str, where: str, params: tuple, limit: int) -> list[di
                    buy_count, sell_count
             FROM launchpad_positions
             WHERE {where}
-            ORDER BY balance_token DESC
+            ORDER BY {order_by}
             LIMIT %s
             """,
             params + (limit,),
@@ -136,8 +148,9 @@ def top_holders(token: str) -> list[dict[str, Any]]:
     )
 
 
-# everyone who has traded the token, ranked client side because ordering depends on
-# the live price, which the client has and the backend does not
+# everyone who has traded the token, ranked by pnl to match the rest endpoint.
+# ordering by balance truncated the list to the biggest current holders, so a trader
+# who sold out at a large profit ranked last and fell off the list entirely
 def top_traders(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
     excluded = list(_internal_addrs())
@@ -146,6 +159,7 @@ def top_traders(token: str) -> list[dict[str, Any]]:
         "token = %s AND trade_count > 0 AND user_address <> ALL(%s)",
         (token, excluded),
         TOP_TRADERS_LIMIT,
+        order_by="total_pnl_native DESC",
     )
 
 
@@ -162,10 +176,14 @@ def positions_for(token: str, addresses: list[str]) -> list[dict[str, Any]]:
         max(len(addrs), 1),
     )
     quote = _quote_price_usd(None)
+    price = _last_price(token)
     for r in rows:
-        # balance in native terms, so the client does not need the price to render it
-        r["balance_native"] = r["unrealized_pnl_native"]
-        r["balance_usd"] = _fmt_usd(Decimal(r["unrealized_pnl_native"]) * quote) if quote > 0 else "0"
+        # balance in native terms, so the client does not need the price to render it.
+        # this used to report unrealized pnl, so a position showed its profit where
+        # its value belonged, and went negative for anyone underwater
+        value_native = Decimal(r["balance_token"] or 0) * price
+        r["balance_native"] = _fmt(value_native)
+        r["balance_usd"] = _fmt_usd(value_native * quote / _WEI) if quote > 0 else "0"
     return rows
 
 
@@ -218,6 +236,8 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
 # (name, symbol, socials, creator, image) never changes and is deliberately omitted
 def token_state(token: str) -> dict[str, Any]:
     token = (token or "").lower()
+    excluded = list(_internal_addrs())
+    day_ago = int(time.time()) - 86400
     with db_cursor() as cur:
         cur.execute(
             """
@@ -229,15 +249,29 @@ def token_state(token: str) -> dict[str, Any]:
                 COALESCE(t.ath_price_native, 0),
                 t.curve_native_reserve, t.curve_token_reserve,
                 (SELECT COUNT(*) FROM launchpad_positions p
-                  WHERE p.token = t.token AND p.balance_token > 1),
+                  WHERE p.token = t.token AND p.balance_token > 1
+                    AND p.user_address <> ALL(%s)),
                 (SELECT COUNT(*) FROM launchpad_positions p
-                  WHERE p.token = t.token AND p.buy_count > 0),
+                  WHERE p.token = t.token AND p.buy_count > 0
+                    AND p.user_address <> ALL(%s)),
                 (SELECT COUNT(*) FROM launchpad_positions p
-                  WHERE p.token = t.token AND p.sell_count > 0)
+                  WHERE p.token = t.token AND p.sell_count > 0
+                    AND p.user_address <> ALL(%s)),
+                -- the rest endpoint reports these over 24h under the same key names.
+                -- pushing lifetime totals here made the page jump by orders of
+                -- magnitude a moment after it loaded
+                (SELECT COALESCE(SUM(native_amount), 0) FROM launchpad_trades
+                  WHERE token = t.token AND timestamp >= %s),
+                (SELECT COALESCE(SUM(usd_amount), 0) FROM launchpad_trades
+                  WHERE token = t.token AND timestamp >= %s),
+                (SELECT COUNT(*) FROM launchpad_trades
+                  WHERE token = t.token AND timestamp >= %s AND is_buy),
+                (SELECT COUNT(*) FROM launchpad_trades
+                  WHERE token = t.token AND timestamp >= %s AND NOT is_buy)
             FROM launchpad_tokens t
             WHERE t.token = %s
             """,
-            (token,),
+            (excluded, excluded, excluded, day_ago, day_ago, day_ago, day_ago, token),
         )
         row = cur.fetchone()
 
@@ -267,6 +301,10 @@ def token_state(token: str) -> dict[str, Any]:
         holders,
         distinct_buyers,
         distinct_sellers,
+        volume_native_24h,
+        volume_usd_24h,
+        buys_24h,
+        sells_24h,
     ) = row
 
     last_price = last_price or Decimal(0)
@@ -289,13 +327,19 @@ def token_state(token: str) -> dict[str, Any]:
         "athPriceNative": _fmt(ath_price),
         "athMarketcap": _fmt(ath_marketcap),
         "athMarketcapUsd": _fmt_usd(ath_marketcap * quote_usd) if quote_usd > 0 else "0",
-        # lifetime totals
-        "volumeNative": str(int(native_volume or 0)),
+        # 24h, matching what the rest endpoint returns under these same names. the
+        # names are historical and do say "volume" rather than "volume24h"
+        "volumeNative": str(int(volume_native_24h or 0)),
+        "volume_usd": _fmt_usd(volume_usd_24h or Decimal(0)),
+        "buyTxs": int(buys_24h or 0),
+        "sellTxs": int(sells_24h or 0),
+        # lifetime, under names that say so
+        "volumeNativeLifetime": str(int(native_volume or 0)),
         "tokenVolume": str(int(token_volume or 0)),
-        "volume_usd": _fmt_usd(volume_usd or Decimal(0)),
+        "volumeUsdLifetime": _fmt_usd(volume_usd or Decimal(0)),
+        "buyTxsLifetime": int(buys or 0),
+        "sellTxsLifetime": int(sells or 0),
         "fees_usd": _fmt_usd(fees_usd or Decimal(0)),
-        "buyTxs": int(buys or 0),
-        "sellTxs": int(sells or 0),
         "txCount": int(tx_count or 0),
         # participants
         "totalHolders": int(holders or 0),
@@ -307,8 +351,10 @@ def token_state(token: str) -> dict[str, Any]:
         "curveTokenReserve": str(int(curve_token or 0)),
         # the 75% threshold flag and when it fired
         "approaching_75": bool(approaching),
-        "approaching_75_block": int(approaching_block or 0),
-        "approaching_75_at": int(approaching_at or 0),
+        # null rather than 0 when the threshold was never crossed, matching rest. a
+        # zero here renders as january 1970 wherever the client formats it as a date
+        "approaching_75_block": int(approaching_block) if approaching_block else None,
+        "approaching_75_at": int(approaching_at) if approaching_at else None,
         # graduation. these flip exactly once but the page must react immediately
         "migrated": bool(migrated),
         "market": market,

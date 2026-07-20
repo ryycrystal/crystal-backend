@@ -4,8 +4,10 @@ the failure modes that matter here are silent: a seq gap the client cannot detec
 a holder that hits zero and lingers forever, a trade id format that double counts.
 """
 
+import asyncio
 import os
 import sys
+import time
 from decimal import Decimal
 
 import pytest
@@ -27,6 +29,23 @@ from tests.test_launchpad_integration import (  # noqa: E402
 )
 
 
+# the hub starts a background fanout task on first connect. left running it keeps a
+# pooled connection and its 250ms tick alive, which stops the module fixture from
+# dropping the scratch database and breaks every test that follows
+@pytest.fixture(autouse=True)
+def _stop_hub():
+    yield
+    from api.ws import HUB
+
+    HUB.subscribers.clear()
+    task = getattr(HUB, "_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    HUB._task = None
+    HUB._prev_rows.clear()
+    HUB._last_sent.clear()
+
+
 # trade ids must be decimal, matching REST, or the client double counts against its
 # own chain-socket ids which are hex
 def test_trade_ids_are_decimal_and_match_rest(db):
@@ -42,16 +61,22 @@ def test_trade_ids_are_decimal_and_match_rest(db):
     assert "0x7" not in rows[0]["id"].split("-")[1]
 
 
-# seq must advance by exactly one per frame so a client can detect a dropped delta
-def test_seq_is_monotonic_per_token_and_channel(db):
-    from api.ws import Hub
+# seq must advance by exactly one per frame so a client can detect a dropped delta,
+# and it is per connection: hub level numbering made a reconnecting client see a jump
+# and re-fetch REST even though its snapshot was already complete
+def test_seq_is_per_subscriber_and_monotonic(db):
+    from api.ws import Subscriber
 
-    hub = Hub()
-    a = [hub._next_seq(TOKEN, "trades") for _ in range(3)]
-    b = [hub._next_seq(TOKEN, "holders") for _ in range(2)]
-    assert a == [1, 2, 3], "seq must increment by one"
-    assert b == [1, 2], "each channel counts independently"
-    assert hub._next_seq("0xother", "trades") == 1, "each token counts independently"
+    a = Subscriber(None)
+    b = Subscriber(None)
+
+    assert [a.next_seq(TOKEN, "trades") for _ in range(3)] == [1, 2, 3]
+    assert [a.next_seq(TOKEN, "holders") for _ in range(2)] == [1, 2], "channels count apart"
+    assert a.next_seq("0xother", "trades") == 1, "tokens count apart"
+
+    # a second connection starts its own numbering rather than inheriting the hub's
+    assert b.next_seq(TOKEN, "trades") == 1, "each socket numbers independently"
+    assert a.next_seq(TOKEN, "trades") == 4, "and does not disturb the first"
 
 
 # the first frame is everything; later frames carry only what changed
@@ -291,3 +316,161 @@ def test_resubscribe_rebaselines(db):
         assert rebaselined, "a re-subscribe must send a fresh baseline"
 
     HUB.subscribers.clear()
+
+
+# an idle token must not re-send the same stats object every block. the watermark
+# guard only asks whether the chain advanced, which on monad is every ~400ms
+def test_stats_does_not_resend_an_unchanged_body(db):
+    import api.api  # noqa: F401
+    from api.ws import Hub
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xs01", log_idx=0)
+    storage.record_block_processed(101)
+
+    hub = Hub()
+    sent: list[dict] = []
+
+    async def _capture(token, channel, payload):
+        sent.append(payload)
+
+    async def _drive():
+        hub.broadcast = _capture  # type: ignore[method-assign]
+        # same underlying data, three successive blocks. the watermark has to advance
+        # too: token_stats stamps it into the body, and comparing the raw body made
+        # this pass while production still resent every frame
+        for blk in (102, 103, 104):
+            storage.record_block_processed(blk)
+            # token_stats is ttl cached for 500ms, so a tight loop would keep handing
+            # back one body and hide the very thing this test exists to catch
+            await asyncio.sleep(0.6)
+            await hub._push_stats(TOKEN, blk)
+
+    asyncio.run(_drive())
+
+    assert len(sent) == 1, f"unchanged stats resent {len(sent)} times across three blocks"
+
+
+# a positions snapshot must carry only the wallets the asking socket registered.
+# building it from the union across every subscriber handed each client the
+# positions of everyone else watching the same token
+def test_positions_snapshot_is_scoped_to_the_asking_socket(db):
+    import api.api  # noqa: F401
+    from api.ws import HUB, Subscriber
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xpp1", log_idx=0)
+    storage.record_block_processed(101)
+
+    mine = Subscriber(None)
+    mine.subscriptions[TOKEN] = {"positions"}
+    mine.addresses = {"0x000000000000000000000000000000000000beef"}
+
+    other = Subscriber(None)
+    other.subscriptions[TOKEN] = {"positions"}
+    other.addresses = {USER}
+
+    async def _drive():
+        HUB.subscribers.add(mine)
+        HUB.subscribers.add(other)
+        try:
+            return await HUB._channel_snapshot(TOKEN, "positions", mine)
+        finally:
+            HUB.subscribers.discard(mine)
+            HUB.subscribers.discard(other)
+
+    body = asyncio.run(_drive())
+    got = {r["address"].lower() for r in (body or {}).get("upserts", [])}
+    assert USER.lower() not in got, f"leaked another socket's wallet: {got}"
+
+
+# the rest endpoint reports volume and tx counts over 24h under these names, so the
+# token channel must too. pushing lifetime totals made the page jump by orders of
+# magnitude a moment after it loaded
+def test_token_channel_volume_and_tx_counts_are_24h(db):
+    import api.api  # noqa: F401
+    from api.ws_data import token_state
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    # one trade well outside the 24h window, one inside it
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1000, txh="0xold", log_idx=0)
+    recent = int(time.time()) - 60
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=recent, txh="0xnew", log_idx=0)
+    storage.record_block_processed(102)
+
+    body = token_state(TOKEN)
+
+    assert int(body["buyTxs"]) + int(body["sellTxs"]) == 1, "only the trade inside 24h counts"
+    assert int(body["buyTxsLifetime"]) + int(body["sellTxsLifetime"]) == 2, "lifetime keeps both"
+    assert int(body["volumeNative"]) < int(body["volumeNativeLifetime"])
+
+
+# realized pnl written before the cost basis model recorded net cash flow, so a
+# wallet that never sold showed a loss equal to everything it had spent
+def test_realized_pnl_backfill_corrects_non_sellers(db):
+    import core.storage as st
+
+    _create(_new_state(), blk=100, ts=1000)
+
+    with st.db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_positions
+                (user_address, token, balance_token, token_bought, token_sold,
+                 native_spent, native_received, realized_pnl_native,
+                 unrealized_pnl_native, total_pnl_native, trade_count,
+                 buy_count, sell_count)
+            VALUES
+                -- never sold, yet carries a loss equal to its whole spend
+                (%s, %s, 100, 100, 0, 16265, 0, -16265, 500, -15765, 2, 2, 0),
+                -- sold half: released basis is half the spend, so realized is 600-400
+                (%s, %s, 50, 100, 50, 800, 600, -200, 250, 50, 3, 2, 1)
+            """,
+            ("0xaaa", TOKEN, "0xbbb", TOKEN),
+        )
+
+    st.backfill_realized_pnl()
+
+    with st.db_cursor() as cur:
+        cur.execute(
+            "SELECT user_address, realized_pnl_native, total_pnl_native "
+            "FROM launchpad_positions WHERE token = %s ORDER BY user_address",
+            (TOKEN,),
+        )
+        got = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
+
+    assert got["0xaaa"][0] == 0, "a wallet that never sold has realized nothing"
+    assert got["0xaaa"][1] == 500, "total is realized plus unrealized"
+    assert got["0xbbb"][0] == 200, "sold half of a 800 basis for 600 -> 600 - 400"
+    assert got["0xbbb"][1] == 450
+
+
+# a client that switches wallets must stop receiving the old one. unioning the
+# addresses kept the previous wallet's position on the page for the whole session
+def test_switching_wallets_replaces_the_address_set(db):
+    import api.api  # noqa: F401
+    from api.ws import Subscriber, _apply_subscribe
+
+    a = "0x000000000000000000000000000000000000aaaa"
+    b = "0x000000000000000000000000000000000000bbbb"
+    sub = Subscriber(None)
+
+    async def _sub(addrs):
+        return await _apply_subscribe(
+            sub, {"op": "subscribe", "token": TOKEN, "channels": ["positions"], "addresses": addrs}
+        )
+
+    asyncio.run(_sub([a]))
+    assert sub.addresses == {a}
+
+    reply = asyncio.run(_sub([b]))
+    assert sub.addresses == {b}, "the previous wallet must not linger"
+    assert reply["addresses"] == [b]
+    assert (TOKEN, "positions") not in sub.primed, "a new wallet set needs a fresh baseline"
+
+    # a message with no addresses key leaves the set alone
+    asyncio.run(_apply_subscribe(sub, {"op": "subscribe", "token": TOKEN, "channels": ["trades"]}))
+    assert sub.addresses == {b}
