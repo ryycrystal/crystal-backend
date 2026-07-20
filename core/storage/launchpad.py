@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 import psycopg2
@@ -1235,6 +1236,176 @@ def search_tokens(query: str, limit: int = 20):
         return cur.fetchall()
 
 
+# filtered token search. every filter is applied in SQL rather than to an already
+# truncated page, because filtering the top 50 silently hides a token that matches
+# but ranks 51st -- results that are wrong rather than merely incomplete
+def search_tokens_filtered(
+    *,
+    query: str = "",
+    filters: dict | None = None,
+    sort: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    mon_usd=None,
+) -> tuple[list[str], dict, int]:
+    f = filters or {}
+    q = (query or "").strip().lower()
+    mon = Decimal(str(mon_usd or 0))
+
+    where: list[str] = []
+    params: list = []
+
+    if q:
+        like = f"%{q}%"
+        where.append("(LOWER(t.symbol) LIKE %s OR LOWER(t.name) LIKE %s OR LOWER(t.token) LIKE %s)")
+        params += [like, like, like]
+
+    # phase is derived from migration plus the curve flag, not a stored column
+    phase = (f.get("phase") or "").strip().lower()
+    if phase == "graduated":
+        where.append("t.migrated = TRUE")
+    elif phase == "graduating":
+        where.append("t.migrated = FALSE AND t.approaching_75 = TRUE")
+    elif phase == "new":
+        where.append("t.migrated = FALSE AND t.approaching_75 = FALSE")
+
+    def rng(col: str, lo_key: str, hi_key: str) -> None:
+        lo, hi = f.get(lo_key), f.get(hi_key)
+        if lo is not None:
+            where.append(f"{col} >= %s")
+            params.append(Decimal(str(lo)))
+        if hi is not None:
+            where.append(f"{col} <= %s")
+            params.append(Decimal(str(hi)))
+
+    # age arrives in minutes: a larger age_min means an older token, so a smaller ts
+    now = int(time.time())
+    if f.get("age_min") is not None:
+        where.append("t.created_at <= %s")
+        params.append(now - int(float(f["age_min"]) * 60))
+    if f.get("age_max") is not None:
+        where.append("t.created_at >= %s")
+        params.append(now - int(float(f["age_max"]) * 60))
+
+    rng("t.volume_usd", "volume_24h_min", "volume_24h_max")
+    rng("t.fees_usd", "fees_min", "fees_max")
+    rng("t.buy_count", "buy_tx_min", "buy_tx_max")
+    rng("t.sell_count", "sell_tx_min", "sell_tx_max")
+    rng("t.last_price_native", "price_min", "price_max")
+
+    # marketcap is price x total supply x the live mon price
+    if mon > 0:
+        for key, op in (("marketcap_min", ">="), ("marketcap_max", "<=")):
+            v = f.get(key)
+            if v is not None:
+                where.append(f"(t.last_price_native * 1000000000 * %s) {op} %s")
+                params += [mon, Decimal(str(v))]
+
+    for key, negate in (("keywords", False), ("exclude_keywords", True)):
+        terms = [w.strip().lower() for w in (f.get(key) or "").split(",") if w.strip()]
+        if not terms:
+            continue
+        clause = " OR ".join(["(LOWER(t.name) LIKE %s OR LOWER(t.symbol) LIKE %s)"] * len(terms))
+        where.append(f"{'NOT ' if negate else ''}({clause})")
+        for term in terms:
+            params += [f"%{term}%", f"%{term}%"]
+
+    # socials are matched by host across all four slots, because slot order is not
+    # guaranteed -- social1 is not reliably twitter
+    cols = ("t.social1", "t.social2", "t.social3", "t.social4")
+    for key, hosts in (
+        ("has_twitter", ("%x.com/%", "%twitter.com/%")),
+        ("has_telegram", ("%t.me/%",)),
+        ("has_discord", ("%discord.gg/%", "%discord.com/%")),
+    ):
+        if not f.get(key):
+            continue
+        ors = []
+        for c in cols:
+            for h in hosts:
+                ors.append(f"LOWER({c}) LIKE %s")
+                params.append(h)
+        where.append("(" + " OR ".join(ors) + ")")
+
+    if f.get("has_website"):
+        ors = [f"({c} IS NOT NULL AND {c} <> '' AND LOWER({c}) LIKE %s)" for c in cols]
+        where.append("(" + " OR ".join(ors) + ")")
+        params += ["%.%"] * len(cols)
+
+    where_sql = " AND ".join(where) if where else "TRUE"
+
+    # holder derived metrics need launchpad_positions, so they are computed per
+    # candidate row and filtered in the outer query
+    derived: list[str] = []
+    dparams: list = []
+
+    def drng(col: str, lo_key: str, hi_key: str) -> None:
+        lo, hi = f.get(lo_key), f.get(hi_key)
+        if lo is not None:
+            derived.append(f"{col} >= %s")
+            dparams.append(Decimal(str(lo)))
+        if hi is not None:
+            derived.append(f"{col} <= %s")
+            dparams.append(Decimal(str(hi)))
+
+    drng("b.holders", "holders_min", "holders_max")
+    drng("b.dev_pct", "dev_holding_min", "dev_holding_max")
+    drng("b.top10_pct", "top10_min", "top10_max")
+    drng("b.sniper_pct", "sniper_holding_min", "sniper_holding_max")
+    derived_sql = " AND ".join(derived) if derived else "TRUE"
+
+    order = {
+        "mc": "b.last_price_native DESC",
+        "volume_24h": "b.volume_usd DESC",
+        "volume_1h": "b.volume_usd DESC",
+        "holders": "b.holders DESC",
+        "recent": "b.created_at DESC",
+    }.get((sort or "").lower(), "b.created_at DESC")
+
+    # percentages are of the 1e27 total supply, so raw balance / 1e25
+    base = f"""
+        SELECT t.token, t.circulating_supply, t.created_at, t.volume_usd,
+               t.last_price_native,
+               (SELECT COUNT(*) FROM launchpad_positions p
+                 WHERE p.token = t.token AND p.balance_token > 1) AS holders,
+               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
+                 WHERE p.token = t.token AND p.user_address = t.creator), 0) / 1e25 AS dev_pct,
+               COALESCE((SELECT SUM(x.balance_token) FROM (
+                    SELECT p.balance_token FROM launchpad_positions p
+                     WHERE p.token = t.token AND p.balance_token > 0
+                     ORDER BY p.balance_token DESC LIMIT 10) x), 0) / 1e25 AS top10_pct,
+               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
+                 JOIN launchpad_snipers s
+                   ON s.token = p.token AND s.user_address = p.user_address
+                 WHERE p.token = t.token), 0) / 1e25 AS sniper_pct
+        FROM launchpad_tokens t
+        WHERE {where_sql}
+    """
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*) FROM ({base}) b WHERE {derived_sql}",
+            tuple(params) + tuple(dparams),
+        )
+        row = cur.fetchone()
+        total = int(row[0]) if row else 0
+
+        cur.execute(
+            f"""
+            SELECT b.token, b.circulating_supply FROM ({base}) b
+            WHERE {derived_sql}
+            ORDER BY {order}
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params) + tuple(dparams) + (int(limit), int(offset)),
+        )
+        rows = cur.fetchall()
+
+    tokens = [(r[0] or "").lower() for r in rows]
+    circ = {(r[0] or "").lower(): r[1] for r in rows}
+    return tokens, circ, total
+
+
 # persist the latest mon usd price
 def set_mon_price_usd(value) -> None:
     val = Decimal(value)
@@ -1703,3 +1874,33 @@ def get_recent_block_hashes(limit: int = 32, cur: psycopg2.extensions.cursor | N
             return [(int(r[0]), r[1]) for r in cur2.fetchall()]
     cur.execute(sql, (int(limit),))
     return [(int(r[0]), r[1]) for r in cur.fetchall()]
+
+
+# which of these tokens were touched after a point, by trade, creation or migration.
+# launchpad_tokens has no updated_at, so change is derived rather than stored
+def tokens_changed_since(tokens: list[str], *, since_block: int = 0, since_ts: int = 0) -> set[str]:
+    toks = [(t or "").lower() for t in tokens if t]
+    if not toks or (not since_block and not since_ts):
+        return set(toks)
+
+    if since_block:
+        trade_clause = "tr.block_number > %s"
+        token_clause = "t.created_block > %s OR t.migrated_block > %s"
+        args = (toks, since_block, toks, since_block, since_block)
+    else:
+        trade_clause = "tr.timestamp > %s"
+        token_clause = "t.created_at > %s OR t.migrated_at > %s"
+        args = (toks, since_ts, toks, since_ts, since_ts)
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT DISTINCT tr.token FROM launchpad_trades tr
+             WHERE tr.token = ANY(%s) AND {trade_clause}
+            UNION
+            SELECT t.token FROM launchpad_tokens t
+             WHERE t.token = ANY(%s) AND ({token_clause})
+            """,
+            args,
+        )
+        return {(r[0] or "").lower() for r in cur.fetchall()}

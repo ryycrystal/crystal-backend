@@ -160,7 +160,10 @@ def token_holders(
 # grouped token lists for recently created approaching and graduated tokens
 @router.get("/tokens")
 @ttl_cache("tokens:list", ttl_seconds=3)
-def list_tokens() -> dict[str, list[dict[str, Any]]]:
+def list_tokens(
+    since_block: int = Query(0, ge=0, description="only tokens touched after this block"),
+    since: int = Query(0, ge=0, description="same, as a unix timestamp. block is exact, prefer it"),
+) -> dict[str, Any]:
     t0 = time.time()
     excluded = _internal_addrs()
     with db_cursor() as cur:
@@ -237,11 +240,27 @@ def list_tokens() -> dict[str, list[dict[str, Any]]]:
     recent_approaching_out = [with_graduation_pct(t) for t, _ in appr_rows if t in token_data]
     recent_created_out = [with_graduation_pct(t) for t, _ in created_rows if t in token_data]
 
-    result = {
+    result: dict[str, Any] = {
         "recent_created": recent_created_out,
         "recent_approaching": recent_approaching_out,
         "recent_graduated": recent_graduated_out,
     }
+
+    if since_block or since:
+        changed = storage.tokens_changed_since(all_token_addrs, since_block=since_block, since_ts=since)
+        # membership is returned in full so the client can drop what left the set.
+        # the server is stateless and cannot know what the client already holds, so
+        # sending ids is both cheaper and more correct than guessing a removed list
+        result["ids"] = {
+            "recent_created": [t for t, _ in created_rows],
+            "recent_approaching": [t for t, _ in appr_rows],
+            "recent_graduated": [t for t, _ in grad_rows],
+        }
+        for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
+            result[bucket] = [r for r in result[bucket] if (r.get("token") or "").lower() in changed]
+        result["since_block"] = since_block
+        result["since"] = since
+        result["as_of_block"] = storage.get_last_processed_block() or 0
 
     dt = (time.time() - t0) * 1000
     log.info("token_list dt_ms=%.1f", dt)
@@ -1825,142 +1844,101 @@ def user_volume(user_addr: str) -> dict[str, Any]:
 @router.get("/search/query")
 @ttl_cache("tokens:search", ttl_seconds=3)
 def search_tokens_api(
-    query: str = Query(
-        ...,
-        min_length=1,
-        max_length=64,
-        description="search string for token name, symbol, or address",
-    ),
-    sort: str = Query(
-        None,
-        description="optional sort: 'mc', 'volume_1h', 'volume_24h', 'recent', 'holders'",
-    ),
+    query: str = Query("", max_length=64, description="optional, name symbol or address"),
+    sort: str = Query("", description="mc | volume_1h | volume_24h | recent | holders"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    phase: str = Query("", description="new | graduating | graduated"),
+    age_min: float | None = Query(None, description="minutes since creation"),
+    age_max: float | None = Query(None),
+    holders_min: float | None = Query(None),
+    holders_max: float | None = Query(None),
+    top10_min: float | None = Query(None, description="percent of supply"),
+    top10_max: float | None = Query(None),
+    dev_holding_min: float | None = Query(None, description="percent of supply"),
+    dev_holding_max: float | None = Query(None),
+    sniper_holding_min: float | None = Query(None, description="percent of supply"),
+    sniper_holding_max: float | None = Query(None),
+    marketcap_min: float | None = Query(None, description="usd"),
+    marketcap_max: float | None = Query(None),
+    volume_24h_min: float | None = Query(None, description="usd"),
+    volume_24h_max: float | None = Query(None),
+    fees_min: float | None = Query(None, description="usd"),
+    fees_max: float | None = Query(None),
+    buy_tx_min: float | None = Query(None),
+    buy_tx_max: float | None = Query(None),
+    sell_tx_min: float | None = Query(None),
+    sell_tx_max: float | None = Query(None),
+    price_min: float | None = Query(None),
+    price_max: float | None = Query(None),
+    keywords: str = Query("", description="comma separated, matched on name and symbol"),
+    exclude_keywords: str = Query("", description="comma separated, excluded on match"),
+    has_website: bool = Query(False),
+    has_twitter: bool = Query(False),
+    has_telegram: bool = Query(False),
+    has_discord: bool = Query(False),
 ) -> dict[str, Any]:
-    q = query.strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="empty query")
-
     excluded = _internal_addrs()
 
-    if sort is None:
-        rows = storage.search_tokens(q, limit=50)
-        token_addrs = [(token or "").lower() for token, _, _ in rows if token]
-        circ_map = {(token or "").lower(): circ for token, circ, _ in rows}
+    filters = {
+        "phase": phase,
+        "age_min": age_min,
+        "age_max": age_max,
+        "holders_min": holders_min,
+        "holders_max": holders_max,
+        "top10_min": top10_min,
+        "top10_max": top10_max,
+        "dev_holding_min": dev_holding_min,
+        "dev_holding_max": dev_holding_max,
+        "sniper_holding_min": sniper_holding_min,
+        "sniper_holding_max": sniper_holding_max,
+        "marketcap_min": marketcap_min,
+        "marketcap_max": marketcap_max,
+        "volume_24h_min": volume_24h_min,
+        "volume_24h_max": volume_24h_max,
+        "fees_min": fees_min,
+        "fees_max": fees_max,
+        "buy_tx_min": buy_tx_min,
+        "buy_tx_max": buy_tx_max,
+        "sell_tx_min": sell_tx_min,
+        "sell_tx_max": sell_tx_max,
+        "price_min": price_min,
+        "price_max": price_max,
+        "keywords": keywords,
+        "exclude_keywords": exclude_keywords,
+        "has_website": has_website,
+        "has_twitter": has_twitter,
+        "has_telegram": has_telegram,
+        "has_discord": has_discord,
+    }
 
-        if not token_addrs:
-            return {"query": query, "sort": None, "count": 0, "results": []}
+    token_addrs, circ_map, total = storage.search_tokens_filtered(
+        query=query,
+        filters=filters,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+        mon_usd=_mon_price_usd(),
+    )
 
-        token_data = _batch_serialize_tokens(token_addrs, excluded)
-        results = []
-        for t in token_addrs:
-            if t in token_data:
-                data = token_data[t]
-                data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), _true_source(data))
-                results.append(data)
-
-        return {"query": query, "sort": None, "count": len(results), "results": results}
-
-    rows = storage.search_tokens(q, limit=1000)
-    token_addrs = [(token or "").lower() for token, _, _ in rows if token]
+    base = {
+        "query": query,
+        "sort": sort or None,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    }
 
     if not token_addrs:
-        return {"query": query, "sort": sort, "count": 0, "results": []}
+        return {**base, "count": 0, "results": []}
 
-    now_ts = int(time.time())
-
-    with db_cursor() as cur:
-        if sort == "mc":
-            cur.execute(
-                """
-                SELECT token, last_price_native, circulating_supply
-                FROM launchpad_tokens
-                WHERE token = ANY(%s)
-                ORDER BY last_price_native DESC NULLS LAST
-                LIMIT 50
-            """,
-                (token_addrs,),
-            )
-        elif sort == "recent":
-            cur.execute(
-                """
-                SELECT token, last_price_native, circulating_supply
-                FROM launchpad_tokens
-                WHERE token = ANY(%s)
-                ORDER BY created_at DESC NULLS LAST
-                LIMIT 50
-            """,
-                (token_addrs,),
-            )
-        elif sort == "volume_1h":
-            cutoff_1h = now_ts - 3600
-            cur.execute(
-                """
-                SELECT t.token, t.last_price_native, t.circulating_supply
-                FROM launchpad_tokens t
-                LEFT JOIN (
-                    SELECT token, COALESCE(SUM(native_amount), 0) as vol
-                    FROM launchpad_trades
-                    WHERE token = ANY(%s) AND timestamp >= %s
-                    GROUP BY token
-                ) tr ON tr.token = t.token
-                WHERE t.token = ANY(%s)
-                ORDER BY tr.vol DESC NULLS LAST
-                LIMIT 50
-            """,
-                (token_addrs, cutoff_1h, token_addrs),
-            )
-        elif sort == "volume_24h":
-            cutoff_24h = now_ts - 86400
-            cur.execute(
-                """
-                SELECT t.token, t.last_price_native, t.circulating_supply
-                FROM launchpad_tokens t
-                LEFT JOIN (
-                    SELECT token, COALESCE(SUM(native_amount), 0) as vol
-                    FROM launchpad_trades
-                    WHERE token = ANY(%s) AND timestamp >= %s
-                    GROUP BY token
-                ) tr ON tr.token = t.token
-                WHERE t.token = ANY(%s)
-                ORDER BY tr.vol DESC NULLS LAST
-                LIMIT 50
-            """,
-                (token_addrs, cutoff_24h, token_addrs),
-            )
-        elif sort == "holders":
-            cur.execute(
-                """
-                SELECT t.token, t.last_price_native, t.circulating_supply
-                FROM launchpad_tokens t
-                LEFT JOIN (
-                    SELECT token, COUNT(*) as cnt
-                    FROM launchpad_positions
-                    WHERE token = ANY(%s) AND balance_token > 1
-                    GROUP BY token
-                ) p ON p.token = t.token
-                WHERE t.token = ANY(%s)
-                ORDER BY p.cnt DESC NULLS LAST
-                LIMIT 50
-            """,
-                (token_addrs, token_addrs),
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"invalid sort: {sort}. Use 'mc', 'volume_1h', 'volume_24h', 'recent', or 'holders'",
-            )
-
-        sorted_rows = cur.fetchall()
-
-    sorted_addrs = [row[0].lower() for row in sorted_rows if row[0]]
-    circ_map = {row[0].lower(): row[2] for row in sorted_rows if row[0]}
-    token_data = _batch_serialize_tokens(sorted_addrs, excluded)
-
+    token_data = _batch_serialize_tokens(token_addrs, excluded)
     results = []
-    for t in sorted_addrs:
-        if t in token_data:
-            data = token_data[t]
-            data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), _true_source(data))
-            results.append(data)
+    for t in token_addrs:
+        data = token_data.get(t)
+        if not data:
+            continue
+        data["graduationPercentageBps"] = _graduation_pct(circ_map.get(t), _true_source(data))
+        results.append(data)
 
-    return {"query": query, "sort": sort, "count": len(results), "results": results}
+    return {**base, "count": len(results), "results": results}
