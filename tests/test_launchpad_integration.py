@@ -1208,3 +1208,39 @@ def test_nadfun_missing_sync_does_not_corrupt_persisted_supply(db):
 
     full = geo["virtual_token_0"] - geo["curve_supply"]
     assert after != full // 10**18, "and must never read as a fully sold curve"
+
+
+def test_detail_endpoint_distinguishes_24h_from_lifetime_volume(db):
+    """The detail endpoint serves 24h under volumeNative/volumeUsd while the list
+    serves lifetime under native_volume/volume_usd. On REDNIT that was 1.97 MON
+    against 1,185,594 MON -- same-looking names, 600,000x apart. The explicit
+    keys make which is which unambiguous, and lifetime fees had no key at all."""
+    import time
+
+    from core.adapters import nadfun as nf
+
+    st = _new_state()
+    _nadfun_seed(st, nf.SOURCE_V2)
+    geo = nf.geometry_for(nf.SOURCE_V2)
+
+    old_ts = int(time.time()) - 40 * 3600  # outside the 24h window
+    tr = geo["virtual_token_0"] - (geo["curve_supply"] // 6)
+    _nadfun_trade(st, nf.SOURCE_V2, tr, 80_000 * 10**18, 101, old_ts, "0xold")
+
+    recent_ts = int(time.time()) - 60
+    tr2 = geo["virtual_token_0"] - (geo["curve_supply"] // 5)
+    _nadfun_trade(st, nf.SOURCE_V2, tr2, 85_000 * 10**18, 102, recent_ts, "0xnew")
+
+    c = _api_client()
+    body = c.get(f"/token/{NF_TOKEN}/60").json()
+
+    for key in ("volume24hNative", "volume24hUsd", "volumeLifetimeNative", "volumeLifetimeUsd", "feesLifetimeUsd"):
+        assert key in body, f"missing {key}"
+
+    lifetime = int(body["volumeLifetimeNative"])
+    day = int(body["volume24hNative"])
+    assert lifetime > day, "lifetime must include the trade outside the 24h window"
+
+    # the ambiguous originals still exist and still mean 24h
+    assert int(body["volumeNative"]) == day
+    assert body["volumeUsd"] == body["volume24hUsd"]

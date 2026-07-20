@@ -486,6 +486,9 @@ def token_overview_graph(
         dev_tokens_graduated = int(core["dev_tokens_graduated"] or 0)
         volume_native_24h = int(core["volume_native_24h"] or 0)
         volume_usd_24h = core["volume_usd_24h"] or Decimal(0)
+        volume_native_lifetime = int(core["native_volume"] or 0)
+        volume_usd_lifetime = core["volume_usd"] or Decimal(0)
+        fees_usd_lifetime = core["fees_usd"] or Decimal(0)
         buys_24h = int(core["buys_24h"] or 0)
         sells_24h = int(core["sells_24h"] or 0)
 
@@ -936,9 +939,18 @@ def token_overview_graph(
             "top10Addresses": top10_addresses,
             "trackedtrades": tracked_trades_out,
             "trades": trades_out,
+            # volumeNative/volumeQuote/volumeUsd are 24h despite the names, while
+            # the list endpoint serves lifetime under native_volume/volume_usd.
+            # the explicit keys below say which is which, the originals stay for
+            # compatibility -- renaming them is a breaking change
             "volumeNative": str(volume_native_24h),
             "volumeQuote": str(volume_native_24h),
             "volumeUsd": _fmt_usd(volume_usd_24h),
+            "volume24hNative": str(volume_native_24h),
+            "volume24hUsd": _fmt_usd(volume_usd_24h),
+            "volumeLifetimeNative": str(volume_native_lifetime),
+            "volumeLifetimeUsd": _fmt_usd(volume_usd_lifetime),
+            "feesLifetimeUsd": _fmt_usd(fees_usd_lifetime),
             "graduationPercentageBps": graduation_bps,
             "circulating_supply": str(int(circulating_supply or 0)),
             **_lifecycle_fields(

@@ -17,8 +17,20 @@
 #                    graduates when virt mon reaches 295,000
 #                    curve supply 808,908,559.32
 #
-# the docs published for monad mainnet describe a later deployment (180,000 virt
-# mon) that is neither of these, do not use them for v1 or v2
+# v1 has TWO virtual mon configs on the same contract: 90,000 (salmonad era) and
+# 180,000 (rednit era, the "future settings" figure in nad.fun's docs). measured
+# from k: rednit k = 193.14e12 = 180,000 x 1,073,000,191, exactly double ours.
+# about 21% of v1 tokens are on the newer one
+#
+# virtual token 0 is 1,073,000,191 in BOTH, and supply depends only on that, so
+# supply, progress and the graduation target are unaffected -- nad.fun's own lens
+# contract agrees with us to the basis point on v1 tokens of either config
+#
+# the only thing the mon config changes is initial_price_native, which applies
+# before a token's first trade and is then overwritten. v1 has created no tokens
+# in over a week, so this is a shrinking set. fixing it properly needs per token
+# virtualMon from the CurveCreate event, which also carries virtualToken and
+# targetTokenAmount
 
 from __future__ import annotations
 
