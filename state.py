@@ -1054,7 +1054,7 @@ class State:
             if quote_price > 0:
                 volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
                 lp.volume_usd += volume_usd_trade
-                fee_native = self._trade_fee_native(is_buy, native_amt, prev_native_reserve, ev)
+                fee_native = self._trade_fee_native(is_buy, prev_native_reserve, ev)
                 if fee_native > 0:
                     lp.fees_usd += (Decimal(fee_native) / (Decimal(10) ** 18)) * quote_price
 
@@ -1356,22 +1356,28 @@ class State:
 
     # fee actually taken on one curve trade, derived from the native reserve delta
     # rather than assumed, so a governance fee change is picked up immediately
-    def _trade_fee_native(self, is_buy: bool, native_amt: int, prev_native_reserve: int, ev: dict) -> int:
+    # fee is the gap between what the user moved and what the curve moved, taken
+    # from the event rather than the caller's native_amt: that value is rewritten
+    # to the reserve delta for sells so volume is gross, which made this return
+    # debited - debited = 0 and silently dropped every sell side fee
+    def _trade_fee_native(self, is_buy: bool, prev_native_reserve: int, ev: dict) -> int:
         try:
             new_reserve = int(ev.get("native_reserve") or 0)
+            paid = int(ev.get("amount_in") or 0)
+            payout = int(ev.get("amount_out") or 0)
         except (TypeError, ValueError):
             return 0
         if new_reserve <= 0 or prev_native_reserve <= 0:
             return 0
         if is_buy:
             credited = new_reserve - prev_native_reserve
-            if credited <= 0 or credited > native_amt:
+            if credited <= 0 or paid <= 0 or credited > paid:
                 return 0
-            return native_amt - credited
+            return paid - credited
         debited = prev_native_reserve - new_reserve
-        if debited <= 0 or debited < native_amt:
+        if debited <= 0 or payout <= 0 or debited < payout:
             return 0
-        return debited - native_amt
+        return debited - payout
 
     # open tokens and cost basis for a position, cached per block so several
     # trades by the same user in one block stay consistent before the batch flush

@@ -886,3 +886,47 @@ def test_recovered_nadfun_token_measures_against_its_own_geometry(monkeypatch):
     # prod still carries 320,661,852 here: the accumulated value, one token off
     # what the reserve actually says, which is the drift derivation removes
     assert lp.circulating_supply != (10**27 - token_reserve) // 10**18 == 260_092_851
+
+
+def test_sell_side_fee_survives_the_gross_volume_override(monkeypatch):
+    """native_amt is rewritten to the reserve delta on sells so volume is gross.
+    The fee derivation used to subtract that from the same delta and get zero, so
+    every sell accrued no fee -- CRY showed 0.504% against a true 1% because its
+    107 buys were charged and its 144 sells were not."""
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    keep = 99_000  # 1% launchpad fee
+    v0 = V0
+
+    # first buy establishes the reserve; no prior reserve means no derivable fee
+    first_in = 10**18
+    nr0 = v0 + (first_in * keep) // 100_000
+    _buy(st, nr0, blk=101, ts=1001, amount_in=first_in, amount_out=10**20)
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.fees_usd == 0, "the first trade has no previous reserve to derive from"
+
+    # second buy: 1 MON gross, 0.99 reaches the curve
+    gross_in = 10**18
+    net_in = (gross_in * keep) // 100_000
+    nr1 = nr0 + net_in
+    _buy(st, nr1, blk=102, ts=1002, amount_in=gross_in, amount_out=10**20)
+    fees_after_buy = lp.fees_usd
+    expected_buy_fee = Decimal(gross_in - net_in) / Decimal(10**18) * st.mon_price_usd
+    assert abs(fees_after_buy - expected_buy_fee) < Decimal("1e-24"), "buy side fee must accrue"
+
+    # sell: curve releases 0.5 gross, user is paid 0.495 net
+    gross_out = 5 * 10**17
+    net_out = (gross_out * keep) // 100_000
+    parsed = lp_mod.parse_launchpad_trade(
+        ROUTER,
+        ["0x", _topic_addr(TOKEN), _topic_addr(USER)],
+        _launchpad_trade_data(False, 10**20, net_out, nr1 - gross_out, _reserves_after(nr1 - gross_out)),
+    )
+    st.apply_launchpad_trade(parsed, 103, 1003, "0xsellfee", 0, ROUTER)
+
+    sell_fee = lp.fees_usd - fees_after_buy
+    assert sell_fee > 0, "sell side fee must accrue too"
+
+    expected_sell_fee = Decimal(gross_out - net_out) / Decimal(10**18) * st.mon_price_usd
+    assert abs(sell_fee - expected_sell_fee) < Decimal("1e-24")
