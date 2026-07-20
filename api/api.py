@@ -415,17 +415,52 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
                 FROM ranked_top
                 WHERE rn <= 10
                 GROUP BY token
+            ),
+            -- these three were only computed on the single token path, so every list
+            -- row carried a hardcoded zero for a field the search can filter on
+            sniper_holdings AS (
+                SELECT p.token,
+                       COUNT(*) AS sniper_cnt,
+                       array_agg(p.user_address) AS sniper_addrs,
+                       SUM(p.balance_token) AS sniper_sum
+                FROM pos p
+                JOIN launchpad_snipers s
+                  ON LOWER(s.token) = p.token AND LOWER(s.user_address) = p.user_address
+                GROUP BY p.token
+            ),
+            insider_holdings AS (
+                SELECT token, SUM(balance_token) AS insider_sum
+                FROM launchpad_positions
+                WHERE token = ANY(%s)
+                  AND balance_token > (token_bought - token_sold) + 1e18
+                GROUP BY token
+            ),
+            pro_traders AS (
+                SELECT token, COUNT(*) AS pro_cnt
+                FROM launchpad_positions
+                WHERE token = ANY(%s)
+                  AND realized_pnl_native > 0
+                  AND trade_count >= 10
+                GROUP BY token
             )
             SELECT
                 r.token,
                 COALESCE(h.cnt, 0) AS holder_count,
                 COALESCE(d.dev_bal, 0) AS dev_holding,
                 COALESCE(t.top10_addrs, ARRAY[]::text[]) AS top10_addresses,
-                COALESCE(t.top10_sum, 0) AS top10_holding
+                COALESCE(t.top10_sum, 0) AS top10_holding,
+                COALESCE(sn.sniper_cnt, 0) AS sniper_count,
+                COALESCE(sn.sniper_addrs, ARRAY[]::text[]) AS sniper_addresses,
+                COALESCE(sn.sniper_sum, 0) AS sniper_holding,
+                COALESCE(ins.insider_sum, 0) AS insider_holding,
+                COALESCE(pt.pro_cnt, 0) AS pro_traders
             FROM req r
             LEFT JOIN holder_counts h ON h.token = r.token
             LEFT JOIN dev_holdings d ON d.token = r.token
             LEFT JOIN top10 t ON t.token = r.token
+            LEFT JOIN sniper_holdings sn ON sn.token = r.token
+            LEFT JOIN insider_holdings ins ON LOWER(ins.token) = r.token
+            LEFT JOIN pro_traders pt ON LOWER(pt.token) = r.token
         """,
             (
                 token_addrs,
@@ -434,6 +469,8 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
                 excluded_list if excluded_list else None,
                 excluded_list if excluded_list else None,
                 excluded_list if excluded_list else None,
+                token_addrs,
+                token_addrs,
             ),
         )
         rows = cur.fetchall()
@@ -445,13 +482,65 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
             "dev_holding": int(row[2] or 0),
             "top10_addresses": [a.lower() for a in (row[3] or [])],
             "top10_holding": int(row[4] or 0),
+            "sniper_count": int(row[5] or 0),
+            "sniper_addresses": sorted(a.lower() for a in (row[6] or [])),
+            "sniper_holding": int(row[7] or 0),
+            "insider_holding": int(row[8] or 0),
+            "pro_traders": int(row[9] or 0),
         }
 
     for token in token_addrs:
         if token not in result:
-            result[token] = {"holder_count": 0, "dev_holding": 0, "top10_addresses": [], "top10_holding": 0}
+            result[token] = {
+                "holder_count": 0,
+                "dev_holding": 0,
+                "top10_addresses": [],
+                "top10_holding": 0,
+                "sniper_count": 0,
+                "sniper_addresses": [],
+                "sniper_holding": 0,
+                "insider_holding": 0,
+                "pro_traders": 0,
+            }
 
     return result
+
+
+# price as of 24h ago per token, for the change the list cards render. the reference
+# is the last trade at or before the boundary, matching how /stats picks price_ref_*,
+# so the list and the detail page cannot disagree about the same window
+def _batch_get_price_change_24h(token_addrs: list[str]) -> dict[str, str]:
+    if not token_addrs:
+        return {}
+    cutoff = int(time.time()) - 86400
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.token, t.last_price_native, r.price_native
+            FROM launchpad_tokens t
+            LEFT JOIN LATERAL (
+                SELECT price_native
+                FROM launchpad_trades
+                WHERE token = t.token AND timestamp <= %s
+                ORDER BY timestamp DESC, log_index DESC
+                LIMIT 1
+            ) r ON TRUE
+            WHERE t.token = ANY(%s)
+            """,
+            (cutoff, token_addrs),
+        )
+        rows = cur.fetchall()
+
+    out: dict[str, str] = {}
+    for token, last, ref in rows:
+        last_d = Decimal(last or 0)
+        ref_d = Decimal(ref or 0)
+        # no trade before the boundary means the token is younger than the window, so
+        # there is no honest baseline to compare against. null renders as a dash
+        if ref_d <= 0 or last_d <= 0:
+            continue
+        out[token] = _fmt((last_d - ref_d) / ref_d * Decimal(100))
+    return out
 
 
 # serialize many tokens for list endpoints in one round trip
@@ -549,8 +638,22 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         data["top10_holding"] = str(stats.get("top10_holding", 0))
         data["top10_addresses"] = stats.get("top10_addresses", [])
 
+    change_24h = _batch_get_price_change_24h(list(token_data.keys()))
+
     for token, data in token_data.items():
-        data["snipers"] = {"count": 0, "addresses": [], "holdingShare": 0.0}
+        stats = holder_stats.get(token, {})
+        sniper_bal = int(stats.get("sniper_holding", 0))
+        data["snipers"] = {
+            "count": int(stats.get("sniper_count", 0)),
+            "addresses": stats.get("sniper_addresses", []),
+            # percent of the 1e27 supply, the same basis the search filter uses. this
+            # was a hardcoded zero, so a row could match sniper_holding_min and still
+            # render 0.00% for the field the user filtered on
+            "holdingShare": float(Decimal(sniper_bal) / _PCT_OF_SUPPLY) if sniper_bal > 0 else 0.0,
+        }
+        data["insider_holding"] = str(int(stats.get("insider_holding", 0)))
+        data["pro_traders"] = int(stats.get("pro_traders", 0))
+        data["change_pct_24h"] = change_24h.get(token)
 
     return token_data
 
@@ -741,7 +844,7 @@ def _serialize_token(token_addr: str) -> dict[str, Any]:
             sb_row = cur.fetchone()
         sniper_balance = int(sb_row[0] or 0)
 
-    sniper_share = float(Decimal(sniper_balance) / Decimal(1_000_000_000)) if sniper_balance > 0 else 0.0
+    sniper_share = float(Decimal(sniper_balance) / _PCT_OF_SUPPLY) if sniper_balance > 0 else 0.0
 
     snipers_view = {
         "count": sniper_count,
@@ -809,6 +912,9 @@ _PRICE_QUANTUM = Decimal(1).scaleb(-9)
 # token balances are raw wei while prices are per whole token, so their product is
 # wei denominated and has to come back down before it means dollars
 _WEI = Decimal(10) ** 18
+
+# raw balance divided by this is a percent of the 1e27 total supply
+_PCT_OF_SUPPLY = Decimal(10) ** 25
 
 
 # price scaled to marketcap units as a string, keeping 9 decimals
