@@ -231,3 +231,160 @@ def test_batch_user_endpoint(db):
     assert c.get("/user", params={"addresses": ""}).json()["count"] == 0
     # and the per-wallet route still works
     assert c.get(f"/user/{USER}").status_code == 200
+
+
+# the two filters the panel could not use, and the echo that makes a misspelled
+# param visible instead of silently returning an unfiltered page
+def test_search_supports_pro_traders_and_insider_filters(db, clean):
+    from fastapi.testclient import TestClient
+
+    import api.api
+
+    client = TestClient(api.api.app)
+
+    r = client.get("/search/query", params={"limit": 1, "pro_traders_min": 1})
+    assert r.status_code == 200
+    assert "pro_traders_min" in r.json()["applied_filters"]
+
+    r = client.get("/search/query", params={"limit": 1, "insider_holding_min": 1})
+    assert r.status_code == 200
+    assert "insider_holding_min" in r.json()["applied_filters"]
+
+    # a param the server does not know must not look like it was applied
+    r = client.get("/search/query", params={"limit": 1, "volumeMin": 5})
+    assert r.status_code == 200
+    assert r.json()["applied_filters"] == [], "an unknown param must not report as applied"
+
+
+# a row that matched a holder-derived filter must not render zero for the field the
+# user filtered on. the batch serializer hardcoded snipers, so a search could return
+# 25 rows above 5% that every one of them displayed as 0.00%
+def test_list_rows_carry_the_fields_the_search_can_filter_on(db, clean):
+    from api.api import _batch_get_holder_stats, _batch_serialize_tokens
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xsn1", log_idx=0)
+    storage.record_block_processed(101)
+
+    stats = _batch_get_holder_stats([TOKEN], set())
+    assert TOKEN in stats
+    # the three that used to be absent from the batch path entirely
+    for key in ("sniper_count", "sniper_addresses", "sniper_holding", "insider_holding", "pro_traders"):
+        assert key in stats[TOKEN], f"batch holder stats missing {key}"
+
+    rows = _batch_serialize_tokens([TOKEN], set())
+    row = rows[TOKEN]
+    assert "snipers" in row and set(row["snipers"]) == {"count", "addresses", "holdingShare"}
+    assert "insider_holding" in row, "insider_holding must be on the row, not hardcoded client side"
+    assert "pro_traders" in row, "pro_traders must be on the row"
+
+
+# holdingShare is a percent of the 1e27 supply, matching the filter's basis. it was
+# divided by 1e9, which is neither a fraction nor a percent
+def test_sniper_holding_share_is_a_percent_of_supply(db, clean):
+    from decimal import Decimal as D
+
+    from api.api import _PCT_OF_SUPPLY
+
+    assert _PCT_OF_SUPPLY == D(10) ** 25
+    # a wallet holding a tenth of the 1e27 supply is 10 percent
+    assert float(D(10) ** 26 / _PCT_OF_SUPPLY) == 10.0
+
+
+# a blacklist that only hides what is on the current page is not a blacklist. these
+# have to exclude in sql, and the client's normalisation has to match the server's
+def test_blacklist_exclusions_run_in_sql(db, clean):
+    import core.storage as st
+
+    _create(_new_state(), blk=100, ts=1000)
+    with st.db_cursor() as cur:
+        cur.execute(
+            "UPDATE launchpad_tokens SET creator=%s, social1=%s, social2=%s WHERE token=%s",
+            ("0xdead", "https://www.Evil.com/path", "https://x.com/BadGuy", TOKEN),
+        )
+
+    def total(ex):
+        _, _, n = st.search_tokens_filtered(query="", filters=ex, limit=5, offset=0, mon_usd=1)
+        return n
+
+    assert total({}) >= 1
+    assert total({"exclude_dev": ["0xDEAD"]}) == 0, "creator match is case insensitive"
+    assert total({"exclude_ca": [TOKEN.upper()]}) == 0, "token match is case insensitive"
+    # bare host, and a full url reduced to the same host
+    assert total({"exclude_website": ["evil.com"]}) == 0
+    assert total({"exclude_website": ["https://www.evil.com/other"]}) == 0
+    # bare handle, @handle and a full url all reduce to the same thing
+    for form in ("badguy", "@BadGuy", "https://x.com/BadGuy/status/9"):
+        assert total({"exclude_twitter": [form]}) == 0, f"handle form {form!r} did not match"
+    # a value that matches nothing must not exclude anything
+    assert total({"exclude_website": ["notevil.com"]}) >= 1
+    assert total({"exclude_twitter": ["someoneelse"]}) >= 1
+
+
+# source 1 has to mean nad.fun regardless of generation, since v1 and v2 are both
+# reported as 1 on the wire
+def test_source_filter_covers_both_nadfun_generations(db, clean):
+    import core.storage as st
+
+    _create(_new_state(), blk=100, ts=1000)
+
+    def total(src):
+        _, _, n = st.search_tokens_filtered(query="", filters={"source": src}, limit=5, offset=0, mon_usd=1)
+        return n
+
+    with st.db_cursor() as cur:
+        cur.execute("UPDATE launchpad_tokens SET source=2 WHERE token=%s", (TOKEN,))
+    assert total(1) == 1, "a v2 token must match a nad.fun request"
+    assert total(0) == 0
+
+    with st.db_cursor() as cur:
+        cur.execute("UPDATE launchpad_tokens SET source=0 WHERE token=%s", (TOKEN,))
+    assert total(0) == 1
+    assert total(1) == 0
+
+
+# the documented 1000 entry blacklist is far past what a query string carries, so the
+# post form has to accept the same filters and return the same shape
+def test_search_post_matches_the_get_form(db, clean):
+    from fastapi.testclient import TestClient
+
+    import api.api
+
+    client = TestClient(api.api.app)
+    _create(_new_state(), blk=100, ts=1000)
+
+    got = client.get("/search/query", params={"limit": 5})
+    post = client.post("/search/query", json={"limit": 5})
+    assert post.status_code == 200
+    assert post.json()["total"] == got.json()["total"]
+    assert set(post.json()) == set(got.json())
+
+    # a list the query string could not carry
+    big = ["0x" + f"{i:040x}" for i in range(1000)]
+    r = client.post("/search/query", json={"limit": 1, "exclude_ca": big})
+    assert r.status_code == 200
+    assert "exclude_ca" in r.json()["applied_filters"]
+
+    # and excluding a real token by post actually removes it
+    r = client.post("/search/query", json={"limit": 5, "exclude_ca": [TOKEN]})
+    assert all(row.get("token") != TOKEN for row in r.json()["results"])
+
+
+# query travels outside the filters dict, so it has to be echoed explicitly. a client
+# that asserts every param it sent came back would otherwise fall back on every search
+def test_query_is_echoed_in_applied_filters(db, clean):
+    from fastapi.testclient import TestClient
+
+    import api.api
+
+    client = TestClient(api.api.app)
+
+    r = client.get("/search/query", params={"limit": 1, "query": "abc"})
+    assert "query" in r.json()["applied_filters"]
+
+    r = client.get("/search/query", params={"limit": 1})
+    assert "query" not in r.json()["applied_filters"], "an empty query is not a filter"
+
+    r = client.post("/search/query", json={"limit": 1, "query": "abc"})
+    assert "query" in r.json()["applied_filters"], "post form must echo it too"

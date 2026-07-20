@@ -12,6 +12,7 @@ from typing import Any
 
 from api.api import (
     _WEI,
+    _api_source,
     _fmt,
     _fmt_usd,
     _internal_addrs,
@@ -197,23 +198,29 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
         if not creator:
             return []
 
+        hour_ago = int(time.time()) - 3600
         cur.execute(
             """
             SELECT t.token, t.symbol, t.name, t.metadata_cid, t.last_price_native,
-                   t.created_at, t.migrated, t.market,
+                   t.created_at, t.migrated, t.market, t.source,
                    (SELECT COUNT(*) FROM launchpad_positions p
-                     WHERE p.token = t.token AND p.balance_token > 1) AS holders
+                     WHERE p.token = t.token AND p.balance_token > 1) AS holders,
+                   -- the strip renders a 1h volume column, and it was the one number
+                   -- the channel could not supply, so it fell back to a stale rest read
+                   (SELECT COALESCE(SUM(native_amount), 0) FROM launchpad_trades
+                     WHERE token = t.token AND timestamp >= %s) AS vol_1h
             FROM launchpad_tokens t
             WHERE t.creator = %s
             ORDER BY t.created_at DESC NULLS LAST
             LIMIT %s
             """,
-            (creator, DEV_TOKENS_LIMIT),
+            (hour_ago, creator, DEV_TOKENS_LIMIT),
         )
         rows = cur.fetchall()
 
     out = []
-    for tok, symbol, name, cid, price, created, migrated, market, holders in rows:
+    for tok, symbol, name, cid, price, created, migrated, market, source, holders, vol_1h in rows:
+        marketcap = (price or Decimal(0)) * Decimal(10**9)
         out.append(
             {
                 "id": tok,
@@ -222,6 +229,11 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
                 "metadataCID": cid or "",
                 "imageUrl": cid or "",
                 "lastPriceNativePerTokenWad": _scaled_price(price),
+                # marketcap and source were on the rest payload but not here, so both
+                # blanked out on the first update that replaced the array
+                "marketcap": _fmt(marketcap),
+                "source": _api_source(source),
+                "volumeNative1h": str(int(vol_1h or 0)),
                 "timestamp": str(int(created or 0)),
                 "migrated": bool(migrated),
                 "holders": int(holders or 0),

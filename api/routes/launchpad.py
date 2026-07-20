@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from api.api import (
+    _PCT_OF_SUPPLY,
     _WEI,
     _api_source,
     _batch_serialize_tokens,
@@ -31,6 +32,13 @@ from api.api import (
 )
 
 router = APIRouter()
+
+
+# a comma separated blacklist param split into normalised entries. empty means no
+# constraint rather than an empty exclusion, which would match nothing
+def _csv(raw: str) -> list[str]:
+    return [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
+
 
 from api.api import _curve_supply_for
 
@@ -157,48 +165,80 @@ def token_holders(
 
 
 # grouped token lists for recently created approaching and graduated tokens
-@router.get("/tokens")
+# the cached variant, for the common case of no blacklist. a 1000 entry list would
+# otherwise become part of the cache key and mint a private entry per user
 @ttl_cache("tokens:list", ttl_seconds=3)
+def _list_tokens_cached(since_block: int, since: int) -> dict[str, Any]:
+    return _list_tokens_impl(since_block, since, {})
+
+
+@router.get("/tokens")
 def list_tokens(
     since_block: int = Query(0, ge=0, description="only tokens touched after this block"),
     since: int = Query(0, ge=0, description="same, as a unix timestamp. block is exact, prefer it"),
+    exclude_dev: str = Query("", description="comma separated creator addresses"),
+    exclude_ca: str = Query("", description="comma separated token addresses"),
+    exclude_website: str = Query("", description="comma separated bare hostnames"),
+    exclude_twitter: str = Query("", description="comma separated bare handles"),
 ) -> dict[str, Any]:
+    ex = {
+        "exclude_dev": _csv(exclude_dev),
+        "exclude_ca": _csv(exclude_ca),
+        "exclude_website": _csv(exclude_website),
+        "exclude_twitter": _csv(exclude_twitter),
+    }
+    if not any(ex.values()):
+        return _list_tokens_cached(since_block, since)
+    return _list_tokens_impl(since_block, since, ex)
+
+
+# buckets are excluded in sql rather than trimmed afterwards, so a blacklisted token
+# is replaced by the next candidate instead of leaving a short column
+def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     t0 = time.time()
     excluded = _internal_addrs()
+    bl_where, bl_params = storage.blacklist_clauses(ex, "")
+    bl_sql = ("".join(f" AND {c}" for c in bl_where)) if bl_where else ""
     with db_cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            f"""
             SELECT token, circulating_supply
             FROM launchpad_tokens
-            WHERE migrated = TRUE
+            WHERE migrated = TRUE{bl_sql}
             ORDER BY migrated_at DESC NULLS LAST, migrated_block DESC NULLS LAST
             LIMIT 30
-        """)
+        """,
+            tuple(bl_params),
+        )
         grad_rows = cur.fetchall()
 
         graduated_ids = {t.lower() for (t, _) in grad_rows if t}
 
         if graduated_ids:
             cur.execute(
-                """
+                f"""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE approaching_75 = TRUE
                   AND migrated = FALSE
-                  AND token <> ALL(%s)
+                  AND token <> ALL(%s){bl_sql}
                 ORDER BY circulating_supply DESC
                 LIMIT 30
             """,
-                (list(graduated_ids),),
+                (list(graduated_ids),) + tuple(bl_params),
             )
         else:
-            cur.execute("""
+            cur.execute(
+                f"""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
                 WHERE approaching_75 = TRUE
-                  AND migrated = FALSE
+                  AND migrated = FALSE{bl_sql}
                 ORDER BY circulating_supply DESC
                 LIMIT 30
-            """)
+            """,
+                tuple(bl_params),
+            )
         appr_rows = cur.fetchall()
 
         approaching_ids = {t.lower() for (t, _) in appr_rows if t}
@@ -206,22 +246,26 @@ def list_tokens(
 
         if excluded_ids:
             cur.execute(
-                """
+                f"""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
-                WHERE token <> ALL(%s)
+                WHERE token <> ALL(%s){bl_sql}
                 ORDER BY created_at DESC NULLS LAST, created_block DESC NULLS LAST
                 LIMIT 30
             """,
-                (list(excluded_ids),),
+                (list(excluded_ids),) + tuple(bl_params),
             )
         else:
-            cur.execute("""
+            cur.execute(
+                f"""
                 SELECT token, circulating_supply
                 FROM launchpad_tokens
+                {"WHERE " + " AND ".join(bl_where) if bl_where else ""}
                 ORDER BY created_at DESC NULLS LAST, created_block DESC NULLS LAST
                 LIMIT 30
-            """)
+            """,
+                tuple(bl_params),
+            )
         created_rows = cur.fetchall()
 
     all_token_addrs = [t for t, _ in grad_rows + appr_rows + created_rows]
@@ -259,7 +303,11 @@ def list_tokens(
             result[bucket] = [r for r in result[bucket] if (r.get("token") or "").lower() in changed]
         result["since_block"] = since_block
         result["since"] = since
-        result["as_of_block"] = storage.get_last_processed_block() or 0
+
+    # on the full response too, not just the delta. without it the client had to seed
+    # its watermark from the chain head minus a guess, and a token created during the
+    # first paint fell into that gap
+    result["as_of_block"] = storage.get_last_processed_block() or 0
 
     dt = (time.time() - t0) * 1000
     log.info("token_list dt_ms=%.1f", dt)
@@ -897,7 +945,8 @@ def token_overview_graph(
                 sb_row = cur.fetchone()
             sniper_balance = int(sb_row[0] or 0)
 
-        sniper_share = float(Decimal(sniper_balance) / Decimal(1_000_000_000)) if sniper_balance > 0 else 0.0
+        # percent of the 1e27 supply. 1e9 was neither a fraction nor a percent
+        sniper_share = float(Decimal(sniper_balance) / _PCT_OF_SUPPLY) if sniper_balance > 0 else 0.0
 
         snipers_view = {
             "count": int(snipers_count or len(sniper_addresses)),
@@ -1858,8 +1907,17 @@ def search_tokens_api(
     top10_max: float | None = Query(None),
     dev_holding_min: float | None = Query(None, description="percent of supply"),
     dev_holding_max: float | None = Query(None),
+    source: str = Query("", description="0 native/crystal, 1 nad.fun"),
+    exclude_dev: str = Query("", description="comma separated creator addresses"),
+    exclude_ca: str = Query("", description="comma separated token addresses"),
+    exclude_website: str = Query("", description="comma separated bare hostnames"),
+    exclude_twitter: str = Query("", description="comma separated bare handles"),
     sniper_holding_min: float | None = Query(None, description="percent of supply"),
     sniper_holding_max: float | None = Query(None),
+    pro_traders_min: float | None = Query(None, description="wallets profitable over >=10 trades"),
+    pro_traders_max: float | None = Query(None),
+    insider_holding_min: float | None = Query(None, description="percent of supply held above net bought"),
+    insider_holding_max: float | None = Query(None),
     marketcap_min: float | None = Query(None, description="usd"),
     marketcap_max: float | None = Query(None),
     volume_24h_min: float | None = Query(None, description="usd"),
@@ -1891,8 +1949,17 @@ def search_tokens_api(
         "top10_max": top10_max,
         "dev_holding_min": dev_holding_min,
         "dev_holding_max": dev_holding_max,
+        "source": source or None,
+        "exclude_dev": _csv(exclude_dev),
+        "exclude_ca": _csv(exclude_ca),
+        "exclude_website": _csv(exclude_website),
+        "exclude_twitter": _csv(exclude_twitter),
         "sniper_holding_min": sniper_holding_min,
         "sniper_holding_max": sniper_holding_max,
+        "pro_traders_min": pro_traders_min,
+        "pro_traders_max": pro_traders_max,
+        "insider_holding_min": insider_holding_min,
+        "insider_holding_max": insider_holding_max,
         "marketcap_min": marketcap_min,
         "marketcap_max": marketcap_max,
         "volume_24h_min": volume_24h_min,
@@ -1913,6 +1980,39 @@ def search_tokens_api(
         "has_discord": has_discord,
     }
 
+    return _search_impl(query, sort, limit, offset, filters, excluded)
+
+
+# a blacklist at the documented 1000 entry cap is roughly 43kb of query string, and
+# the ingress rejects anything past about 17kb, so the same search is also reachable
+# by post. both transports run this identical body
+@router.post("/search/query")
+def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
+    b = body or {}
+    excluded = _internal_addrs()
+
+    def lst(key):
+        v = b.get(key)
+        if isinstance(v, list):
+            return [str(x).strip().lower() for x in v if str(x).strip()]
+        return _csv(str(v or ""))
+
+    filters = {k: v for k, v in b.items() if k not in ("query", "sort", "limit", "offset")}
+    for key in ("exclude_dev", "exclude_ca", "exclude_website", "exclude_twitter"):
+        filters[key] = lst(key)
+
+    return _search_impl(
+        str(b.get("query") or ""),
+        str(b.get("sort") or ""),
+        int(b.get("limit") or 50),
+        int(b.get("offset") or 0),
+        filters,
+        excluded,
+    )
+
+
+# shared body behind the get and post forms of the search
+def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict, excluded: set) -> dict[str, Any]:
     token_addrs, circ_map, total = storage.search_tokens_filtered(
         query=query,
         filters=filters,
@@ -1928,6 +2028,18 @@ def search_tokens_api(
         "limit": limit,
         "offset": offset,
         "total": total,
+        # exactly which filters were understood and applied. an unknown or misspelled
+        # param is otherwise ignored in silence, and the client cannot tell a filtered
+        # result from an unfiltered one -- the same trap as filtering a page client side
+        # `is not False` and `!= ""` rather than truthiness, so a real numeric bound of
+        # 0 still counts as applied while the unset string and bool defaults do not
+        # query is echoed too. it travels outside the filters dict, so a client that
+        # asserts every param it sent came back applied would discard the response and
+        # fall back to a client side pass on every search
+        "applied_filters": sorted(
+            ([k for k, v in filters.items() if v is not None and v is not False and v != "" and v != []])
+            + (["query"] if (query or "").strip() else [])
+        ),
     }
 
     if not token_addrs:

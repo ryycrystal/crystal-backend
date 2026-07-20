@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from decimal import Decimal
 
@@ -1192,6 +1193,86 @@ def search_tokens(query: str, limit: int = 20):
         return cur.fetchall()
 
 
+# a social slot reduced to a bare hostname: scheme and a leading www. removed, path
+# and query dropped. matches the normalisation the client applies to a blacklist entry
+def _host_expr(col: str) -> str:
+    return (
+        "regexp_replace("
+        f"split_part(split_part(lower(regexp_replace(COALESCE({col}, ''), '^https?://', '', 'i')), '/', 1), '?', 1)"
+        r", '^www\.', '')"
+    )
+
+
+# a social slot reduced to a bare twitter handle, or null when the slot is not twitter.
+# returning null rather than the raw value keeps a website from matching a handle
+def _handle_expr(col: str) -> str:
+    tw = r"'^(https?://)?(www\.)?(x|twitter)\.com/'"
+    return (
+        "CASE "
+        f"WHEN COALESCE({col}, '') ~* {tw} THEN "
+        f"lower(split_part(split_part(regexp_replace({col}, {tw}, '', 'i'), '/', 1), '?', 1)) "
+        f"WHEN COALESCE({col}, '') ~ '^@' THEN lower(substring({col} from 2)) "
+        "ELSE NULL END"
+    )
+
+
+# blacklist exclusions as a sql fragment plus params, shared by every list endpoint.
+# built once so /tokens and /search/query cannot drift into normalising differently
+def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], list]:
+    ex = ex or {}
+    a = f"{alias}." if alias else ""
+    where: list[str] = []
+    params: list = []
+
+    def norm(key):
+        return [str(v).strip().lower() for v in (ex.get(key) or []) if str(v).strip()]
+
+    # the column expressions produce a bare host and a bare handle, so the incoming
+    # values have to be reduced the same way. the client already sends them bare, but
+    # a full url arriving here would otherwise silently match nothing
+    def norm_host(key):
+        out = []
+        for v in norm(key):
+            v = re.sub(r"^https?://", "", v)
+            v = re.sub(r"^www\.", "", v)
+            out.append(v.split("/")[0].split("?")[0])
+        return [v for v in out if v]
+
+    def norm_handle(key):
+        out = []
+        for v in norm(key):
+            v = re.sub(r"^(https?://)?(www\.)?(x|twitter)\.com/", "", v)
+            v = v.lstrip("@")
+            out.append(v.split("/")[0].split("?")[0])
+        return [v for v in out if v]
+
+    dev = norm("exclude_dev")
+    if dev:
+        where.append(f"LOWER(COALESCE({a}creator, '')) <> ALL(%s)")
+        params.append(dev)
+
+    ca = norm("exclude_ca")
+    if ca:
+        where.append(f"LOWER({a}token) <> ALL(%s)")
+        params.append(ca)
+
+    for key, build, prep in (
+        ("exclude_website", _host_expr, norm_host),
+        ("exclude_twitter", _handle_expr, norm_handle),
+    ):
+        vals = prep(key)
+        if not vals:
+            continue
+        # coalesce is load bearing: the handle expression is null for a slot that is
+        # not twitter, and NOT (null OR false) is null, which drops the row. without
+        # it a single twitter entry emptied the whole feed
+        clauses = [f"COALESCE({build(f'{a}social{i}')}, '')" for i in range(1, 5)]
+        where.append("NOT (" + " OR ".join(f"({c}) = ANY(%s)" for c in clauses) + ")")
+        params.extend([vals] * len(clauses))
+
+    return where, params
+
+
 # filtered token search. every filter is applied in SQL rather than to an already
 # truncated page, because filtering the top 50 silently hides a token that matches
 # but ranks 51st -- results that are wrong rather than merely incomplete
@@ -1242,6 +1323,22 @@ def search_tokens_filtered(
     if f.get("age_max") is not None:
         where.append("t.created_at >= %s")
         params.append(now - int(float(f["age_max"]) * 60))
+
+    # nad.fun v1 and v2 are both reported as source 1 on the wire, so a request for
+    # nad.fun has to match either generation
+    src = f.get("source")
+    if src is not None and str(src).strip() != "":
+        if int(src) == 0:
+            where.append("t.source = 0")
+        else:
+            where.append("t.source <> 0")
+
+    # blacklist exclusions run in sql for the same reason the filters do: applied to
+    # the current page they hide what happens to be on screen and miss every other
+    # match, which is a promise the feature cannot keep
+    bl_where, bl_params = blacklist_clauses(f, "t")
+    where.extend(bl_where)
+    params.extend(bl_params)
 
     rng("t.volume_usd", "volume_24h_min", "volume_24h_max")
     rng("t.fees_usd", "fees_min", "fees_max")
@@ -1308,6 +1405,8 @@ def search_tokens_filtered(
     drng("b.dev_pct", "dev_holding_min", "dev_holding_max")
     drng("b.top10_pct", "top10_min", "top10_max")
     drng("b.sniper_pct", "sniper_holding_min", "sniper_holding_max")
+    drng("b.pro_traders", "pro_traders_min", "pro_traders_max")
+    drng("b.insider_pct", "insider_holding_min", "insider_holding_max")
     derived_sql = " AND ".join(derived) if derived else "TRUE"
 
     order = {
@@ -1333,7 +1432,20 @@ def search_tokens_filtered(
                COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
                  JOIN launchpad_snipers s
                    ON s.token = p.token AND s.user_address = p.user_address
-                 WHERE p.token = t.token), 0) / 1e25 AS sniper_pct
+                 WHERE p.token = t.token), 0) / 1e25 AS sniper_pct,
+               -- a pro trader is profitable with a real sample behind it, rather than
+               -- one lucky trade. definition is deliberately visible here so it can be
+               -- retuned without hunting through the query
+               (SELECT COUNT(*) FROM launchpad_positions p
+                 WHERE p.token = t.token
+                   AND p.realized_pnl_native > 0
+                   AND p.trade_count >= 10) AS pro_traders,
+               -- an insider holds more than it ever bought net, so the excess arrived
+               -- by transfer rather than through the curve. the dust margin keeps
+               -- rounding on the balance from tripping it
+               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
+                 WHERE p.token = t.token
+                   AND p.balance_token > (p.token_bought - p.token_sold) + 1e18), 0) / 1e25 AS insider_pct
         FROM launchpad_tokens t
         WHERE {where_sql}
     """
