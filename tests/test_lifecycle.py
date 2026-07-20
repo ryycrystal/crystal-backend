@@ -364,20 +364,14 @@ def test_fee_rates_match_what_the_chain_charges():
     """Measured from real trades, not assumed:
       v1 REDNIT  reserve delta 0.98950500 -> user received 0.97960995  = 1%
       v2 BTS     amount in 4,000 -> reserve delta 3,920                = 2%
-    A single hardcoded 1% halved v2 fees on every reorg recompute."""
+    Each generation charges its own rate, so nothing may assume a single one."""
     from decimal import Decimal
 
-    import state as state_mod
     from core.adapters import nadfun as nf
 
     assert nf.fee_rate_for(nf.SOURCE_V1) == Decimal("0.01")
     assert nf.fee_rate_for(nf.SOURCE_V2) == Decimal("0.02")
     assert nf.fee_rate_for(nf.SOURCE_V1) != nf.fee_rate_for(nf.SOURCE_V2)
-
-    # the reorg recompute must consult the source, not a constant
-    assert state_mod._fee_rate_for_source(nf.SOURCE_V1) == Decimal("0.01")
-    assert state_mod._fee_rate_for_source(nf.SOURCE_V2) == Decimal("0.02")
-    assert state_mod._fee_rate_for_source(0) == state_mod.NATIVE_FEE_RATE
 
     # the exact v1 arithmetic that established the rate
     gross = Decimal("0.98950500")

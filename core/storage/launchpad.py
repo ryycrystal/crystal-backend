@@ -162,55 +162,6 @@ def insert_trade(
         )
 
 
-# store a blocks hash so reorgs can be detected later
-def record_block_hash(block_number: int, block_hash: str, cur: psycopg2.extensions.cursor | None = None) -> None:
-    sql = """
-        INSERT INTO launchpad_blocks (number, block_hash)
-        VALUES (%s, %s)
-        ON CONFLICT (number) DO UPDATE
-        SET processed_at = NOW(), block_hash = EXCLUDED.block_hash;
-    """
-    args = (int(block_number), (block_hash or "").lower() or None)
-    if cur is None:
-        with db_cursor() as cur2:
-            cur2.execute(sql, args)
-    else:
-        cur.execute(sql, args)
-
-
-# stored hash for one processed block
-def get_processed_block_hash(block_number: int, cur: psycopg2.extensions.cursor | None = None):
-    sql = "SELECT block_hash FROM launchpad_blocks WHERE number = %s;"
-    if cur is None:
-        with db_cursor() as cur2:
-            cur2.execute(sql, (int(block_number),))
-            row = cur2.fetchone()
-    else:
-        cur.execute(sql, (int(block_number),))
-        row = cur.fetchone()
-    return row[0] if row else None
-
-
-# delete trades from a block onward and return the affected tokens
-def rollback_launchpad_from_block(from_block: int, cur: psycopg2.extensions.cursor | None = None) -> list[str]:
-    # run the aggregate query on a cursor
-    def _run(c):
-        c.execute(
-            "SELECT DISTINCT token FROM launchpad_trades WHERE block_number >= %s;",
-            (int(from_block),),
-        )
-        tokens = [r[0] for r in c.fetchall() if r and r[0]]
-        c.execute("DELETE FROM launchpad_trades WHERE block_number >= %s;", (int(from_block),))
-        c.execute("DELETE FROM launchpad_blocks WHERE number >= %s;", (int(from_block),))
-        return tokens
-
-    if cur is None:
-        with db_cursor() as cur2:
-            return _run(cur2)
-    return _run(cur)
-
-
-# recompute a tokens aggregates from its surviving trade rows
 def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | None = None) -> dict:
     tok = (token or "").lower()
 
@@ -1859,25 +1810,6 @@ def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
     return int(row[0]), int(row[1])
 
 
-# the most recent processed block numbers and hashes
-def get_recent_block_hashes(limit: int = 32, cur: psycopg2.extensions.cursor | None = None) -> list[tuple]:
-    sql = """
-        SELECT number, block_hash
-        FROM launchpad_blocks
-        WHERE block_hash IS NOT NULL
-        ORDER BY number DESC
-        LIMIT %s;
-    """
-    if cur is None:
-        with db_cursor() as cur2:
-            cur2.execute(sql, (int(limit),))
-            return [(int(r[0]), r[1]) for r in cur2.fetchall()]
-    cur.execute(sql, (int(limit),))
-    return [(int(r[0]), r[1]) for r in cur.fetchall()]
-
-
-# which of these tokens were touched after a point, by trade, creation or migration.
-# launchpad_tokens has no updated_at, so change is derived rather than stored
 def tokens_changed_since(tokens: list[str], *, since_block: int = 0, since_ts: int = 0) -> set[str]:
     toks = [(t or "").lower() for t in tokens if t]
     if not toks or (not since_block and not since_ts):

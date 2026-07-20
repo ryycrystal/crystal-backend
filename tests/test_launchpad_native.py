@@ -930,3 +930,44 @@ def test_sell_side_fee_survives_the_gross_volume_override(monkeypatch):
 
     expected_sell_fee = Decimal(gross_out - net_out) / Decimal(10**18) * st.mon_price_usd
     assert abs(sell_fee - expected_sell_fee) < Decimal("1e-24")
+
+
+def test_unmapped_nadfun_contract_is_refused_not_assumed_v1(monkeypatch):
+    """The old catch-all classified any nad.fun address that was not v2 as v1, so
+    adding a future deployment to NADFUN_ADDRESSES without an adapter would have
+    measured it with v1 geometry and reported plausible, wrong numbers."""
+    from core import chain as chain_mod
+    from core.adapters import nadfun as nf
+
+    assert state._source_for_emitter(ROUTER) == 0
+    assert state._source_for_emitter(chain_mod.NADFUN_ADDR) == nf.SOURCE_V1
+    assert state._source_for_emitter(chain_mod.NADFUN_V2_ADDR) == nf.SOURCE_V2
+
+    # a nad.fun contract we have no adapter for must resolve to nothing
+    unmapped = "0x00000000000000000000000000000000000000v3".replace("v3", "99")
+    monkeypatch.setattr(chain_mod, "is_nadfun_address", lambda a: a == unmapped)
+    assert state._source_for_emitter(unmapped) is None
+    assert state._source_for_emitter("0xdeadbeef00000000000000000000000000000000") is None
+
+
+def test_trade_from_an_unmapped_nadfun_contract_creates_no_token(monkeypatch):
+    """Refusing beats guessing: a wrong generation produces believable numbers."""
+    from core import chain as chain_mod
+
+    st = _fresh_state(monkeypatch)
+    monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "GHOST")
+    unmapped = "0x1111111111111111111111111111111111119999"
+    monkeypatch.setattr(chain_mod, "is_nadfun_address", lambda a: a == unmapped)
+
+    tok = "0xcccc000000000000000000000000000000000001"
+    ev = {
+        "token": tok,
+        "user": USER,
+        "is_buy": True,
+        "amount_in": 10**18,
+        "amount_out": 10**20,
+        "native_reserve": 90_000 * 10**18,
+        "token_reserve": 10**27,
+    }
+    st.apply_launchpad_trade(ev, 101, 1001, "0xghost", 0, unmapped)
+    assert tok not in st.launchpad_tokens, "must not invent a token on unknown geometry"
