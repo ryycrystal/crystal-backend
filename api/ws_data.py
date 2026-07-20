@@ -9,7 +9,14 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from api.api import _fmt, _fmt_usd, _internal_addrs, _quote_price_usd, _scaled_price
+from api.api import (
+    _fmt,
+    _fmt_usd,
+    _internal_addrs,
+    _lifecycle_fields,
+    _quote_price_usd,
+    _scaled_price,
+)
 from core.storage import db_cursor
 
 # how many rows each list channel carries
@@ -204,3 +211,117 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# everything on the token detail response that moves as trades land, so a client can
+# stop polling /token entirely after its first load. the static half of that response
+# (name, symbol, socials, creator, image) never changes and is deliberately omitted
+def token_state(token: str) -> dict[str, Any]:
+    token = (token or "").lower()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                t.last_price_native, t.native_volume, t.token_volume, t.volume_usd,
+                t.fees_usd, t.buy_count, t.sell_count, t.tx_count,
+                t.circulating_supply, t.source, t.migrated, t.market, t.migrated_at,
+                t.approaching_75, t.approaching_75_block, t.approaching_75_at,
+                COALESCE(t.ath_price_native, 0),
+                t.curve_native_reserve, t.curve_token_reserve,
+                (SELECT COUNT(*) FROM launchpad_positions p
+                  WHERE p.token = t.token AND p.balance_token > 1),
+                (SELECT COUNT(*) FROM launchpad_positions p
+                  WHERE p.token = t.token AND p.buy_count > 0),
+                (SELECT COUNT(*) FROM launchpad_positions p
+                  WHERE p.token = t.token AND p.sell_count > 0)
+            FROM launchpad_tokens t
+            WHERE t.token = %s
+            """,
+            (token,),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        return {}
+
+    (
+        last_price,
+        native_volume,
+        token_volume,
+        volume_usd,
+        fees_usd,
+        buys,
+        sells,
+        tx_count,
+        circulating,
+        source,
+        migrated,
+        market,
+        migrated_at,
+        approaching,
+        approaching_block,
+        approaching_at,
+        ath_price,
+        curve_native,
+        curve_token,
+        holders,
+        distinct_buyers,
+        distinct_sellers,
+    ) = row
+
+    last_price = last_price or Decimal(0)
+    ath_price = ath_price or Decimal(0)
+    if ath_price < last_price:
+        ath_price = last_price
+
+    quote_usd = _quote_price_usd(None)
+    marketcap = last_price * Decimal(10**9)
+    ath_marketcap = ath_price * Decimal(10**9)
+
+    body: dict[str, Any] = {
+        # price and valuation
+        "lastPriceNativePerTokenWad": _scaled_price(last_price),
+        "lastPriceQuotePerTokenWad": _scaled_price(last_price),
+        "marketcap": _fmt(marketcap),
+        "marketcap_quote": _fmt(marketcap),
+        "marketcap_usd": _fmt_usd(marketcap * quote_usd) if quote_usd > 0 else "0",
+        # all time high, only moves on a new high
+        "athPriceNative": _fmt(ath_price),
+        "athMarketcap": _fmt(ath_marketcap),
+        "athMarketcapUsd": _fmt_usd(ath_marketcap * quote_usd) if quote_usd > 0 else "0",
+        # lifetime totals
+        "volumeNative": str(int(native_volume or 0)),
+        "tokenVolume": str(int(token_volume or 0)),
+        "volume_usd": _fmt_usd(volume_usd or Decimal(0)),
+        "fees_usd": _fmt_usd(fees_usd or Decimal(0)),
+        "buyTxs": int(buys or 0),
+        "sellTxs": int(sells or 0),
+        "txCount": int(tx_count or 0),
+        # participants
+        "totalHolders": int(holders or 0),
+        "distinctBuyers": int(distinct_buyers or 0),
+        "distinctSellers": int(distinct_sellers or 0),
+        # curve position, the progress bar
+        "circulating_supply": str(int(circulating or 0)),
+        "curveNativeReserve": str(int(curve_native or 0)),
+        "curveTokenReserve": str(int(curve_token or 0)),
+        # the 75% threshold flag and when it fired
+        "approaching_75": bool(approaching),
+        "approaching_75_block": int(approaching_block or 0),
+        "approaching_75_at": int(approaching_at or 0),
+        # graduation. these flip exactly once but the page must react immediately
+        "migrated": bool(migrated),
+        "market": market,
+        "migratedAt": int(migrated_at) if migrated_at else None,
+    }
+
+    # phase and progress are derived, never stored, so they cannot drift
+    body.update(
+        _lifecycle_fields(
+            source=source,
+            circulating_supply=int(circulating or 0),
+            tx_count=int(tx_count or 0),
+            migrated=bool(migrated),
+        )
+    )
+    return body

@@ -26,11 +26,11 @@ router = APIRouter()
 
 # channels a client may subscribe to. stats is implemented; the rest are declared
 # so a client subscribing early gets an explicit "not yet" rather than silence
-KNOWN_CHANNELS = ("stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
-IMPLEMENTED_CHANNELS = ("stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
+KNOWN_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
+IMPLEMENTED_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
 
 # channels that send the whole object every time rather than a diff
-SNAPSHOT_CHANNELS = ("stats", "dev_tokens")
+SNAPSHOT_CHANNELS = ("token", "stats", "dev_tokens")
 
 # how often the fanout task checks whether the indexer has moved
 POLL_INTERVAL_SECONDS = 0.25
@@ -162,6 +162,7 @@ class Hub:
                 continue
             self._last_sent[key] = watermark
             fn = {
+                "token": self._push_token_state,
                 "stats": self._push_stats,
                 "trades": self._push_trades,
                 "holders": self._push_holders,
@@ -193,6 +194,22 @@ class Hub:
         upserts = [v for k, v in rows.items() if prev.get(k) != v]
         removed = [k for k in prev if k not in rows]
         return upserts, removed
+
+    # token: the per trade half of the token detail response, so a client can stop
+    # polling /token after first load. snapshot because it is ~25 scalars, where a
+    # diff would cost more than the object
+    async def _push_token_state(self, token: str, watermark: int) -> None:
+        from api.ws_data import token_state
+
+        body = await asyncio.to_thread(token_state, token)
+        if not body:
+            return
+        key = (token, "token")
+        if self._prev_rows.get(key) == {"all": body}:
+            return
+        self._prev_rows[key] = {"all": body}
+        env = self._envelope(token, "token", watermark, "snapshot")
+        await self.broadcast(token, "token", {**env, **body})
 
     # stats: an aggregate, so the whole object every time
     async def _push_stats(self, token: str, watermark: int) -> None:

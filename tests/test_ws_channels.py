@@ -6,6 +6,7 @@ a holder that hits zero and lingers forever, a trade id format that double count
 
 import os
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -122,3 +123,78 @@ def test_indexer_watermark_tracks_processed_blocks(db):
     assert indexer_watermark() == 500
     storage.record_block_processed(499)
     assert indexer_watermark() == 500, "watermark is the max, not the latest write"
+
+
+# the token channel must carry everything on /token that moves per trade, so the
+# client can stop polling it entirely after first load
+def test_token_channel_carries_the_live_fields(db):
+    from api.ws_data import token_state
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xts1", log_idx=0)
+
+    body = token_state(TOKEN)
+
+    # valuation
+    for k in ("marketcap", "marketcap_usd", "lastPriceNativePerTokenWad", "athMarketcap"):
+        assert k in body, f"missing {k}"
+    # curve position, the progress bar
+    for k in ("circulating_supply", "progressBps", "phase", "curveNativeReserve"):
+        assert k in body, f"missing {k}"
+    # lifetime totals
+    for k in ("volumeNative", "volume_usd", "fees_usd", "buyTxs", "sellTxs", "txCount"):
+        assert k in body, f"missing {k}"
+    # participants
+    for k in ("totalHolders", "distinctBuyers", "distinctSellers"):
+        assert k in body, f"missing {k}"
+    # threshold and graduation
+    for k in ("approaching_75", "migrated", "market", "migratedAt"):
+        assert k in body, f"missing {k}"
+
+    # and the static half is deliberately absent
+    for k in ("name", "symbol", "social1", "creator", "description"):
+        assert k not in body, f"{k} never changes and should not be pushed"
+
+
+# an unknown token yields nothing rather than a half filled object
+def test_token_channel_on_unknown_token_is_empty(db):
+    from api.ws_data import token_state
+
+    assert token_state("0x000000000000000000000000000000000000dead") == {}
+
+
+# progress and phase must track the curve as trades land
+def test_token_channel_tracks_curve_progress(db):
+    from api.ws_data import token_state
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xtp1", log_idx=0)
+    early = token_state(TOKEN)
+
+    # push the curve past the 75% threshold
+    _trade(st, native_reserve=2500 * 10**18, blk=102, ts=1002, txh="0xtp2", log_idx=0)
+    late = token_state(TOKEN)
+
+    assert int(late["progressBps"]) > int(early["progressBps"]), "progress must advance"
+    assert late["phase"] == "graduating"
+    assert late["approaching_75"] is True
+    assert int(late["approaching_75_block"]) == 102
+
+
+# ath holds at the peak rather than following price down
+def test_token_channel_ath_does_not_follow_price_down(db):
+    from api.ws_data import token_state
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=2000 * 10**18, blk=101, ts=1001, txh="0xta1", log_idx=0)
+    peak = token_state(TOKEN)["athMarketcap"]
+
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=1002, txh="0xta2", log_idx=0)
+    after = token_state(TOKEN)
+
+    assert after["athMarketcap"] == peak, "ath must hold at the high"
+    assert Decimal(after["marketcap"]) < Decimal(peak), "price did come down"
