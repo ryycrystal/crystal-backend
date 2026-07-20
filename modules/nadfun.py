@@ -454,6 +454,16 @@ def parse_nadfun_graduated(
 
 
 # decode a nadfun sniping penalty log
+# v2 only anti sniping penalty, parsed and counted but deliberately not dispatched
+#
+# it is absent from the v1 abi nad.fun publishes so there is no authoritative
+# definition to implement against, and it fired zero times in 20,000 blocks
+#
+# it cannot corrupt what matters: supply derives from CurveSync reserves and
+# balances from erc20 transfers, both authoritative, so a penalty that moves
+# tokens or mon shows up in the next sync and transfer anyway. the only thing it
+# could skew is fee accounting, where a fee taken outside the reserve delta would
+# not be captured
 def parse_nadfun_sniping_penalty(
     _addr: str,
     topics: list[str],
