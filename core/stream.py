@@ -7,7 +7,6 @@ from collections import deque
 import websockets
 
 import backfill
-import core.storage as storage
 from core import chain as h
 from core.sequencer import SEQUENCER
 
@@ -571,85 +570,4 @@ async def vault_sampler(state):
         await asyncio.sleep(VAULT_SAMPLER_INTERVAL)
 
 
-REORG_CHECK_INTERVAL = 20
-REORG_CHECK_DEPTH = 32
-
-
 # rebuild state for a block range after a rollback
-async def _reindex_range(frm: int, to: int) -> None:
-    if to < frm:
-        return
-    logs = await backfill.fetch_logs_http(frm, to)
-    by_block: dict[int, list[dict]] = {}
-    for log in logs:
-        topics = log.get("topics") or []
-        if not topics:
-            continue
-        tag = h.EVENT_SIGS.get(topics[0].lower())
-        if not tag:
-            continue
-        addr = (log.get("address") or "").lower()
-        h.register_dynamic_addresses_from_log(log)
-        if not h.accepts_log_for_indexing(tag, addr):
-            continue
-        blk_hex = log.get("blockNumber")
-        blk_num = int(blk_hex, 16) if isinstance(blk_hex, str) else int(blk_hex or 0)
-        by_block.setdefault(blk_num, []).append(log)
-
-    if by_block:
-        await backfill.ensure_block_timestamps(by_block)
-        for blk in sorted(by_block):
-            for log in by_block[blk]:
-                SEQUENCER.add_log(log)
-
-    for blk in range(frm, to + 1):
-        blk_logs = by_block.get(blk, [])
-        blk_ts = None
-        if blk_logs:
-            ts_raw = blk_logs[0].get("blockTimestamp")
-            if isinstance(ts_raw, str):
-                blk_ts = int(ts_raw, 16)
-            elif ts_raw is not None:
-                blk_ts = int(ts_raw)
-        SEQUENCER.note_block(blk, block_timestamp=blk_ts)
-
-
-# catch reorgs the per block guard misses by walking the indexed tail newest first
-# and comparing stored hashes against the chain, a reorg replaces a contiguous
-# suffix so the first match ends the scan
-async def reorg_watcher(state):
-    while True:
-        await asyncio.sleep(REORG_CHECK_INTERVAL)
-        try:
-            rows = storage.get_recent_block_hashes(REORG_CHECK_DEPTH)
-            if not rows:
-                continue
-
-            rollback_from = None
-            for number, stored in rows:
-                if not stored:
-                    continue
-                resp = await backfill.http_jsonrpc("eth_getBlockByNumber", [hex(int(number)), False])
-                result = resp.get("result") or {}
-                onchain = str(result.get("hash") or "").lower()
-                if not onchain:
-                    break
-                if onchain == str(stored).lower():
-                    break
-                rollback_from = int(number)
-
-            if rollback_from is None:
-                continue
-
-            print(f"[REORG] chain diverged at block {rollback_from}; rolling back", flush=True)
-            state.handle_reorg(rollback_from)
-            SEQUENCER.reset_pending(rollback_from)
-
-            head = await backfill.get_head_http()
-            await _reindex_range(rollback_from, head)
-            print(f"[REORG] re-indexed {rollback_from}-{head}", flush=True)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            print(f"[REORG] {e!r}", flush=True)

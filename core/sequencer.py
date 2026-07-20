@@ -466,7 +466,7 @@ class Sequencer:
             except Exception as e:
                 print(f"[SQ] Failed to discover nad.fun v2 token {token}: {e!r}", flush=True)
 
-    # process one block inside a transaction with reorg and idempotency guards
+    # process one block inside a transaction
     def _process_block(
         self,
         blk: int,
@@ -521,41 +521,17 @@ class Sequencer:
                 has_trades = True
                 break
 
-        block_hash = ""
-        for log in logs:
-            bh = log.get("blockHash")
-            if bh:
-                block_hash = str(bh).lower()
-                break
-
-        # a re indexed block with a different hash means the chain replaced it, so
-        # drop the orphaned rows before re indexing
-        def _reorg_guard(c):
-            if not block_hash:
-                return
-            try:
-                if self._state.detect_reorg(blk, block_hash, cur=c):
-                    print(f"[SQ] reorg detected at block {blk}, rolling back", flush=True)
-                    self._state.handle_reorg(blk, cur=c)
-            except Exception as e:
-                print(f"[SQ] reorg check failed at {blk}: {e!r}", flush=True)
-
-        # record the block and its hash once its logs are committed
+        # record the block once its logs are committed
         def _mark_processed(c):
             if not record_processed:
                 return
-            if block_hash:
-                storage.record_block_hash(blk, block_hash, cur=c)
-            else:
-                storage.record_block_processed(blk, cur=c)
+            storage.record_block_processed(blk, cur=c)
 
         if cur is None:
             with db_cursor() as cur:
-                _reorg_guard(cur)
                 self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
                 _mark_processed(cur)
         else:
-            _reorg_guard(cur)
             self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
             _mark_processed(cur)
 

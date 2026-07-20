@@ -117,21 +117,59 @@ def _fetch_launchpad_initial_native_supply() -> int:
     return int(cached) if cached is not None else 0
 
 
-# native launchpadFee is an inverted keep factor out of 100000, currently 99000
-# which is 1%. governance settable, so treat this as the deployed default rather
-# than a law -- the per trade path derives the real rate from the reserve delta
-NATIVE_FEE_RATE = Decimal("0.01")
-
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
 NADFUN_ADAPTERS = nadfun_geo.build_all()
 
+# explicit, not a catch-all: every nad.fun generation is a different curve, so an
+# address we have no adapter for must be refused rather than assumed to be v1.
+# adding a new deployment to NADFUN_ADDRESSES without an adapter would otherwise
+# measure it with v1 geometry and report plausible, wrong numbers
+_SOURCE_BY_EMITTER = {
+    h.NADFUN_ADDR: nadfun_geo.SOURCE_V1,
+    h.NADFUN_V2_ADDR: nadfun_geo.SOURCE_V2,
+}
 
-# fee fraction a source takes per trade, nad.fun v1 is 1% and v2 is 2% so a
-# single hardcoded rate halved v2 fees on every reorg recompute
-def _fee_rate_for_source(source) -> Decimal:
-    if nadfun_geo.is_nadfun_source(source):
-        return nadfun_geo.fee_rate_for(source)
-    return NATIVE_FEE_RATE
+
+# internal source for the contract that emitted an event, none when unknown
+def _source_for_emitter(log_addr: str) -> int | None:
+    src = (log_addr or "").lower()
+    if src == (h.CONTRACTS.get("ROUTER", "") or "").lower():
+        return 0
+    if src in _SOURCE_BY_EMITTER:
+        return _SOURCE_BY_EMITTER[src]
+    if h.is_nadfun_address(src):
+        print(
+            f"[State] refusing to classify token from unmapped nad.fun contract {src}: "
+            "add an adapter for this generation before indexing it",
+            flush=True,
+        )
+    return None
+
+
+# explicit, not a catch-all: every nad.fun generation is a different curve, so an
+# address we have no adapter for must be refused rather than assumed to be v1.
+# adding a new deployment to NADFUN_ADDRESSES without an adapter would otherwise
+# measure it with v1 geometry and report plausible, wrong numbers
+_SOURCE_BY_EMITTER = {
+    h.NADFUN_ADDR: nadfun_geo.SOURCE_V1,
+    h.NADFUN_V2_ADDR: nadfun_geo.SOURCE_V2,
+}
+
+
+# internal source for the contract that emitted an event, none when unknown
+def _source_for_emitter(log_addr: str) -> int | None:
+    src = (log_addr or "").lower()
+    if src == (h.CONTRACTS.get("ROUTER", "") or "").lower():
+        return 0
+    if src in _SOURCE_BY_EMITTER:
+        return _SOURCE_BY_EMITTER[src]
+    if h.is_nadfun_address(src):
+        print(
+            f"[State] refusing to classify token from unmapped nad.fun contract {src}: "
+            "add an adapter for this generation before indexing it",
+            flush=True,
+        )
+    return None
 
 
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
@@ -598,8 +636,11 @@ class State:
 
             # each nad.fun generation is a different curve, so it gets its own
             # internal source, the api still reports source 1 for both
-            if src == h.NADFUN_V2_ADDR:
-                source = nadfun_geo.SOURCE_V2
+            resolved = _source_for_emitter(src)
+            if resolved is None:
+                return
+            source = resolved
+            if source == nadfun_geo.SOURCE_V2:
                 storage.mark_nadfun_v2(token, cur=cur)
 
             lp = self.launchpad_tokens.get(token)
@@ -706,100 +747,6 @@ class State:
                 )
 
     # drop orphaned trades and recompute every affected token from what survives
-    def handle_reorg(self, from_block: int, cur=None) -> list[str]:
-        with self._lock:
-            # nad.fun reserves arrive on a separate log held in module state, any
-            # sync still waiting belongs to the orphaned chain
-            try:
-                from modules import nadfun as _nf
-
-                _nf.clear_pending_syncs()
-            except Exception:
-                pass
-
-            affected = storage.rollback_launchpad_from_block(int(from_block), cur=cur)
-
-            for token in affected:
-                tok = (token or "").lower()
-                lp = self.launchpad_tokens.get(tok)
-                if lp is None:
-                    continue
-
-                agg = storage.aggregate_token_from_trades(tok, cur=cur)
-
-                lp.native_volume = int(agg["native_volume"])
-                lp.token_volume = int(agg["token_volume"])
-                lp.volume_usd = Decimal(agg["volume_usd"] or 0)
-                lp.fees_usd = lp.volume_usd * _fee_rate_for_source(lp.source)
-                lp.tx_count = int(agg["tx_count"])
-                lp.buy_count = int(agg["buy_count"])
-                lp.sell_count = int(agg["sell_count"])
-
-                if agg["last_price_native"] is not None:
-                    lp.last_price_native = Decimal(agg["last_price_native"])
-
-                lp.curve_native_reserve = int(agg["native_reserve"] or 0)
-                lp.curve_token_reserve = int(agg["token_reserve"] or 0)
-
-                adapter = launchpad_adapters.get(lp.source)
-                curve = None
-                if adapter is not None and lp.curve_token_reserve > 0:
-                    curve = adapter.curve_state(
-                        {
-                            "native_reserve": lp.curve_native_reserve,
-                            "token_reserve": lp.curve_token_reserve,
-                        }
-                    )
-
-                if curve is not None:
-                    lp.circulating_supply = curve.tokens_sold // 10**18
-                    lp.approaching_75 = bool(curve.is_graduating)
-                    if not lp.approaching_75:
-                        lp.approaching_75_block = 0
-                        lp.approaching_75_at = 0
-                elif lp.tx_count == 0:
-                    lp.circulating_supply = 0
-                    lp.approaching_75 = False
-                    lp.approaching_75_block = 0
-                    lp.approaching_75_at = 0
-
-                storage.update_token_after_trade(
-                    token=tok,
-                    last_price_native=lp.last_price_native,
-                    native_volume=int(lp.native_volume),
-                    token_volume=int(lp.token_volume),
-                    volume_usd=lp.volume_usd,
-                    fees_usd=lp.fees_usd,
-                    buy_count=lp.buy_count,
-                    sell_count=lp.sell_count,
-                    tx_count=lp.tx_count,
-                    circulating_supply=lp.circulating_supply,
-                    approaching_75=lp.approaching_75,
-                    approaching_75_block=lp.approaching_75_block,
-                    approaching_75_at=lp.approaching_75_at,
-                    snipers_count=lp.snipers,
-                    curve_native_reserve=int(lp.curve_native_reserve),
-                    curve_token_reserve=int(lp.curve_token_reserve),
-                    cur=cur,
-                )
-
-            if affected:
-                print(
-                    f"[State] reorg from block {from_block}: rebuilt {len(affected)} token(s)",
-                    flush=True,
-                )
-            return affected
-
-    # true when a block already indexed now reports a different hash
-    def detect_reorg(self, block_number: int, block_hash: str, cur=None) -> bool:
-        if not block_hash:
-            return False
-        try:
-            known = storage.get_processed_block_hash(int(block_number), cur=cur)
-        except Exception:
-            return False
-        return bool(known) and known.lower() != block_hash.lower()
-
     # stub a native token whose tokencreated was never seen
     def _ensure_launchpad_token_locked(self, token: str, blk: int, ts: int, log_addr: str = "", cur=None):
         tok = (token or "").lower()
@@ -808,13 +755,9 @@ class State:
 
         # the emitting contract decides the source, assuming native would measure
         # a nad.fun curve against native geometry and understate supply silently
-        src = (log_addr or "").lower()
-        if src == h.NADFUN_V2_ADDR:
-            source = nadfun_geo.SOURCE_V2
-        elif h.is_nadfun_address(src):
-            source = nadfun_geo.SOURCE_V1
-        else:
-            source = 0
+        source = _source_for_emitter(log_addr)
+        if source is None:
+            return None
 
         name = _fetch_token_string(tok, _ERC20_NAME_SELECTOR)
         symbol = _fetch_token_string(tok, _ERC20_SYMBOL_SELECTOR)
@@ -879,12 +822,13 @@ class State:
         batch=None,
     ) -> None:
         with self._lock:
-            if txh:
-                try:
-                    if storage.trade_exists(txh, log_idx, cur=cur):
-                        return
-                except Exception:
-                    pass
+            # deliberately not guarded: if this check cannot run we must not carry
+            # on as though the trade were new. the row would dedupe on the unique
+            # constraint but every aggregate above has already been mutated, so a
+            # redelivery during a database blip would double count volume, fees
+            # and positions. letting it raise fails the block so it is retried
+            if txh and storage.trade_exists(txh, log_idx, cur=cur):
+                return
 
             is_pool_swap = "pool" in ev and "amount0" in ev and "amount1" in ev
             if not is_pool_swap:

@@ -9,7 +9,7 @@ import backfill
 import core.storage as storage
 import export_logs
 from core.sequencer import SEQUENCER
-from core.stream import reorg_watcher, stream_logs, vault_sampler
+from core.stream import stream_logs, vault_sampler
 from modules import nadfun
 from replay_dump import dump_bounds, replay_dump_range
 
@@ -163,7 +163,6 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
-        asyncio.create_task(reorg_watcher(SEQUENCER._state)),
     ]
     if args.live_dump_dir:
         print(

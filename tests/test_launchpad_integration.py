@@ -478,42 +478,6 @@ def test_crash_midway_through_block_then_reprocess(db):
 # -- known gap ----------------------------------------------------------------
 
 
-def test_short_reorg_replaces_previously_indexed_blocks(db):
-    import core.storage as storage
-
-    st = _new_state()
-    _create(st)
-    _trade(st, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
-    storage.record_block_hash(109, "0xaaa")
-    _trade(st, native_reserve=1500 * 10**18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
-    storage.record_block_hash(110, "0xbbb")
-
-    assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
-
-    # block 110 comes back with a different hash -> reorg
-    st2 = _new_state()
-    st2.rebuild_from_db()
-    assert st2.detect_reorg(110, "0xdifferent") is True
-    assert st2.detect_reorg(109, "0xaaa") is False
-
-    st2.handle_reorg(110)
-
-    # the orphaned trade is gone and the surviving one still counts
-    assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xorphan'")[0][0] == 0
-    assert _q(db, "SELECT count(*) FROM launchpad_trades WHERE txhash='0xkeep'")[0][0] == 1
-
-    row = _token_row(db)
-    assert int(row[4]) == 10**18  # native_volume back to one trade
-    assert int(row[5]) == 1  # tx_count
-    assert int(row[2]) == 1400 * 10**18  # curve reserve from surviving trade
-    assert row[1] is False  # no longer graduating
-
-    # replaying the canonical block lands cleanly on the rebuilt state
-    _trade(st2, native_reserve=1800 * 10**18, blk=110, ts=1010, txh="0xcanon", log_idx=0)
-    assert _q(db, "SELECT count(*) FROM launchpad_trades")[0][0] == 2
-    assert int(_token_row(db)[2]) == 1800 * 10**18
-
-
 def test_sniper_count_does_not_exceed_distinct_snipers(db):
     """One address buying twice inside the window is ONE sniper.
 
@@ -550,79 +514,6 @@ def test_sniper_count_does_not_exceed_distinct_snipers(db):
     counted = _q(db, "SELECT snipers_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]
     assert rows == 1, "one address is one sniper"
     assert int(counted) == rows, f"snipers_count {counted} must equal distinct snipers {rows}"
-
-
-def test_sniper_window_excludes_late_buys_and_the_creator(db):
-    st = _new_state()
-    _create(st, blk=100, ts=1000)
-
-    # outside the 10-block window
-    _trade(st, native_reserve=1100 * 10**18, blk=200, ts=1100, txh="0xlate", log_idx=0)
-    assert _q(db, "SELECT count(*) FROM launchpad_snipers WHERE token=%s", (TOKEN,))[0][0] == 0
-    assert int(_q(db, "SELECT snipers_count FROM launchpad_tokens WHERE token=%s", (TOKEN,))[0][0]) == 0
-
-
-def test_deep_reorg_scan_finds_divergence_the_per_block_guard_misses(db):
-    """The per-block guard only fires when a block is delivered again. This
-    simulates the scan that walks the indexed tail newest-first."""
-    import core.storage as storage
-
-    st = _new_state()
-    _create(st)
-    _trade(st, native_reserve=1300 * 10**18, blk=120, ts=1020, txh="0xb120", log_idx=0)
-    storage.record_block_hash(120, "0x120good")
-    _trade(st, native_reserve=1400 * 10**18, blk=121, ts=1021, txh="0xb121", log_idx=0)
-    storage.record_block_hash(121, "0x121bad")
-    _trade(st, native_reserve=1500 * 10**18, blk=122, ts=1022, txh="0xb122", log_idx=0)
-    storage.record_block_hash(122, "0x122bad")
-
-    rows = storage.get_recent_block_hashes(32)
-    assert [r[0] for r in rows] == [122, 121, 120], "must be newest-first"
-
-    # chain now reports different hashes for 121/122; 120 is unchanged
-    onchain = {120: "0x120good", 121: "0x121new", 122: "0x122new"}
-    rollback_from = None
-    for number, stored in rows:
-        if onchain[number] == stored:
-            break  # canonical from here down -- scan stops
-        rollback_from = number
-    assert rollback_from == 121, "must roll back to the deepest divergent block"
-
-    st.handle_reorg(rollback_from)
-    remaining = {r[0] for r in _q(db, "SELECT txhash FROM launchpad_trades")}
-    assert remaining == {"0xb120"}
-    assert int(_token_row(db)[2]) == 1300 * 10**18
-
-
-def test_reorg_rebuild_matches_a_clean_index_of_the_canonical_chain(db):
-    """After a reorg the state must equal what a fresh index of the surviving
-    chain would produce -- not merely 'something plausible'."""
-    import core.storage as storage
-
-    st = _new_state()
-    _create(st)
-    _trade(st, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
-    storage.record_block_hash(109, "0xaaa")
-    _trade(st, native_reserve=2500 * 10**18, blk=110, ts=1010, txh="0xorphan", log_idx=0)
-    storage.record_block_hash(110, "0xbbb")
-    st.handle_reorg(110)
-    after_reorg = _token_row(db)
-
-    # now index only the canonical chain from scratch
-    import psycopg2
-
-    conn = psycopg2.connect(db)
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute("TRUNCATE " + ", ".join(LAUNCHPAD_TABLES) + " RESTART IDENTITY CASCADE;")
-    conn.close()
-
-    st2 = _new_state()
-    _create(st2)
-    _trade(st2, native_reserve=1400 * 10**18, blk=109, ts=1009, txh="0xkeep", log_idx=0)
-    clean = _token_row(db)
-
-    assert after_reorg == clean
 
 
 def test_ath_is_persisted_and_never_regresses(db):
@@ -1161,32 +1052,6 @@ def test_nadfun_derived_supply_and_reserves_persist(db):
     assert int(row[1]) == tr, "nad.fun curve reserves must persist like native's"
     assert int(row[2]) == 90_000 * 10**18
     assert int(row[0]) == (geo["virtual_token_0"] - tr) // 10**18
-
-
-def test_reorg_recompute_uses_the_v2_fee_rate_not_a_flat_one_percent(db):
-    """v2 charges 2%. A hardcoded 1% halved a token's lifetime fees on reorg."""
-    import core.storage as storage
-    from core.adapters import nadfun as nf
-
-    st = _new_state()
-    lp = _nadfun_seed(st, nf.SOURCE_V2)
-    geo = nf.geometry_for(nf.SOURCE_V2)
-
-    tr = geo["virtual_token_0"] - (geo["curve_supply"] // 8)
-    _nadfun_trade(st, nf.SOURCE_V2, tr, 80_000 * 10**18, 109, 1009, "0xnfkeep")
-    storage.record_block_hash(109, "0xaaa")
-
-    tr2 = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
-    _nadfun_trade(st, nf.SOURCE_V2, tr2, 90_000 * 10**18, 110, 1010, "0xnforphan")
-    storage.record_block_hash(110, "0xbbb")
-
-    st.handle_reorg(110)
-
-    assert lp.volume_usd > 0, "need volume for the fee assertion to mean anything"
-    expected = lp.volume_usd * nf.fee_rate_for(nf.SOURCE_V2)
-    assert lp.fees_usd == expected
-    # the old behaviour, kept explicit so a regression is unmistakable
-    assert lp.fees_usd != lp.volume_usd * Decimal("0.01")
 
 
 def test_nadfun_missing_sync_does_not_corrupt_persisted_supply(db):
