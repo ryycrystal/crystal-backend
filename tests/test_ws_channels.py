@@ -198,3 +198,96 @@ def test_token_channel_ath_does_not_follow_price_down(db):
 
     assert after["athMarketcap"] == peak, "ath must hold at the high"
     assert Decimal(after["marketcap"]) < Decimal(peak), "price did come down"
+
+
+# H-01: a client joining a token another client already watches must receive a full
+# baseline. hub level diff state cannot answer this, because the new client has no
+# state of its own -- before the fix it received nothing at all
+def test_second_subscriber_gets_its_own_baseline(db):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import api.api  # noqa: F401
+    from api.ws import HUB
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xh01a", log_idx=0)
+    storage.record_block_processed(101)
+
+    client = TestClient(api.api.app)
+    frame = json.dumps({"op": "subscribe", "token": TOKEN, "channels": ["trades", "holders"]})
+
+    def _collect(ws):
+        ws.receive_json()  # welcome
+        ws.send_text(frame)
+        seen = {}
+        for _ in range(12):
+            msg = ws.receive_json()
+            ch = msg.get("channel")
+            if ch and ch not in seen:
+                seen[ch] = msg
+            if len(seen) >= 2:
+                break
+        return seen
+
+    with client.websocket_connect("/ws") as a:
+        first = _collect(a)
+        assert "trades" in first, "the first subscriber must be baselined"
+        assert first["trades"]["kind"] == "snapshot"
+        assert len(first["trades"]["added"]) >= 1
+
+        # B joins while A is still connected and the hub is already primed
+        with client.websocket_connect("/ws") as b:
+            second = _collect(b)
+
+        assert "trades" in second, "a late joiner must not be left empty"
+        assert second["trades"]["kind"] == "snapshot", "it needs a baseline, not a delta"
+        assert len(second["trades"]["added"]) == len(first["trades"]["added"])
+        assert "holders" in second
+
+    HUB.subscribers.clear()
+
+
+# re-subscribing after an unsubscribe must baseline again, not assume prior state
+def test_resubscribe_rebaselines(db):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import api.api  # noqa: F401
+    from api.ws import HUB
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xh01b", log_idx=0)
+    storage.record_block_processed(101)
+
+    client = TestClient(api.api.app)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN, "channels": ["trades"]}))
+        got_first = False
+        for _ in range(10):
+            m = ws.receive_json()
+            if m.get("channel") == "trades":
+                got_first = m.get("kind") == "snapshot"
+                break
+        assert got_first
+
+        ws.send_text(json.dumps({"op": "unsubscribe", "token": TOKEN, "channels": ["trades"]}))
+        for _ in range(10):
+            if ws.receive_json().get("op") == "unsubscribed":
+                break
+
+        ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN, "channels": ["trades"]}))
+        rebaselined = False
+        for _ in range(10):
+            m = ws.receive_json()
+            if m.get("channel") == "trades":
+                rebaselined = m.get("kind") == "snapshot" and len(m.get("added", [])) >= 1
+                break
+        assert rebaselined, "a re-subscribe must send a fresh baseline"
+
+    HUB.subscribers.clear()

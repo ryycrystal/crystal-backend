@@ -26,6 +26,15 @@ def client():
     return TestClient(api.api.app)
 
 
+# subscribe now emits baseline frames, so pull past them to reach the next op reply
+def _next_op(ws):
+    for _ in range(20):
+        msg = ws.receive_json()
+        if msg.get("op"):
+            return msg
+    raise AssertionError("no op frame received")
+
+
 # a fresh socket is greeted with what it can actually subscribe to
 def test_welcome_declares_capabilities(client):
     with client.websocket_connect("/ws") as ws:
@@ -105,7 +114,7 @@ def test_unsubscribe_is_granular(client):
         ws.send_text(json.dumps({"op": "subscribe", "token": TOKEN_A, "channels": ["stats"]}))
         ws.receive_json()
         ws.send_text(json.dumps({"op": "unsubscribe", "token": TOKEN_A}))
-        reply = ws.receive_json()
+        reply = _next_op(ws)
         assert reply["op"] == "unsubscribed"
         assert reply["channels"] == "all"
 
@@ -126,9 +135,9 @@ def test_subscriptions_are_isolated_between_clients(client):
         a.receive_json()
         b.receive_json()
         a.send_text(json.dumps({"op": "subscribe", "token": TOKEN_A, "channels": ["stats"]}))
-        a.receive_json()
+        _next_op(a)
         b.send_text(json.dumps({"op": "subscribe", "token": TOKEN_B, "channels": ["stats"]}))
-        b.receive_json()
+        _next_op(b)
 
         subs = {frozenset(s.subscriptions.keys()) for s in HUB.subscribers}
         assert frozenset({TOKEN_A}) in subs
