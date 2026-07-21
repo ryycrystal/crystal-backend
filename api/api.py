@@ -509,14 +509,14 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
 # price as of 24h ago per token, for the change the list cards render. the reference
 # is the last trade at or before the boundary, matching how /stats picks price_ref_*,
 # so the list and the detail page cannot disagree about the same window
-def _batch_get_price_change_24h(token_addrs: list[str]) -> dict[str, str]:
+def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]]:
     if not token_addrs:
         return {}
     cutoff = int(time.time()) - 86400
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT t.token, t.last_price_native, r.price_native
+            SELECT t.token, t.last_price_native, r.price_native, f.price_native
             FROM launchpad_tokens t
             LEFT JOIN LATERAL (
                 SELECT price_native
@@ -525,21 +525,35 @@ def _batch_get_price_change_24h(token_addrs: list[str]) -> dict[str, str]:
                 ORDER BY timestamp DESC, log_index DESC
                 LIMIT 1
             ) r ON TRUE
+            LEFT JOIN LATERAL (
+                -- the very first recorded trade, the launch reference. observed data,
+                -- so it never depends on v0, which is settable and changes at go-live
+                SELECT price_native
+                FROM launchpad_trades
+                WHERE token = t.token
+                ORDER BY timestamp ASC, log_index ASC
+                LIMIT 1
+            ) f ON TRUE
             WHERE t.token = ANY(%s)
             """,
             (cutoff, token_addrs),
         )
         rows = cur.fetchall()
 
-    out: dict[str, str] = {}
-    for token, last, ref in rows:
-        last_d = Decimal(last or 0)
+    def pct(last_d: Decimal, ref) -> str | None:
         ref_d = Decimal(ref or 0)
-        # no trade before the boundary means the token is younger than the window, so
-        # there is no honest baseline to compare against. null renders as a dash
+        # no baseline means no honest comparison, so null, which renders as a dash
         if ref_d <= 0 or last_d <= 0:
-            continue
-        out[token] = _fmt((last_d - ref_d) / ref_d * Decimal(100))
+            return None
+        return _fmt((last_d - ref_d) / ref_d * Decimal(100))
+
+    out: dict[str, dict[str, str]] = {}
+    for token, last, ref_24h, ref_launch in rows:
+        last_d = Decimal(last or 0)
+        out[token] = {
+            "change_pct_24h": pct(last_d, ref_24h),
+            "change_pct_since_launch": pct(last_d, ref_launch),
+        }
     return out
 
 
@@ -638,7 +652,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         data["top10_holding"] = str(stats.get("top10_holding", 0))
         data["top10_addresses"] = stats.get("top10_addresses", [])
 
-    change_24h = _batch_get_price_change_24h(list(token_data.keys()))
+    changes = _batch_get_price_changes(list(token_data.keys()))
 
     for token, data in token_data.items():
         stats = holder_stats.get(token, {})
@@ -653,7 +667,9 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         }
         data["insider_holding"] = str(int(stats.get("insider_holding", 0)))
         data["pro_traders"] = int(stats.get("pro_traders", 0))
-        data["change_pct_24h"] = change_24h.get(token)
+        ch = changes.get(token) or {}
+        data["change_pct_24h"] = ch.get("change_pct_24h")
+        data["change_pct_since_launch"] = ch.get("change_pct_since_launch")
 
     return token_data
 

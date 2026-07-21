@@ -388,3 +388,45 @@ def test_query_is_echoed_in_applied_filters(db, clean):
 
     r = client.post("/search/query", json={"limit": 1, "query": "abc"})
     assert "query" in r.json()["applied_filters"], "post form must echo it too"
+
+
+# change since launch is measured from the first recorded trade, always available for a
+# token that has traded, and never dependent on v0 which is settable
+def test_change_pct_since_launch(db, clean):
+    from api.api import _batch_get_price_changes
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    # three trades: launch price rises, so a positive change since launch. reserves
+    # climb, which raises last_price_native
+    _trade(st, native_reserve=1000 * 10**18, blk=101, ts=1001, txh="0xa", log_idx=0)
+    _trade(st, native_reserve=1500 * 10**18, blk=102, ts=1002, txh="0xb", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=103, ts=1003, txh="0xc", log_idx=0)
+
+    ch = _batch_get_price_changes([TOKEN])[TOKEN]
+    assert ch["change_pct_since_launch"] is not None
+    # last price is above the first, so the change is positive
+    assert Decimal(ch["change_pct_since_launch"]) > 0
+
+    # a token that has never traded has no baseline -> null, which the card dashes
+    _create(st, token="0x00000000000000000000000000000000000000ff", blk=100, ts=1000)
+    ch2 = _batch_get_price_changes(["0x00000000000000000000000000000000000000ff"])
+    assert ch2.get("0x00000000000000000000000000000000000000ff", {}).get("change_pct_since_launch") is None
+
+
+# the launch reference is the EARLIEST trade, not the latest. an ascending vs
+# descending mix-up would silently make every token read ~0% since launch
+def test_launch_reference_is_the_first_trade(db, clean):
+    from api.api import _batch_get_price_changes
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1000 * 10**18, blk=101, ts=1001, txh="0xf1", log_idx=0)
+    early = _batch_get_price_changes([TOKEN])[TOKEN]["change_pct_since_launch"]
+    # first trade == current, so change is 0 (or None if the single price is falsy)
+    assert early in ("0", None)
+
+    _trade(st, native_reserve=3000 * 10**18, blk=110, ts=1100, txh="0xf2", log_idx=0)
+    later = _batch_get_price_changes([TOKEN])[TOKEN]["change_pct_since_launch"]
+    # now the baseline is still the first trade, so a large positive change, not ~0
+    assert Decimal(later) > 50, f"expected a big change from the first price, got {later}"
