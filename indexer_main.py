@@ -13,7 +13,7 @@ from core.stream import stream_logs, vault_sampler
 from modules import nadfun
 from replay_dump import dump_bounds, replay_dump_range
 
-DEFAULT_START_BLOCK = 92718537
+DEFAULT_START_BLOCK = 37709836
 
 
 # command line options for the indexer run modes

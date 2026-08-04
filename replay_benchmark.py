@@ -9,7 +9,7 @@ from replay_dump import replay_dump_range
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark dump replay throughput into Postgres.")
     parser.add_argument("--dump", default="chain-log-dump", help="dump directory containing manifest.json")
-    parser.add_argument("--start", type=lambda x: int(x, 0), default=92718537, help="first block to replay")
+    parser.add_argument("--start", type=lambda x: int(x, 0), default=37709836, help="first block to replay")
     parser.add_argument("--end", type=lambda x: int(x, 0), required=True, help="last block to replay")
     parser.add_argument("--reset", action="store_true", help="clear derived state before replay")
     parser.add_argument("--allow-missing-timestamps", action="store_true", help="allow logs without blockTimestamp")
