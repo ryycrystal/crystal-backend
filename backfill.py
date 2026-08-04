@@ -1,7 +1,10 @@
 import asyncio
 import argparse
 import httpx
+import os
 import traceback
+
+TIMESTAMP_CONCURRENCY = int(os.getenv("TIMESTAMP_CONCURRENCY", "32"))
 
 from core import chain as h
 import core.storage as storage
@@ -212,8 +215,18 @@ async def ensure_block_timestamps(logs_by_block: dict[int, list[dict]]) -> None:
         if any(log.get("blockTimestamp") is None for log in logs):
             missing.append(int(blk))
 
-    for blk in missing:
-        ts_hex = hex(await get_block_timestamp_http(blk))
+    if not missing:
+        return
+
+    # one rpc round trip per block, so fetch them concurrently; awaiting each in
+    # turn caps replay at 1/latency blocks per second regardless of the rps budget
+    sem = asyncio.Semaphore(TIMESTAMP_CONCURRENCY)
+
+    async def _fetch(blk: int) -> tuple[int, str]:
+        async with sem:
+            return blk, hex(await get_block_timestamp_http(blk))
+
+    for blk, ts_hex in await asyncio.gather(*(_fetch(b) for b in missing)):
         for log in logs_by_block.get(blk, []):
             if log.get("blockTimestamp") is None:
                 log["blockTimestamp"] = ts_hex

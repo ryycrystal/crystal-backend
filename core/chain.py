@@ -225,7 +225,7 @@ def accepts_log_for_indexing(tag: str, addr: str) -> bool:
 
 
 WS_URL = "wss://rpc-mainnet.monadinfra.com"
-_RPC_MAX_RPS = 20
+_RPC_MAX_RPS = int(os.getenv("RPC_MAX_RPS", "20"))
 _last_rpc_ts = 0.0
 _rpc_lock = asyncio.Lock()
 
