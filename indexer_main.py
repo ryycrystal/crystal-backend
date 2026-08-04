@@ -9,7 +9,7 @@ import backfill
 import core.storage as storage
 import export_logs
 from core.sequencer import SEQUENCER
-from core.stream import stream_logs, vault_sampler
+from core.stream import BACKFILL_BATCH, stream_logs, vault_sampler
 from modules import nadfun
 from replay_dump import dump_bounds, replay_dump_range
 
@@ -21,12 +21,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crystal indexer startup coordinator")
     parser.add_argument(
         "--mode",
-        choices=("resume", "bootstrap", "rebuild", "replay-only", "live"),
+        choices=("resume", "bootstrap", "rebuild", "reindex", "replay-only", "live"),
         default="resume",
         help=(
             "resume: DB + dump catchup + live; bootstrap: first start from dump or RPC; "
-            "rebuild: clear derived DB and replay dump; replay-only: replay dump and exit; "
-            "live: DB state then RPC/live only"
+            "rebuild: clear derived DB and replay dump; "
+            "reindex: clear derived DB and replay the cached block logs, then live; "
+            "replay-only: replay dump and exit; live: DB state then RPC/live only"
         ),
     )
     parser.add_argument("--start-block", type=lambda x: int(x, 0), default=DEFAULT_START_BLOCK)
@@ -253,6 +254,14 @@ async def main() -> None:
                 rebuild_state=False,
                 allow_missing_timestamps=args.allow_missing_timestamps,
             )
+            await _start_live(args, last + 1)
+            return
+
+        if args.mode == "reindex":
+            # the cached block logs already cover history, and a block absent from
+            # the cache had no log worth indexing, so replay them directly instead
+            # of treating every gap as something to refetch over rpc
+            last = await backfill.reindex(args.start_block, BACKFILL_BATCH)
             await _start_live(args, last + 1)
             return
 
