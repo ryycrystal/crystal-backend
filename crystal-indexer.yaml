@@ -222,13 +222,13 @@ properties:
     - args:
       - indexer_main.py
       - --mode
-      - resume
+      - rebuild
       - --dump-dir
       - /dump
       - --live-dump-dir
       - /dump
       - --start-block
-      - '37709836'
+      - '92718537'
       command:
       - python
       env:

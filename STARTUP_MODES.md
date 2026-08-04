@@ -1,6 +1,9 @@
 # Indexer Startup Runbook
 
-Default relevant start block: `37709836`.
+Default relevant start block: `92718537`.
+
+Command examples below still show the previous start block `37709836`; substitute
+the current default when running them.
 
 The raw log dump is the canonical replay source. Postgres stores derived query
 state. A Postgres snapshot is a fast restore point, but it does not replace the
