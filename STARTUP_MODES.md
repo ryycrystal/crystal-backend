@@ -1,9 +1,12 @@
 # Indexer Startup Runbook
 
-Default relevant start block: `92718537`.
+Default relevant start block: `37709836`.
 
-Command examples below still show the previous start block `37709836`; substitute
-the current default when running them.
+Replay always starts here. Contract generations are selected by address, not by
+block: only the addresses in `ADDRS` are indexed, so a full replay rebuilds
+launchpad history from the start while picking up the current Crystal router and
+vault factory from their own deploy blocks (`92718537` / `92718579`). Retired
+router generations are dropped simply by not being listed.
 
 The raw log dump is the canonical replay source. Postgres stores derived query
 state. A Postgres snapshot is a fast restore point, but it does not replace the
