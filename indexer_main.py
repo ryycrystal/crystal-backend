@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--start-block", type=lambda x: int(x, 0), default=DEFAULT_START_BLOCK)
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="reindex mode only: clear derived state and rebuild from --start-block "
+        "instead of resuming from the last block already written",
+    )
     parser.add_argument("--dump-dir", default=None, help="directory created by export_logs.py")
     parser.add_argument("--dump-end", type=lambda x: int(x, 0), default=None, help="last dump block to replay")
     parser.add_argument(
@@ -261,7 +267,9 @@ async def main() -> None:
             # the cached block logs already cover history, and a block absent from
             # the cache had no log worth indexing, so replay them directly instead
             # of treating every gap as something to refetch over rpc
-            last = await backfill.reindex(args.start_block, BACKFILL_BATCH)
+            last = await backfill.reindex(
+                args.start_block, BACKFILL_BATCH, resume=not args.clean
+            )
             await _start_live(args, last + 1)
             return
 

@@ -26,9 +26,7 @@ async def _process_metadata_batch_for_resync() -> int:
         return 0
 
 
-async def reindex(start_block: int, batch: int) -> int:
-    print(f"[Reindex] Starting reindex from block {start_block}")
-
+async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
     min_cached, max_cached = storage.get_cached_block_range()
     if min_cached is None:
         return start_block - 1
@@ -36,10 +34,22 @@ async def reindex(start_block: int, batch: int) -> int:
     if start_block < min_cached:
         start_block = min_cached
 
-    with storage.db_cursor() as cur:
-        storage.clear_derived_state_from_block(start_block, cur)
+    # a full replay takes long enough that an unrelated container restart must not
+    # throw it away, so pick up from the last block already written unless a clean
+    # rebuild was asked for
+    last_db = int(storage.get_last_processed_block() or 0)
+    resuming = resume and last_db >= start_block
 
-    SEQUENCER._state.reset_for_reindex()
+    if resuming:
+        start_block = last_db + 1
+        print(f"[Reindex] Resuming from block {start_block} (db had {last_db})")
+        SEQUENCER._state.rebuild_from_db()
+    else:
+        print(f"[Reindex] Clean reindex from block {start_block}")
+        with storage.db_cursor() as cur:
+            storage.clear_derived_state_from_block(start_block, cur)
+        SEQUENCER._state.reset_for_reindex()
+
     SEQUENCER.reset_pending(start_block)
     nadfun._PENDING_SYNC.clear()
 
