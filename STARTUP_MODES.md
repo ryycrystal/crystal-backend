@@ -8,9 +8,65 @@ launchpad history from the start while picking up the current Crystal router and
 vault factory from their own deploy blocks (`92718537` / `92718579`). Retired
 router generations are dropped simply by not being listed.
 
-The raw log dump is the canonical replay source. Postgres stores derived query
-state. A Postgres snapshot is a fast restore point, but it does not replace the
-raw dump.
+Postgres stores derived query state. Two things can rebuild it: the
+`launchpad_block_logs` table, which caches raw logs back to `37709836`, and the
+on disk dump, which only reaches back to `89746624`. The cache is the wider
+source, so `--mode reindex` replays from it and the dump is only a secondary
+copy. A Postgres snapshot is a fast restore point, but it does not replace
+either.
+
+## Migrating to a new Crystal deployment
+
+Nadfun history survives untouched, the retired router's data disappears, and the
+new router is indexed from its own deploy block. No code change and no image
+rebuild are needed.
+
+Two filters do the work. The cache is written address filtered, so it holds every
+nadfun log plus whichever Crystal generation was live at the time. At replay time
+`accepts_log_for_indexing` filters again against the current `ADDRS`, so logs from
+a retired router are rejected on the way in and never reach Postgres. The new
+router's logs are the one gap: it was not being indexed when those blocks were
+first seen, so nothing was cached for it and that range has to be refetched.
+
+1. Point the indexer at the new contracts, via the container app environment:
+
+```powershell
+CRYSTAL_ADDRESS=0x...
+VAULT_FACTORY_ADDRESS=0x...
+```
+
+2. Evict the cached logs from the new deploy block onward. They were written
+   while the old addresses were current, so they are missing the new router's
+   events. Deleting them makes the RPC catchup refetch the range unfiltered:
+
+```sql
+DELETE FROM launchpad_block_logs WHERE number >= <new deploy block>;
+```
+
+3. Rebuild:
+
+```powershell
+python indexer_main.py --mode reindex --clean --start-block 37709836
+```
+
+`reindex` replays cached logs only and skips blocks absent from the cache; a block
+with no cached entry held nothing indexable. When it reaches the end of the cache
+it hands off to the live path, which refetches the evicted range over RPC and
+picks up the new contracts, then continues streaming.
+
+Find the deploy block by bisecting `eth_getCode` over the address; the first block
+that returns bytecode is the one to use.
+
+`--clean` is what forces the wipe and restart. Without it `reindex` resumes from
+the last block already written, which is the behaviour you want for an ordinary
+restart part way through a long replay.
+
+The full replay from `37709836` is unavoidable today: aggregate tables such as
+`launchpad_positions` and `launchpad_users` hold running totals whose realized PnL
+and cost basis are path dependent, so a later generation's contribution cannot be
+subtracted with SQL. Making `clear_derived_state_from_block` honour its block
+argument would allow a partial rebuild, but that also needs a way to recompute
+those aggregates; see the `block-scoped-clear` branch.
 
 ## VS Code Markdown Preview
 
