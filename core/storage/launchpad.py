@@ -2109,3 +2109,44 @@ def pairs_missing_fees(limit: int = 100) -> list[str]:
             (int(limit),),
         )
         return [(r[0] or "").lower() for r in cur.fetchall()]
+
+
+# cached fee rows for many pairs in one round trip, keyed by pair
+def get_pair_fees_batch(pairs: list[str]) -> dict[str, dict]:
+    pairs = [(p or "").lower() for p in pairs if p]
+    if not pairs:
+        return {}
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT pair, ok, fee_collector, base_token, quote_token,
+                   creator_fee_rate, curve_protocol_fee_rate, dex_protocol_fee_rate, fetched_at
+            FROM launchpad_pair_fees WHERE pair = ANY(%s)
+            """,
+            (pairs,),
+        )
+        rows = cur.fetchall()
+    out = {}
+    for r in rows:
+        out[r[0]] = {
+            "pair": r[0],
+            "ok": bool(r[1]),
+            "feeCollector": r[2] or None,
+            "baseToken": r[3] or None,
+            "quoteToken": r[4] or None,
+            "creatorFeeRate": str(int(r[5] or 0)),
+            "curveProtocolFeeRate": str(int(r[6] or 0)),
+            "dexProtocolFeeRate": str(int(r[7] or 0)),
+            "fetchedAt": int(r[8] or 0),
+        }
+    return out
+
+
+# taker fee per crystal market for many markets in one round trip
+def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
+    markets = [(m or "").lower() for m in markets if m]
+    if not markets:
+        return {}
+    with db_cursor() as cur:
+        cur.execute("SELECT LOWER(market), taker_fee FROM markets WHERE LOWER(market) = ANY(%s)", (markets,))
+        return {r[0]: str(int(r[1] or 0)) for r in cur.fetchall()}

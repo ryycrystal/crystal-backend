@@ -607,6 +607,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "metadata_cid": row[4],
             "imageUrl": row[4],
             "source": _api_source(row[10]),
+            "sourceRaw": int(row[10] or 0),
             "nadfunVersion": _nadfun_version(token, row[10]),
             "quote_token": quote_token,
             "quote_asset": quote_token,
@@ -656,6 +657,12 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         data["top10_addresses"] = stats.get("top10_addresses", [])
 
     changes = _batch_get_price_changes(list(token_data.keys()))
+    # the wire source collapses both nadfun generations to 1, and v1 and v2 charge
+    # different curve fees, so the fee lookup needs the raw generation
+    raw_sources = {t: d.get("sourceRaw") for t, d in token_data.items()}
+    _markets = [(d.get("market") or "").lower() for d in token_data.values() if d.get("market")]
+    pair_fee_map = storage.get_pair_fees_batch(_markets)
+    taker_fee_map = storage.get_taker_fees_batch(_markets)
 
     for token, data in token_data.items():
         stats = holder_stats.get(token, {})
@@ -673,6 +680,18 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
         ch = changes.get(token) or {}
         data["change_pct_24h"] = ch.get("change_pct_24h")
         data["change_pct_since_launch"] = ch.get("change_pct_since_launch")
+        # the same fee block the meta endpoint carries, so a page load is one call.
+        # cache only here: the sweep and the per token endpoints keep it warm, and a
+        # list of 90 rows must never fan out into 90 chain reads
+        market = (data.get("market") or "").lower()
+        src = int(raw_sources.get(token) or 0)
+        data["fees"] = {
+            "curveFeeRate": _fmt(_nadfun_geo.fee_rate_for(src)) if _nadfun_geo.is_nadfun_source(src) else None,
+            "pair": pair_fee_map.get(market) if src != 0 else None,
+            "crystalMarket": (
+                {"market": market, "takerFee": taker_fee_map[market]} if src == 0 and market in taker_fee_map else None
+            ),
+        }
 
     return token_data
 
