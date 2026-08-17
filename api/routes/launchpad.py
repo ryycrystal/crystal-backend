@@ -1921,33 +1921,8 @@ def chart_only(
     if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
         raise HTTPException(status_code=400)
 
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            SELECT bucket_start, open_price, high_price, low_price, close_price, quote_volume
-            FROM launchpad_ohlcv
-            WHERE token = %s AND resolution_sec = %s
-            ORDER BY bucket_start DESC
-            LIMIT 1000
-            """,
-            (token_addr, chartres),
-        )
-        rows = cur.fetchall()
-
-    rows.reverse()
-
-    out = []
-    for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
-        out.append(
-            {
-                "time": str(int(bucket_start)),
-                "open": _scaled_price(open_p),
-                "high": _scaled_price(high_p),
-                "low": _scaled_price(low_p),
-                "close": _scaled_price(close_p),
-                "quoteVolume": str(int(qv or 0)),
-            }
-        )
+    # same stitched builder the token page uses, so the two charts cannot diverge
+    out = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
 
     return {
         "token": token_addr,

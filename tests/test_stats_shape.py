@@ -540,3 +540,29 @@ def test_nadfun_version_marker_fallback(db, clean):
     assert a._nadfun_version(tok, 1) == 2, "marked token with stale source=1 must read v2"
     assert a._nadfun_version("0x00000000000000000000000000000000000000ce", 1) == 1
     assert a._nadfun_version(tok, 2) == 2
+
+
+# a bucket with a single trade must not be a zero range doji: its open stitches to
+# the previous close so the move renders as the candle body, and high/low envelope it
+def test_klines_stitch_open_to_previous_close(db, clean):
+    from decimal import Decimal as D
+
+    from api.api import _build_ohlcv_from_db
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    # earlier tests in this module leave bars for the same token, and the clean
+    # fixture does not cover the ohlcv table, so this test owns its slate
+    with storage.db_cursor() as cur:
+        cur.execute("DELETE FROM launchpad_ohlcv WHERE token = %s", (TOKEN,))
+    # two trades in different 60s buckets, each alone in its bucket
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1000, txh="0xk1", log_idx=0)
+    _trade(st, native_reserve=2000 * 10**18, blk=102, ts=1060, txh="0xk2", log_idx=0)
+
+    ks = _build_ohlcv_from_db(TOKEN, bucket_seconds=60)
+    assert len(ks) == 2
+    first, second = ks
+    assert second["open"] == first["close"], "open must stitch to the previous close"
+    assert D(second["high"]) >= max(D(second["open"]), D(second["close"]))
+    assert D(second["low"]) <= min(D(second["open"]), D(second["close"]))
+    assert D(second["close"]) != D(second["open"]), "a real move is no longer a flat doji"

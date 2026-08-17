@@ -976,18 +976,33 @@ def _build_ohlcv_from_db(
 
     rows.reverse()
 
+    # candles are stored with open = the first trade's post-trade price, so a bucket
+    # with one trade was a zero range doji and consecutive candles never shared an
+    # edge: a 50 percent move rendered as a flat bar next to a gap. stitching each
+    # open to the previous close at serve time makes the move the candle body
     out: list[dict[str, Any]] = []
+    prev_close: Decimal | None = None
     for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
+        o = Decimal(open_p or 0)
+        hi = Decimal(high_p or 0)
+        lo = Decimal(low_p or 0)
+        cl = Decimal(close_p or 0)
+        if prev_close is not None and prev_close > 0:
+            o = prev_close
+            hi = max(hi, o)
+            lo = min(lo, o) if lo > 0 else o
         out.append(
             {
                 "time": str(int(bucket_start)),
-                "open": _scaled_price(open_p),
-                "high": _scaled_price(high_p),
-                "low": _scaled_price(low_p),
-                "close": _scaled_price(close_p),
+                "open": _scaled_price(o),
+                "high": _scaled_price(hi),
+                "low": _scaled_price(lo),
+                "close": _scaled_price(cl),
                 "quoteVolume": str(int(qv or 0)),
             }
         )
+        if cl > 0:
+            prev_close = cl
 
     return out
 
