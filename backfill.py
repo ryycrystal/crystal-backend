@@ -1,7 +1,10 @@
 import asyncio
 import argparse
 import httpx
+import os
 import traceback
+
+TIMESTAMP_CONCURRENCY = int(os.getenv("TIMESTAMP_CONCURRENCY", "32"))
 
 from core import chain as h
 import core.storage as storage
@@ -23,9 +26,7 @@ async def _process_metadata_batch_for_resync() -> int:
         return 0
 
 
-async def reindex(start_block: int, batch: int) -> int:
-    print(f"[Reindex] Starting reindex from block {start_block}")
-
+async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
     min_cached, max_cached = storage.get_cached_block_range()
     if min_cached is None:
         return start_block - 1
@@ -33,10 +34,22 @@ async def reindex(start_block: int, batch: int) -> int:
     if start_block < min_cached:
         start_block = min_cached
 
-    with storage.db_cursor() as cur:
-        storage.clear_derived_state_from_block(start_block, cur)
+    # a full replay takes long enough that an unrelated container restart must not
+    # throw it away, so pick up from the last block already written unless a clean
+    # rebuild was asked for
+    last_db = int(storage.get_last_processed_block() or 0)
+    resuming = resume and last_db >= start_block
 
-    SEQUENCER._state.reset_for_reindex()
+    if resuming:
+        start_block = last_db + 1
+        print(f"[Reindex] Resuming from block {start_block} (db had {last_db})")
+        SEQUENCER._state.rebuild_from_db()
+    else:
+        print(f"[Reindex] Clean reindex from block {start_block}")
+        with storage.db_cursor() as cur:
+            storage.clear_derived_state_from_block(start_block, cur)
+        SEQUENCER._state.reset_for_reindex()
+
     SEQUENCER.reset_pending(start_block)
     nadfun._PENDING_SYNC.clear()
 
@@ -212,8 +225,18 @@ async def ensure_block_timestamps(logs_by_block: dict[int, list[dict]]) -> None:
         if any(log.get("blockTimestamp") is None for log in logs):
             missing.append(int(blk))
 
-    for blk in missing:
-        ts_hex = hex(await get_block_timestamp_http(blk))
+    if not missing:
+        return
+
+    # one rpc round trip per block, so fetch them concurrently; awaiting each in
+    # turn caps replay at 1/latency blocks per second regardless of the rps budget
+    sem = asyncio.Semaphore(TIMESTAMP_CONCURRENCY)
+
+    async def _fetch(blk: int) -> tuple[int, str]:
+        async with sem:
+            return blk, hex(await get_block_timestamp_http(blk))
+
+    for blk, ts_hex in await asyncio.gather(*(_fetch(b) for b in missing)):
         for log in logs_by_block.get(blk, []):
             if log.get("blockTimestamp") is None:
                 log["blockTimestamp"] = ts_hex

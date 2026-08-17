@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 import uuid
 from collections import deque
@@ -11,7 +12,9 @@ from core import chain as h
 from core.sequencer import SEQUENCER
 
 HEAD_TIMEOUT = 60.0
-BACKFILL_BATCH = 100
+# replay is latency bound rather than cpu bound, so the chunk size mostly decides
+# how much fixed per chunk round trip cost gets amortised
+BACKFILL_BATCH = int(os.getenv("BACKFILL_BATCH", "100"))
 VAULT_SAMPLER_INTERVAL = 30
 VAULT_SAMPLER_MULTICALL_CHUNK = 200
 MULTICALL3_ADDR = "0xca11bde05977b3631167028862be2a173976ca11"
