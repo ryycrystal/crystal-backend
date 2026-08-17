@@ -267,9 +267,7 @@ async def main() -> None:
             # the cached block logs already cover history, and a block absent from
             # the cache had no log worth indexing, so replay them directly instead
             # of treating every gap as something to refetch over rpc
-            last = await backfill.reindex(
-                args.start_block, BACKFILL_BATCH, resume=not args.clean
-            )
+            last = await backfill.reindex(args.start_block, BACKFILL_BATCH, resume=not args.clean)
             await _start_live(args, last + 1)
             return
 
