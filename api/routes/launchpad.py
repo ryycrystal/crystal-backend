@@ -615,6 +615,8 @@ def token_overview_graph(
         description="set false to omit series.klines, which the client already has after first load",
     ),
 ) -> dict[str, Any]:
+    from core.adapters import nadfun as _nadfun_geo
+
     t0 = time.time()
     excluded = _internal_addrs()
 
@@ -1103,6 +1105,23 @@ def token_overview_graph(
                 "klines": series_klines,
             },
             "snipers": snipers_view,
+            # the full stats windows and the fee block ride along so /board is one
+            # query: no separate /stats, /meta or /pair call on page load
+            "stats": token_stats(token_addr),
+            "fees": {
+                "curveFeeRate": _fmt(_nadfun_geo.fee_rate_for(source))
+                if _nadfun_geo.is_nadfun_source(source)
+                else None,
+                "pair": storage.get_pair_fees((market or "").lower()) if market and source != 0 else None,
+                "crystalMarket": (
+                    {"market": (market or "").lower(), "takerFee": tf}
+                    if source == 0
+                    and market
+                    and (tf := storage.get_taker_fees_batch([market]).get((market or "").lower()))
+                    else None
+                ),
+            },
+            "sourceRaw": int(source or 0),
             "social1": social1,
             "social2": social2,
             "social3": social3,
