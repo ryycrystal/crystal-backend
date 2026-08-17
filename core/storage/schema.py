@@ -757,6 +757,25 @@ def init_db() -> None:
             """
         )
 
+        # fee config per dex pair, read once from the pair's fee collector and cached
+        # so the terminal never needs an on chain read before a swap
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS launchpad_pair_fees
+            (
+                pair TEXT PRIMARY KEY,
+                ok BOOLEAN NOT NULL DEFAULT FALSE,
+                fee_collector TEXT DEFAULT '',
+                base_token TEXT DEFAULT '',
+                quote_token TEXT DEFAULT '',
+                creator_fee_rate NUMERIC DEFAULT 0,
+                curve_protocol_fee_rate NUMERIC DEFAULT 0,
+                dex_protocol_fee_rate NUMERIC DEFAULT 0,
+                fetched_at BIGINT DEFAULT 0
+            );
+            """
+        )
+
         # each nad.fun generation is its own curve, so v2 tokens move to source 2,
         # must run after nadfun_v2_tokens exists
         cur.execute(

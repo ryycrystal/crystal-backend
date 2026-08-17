@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections import deque
@@ -161,6 +162,7 @@ async def start_metadata_worker(storage_module) -> None:
                     # visible to the sweep on this same pass
                     await recover_missing_uris(mod)
                     await sweep_missing_metadata(mod)
+                    await sweep_pair_fees(mod)
                 retry_batch = []
                 temp_hold = []
                 while _RETRY_QUEUE:
@@ -623,3 +625,90 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
     if queued:
         print(f"[Metadata] sweep re-queued {queued} tokens missing metadata", flush=True)
     return queued
+
+
+# selectors derived from keccak256 of the signatures and verified against live pairs:
+# a nad.fun pair exposes feeCollector(), a plain pair reverts, which classifies it
+_FEE_COLLECTOR_SELECTOR = "0xc415b95c"
+_GET_FEE_CONFIG_SELECTOR = "0x1e442b55"
+
+
+# one raw eth_call, none on revert or transport failure
+def _fee_rpc_call(to: str, data: str) -> str | None:
+    import urllib.request
+
+    rpc = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": to, "data": data}, "latest"]}
+    try:
+        req = urllib.request.Request(
+            rpc, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
+        )
+        out = json.load(urllib.request.urlopen(req, timeout=15))
+    except Exception:
+        return None
+    res = out.get("result")
+    return res if isinstance(res, str) and res != "0x" else None
+
+
+# fee config for a pair straight off chain. ok=false means the pair has no fee
+# collector, which is how a general dex pair is told apart from a nad.fun one
+def fetch_pair_fee_config(pair: str) -> dict:
+    pair = (pair or "").lower()
+    out = {
+        "pair": pair,
+        "ok": False,
+        "fee_collector": "",
+        "base_token": "",
+        "quote_token": "",
+        "creator_fee_rate": 0,
+        "curve_protocol_fee_rate": 0,
+        "dex_protocol_fee_rate": 0,
+    }
+    fc = _fee_rpc_call(pair, _FEE_COLLECTOR_SELECTOR)
+    if not fc or len(fc) < 42:
+        return out
+    collector = "0x" + fc[-40:]
+    cfg = _fee_rpc_call(collector, _GET_FEE_CONFIG_SELECTOR + pair[2:].rjust(64, "0"))
+    if not cfg or len(cfg) < 2 + 5 * 64:
+        return out
+    words = [cfg[2 + i * 64 : 2 + (i + 1) * 64] for i in range(5)]
+    out.update(
+        ok=True,
+        fee_collector=collector,
+        base_token="0x" + words[0][-40:],
+        quote_token="0x" + words[1][-40:],
+        creator_fee_rate=int(words[2], 16),
+        curve_protocol_fee_rate=int(words[3], 16),
+        dex_protocol_fee_rate=int(words[4], 16),
+    )
+    return out
+
+
+# fetch fee config for migrated pairs the cache does not cover yet
+async def sweep_pair_fees(storage_module, limit: int = 50) -> int:
+    try:
+        pairs = await asyncio.to_thread(storage_module.pairs_missing_fees, limit)
+    except Exception:
+        return 0
+    done = 0
+    for pair in pairs:
+        cfg = await asyncio.to_thread(fetch_pair_fee_config, pair)
+        try:
+            await asyncio.to_thread(
+                storage_module.upsert_pair_fees,
+                pair,
+                ok=cfg["ok"],
+                fee_collector=cfg["fee_collector"],
+                base_token=cfg["base_token"],
+                quote_token=cfg["quote_token"],
+                creator_fee_rate=cfg["creator_fee_rate"],
+                curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
+                dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                fetched_at=int(time.time()),
+            )
+            done += 1
+        except Exception:
+            continue
+    if done:
+        print(f"[Fees] cached fee config for {done} pairs", flush=True)
+    return done

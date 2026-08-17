@@ -2010,3 +2010,102 @@ def tokens_missing_uri(limit: int = 200) -> list[str]:
             (int(limit),),
         )
         return [(r[0] or "").lower() for r in cur.fetchall()]
+
+
+# repair the stored generation for a token whose emitter proved the row wrong
+def set_token_source(token: str, source: int, cur=None) -> None:
+    sql = "UPDATE launchpad_tokens SET source = %s WHERE token = %s"
+    params = (int(source), (token or "").lower())
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+# cached fee config for a dex pair, fetched from the pair's fee collector on chain.
+# ok=false records a revert, meaning a plain pair with no collector, so the client
+# can classify it as general without a chain read of its own
+def upsert_pair_fees(
+    pair: str,
+    *,
+    ok: bool,
+    fee_collector: str = "",
+    base_token: str = "",
+    quote_token: str = "",
+    creator_fee_rate: int = 0,
+    curve_protocol_fee_rate: int = 0,
+    dex_protocol_fee_rate: int = 0,
+    fetched_at: int = 0,
+) -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_pair_fees
+                (pair, ok, fee_collector, base_token, quote_token,
+                 creator_fee_rate, curve_protocol_fee_rate, dex_protocol_fee_rate, fetched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (pair) DO UPDATE SET
+                ok = EXCLUDED.ok,
+                fee_collector = EXCLUDED.fee_collector,
+                base_token = EXCLUDED.base_token,
+                quote_token = EXCLUDED.quote_token,
+                creator_fee_rate = EXCLUDED.creator_fee_rate,
+                curve_protocol_fee_rate = EXCLUDED.curve_protocol_fee_rate,
+                dex_protocol_fee_rate = EXCLUDED.dex_protocol_fee_rate,
+                fetched_at = EXCLUDED.fetched_at;
+            """,
+            (
+                (pair or "").lower(),
+                bool(ok),
+                (fee_collector or "").lower(),
+                (base_token or "").lower(),
+                (quote_token or "").lower(),
+                int(creator_fee_rate),
+                int(curve_protocol_fee_rate),
+                int(dex_protocol_fee_rate),
+                int(fetched_at),
+            ),
+        )
+
+
+# cached row for a pair, none when never fetched
+def get_pair_fees(pair: str) -> dict | None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT pair, ok, fee_collector, base_token, quote_token,
+                   creator_fee_rate, curve_protocol_fee_rate, dex_protocol_fee_rate, fetched_at
+            FROM launchpad_pair_fees WHERE pair = %s
+            """,
+            ((pair or "").lower(),),
+        )
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {
+        "pair": r[0],
+        "ok": bool(r[1]),
+        "feeCollector": r[2] or None,
+        "baseToken": r[3] or None,
+        "quoteToken": r[4] or None,
+        "creatorFeeRate": str(int(r[5] or 0)),
+        "curveProtocolFeeRate": str(int(r[6] or 0)),
+        "dexProtocolFeeRate": str(int(r[7] or 0)),
+        "fetchedAt": int(r[8] or 0),
+    }
+
+
+# migrated nadfun pairs the sweep has not fetched fees for yet
+def pairs_missing_fees(limit: int = 100) -> list[str]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.market FROM launchpad_tokens t
+            WHERE t.source <> 0 AND COALESCE(t.market, '') <> ''
+              AND NOT EXISTS (SELECT 1 FROM launchpad_pair_fees f WHERE f.pair = LOWER(t.market))
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [(r[0] or "").lower() for r in cur.fetchall()]

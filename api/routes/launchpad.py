@@ -495,6 +495,113 @@ def token_trades_range(
 
 
 # token overview, holders, recent trades and chart data in one payload
+# every column the backend holds for a token, unshaped. the terminal reads this once
+# instead of issuing chain reads before a swap, so the fee block matters most: curve
+# fee for the bonding phase, pair fee config once a dex pair exists, and the crystal
+# market taker fee for native tokens. declared before the chartres route or that
+# catch all would shadow it
+@router.get("/token/{token_addr}/meta")
+def token_meta(token_addr: str) -> dict[str, Any]:
+    from core.adapters import nadfun as _nadfun_geo
+    from modules.nadfun import fetch_pair_fee_config
+
+    token_addr = token_addr.lower()
+    with db_cursor() as cur:
+        cur.execute("SELECT * FROM launchpad_tokens WHERE token = %s", (token_addr,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="token not found")
+        cols = [d[0] for d in cur.description]
+    raw = dict(zip(cols, row))
+    # decimals and datetimes serialize as strings so nothing is lost to float
+    for k, v in list(raw.items()):
+        if isinstance(v, Decimal):
+            raw[k] = _fmt(v)
+        elif v is not None and not isinstance(v, (str, int, bool, list, dict)):
+            raw[k] = str(v)
+
+    source = int(raw.get("source") or 0)
+    version = _nadfun_version(token_addr, source)
+    market = (raw.get("market") or "").lower()
+
+    fees: dict[str, Any] = {
+        # fraction of each curve trade taken as fee while the token is bonding.
+        # null for native, whose curve fee comes from launchpad params instead
+        "curveFeeRate": _fmt(_nadfun_geo.fee_rate_for(source)) if _nadfun_geo.is_nadfun_source(source) else None,
+        "pair": None,
+        "crystalMarket": None,
+    }
+    if market and source != 0:
+        cached = storage.get_pair_fees(market)
+        if cached is None or (int(time.time()) - cached.get("fetchedAt", 0)) > 3600:
+            cfg = fetch_pair_fee_config(market)
+            storage.upsert_pair_fees(
+                market,
+                ok=cfg["ok"],
+                fee_collector=cfg["fee_collector"],
+                base_token=cfg["base_token"],
+                quote_token=cfg["quote_token"],
+                creator_fee_rate=cfg["creator_fee_rate"],
+                curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
+                dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                fetched_at=int(time.time()),
+            )
+            cached = storage.get_pair_fees(market)
+        fees["pair"] = cached
+    if market and source == 0:
+        with db_cursor() as cur:
+            cur.execute("SELECT taker_fee FROM markets WHERE LOWER(market) = %s", (market,))
+            r = cur.fetchone()
+        if r is not None:
+            fees["crystalMarket"] = {"market": market, "takerFee": str(int(r[0] or 0))}
+
+    return {
+        "token": token_addr,
+        "raw": raw,
+        "source": _api_source(source),
+        "sourceRaw": source,
+        "nadfunVersion": version,
+        **_lifecycle_fields(
+            source=source,
+            circulating_supply=raw.get("circulating_supply"),
+            tx_count=raw.get("tx_count"),
+            migrated=raw.get("migrated"),
+        ),
+        "fees": fees,
+        "as_of_block": storage.get_last_processed_block() or 0,
+    }
+
+
+# fee config for any dex pair, cached server side so the terminal can price a swap
+# without a chain read. ok=false marks a plain pair with no fee collector
+@router.get("/pair/{pair_addr}/fees")
+def pair_fees(pair_addr: str) -> dict[str, Any]:
+    from modules.nadfun import fetch_pair_fee_config
+
+    pair_addr = pair_addr.lower()
+    if not pair_addr.startswith("0x") or len(pair_addr) != 42:
+        raise HTTPException(status_code=400, detail="invalid pair address")
+    cached = storage.get_pair_fees(pair_addr)
+    if cached is None or (int(time.time()) - cached.get("fetchedAt", 0)) > 3600:
+        cfg = fetch_pair_fee_config(pair_addr)
+        # a transport failure must not overwrite a good cached row with a false
+        # "general pair" verdict, so only a definitive answer or an empty cache writes
+        if cfg["ok"] or cached is None:
+            storage.upsert_pair_fees(
+                pair_addr,
+                ok=cfg["ok"],
+                fee_collector=cfg["fee_collector"],
+                base_token=cfg["base_token"],
+                quote_token=cfg["quote_token"],
+                creator_fee_rate=cfg["creator_fee_rate"],
+                curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
+                dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                fetched_at=int(time.time()),
+            )
+        cached = storage.get_pair_fees(pair_addr)
+    return cached or {"pair": pair_addr, "ok": False}
+
+
 @router.get("/token/{token_addr}/{chartres}")
 def token_overview_graph(
     token_addr: str,

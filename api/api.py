@@ -233,11 +233,14 @@ def _nadfun_v2_set() -> set[str]:
 # 1 or 2 for a nadfun token, 0 for any other source
 def _nadfun_version(token: str, source) -> int:
     src = int(source or 0)
-    if _nadfun_geo.is_nadfun_source(src):
-        return _nadfun_geo.version_of(src)
-    # tokens indexed before source 2 existed still resolve through the marker table
+    # source 1 can be a stale row written by the preload path before its repair
+    # lands, so the marker table gets the final word rather than the column. the
+    # short circuit through version_of() made that fallback unreachable and a fresh
+    # v2 token reported v1 until the next restart
     if src == 1:
         return 2 if (token or "").lower() in _nadfun_v2_set() else 1
+    if _nadfun_geo.is_nadfun_source(src):
+        return _nadfun_geo.version_of(src)
     return 0
 
 

@@ -570,7 +570,10 @@ class State:
             )
             lp.created_block = int(blk)
             lp.created_at = int(ts or 0)
-            lp.source = 1
+            # this is by definition a v2 token, and writing 1 here left the row
+            # wrong until the next restart repaired it: the api reported v1 and the
+            # in memory curve ran v1 geometry for the whole interim
+            lp.source = nadfun_geo.SOURCE_V2
             lp.quote_token = quote_token
             self.launchpad_tokens[token] = lp
 
@@ -585,7 +588,7 @@ class State:
                 social2="",
                 social3="",
                 social4="",
-                source=1,
+                source=nadfun_geo.SOURCE_V2,
                 created_block=int(blk),
                 created_at=int(ts or 0),
                 last_price_native=lp.last_price_native,
@@ -651,6 +654,12 @@ class State:
 
             lp = self.launchpad_tokens.get(token)
             if lp is not None:
+                # the emitter is the ground truth for the generation. a row created
+                # by the preload or recovery path can carry a stale source, and
+                # keeping it wrong here measured the curve with the wrong geometry
+                if lp.source != source:
+                    lp.source = source
+                    storage.set_token_source(token, source, cur=cur)
                 if creator and not (lp.creator or ""):
                     lp.creator = creator
                     if name and not (lp.name or ""):
@@ -808,13 +817,15 @@ class State:
                 social2="",
                 social3="",
                 social4="",
-                source=0,
+                source=source,
                 created_block=int(blk),
                 created_at=int(ts or 0),
                 last_price_native=lp.last_price_native,
                 quote_token=WMON,
                 cur=cur,
             )
+            if source == nadfun_geo.SOURCE_V2:
+                storage.mark_nadfun_v2(tok, cur=cur)
         except Exception:
             pass
 

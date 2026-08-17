@@ -430,3 +430,113 @@ def test_launch_reference_is_the_first_trade(db, clean):
     later = _batch_get_price_changes([TOKEN])[TOKEN]["change_pct_since_launch"]
     # now the baseline is still the first trade, so a large positive change, not ~0
     assert Decimal(later) > 50, f"expected a big change from the first price, got {later}"
+
+
+# the meta endpoint dumps every stored column plus the fee block, and must not be
+# shadowed by the chartres catch all route declared after it
+def test_token_meta_dumps_everything(db, clean, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.api
+    import modules.nadfun as mn
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xmeta1", log_idx=0)
+    storage.record_block_processed(101)
+
+    monkeypatch.setattr(
+        mn,
+        "fetch_pair_fee_config",
+        lambda pair: {
+            "pair": pair,
+            "ok": True,
+            "fee_collector": "0xfc",
+            "base_token": "0xbb",
+            "quote_token": "0xqq",
+            "creator_fee_rate": 100,
+            "curve_protocol_fee_rate": 40,
+            "dex_protocol_fee_rate": 60,
+        },
+    )
+    client = TestClient(api.api.app)
+    r = client.get(f"/token/{TOKEN}/meta")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    # the raw block carries actual db columns, not a shaped subset
+    for col in ("token", "creator", "source", "circulating_supply", "native_volume", "tx_count"):
+        assert col in d["raw"], f"raw dump missing column {col}"
+    assert d["sourceRaw"] == 0 and d["source"] == 0
+    assert "phase" in d and "progressBps" in d and "as_of_block" in d
+    assert d["fees"]["curveFeeRate"] is None, "native curve fee is not a nadfun rate"
+    assert d["fees"]["pair"] is None, "no market -> no pair fees"
+
+    r404 = client.get("/token/0x00000000000000000000000000000000000000aa/meta")
+    assert r404.status_code == 404
+
+
+# pair fee config is cached in the db after the first fetch, and a revert result is
+# a cacheable verdict meaning general pair, not an error
+def test_pair_fees_cached_and_served(db, clean, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.api
+    import modules.nadfun as mn
+
+    calls = []
+
+    def fake_fetch(pair):
+        calls.append(pair)
+        return {
+            "pair": pair,
+            "ok": True,
+            "fee_collector": "0xfeec",
+            "base_token": "0xb1",
+            "quote_token": "0xq1",
+            "creator_fee_rate": 100,
+            "curve_protocol_fee_rate": 40,
+            "dex_protocol_fee_rate": 60,
+        }
+
+    monkeypatch.setattr(mn, "fetch_pair_fee_config", fake_fetch)
+    client = TestClient(api.api.app)
+    pair = "0x" + "ab" * 20
+
+    r1 = client.get(f"/pair/{pair}/fees")
+    assert r1.status_code == 200
+    d = r1.json()
+    assert d["ok"] is True and d["dexProtocolFeeRate"] == "60" and d["creatorFeeRate"] == "100"
+
+    r2 = client.get(f"/pair/{pair}/fees")
+    assert r2.json() == d
+    assert len(calls) == 1, "second read must come from the cache, not the chain"
+
+    assert client.get("/pair/notanaddress/fees").status_code == 400
+
+
+# the preload path is by definition creating a v2 token, and writing source 1 left
+# the row wrong until the next restart repaired it
+def test_preload_v2_token_persists_source_2(db, clean):
+    import core.storage as st
+
+    tok = "0x00000000000000000000000000000000000000e2"
+    state = _new_state()
+    state.ensure_v2_launchpad_token(tok, blk=100, ts=1000)
+    with st.db_cursor() as cur:
+        cur.execute("SELECT source FROM launchpad_tokens WHERE token = %s", (tok,))
+        row = cur.fetchone()
+    assert row and int(row[0]) == 2, f"preload wrote source={row and row[0]}, expected 2"
+
+
+# a stale source=1 row still reports v2 through the marker table. the short circuit
+# through version_of() made that fallback unreachable
+def test_nadfun_version_marker_fallback(db, clean):
+    import api.api as a
+    import core.storage as st
+
+    tok = "0x00000000000000000000000000000000000000cd"
+    st.mark_nadfun_v2(tok)
+    a._nadfun_v2_cache = None  # defeat the 60s cache for the assertion
+    assert a._nadfun_version(tok, 1) == 2, "marked token with stale source=1 must read v2"
+    assert a._nadfun_version("0x00000000000000000000000000000000000000ce", 1) == 1
+    assert a._nadfun_version(tok, 2) == 2
