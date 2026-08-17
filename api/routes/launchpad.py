@@ -550,7 +550,7 @@ def token_meta(token_addr: str) -> dict[str, Any]:
         fees["pair"] = cached
     if market and source == 0:
         with db_cursor() as cur:
-            cur.execute("SELECT taker_fee FROM markets WHERE LOWER(market) = %s", (market,))
+            cur.execute("SELECT taker_fee FROM crystal_markets WHERE LOWER(market) = %s", (market,))
             r = cur.fetchone()
         if r is not None:
             fees["crystalMarket"] = {"market": market, "takerFee": str(int(r[0] or 0))}

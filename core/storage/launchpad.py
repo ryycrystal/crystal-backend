@@ -2148,5 +2148,5 @@ def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
     if not markets:
         return {}
     with db_cursor() as cur:
-        cur.execute("SELECT LOWER(market), taker_fee FROM markets WHERE LOWER(market) = ANY(%s)", (markets,))
+        cur.execute("SELECT LOWER(market), taker_fee FROM crystal_markets WHERE LOWER(market) = ANY(%s)", (markets,))
         return {r[0]: str(int(r[1] or 0)) for r in cur.fetchall()}
