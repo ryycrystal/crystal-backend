@@ -581,7 +581,8 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
                 approaching_75_block, approaching_75_at,
                 COALESCE(u.tokens_created, 0) as dev_tokens_created,
                 COALESCE(u.tokens_graduated, 0) as dev_tokens_graduated,
-                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a') as quote_token
+                COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a') as quote_token,
+                t.curve_native_reserve, t.curve_token_reserve
             FROM launchpad_tokens t
             LEFT JOIN launchpad_users u ON u.address = t.creator
             WHERE token = ANY(%s)
@@ -634,6 +635,10 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "approaching_75": bool(row[27]),
             "approaching_75_block": row[28],
             "approaching_75_at": row[29],
+            # curve reserves, wei strings: quote = native side, base = token side.
+            # frozen at their final values once migrated, so gate on migrated
+            "reserveQuote": str(int(row[33] or 0)),
+            "reserveBase": str(int(row[34] or 0)),
             "social1": row[6],
             "social2": row[7],
             "social3": row[8],
