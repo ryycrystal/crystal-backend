@@ -637,3 +637,21 @@ def list_pool_fee_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[int,
             ((market or "").lower(), int(lo_ts), int(hi_ts)),
         )
         return [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]
+
+
+# lp share positions for one wallet across pools, the first reader of the table the
+# transfer handler has been writing all along
+def list_lp_positions(user: str) -> list[tuple[str, int, int]]:
+    from .base import db_cursor
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT market, shares, last_transfer
+            FROM crystal_pool_lp_users
+            WHERE user_address = %s AND shares > 0
+            ORDER BY shares DESC
+            """,
+            ((user or "").lower(),),
+        )
+        return [((m or "").lower(), int(s_ or 0), int(t or 0)) for m, s_, t in cur.fetchall()]

@@ -614,3 +614,35 @@ def test_spot_portfolio_one_call(db, clean, monkeypatch):
     assert d["summary"]["activeOrders"] is None and d["summary"]["totalVolume"] is None
     assert d["balance_block"] == 12345 and d["stale"] is False
     assert client.get("/spot/nope").status_code == 400
+
+
+# synthetic vectors packed exactly as contract.sol's assembly packs them. no real
+# fill exists on the new deployment yet, so the first live trade must re-verify
+def test_orderbook_raw_log_decoders(db):
+    from modules.orderbook import BATCH_ORDERS_TOPIC, FILL_TOPIC, decode_fill, decode_order_updates
+
+    def w(v):
+        return f"{v:064x}"
+
+    caller = "0x" + "aa" * 20
+    t1 = "0x" + "00" * 12 + caller[2:]
+    amounts = (1000 << 128) | 990
+    info = (1 << 252) | (777 << 128) | 779
+    e1 = (777 << 176) | (5 << 128) | 42
+    e2 = (779 << 176) | (9 << 128) | 0
+    data = "0x" + w(amounts) + w(info) + w(0x60) + w(64) + w(e1) + w(e2)
+    f = decode_fill([FILL_TOPIC, t1], data)
+    assert f["amount_in"] == 1000 and f["amount_out"] == 990 and f["is_buy"] is True
+    assert f["first_fill_price"] == 777 and f["last_fill_price"] == 779
+    assert f["touched"] == [
+        {"price": 777, "order_id": 5, "size": 42},
+        {"price": 779, "order_id": 9, "size": 0},
+    ], "remaining size must come straight off the entry"
+
+    add = (1 << 252) | (500 << 176) | (7 << 128) | 12345
+    cancel = (2 << 252) | (501 << 176) | (8 << 128) | 999
+    data2 = "0x" + w(0x20) + w(64) + w(add) + w(cancel)
+    u = decode_order_updates([BATCH_ORDERS_TOPIC, t1], data2)
+    assert u["owner"] == caller
+    assert u["orders"][0] == {"price": 500, "order_id": 7, "size": 12345, "is_buy": True, "is_cancel": False}
+    assert u["orders"][1]["is_cancel"] is True and u["orders"][1]["is_buy"] is False

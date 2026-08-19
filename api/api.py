@@ -165,6 +165,9 @@ def _crystal_pool_row_to_api(row) -> dict[str, Any]:
             "name": base_name or "",
         },
         "marketType": int(market_type or 0),
+        # the list query gates on is_canonical, so every served pool is verified.
+        # served explicitly so the frontend filter reads data, not an absence
+        "verified": True,
         "isAmmEnabled": bool(is_amm_enabled),
         "lastPrice": _fmt(last_price or Decimal(0)),
         "takerFee": str(int(taker_fee or 0)),

@@ -142,3 +142,29 @@ def _apy_history(market: str, tvl_history: list[dict]) -> list[dict]:
         apy = (total / tvl) * 365.0 * 100.0 if tvl > 0 else None
         out.append({"timestamp": ts, "apy": apy})
     return out
+
+
+# lp positions for a wallet, served from indexed transfers so the client can stop
+# reading totalSupply/balanceOf off the chain per pool
+@router.get("/pools/positions/{user_addr}")
+def lp_positions(user_addr: str) -> dict[str, Any]:
+    user_addr = (user_addr or "").lower()
+    if not user_addr.startswith("0x") or len(user_addr) != 42:
+        raise HTTPException(status_code=400, detail="invalid address")
+    rows = storage.list_lp_positions(user_addr)
+    out = []
+    for market, shares, last_transfer in rows:
+        pool_row = storage.get_crystal_pool_with_state(market)
+        pool = _pool_row_to_api(pool_row) if pool_row else {"market": market}
+        total = int(pool.get("totalShares") or 0)
+        share_pct = (shares / total * 100.0) if total > 0 else None
+        out.append(
+            {
+                "market": market,
+                "shares": str(shares),
+                "sharePct": share_pct,
+                "lastTransfer": last_transfer,
+                "pool": pool,
+            }
+        )
+    return {"ok": True, "user": user_addr, "count": len(out), "positions": out}
