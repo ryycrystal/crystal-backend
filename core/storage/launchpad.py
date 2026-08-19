@@ -1417,36 +1417,54 @@ def search_tokens_filtered(
         "recent": "b.created_at DESC",
     }.get((sort or "").lower(), "b.created_at DESC")
 
-    # percentages are of the 1e27 total supply, so raw balance / 1e25
+    # percentages are of the 1e27 total supply, so raw balance / 1e25. the holder
+    # derived numbers come from ONE pass over launchpad_positions grouped by token,
+    # joined onto the candidates: the per row correlated subqueries ran six index
+    # probes per candidate, which at 31k candidates was a seven second query
     base = f"""
+        WITH agg AS (
+            SELECT token,
+                   COUNT(*) FILTER (WHERE balance_token > 1) AS holders,
+                   COUNT(*) FILTER (WHERE realized_pnl_native > 0 AND trade_count >= 10) AS pro_traders,
+                   COALESCE(SUM(balance_token)
+                       FILTER (WHERE balance_token > (token_bought - token_sold) + 1e18), 0) / 1e25 AS insider_pct
+            FROM launchpad_positions GROUP BY token
+        ),
+        top10 AS (
+            -- the window only ever matters for positive balances, and most position
+            -- rows are sold out zeros, so sorting only the live ones keeps this cheap
+            SELECT token, COALESCE(SUM(balance_token), 0) / 1e25 AS top10_pct
+            FROM (
+                SELECT p.token, p.balance_token,
+                       ROW_NUMBER() OVER (PARTITION BY p.token ORDER BY p.balance_token DESC) AS rn
+                FROM launchpad_positions p WHERE p.balance_token > 0
+            ) x WHERE rn <= 10 GROUP BY token
+        ),
+        dev AS (
+            SELECT p.token, COALESCE(SUM(p.balance_token), 0) / 1e25 AS dev_pct
+            FROM launchpad_positions p
+            JOIN launchpad_tokens tt ON tt.token = p.token AND p.user_address = tt.creator
+            GROUP BY p.token
+        ),
+        snip AS (
+            SELECT p.token, COALESCE(SUM(p.balance_token), 0) / 1e25 AS sniper_pct
+            FROM launchpad_positions p
+            JOIN launchpad_snipers s ON s.token = p.token AND s.user_address = p.user_address
+            GROUP BY p.token
+        )
         SELECT t.token, t.circulating_supply, t.created_at, t.volume_usd,
                t.last_price_native,
-               (SELECT COUNT(*) FROM launchpad_positions p
-                 WHERE p.token = t.token AND p.balance_token > 1) AS holders,
-               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
-                 WHERE p.token = t.token AND p.user_address = t.creator), 0) / 1e25 AS dev_pct,
-               COALESCE((SELECT SUM(x.balance_token) FROM (
-                    SELECT p.balance_token FROM launchpad_positions p
-                     WHERE p.token = t.token AND p.balance_token > 0
-                     ORDER BY p.balance_token DESC LIMIT 10) x), 0) / 1e25 AS top10_pct,
-               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
-                 JOIN launchpad_snipers s
-                   ON s.token = p.token AND s.user_address = p.user_address
-                 WHERE p.token = t.token), 0) / 1e25 AS sniper_pct,
-               -- a pro trader is profitable with a real sample behind it, rather than
-               -- one lucky trade. definition is deliberately visible here so it can be
-               -- retuned without hunting through the query
-               (SELECT COUNT(*) FROM launchpad_positions p
-                 WHERE p.token = t.token
-                   AND p.realized_pnl_native > 0
-                   AND p.trade_count >= 10) AS pro_traders,
-               -- an insider holds more than it ever bought net, so the excess arrived
-               -- by transfer rather than through the curve. the dust margin keeps
-               -- rounding on the balance from tripping it
-               COALESCE((SELECT SUM(p.balance_token) FROM launchpad_positions p
-                 WHERE p.token = t.token
-                   AND p.balance_token > (p.token_bought - p.token_sold) + 1e18), 0) / 1e25 AS insider_pct
+               COALESCE(a.holders, 0) AS holders,
+               COALESCE(d.dev_pct, 0) AS dev_pct,
+               COALESCE(tp.top10_pct, 0) AS top10_pct,
+               COALESCE(sn.sniper_pct, 0) AS sniper_pct,
+               COALESCE(a.pro_traders, 0) AS pro_traders,
+               COALESCE(a.insider_pct, 0) AS insider_pct
         FROM launchpad_tokens t
+        LEFT JOIN agg a ON a.token = t.token
+        LEFT JOIN top10 tp ON tp.token = t.token
+        LEFT JOIN dev d ON d.token = t.token
+        LEFT JOIN snip sn ON sn.token = t.token
         WHERE {where_sql}
     """
 
