@@ -19,6 +19,9 @@ VAULT_SAMPLER_INTERVAL = 30
 VAULT_SAMPLER_MULTICALL_CHUNK = 200
 MULTICALL3_ADDR = "0xca11bde05977b3631167028862be2a173976ca11"
 GET_BALANCES_CALLDATA = bytes.fromhex("00113e08")
+# erc20 totalSupply(), piggybacked on the same multicall so the event-replay share
+# counter is reconciled against the chain on every sweep instead of drifting silently
+TOTAL_SUPPLY_CALLDATA = bytes.fromhex("18160ddd")
 MULTICALL3_AGGREGATE3_SELECTOR = bytes.fromhex("82ad56cb")
 
 missing_blocks: deque[int] = deque()
@@ -139,23 +142,29 @@ async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_n
     for i in range(0, len(vaults), VAULT_SAMPLER_MULTICALL_CHUNK):
         chunk = vaults[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
         try:
-            data = _encode_multicall3_aggregate3([(v, GET_BALANCES_CALLDATA) for v in chunk])
+            calls = []
+            for v in chunk:
+                calls.append((v, GET_BALANCES_CALLDATA))
+                calls.append((v, TOTAL_SUPPLY_CALLDATA))
+            data = _encode_multicall3_aggregate3(calls)
             call_resp = await backfill.http_jsonrpc(
                 "eth_call",
                 [{"to": MULTICALL3_ADDR, "data": data}, blk_hex],
             )
             ret = call_resp.get("result")
             results = _decode_multicall3_aggregate3_result(ret) if isinstance(ret, str) else []
-            if len(results) != len(chunk):
-                raise ValueError(f"multicall result length mismatch {len(results)} != {len(chunk)}")
-            for vaddr, (ok, raw) in zip(chunk, results):
-                if not ok:
-                    continue
-                decoded = _decode_vault_get_balances_return(raw)
-                if not decoded:
-                    continue
-                quote_bal, base_bal = decoded
-                state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+            if len(results) != 2 * len(chunk):
+                raise ValueError(f"multicall result length mismatch {len(results)} != {2 * len(chunk)}")
+            for j, vaddr in enumerate(chunk):
+                ok, raw = results[2 * j]
+                if ok:
+                    decoded = _decode_vault_get_balances_return(raw)
+                    if decoded:
+                        quote_bal, base_bal = decoded
+                        state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
+                ok_ts, raw_ts = results[2 * j + 1]
+                if ok_ts and isinstance(raw_ts, (bytes, bytearray)) and len(raw_ts) >= 32:
+                    state.reconcile_vault_shares(vaddr, int.from_bytes(raw_ts[:32], "big"))
         except Exception as e:
             print(f"[SAMPLER] Multicall fallback for chunk {i}-{i + len(chunk) - 1}: {e!r}", flush=True)
             await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)

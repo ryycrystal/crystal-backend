@@ -2695,6 +2695,29 @@ class State:
         while dq and int(dq[0].get("timestamp", 0)) < cutoff:
             dq.popleft()
 
+    # the share counter is replayed from events, and any missed or double applied
+    # event mis-prices every depositor from then on. the chain total supply is the
+    # truth, so the sampler hands it here and a divergence is corrected and logged
+    def reconcile_vault_shares(self, vault: str, chain_supply: int) -> None:
+        vaddr = (vault or "").lower()
+        with self._lock:
+            v = self.vaults.get(vaddr)
+            if v is None:
+                return
+            ours = int(getattr(v, "circulatingShares", 0) or 0)
+            chain = int(chain_supply)
+            if chain < 0 or chain == ours:
+                return
+            print(
+                f"[Vaults] share drift on {vaddr}: replayed {ours} vs chain {chain}, healing",
+                flush=True,
+            )
+            v.circulatingShares = chain
+            try:
+                storage.update_crystal_vault_fields(vault=vaddr, circulating_shares=chain)
+            except Exception:
+                pass
+
     # store one sampled vault balance and its usd value
     def record_vault_balance_sample(
         self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int

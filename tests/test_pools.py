@@ -550,3 +550,38 @@ if __name__ == "__main__":
     ]:
         fn()
     print("Pool tests passed")
+
+
+# phase 1 invariants: the amm fee comes from the market's taker fee, never an
+# invented constant, and unknown decimals price as nothing instead of 1e18x
+def test_pool_fee_rate_uses_taker_fee_not_a_constant():
+    from decimal import Decimal
+
+    import models
+    from state import State
+
+    mi = models.MarketInfo.__new__(models.MarketInfo)
+    mi.marketType = 2
+    mi.takerFee = 99750
+    assert State._pool_fee_rate(mi) == Decimal("0.0025") * Decimal(1), "99750 keep -> 25bps"
+    mi.takerFee = 99910
+    assert State._pool_fee_rate(mi) == (Decimal(100000) - Decimal(99910)) / Decimal(100000)
+    mi.takerFee = 0
+    assert State._pool_fee_rate(mi) == Decimal(0), "unset fee is zero, not a made up 25bps"
+
+
+def test_unknown_decimals_price_as_nothing():
+    from decimal import Decimal
+
+    import models
+    from state import State
+
+    st = State.__new__(State)
+    st.tokenToPrice = {"0xq": Decimal("2"), "0xb": Decimal("3")}
+    mi = models.MarketInfo.__new__(models.MarketInfo)
+    mi.quoteAddress, mi.baseAddress = "0xq", "0xb"
+    mi.quoteDecimals, mi.baseDecimals = 18, 0  # base decimals unknown
+    tvl = st._pool_tvl_usd_locked(mi, 5 * 10**18, 7 * 10**18)
+    assert tvl == Decimal(10), f"only the priced side counts, got {tvl}"
+    mi.quoteDecimals = 0
+    assert st._pool_tvl_usd_locked(mi, 5 * 10**18, 7 * 10**18) == 0

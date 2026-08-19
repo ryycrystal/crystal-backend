@@ -300,10 +300,17 @@ class Hub:
         if not new and not gone and not patches:
             return
         env = self._envelope("tokens", "tokens", watermark, "delta")
-        payload = {**env, "new": new, "u": patches, "gone": gone, "ids": body.get("ids") or {
-            b: [(r.get("token") or "").lower() for r in (body.get(b) or [])]
-            for b in ("recent_created", "recent_approaching", "recent_graduated")
-        }}
+        payload = {
+            **env,
+            "new": new,
+            "u": patches,
+            "gone": gone,
+            "ids": body.get("ids")
+            or {
+                b: [(r.get("token") or "").lower() for r in (body.get(b) or [])]
+                for b in ("recent_created", "recent_approaching", "recent_graduated")
+            },
+        }
         await self.broadcast("tokens", "tokens", payload)
 
     # wrap a channel body in the envelope every frame carries
