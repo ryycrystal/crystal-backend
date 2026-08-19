@@ -474,3 +474,51 @@ def test_switching_wallets_replaces_the_address_set(db):
     # a message with no addresses key leaves the set alone
     asyncio.run(_apply_subscribe(sub, {"op": "subscribe", "token": TOKEN, "channels": ["trades"]}))
     assert sub.addresses == {b}
+
+
+# the explorer list channel: subscribe with the pseudo token, get the full bucket
+# snapshot, then per field patches rather than full rows when something changes
+def test_tokens_list_channel_snapshot_and_field_diffs(db):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import api.api
+    from api.ws import HUB
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xtl1", log_idx=0)
+    storage.record_block_processed(101)
+
+    client = TestClient(api.api.app)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(json.dumps({"op": "subscribe", "token": "tokens", "channels": ["tokens"]}))
+        snap = None
+        for _ in range(10):
+            m = ws.receive_json()
+            if m.get("channel") == "tokens" and m.get("kind") == "snapshot":
+                snap = m
+                break
+        assert snap and "recent_created" in snap, "list snapshot must carry the buckets"
+
+        # a field diff, driven directly through the pusher
+        sent = []
+
+        async def cap(token, channel, payload):
+            sent.append(payload)
+
+        HUB.broadcast = cap  # type: ignore[method-assign]
+        _trade(st, native_reserve=1300 * 10**18, blk=102, ts=1002, txh="0xtl2", log_idx=0)
+        storage.record_block_processed(102)
+        asyncio.run(HUB._push_tokens_list("tokens", 102))
+        HUB.broadcast = type(HUB).broadcast.__get__(HUB)  # restore
+        assert sent, "a change must produce a delta frame"
+        frame = sent[-1]
+        assert frame["u"], "changed token arrives as a per field patch"
+        patch = list(frame["u"].values())[0]
+        assert "token" not in patch or len(patch) < 10, "patch carries changed fields, not the row"
+        assert "ids" in frame
+
+    HUB.subscribers.clear()

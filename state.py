@@ -1923,9 +1923,6 @@ class State:
     @staticmethod
     def _pool_fee_rate(mi: models.MarketInfo) -> Decimal:
         try:
-            mt = int(getattr(mi, "marketType", 0) or 0)
-            if mt > 1:
-                return Decimal("0.0025")
             tf = int(getattr(mi, "takerFee", 0) or 0)
             if tf <= 0 or tf > 100000:
                 return Decimal(0)
@@ -1943,10 +1940,16 @@ class State:
     ) -> tuple[Decimal, Decimal]:
         qd = int(getattr(mi, "quoteDecimals", 0) or 0)
         bd = int(getattr(mi, "baseDecimals", 0) or 0)
+        # zero decimals means discovery failed, and raw / 10**0 prices wei as whole
+        # tokens: a 1e18x inflation. an unpriced side is honest, an inflated one lies
         pq = Decimal(self.tokenToPrice.get((getattr(mi, "quoteAddress", "") or "").lower(), Decimal(0)) or 0)
         pb = Decimal(self.tokenToPrice.get((getattr(mi, "baseAddress", "") or "").lower(), Decimal(0)) or 0)
-        q_units = Decimal(int(reserve_quote or 0)) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
-        b_units = Decimal(int(reserve_base or 0)) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+        if qd <= 0:
+            pq = Decimal(0)
+        if bd <= 0:
+            pb = Decimal(0)
+        q_units = Decimal(int(reserve_quote or 0)) / (Decimal(10) ** qd) if qd > 0 else Decimal(0)
+        b_units = Decimal(int(reserve_base or 0)) / (Decimal(10) ** bd) if bd > 0 else Decimal(0)
         if q_units > 0 and b_units > 0:
             if pq > 0 and pb <= 0:
                 pb = (q_units * pq) / b_units
@@ -1960,8 +1963,8 @@ class State:
             qd = int(getattr(mi, "quoteDecimals", 0) or 0)
             bd = int(getattr(mi, "baseDecimals", 0) or 0)
             pq, pb = self._pool_effective_usd_prices_locked(mi, reserve_quote, reserve_base)
-            q_units = Decimal(int(reserve_quote or 0)) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
-            b_units = Decimal(int(reserve_base or 0)) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+            q_units = Decimal(int(reserve_quote or 0)) / (Decimal(10) ** qd) if qd > 0 else Decimal(0)
+            b_units = Decimal(int(reserve_base or 0)) / (Decimal(10) ** bd) if bd > 0 else Decimal(0)
             tvl = (q_units * pq) + (b_units * pb)
             return tvl if tvl.is_finite() else Decimal(0)
         except Exception:
@@ -2710,8 +2713,15 @@ class State:
             pq = Decimal(self.tokenToPrice.get(qaddr, Decimal(0)) or 0)
             pb = Decimal(self.tokenToPrice.get(baddr, Decimal(0)) or 0)
 
-            q_units = Decimal(int(quote_balance)) / (Decimal(10) ** qd if qd >= 0 else Decimal(1))
-            b_units = Decimal(int(base_balance)) / (Decimal(10) ** bd if bd >= 0 else Decimal(1))
+            # unknown decimals must not price raw wei as whole tokens. the raw
+            # balances are still recorded so the series has the point, but its usd
+            # value stays zero rather than inflated by up to 1e18
+            if qd <= 0:
+                pq = Decimal(0)
+            if bd <= 0:
+                pb = Decimal(0)
+            q_units = Decimal(int(quote_balance)) / (Decimal(10) ** qd) if qd > 0 else Decimal(0)
+            b_units = Decimal(int(base_balance)) / (Decimal(10) ** bd) if bd > 0 else Decimal(0)
             tvl_usd = (q_units * pq) + (b_units * pb)
             usd_value = float(tvl_usd) if tvl_usd.is_finite() else 0.0
 

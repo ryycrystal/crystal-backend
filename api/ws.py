@@ -26,14 +26,15 @@ router = APIRouter()
 
 # channels a client may subscribe to. stats is implemented; the rest are declared
 # so a client subscribing early gets an explicit "not yet" rather than silence
-KNOWN_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
-IMPLEMENTED_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens")
+KNOWN_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens", "tokens")
+IMPLEMENTED_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens", "tokens")
 
 # channels that send the whole object every time rather than a diff
 SNAPSHOT_CHANNELS = ("token", "stats", "dev_tokens")
 
 # how often the fanout task checks whether the indexer has moved
-POLL_INTERVAL_SECONDS = 0.25
+# one tick per monad block: pushing faster than blocks land is pure waste
+POLL_INTERVAL_SECONDS = 0.4
 
 # a socket that has not pinged or subscribed in this long is dropped
 IDLE_TIMEOUT_SECONDS = 300
@@ -198,6 +199,16 @@ class Hub:
             return {"upserts": await asyncio.to_thread(d.top_traders, token)}
         if channel == "dev_tokens":
             return {"devTokens": await asyncio.to_thread(d.dev_tokens, token)}
+        if channel == "tokens":
+            from api.routes.launchpad import _list_tokens_impl
+
+            body = await asyncio.to_thread(_list_tokens_impl, 0, 0, {})
+            rows = {}
+            for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
+                for r in body.get(bucket) or []:
+                    rows[(r.get("token") or "").lower()] = r
+            self._prev_rows[("tokens", "tokens")] = rows
+            return body
         if channel == "positions":
             # only this socket's own wallets. taking the union across every
             # subscriber sent each client the positions of everyone else watching
@@ -250,6 +261,7 @@ class Hub:
                 continue
             self._last_sent[key] = watermark
             fn = {
+                "tokens": self._push_tokens_list,
                 "token": self._push_token_state,
                 "stats": self._push_stats,
                 "trades": self._push_trades,
@@ -260,6 +272,39 @@ class Hub:
             }.get(channel)
             if fn is not None:
                 await fn(token, watermark)
+
+    # the explorer list: one frame per tick carrying full rows for tokens that
+    # entered, per field patches for tokens that changed, and the membership ids.
+    # bytes track what actually happened on chain rather than the table size
+    async def _push_tokens_list(self, token: str, watermark: int) -> None:
+        from api.routes.launchpad import _list_tokens_impl
+
+        body = await asyncio.to_thread(_list_tokens_impl, 0, 0, {})
+        rows: dict[str, dict] = {}
+        for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
+            for r in body.get(bucket) or []:
+                rows[(r.get("token") or "").lower()] = r
+        prev = self._prev_rows.get(("tokens", "tokens")) or {}
+        self._prev_rows[("tokens", "tokens")] = rows
+
+        new = [r for k, r in rows.items() if k not in prev]
+        gone = [k for k in prev if k not in rows]
+        patches: dict[str, dict] = {}
+        for k, r in rows.items():
+            p = prev.get(k)
+            if p is None or p == r:
+                continue
+            diff = {f: v for f, v in r.items() if p.get(f) != v}
+            if diff:
+                patches[k] = diff
+        if not new and not gone and not patches:
+            return
+        env = self._envelope("tokens", "tokens", watermark, "delta")
+        payload = {**env, "new": new, "u": patches, "gone": gone, "ids": body.get("ids") or {
+            b: [(r.get("token") or "").lower() for r in (body.get(b) or [])]
+            for b in ("recent_created", "recent_approaching", "recent_graduated")
+        }}
+        await self.broadcast("tokens", "tokens", payload)
 
     # wrap a channel body in the envelope every frame carries
     def _envelope(self, token: str, channel: str, watermark: int, kind: str) -> dict[str, Any]:
@@ -427,7 +472,7 @@ HUB = Hub()
 async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, Any]:
     token = str(msg.get("token") or "").lower().strip()
     channels = msg.get("channels") or []
-    if not token.startswith("0x") or len(token) != 42:
+    if token != "tokens" and (not token.startswith("0x") or len(token) != 42):
         return {"op": "error", "error": "invalid token address"}
     if not isinstance(channels, list) or not channels:
         return {"op": "error", "error": "channels must be a non-empty list"}
@@ -531,6 +576,24 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                         await HUB.send_snapshot(sub, tok, ch)
             elif op == "unsubscribe":
                 await sub.send(await _apply_unsubscribe(sub, msg))
+            elif op == "query":
+                from api.api import _internal_addrs
+                from api.routes.launchpad import _search_impl
+
+                f = msg.get("filters") or {}
+                try:
+                    res = await asyncio.to_thread(
+                        _search_impl,
+                        str(f.pop("query", "") or ""),
+                        str(f.pop("sort", "") or ""),
+                        int(f.pop("limit", 50) or 50),
+                        int(f.pop("offset", 0) or 0),
+                        f,
+                        _internal_addrs(),
+                    )
+                    await sub.send({"op": "query_result", "id": msg.get("id"), **res})
+                except Exception:
+                    await sub.send({"op": "error", "id": msg.get("id"), "error": "query failed"})
             elif op == "ping":
                 await sub.send({"op": "pong", "ts": int(time.time())})
             else:
