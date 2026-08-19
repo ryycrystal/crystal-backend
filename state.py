@@ -1919,6 +1919,25 @@ class State:
         if changed_tokens:
             self._refresh_pools_for_price_tokens(changed_tokens, blk=blk, ts=ts, cur=cur)
 
+    # strict univ2: k grows only through the in-price fee spread, so sqrt(k) growth
+    # over a trade IS the lp accrual, spread and compounding included, exact at any
+    # trade size. no percentage constant: takerFee is feeRecipient revenue and the
+    # 25bps factor is pricing, not a collectable cut
+    def _pool_fees_from_k_growth_locked(
+        self, mi: models.MarketInfo, prev_rq: int, prev_rb: int, new_rq: int, new_rb: int
+    ) -> Decimal:
+        try:
+            if prev_rq <= 0 or prev_rb <= 0 or new_rq <= 0 or new_rb <= 0:
+                return Decimal(0)
+            ratio = (Decimal(new_rq) * Decimal(new_rb)) / (Decimal(prev_rq) * Decimal(prev_rb))
+            if not ratio.is_finite() or ratio <= 1:
+                return Decimal(0)
+            growth = ratio.sqrt() - Decimal(1)
+            fees = self._pool_tvl_usd_locked(mi, prev_rq, prev_rb) * growth
+            return fees if fees.is_finite() and fees > 0 else Decimal(0)
+        except Exception:
+            return Decimal(0)
+
     # taker fee of a pool as a decimal rate
     @staticmethod
     def _pool_fee_rate(mi: models.MarketInfo) -> Decimal:
@@ -2142,9 +2161,7 @@ class State:
             fees_usd = Decimal(0)
             if kind == "trade" and (prev_rq != 0 or prev_rb != 0):
                 volume_usd = self._pool_trade_volume_usd_locked(mi, dq, db)
-                fees_usd = volume_usd * self._pool_fee_rate(mi)
-                if not fees_usd.is_finite():
-                    fees_usd = Decimal(0)
+                fees_usd = self._pool_fees_from_k_growth_locked(mi, prev_rq, prev_rb, new_rq, new_rb)
 
             mi.reserveQuote = new_rq
             mi.reserveBase = new_rb

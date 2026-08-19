@@ -880,3 +880,28 @@ def backfill_realized_pnl() -> None:
             return
         total += done
         print(f"[DB] realized pnl backfill: {total} positions", flush=True)
+
+
+# recompute stored trade-sync fees from the reserves ledger on the exact sqrt(k)
+# growth basis. idempotent: the formula is a pure function of stored columns
+def backfill_pool_fees_k_growth() -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE crystal_pool_sync_events e
+            SET fees_usd = GREATEST(
+                COALESCE(t.tvl_usd, 0) * (SQRT(
+                    (e.reserve_quote * e.reserve_base)::numeric
+                    / NULLIF((e.prev_reserve_quote * e.prev_reserve_base)::numeric, 0)
+                ) - 1), 0)
+            FROM crystal_pool_tvl_samples t
+            WHERE e.kind = 'trade'
+              AND e.prev_reserve_quote > 0 AND e.prev_reserve_base > 0
+              AND e.reserve_quote > 0 AND e.reserve_base > 0
+              AND t.market = e.market AND t.block_number = e.block_number
+              AND t.log_index = e.log_index;
+            """
+        )
+        n = cur.rowcount or 0
+    if n:
+        print(f"[DB] pool fee k-growth backfill: {n} trade syncs recomputed", flush=True)
