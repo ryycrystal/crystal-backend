@@ -33,8 +33,8 @@ IMPLEMENTED_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top
 SNAPSHOT_CHANNELS = ("token", "stats", "dev_tokens")
 
 # how often the fanout task checks whether the indexer has moved
-# one tick per monad block: pushing faster than blocks land is pure waste
-POLL_INTERVAL_SECONDS = 0.4
+# one tick per monad block (300ms): pushing faster than blocks land is pure waste
+POLL_INTERVAL_SECONDS = 0.3
 
 # a socket that has not pinged or subscribed in this long is dropped
 IDLE_TIMEOUT_SECONDS = 300
