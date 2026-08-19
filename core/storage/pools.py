@@ -647,11 +647,187 @@ def list_lp_positions(user: str) -> list[tuple[str, int, int]]:
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT market, shares, last_transfer
+            SELECT market, shares, last_transfer, cost_quote, cost_base
             FROM crystal_pool_lp_users
             WHERE user_address = %s AND shares > 0
             ORDER BY shares DESC
             """,
             ((user or "").lower(),),
         )
-        return [((m or "").lower(), int(s_ or 0), int(t or 0)) for m, s_, t in cur.fetchall()]
+        return [
+            ((m or "").lower(), int(s_ or 0), int(t or 0), int(cq or 0), int(cb or 0))
+            for m, s_, t, cq, cb in cur.fetchall()
+        ]
+
+
+# one lp deposit or withdrawal, amounts from the mint/burn event. user and shares
+# arrive from the paired lp token transfer and may attach afterwards
+def insert_pool_liquidity_event(
+    *,
+    txhash: str,
+    log_index: int,
+    market: str,
+    kind: str,
+    user_address: str,
+    amount_quote: int,
+    amount_base: int,
+    block_number: int,
+    timestamp: int,
+    cur=None,
+) -> None:
+    from .base import db_cursor
+
+    sql = """
+        INSERT INTO crystal_pool_liquidity_events
+            (txhash, log_index, market, kind, user_address, amount_quote, amount_base, block_number, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (txhash, log_index) DO NOTHING
+    """
+    params = (
+        (txhash or "").lower(),
+        int(log_index),
+        (market or "").lower(),
+        kind,
+        (user_address or "").lower(),
+        int(amount_quote),
+        int(amount_base),
+        int(block_number),
+        int(timestamp),
+    )
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+# attach the user and share count learned from the lp token transfer in the same tx
+def attach_pool_liquidity_shares(
+    *, txhash: str, market: str, kind: str, shares: int, user_address: str = "", cur=None
+) -> None:
+    from .base import db_cursor
+
+    sql = """
+        UPDATE crystal_pool_liquidity_events
+        SET shares = COALESCE(shares, 0) + %s,
+            user_address = CASE WHEN COALESCE(user_address, '') = '' THEN %s ELSE user_address END
+        WHERE txhash = %s AND market = %s AND kind = %s
+    """
+    params = (int(shares), (user_address or "").lower(), (txhash or "").lower(), (market or "").lower(), kind)
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+# lp deposit and withdrawal history for a pool, optionally one wallet
+def list_pool_liquidity_events(market: str, user: str = "", limit: int = 100) -> list[dict]:
+    from .base import db_cursor
+
+    where = "market = %s"
+    params: list = [(market or "").lower()]
+    if user:
+        where += " AND user_address = %s"
+        params.append(user.lower())
+    params.append(max(1, min(int(limit or 100), 500)))
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT txhash, log_index, kind, user_address, amount_quote, amount_base,
+                   shares, block_number, timestamp
+            FROM crystal_pool_liquidity_events
+            WHERE {where}
+            ORDER BY timestamp DESC, log_index DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "txHash": r[0],
+            "logIndex": int(r[1]),
+            "kind": r[2],
+            "user": r[3] or None,
+            "amountQuote": str(int(r[4] or 0)),
+            "amountBase": str(int(r[5] or 0)),
+            "shares": str(int(r[6])) if r[6] is not None else None,
+            "block": int(r[7] or 0),
+            "timestamp": int(r[8] or 0),
+        }
+        for r in rows
+    ]
+
+
+# move a wallet's lp cost basis on mint and burn, proportional release on burn
+def apply_lp_cost_delta(
+    *, market: str, user: str, dq: int, db_: int, burn_fraction_num: int = 0, burn_fraction_den: int = 0, cur=None
+) -> None:
+    from .base import db_cursor
+
+    if burn_fraction_den > 0:
+        sql = """
+            UPDATE crystal_pool_lp_users
+            SET cost_quote = cost_quote - (cost_quote * %s / %s),
+                cost_base = cost_base - (cost_base * %s / %s)
+            WHERE market = %s AND user_address = %s
+        """
+        params = (
+            int(burn_fraction_num),
+            int(burn_fraction_den),
+            int(burn_fraction_num),
+            int(burn_fraction_den),
+            (market or "").lower(),
+            (user or "").lower(),
+        )
+    else:
+        sql = """
+            INSERT INTO crystal_pool_lp_users (market, user_address, shares, cost_quote, cost_base)
+            VALUES (%s, %s, 0, %s, %s)
+            ON CONFLICT (market, user_address) DO UPDATE
+            SET cost_quote = crystal_pool_lp_users.cost_quote + EXCLUDED.cost_quote,
+                cost_base = crystal_pool_lp_users.cost_base + EXCLUDED.cost_base
+        """
+        params = ((market or "").lower(), (user or "").lower(), int(dq), int(db_))
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+# current lp share balance for one wallet in one pool
+def get_lp_user_shares(market: str, user: str, cur=None) -> int:
+    from .base import db_cursor
+
+    sql = "SELECT shares FROM crystal_pool_lp_users WHERE market = %s AND user_address = %s"
+    params = ((market or "").lower(), (user or "").lower())
+    if cur is not None:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    with db_cursor() as c:
+        c.execute(sql, params)
+        row = c.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+# deposit amounts of the mint event in a tx, for cost basis attribution
+def get_pool_liquidity_amounts(txhash: str, market: str, kind: str, cur=None) -> tuple[int, int] | None:
+    from .base import db_cursor
+
+    sql = """
+        SELECT amount_quote, amount_base FROM crystal_pool_liquidity_events
+        WHERE txhash = %s AND market = %s AND kind = %s
+        ORDER BY log_index DESC LIMIT 1
+    """
+    params = ((txhash or "").lower(), (market or "").lower(), kind)
+    if cur is not None:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    else:
+        with db_cursor() as c:
+            c.execute(sql, params)
+            row = c.fetchone()
+    return (int(row[0] or 0), int(row[1] or 0)) if row else None

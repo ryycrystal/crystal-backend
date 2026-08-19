@@ -622,3 +622,31 @@ def test_pool_fees_from_k_growth():
     # k unchanged or shrunk means no fee accrual, never negative
     assert st._pool_fees_from_k_growth_locked(mi, prev_q, prev_b, 110 * 10**18, int(90.909090e18)) == 0
     assert st._pool_fees_from_k_growth_locked(mi, 0, 0, new_q, new_b) == 0
+
+
+# preview math is univ2: ratio-rebalanced deposit, min() mint, pro-rata withdraw
+def test_pool_preview_math():
+    row = _pool_row_25()
+    api_row = {
+        "market": "0xpool",
+        "reserveQuote": "1000000",
+        "reserveBase": "2000000",
+        "totalShares": "500000",
+        "lastSyncBlock": 55,
+    }
+    with (
+        patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=row),
+        patch.object(pool_api, "_pool_row_to_api", return_value=dict(api_row)),
+    ):
+        d = pool_api.pool_preview("0xPOOL", quote=100000, base=999999, shares=0)
+        assert d["kind"] == "deposit"
+        assert d["amountQuoteUsed"] == "100000"
+        assert d["amountBaseUsed"] == "200000", "base rebalanced to the pool ratio"
+        assert d["lpOut"] == "50000", "10 percent of reserves mints 10 percent of shares"
+
+        w = pool_api.pool_preview("0xPOOL", quote=0, base=0, shares=50000)
+        assert w["kind"] == "withdraw"
+        assert w["amountQuoteOut"] == "100000" and w["amountBaseOut"] == "200000"
+
+    with patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=None):
+        _assert_http_exc(lambda: pool_api.pool_preview("0xPOOL", quote=1, base=1, shares=0), 404)

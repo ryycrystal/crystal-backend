@@ -571,11 +571,37 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS crystal_pool_liquidity_events
+            (
+                txhash        TEXT NOT NULL,
+                log_index     BIGINT NOT NULL,
+                market        TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                user_address  TEXT DEFAULT '',
+                amount_quote  NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                amount_base   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                shares        NUMERIC(78, 0),
+                block_number  BIGINT NOT NULL DEFAULT 0,
+                timestamp     BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pool_liq_market_ts
+            ON crystal_pool_liquidity_events (market, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS crystal_pool_lp_users
             (
                 market        TEXT NOT NULL,
                 user_address  TEXT NOT NULL,
                 shares        NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                cost_quote    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                cost_base     NUMERIC(78, 0) NOT NULL DEFAULT 0,
                 last_transfer BIGINT NOT NULL DEFAULT 0,
                 updated_block BIGINT,
                 PRIMARY KEY (market, user_address)
@@ -588,6 +614,7 @@ def init_db() -> None:
             ON crystal_pool_lp_users (market, shares DESC, user_address ASC);
             """
         )
+        _migrate_lp_user_cost_columns(cur)
 
         cur.execute(
             """
@@ -884,6 +911,15 @@ def backfill_realized_pnl() -> None:
 
 # recompute stored trade-sync fees from the reserves ledger on the exact sqrt(k)
 # growth basis. idempotent: the formula is a pure function of stored columns
+def _migrate_lp_user_cost_columns(cur) -> None:
+    cur.execute(
+        "ALTER TABLE crystal_pool_lp_users ADD COLUMN IF NOT EXISTS cost_quote NUMERIC(78,0) NOT NULL DEFAULT 0;"
+    )
+    cur.execute(
+        "ALTER TABLE crystal_pool_lp_users ADD COLUMN IF NOT EXISTS cost_base NUMERIC(78,0) NOT NULL DEFAULT 0;"
+    )
+
+
 def backfill_pool_fees_k_growth() -> None:
     with db_cursor() as cur:
         cur.execute(

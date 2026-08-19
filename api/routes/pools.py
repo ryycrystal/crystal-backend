@@ -153,18 +153,101 @@ def lp_positions(user_addr: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid address")
     rows = storage.list_lp_positions(user_addr)
     out = []
-    for market, shares, last_transfer in rows:
+    for market, shares, last_transfer, cost_q, cost_b in rows:
         pool_row = storage.get_crystal_pool_with_state(market)
         pool = _pool_row_to_api(pool_row) if pool_row else {"market": market}
         total = int(pool.get("totalShares") or 0)
         share_pct = (shares / total * 100.0) if total > 0 else None
+        rq = int(pool.get("reserveQuote") or 0)
+        rb = int(pool.get("reserveBase") or 0)
+        cur_q = shares * rq // total if total > 0 else 0
+        cur_b = shares * rb // total if total > 0 else 0
         out.append(
             {
                 "market": market,
                 "shares": str(shares),
                 "sharePct": share_pct,
                 "lastTransfer": last_transfer,
+                # redeemable now vs deposited. the difference bundles fee accrual and
+                # price drift, so it estimates outcome, not fees alone
+                "currentQuote": str(cur_q),
+                "currentBase": str(cur_b),
+                "costQuote": str(cost_q),
+                "costBase": str(cost_b),
+                "earnedQuoteEst": str(cur_q - cost_q),
+                "earnedBaseEst": str(cur_b - cost_b),
                 "pool": pool,
             }
         )
     return {"ok": True, "user": user_addr, "count": len(out), "positions": out}
+
+
+# lp deposit and withdrawal history for a pool, optionally scoped to one wallet
+@router.get("/pools/{pool_addr}/liquidity")
+def pool_liquidity_history(pool_addr: str, user: str = Query(""), limit: int = Query(100, le=500)) -> dict[str, Any]:
+    pool_addr = (pool_addr or "").lower()
+    events = storage.list_pool_liquidity_events(pool_addr, user=user, limit=limit)
+    return {"ok": True, "market": pool_addr, "count": len(events), "events": events}
+
+
+# add and remove previews from indexed reserves, so quoting a deposit needs no rpc
+@router.get("/pools/{pool_addr}/preview")
+def pool_preview(
+    pool_addr: str,
+    quote: int = Query(0, ge=0),
+    base: int = Query(0, ge=0),
+    shares: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    pool_addr = (pool_addr or "").lower()
+    row = storage.get_crystal_pool_with_state(pool_addr)
+    if not row:
+        raise HTTPException(status_code=404, detail="pool not found")
+    pool = _pool_row_to_api(row)
+    rq = int(pool.get("reserveQuote") or 0)
+    rb = int(pool.get("reserveBase") or 0)
+    total = int(pool.get("totalShares") or 0)
+
+    if shares > 0:
+        if total <= 0:
+            raise HTTPException(status_code=400, detail="pool has no shares")
+        s = min(shares, total)
+        return {
+            "ok": True,
+            "kind": "withdraw",
+            "shares": str(s),
+            "amountQuoteOut": str(s * rq // total),
+            "amountBaseOut": str(s * rb // total),
+            "as_of_block": pool.get("lastSyncBlock"),
+        }
+
+    if quote <= 0 or base <= 0:
+        raise HTTPException(status_code=400, detail="deposit preview needs quote and base, withdraw needs shares")
+    if rq <= 0 or rb <= 0 or total <= 0:
+        from decimal import Decimal
+
+        lp = int((Decimal(quote) * Decimal(base)).sqrt())
+        return {
+            "ok": True,
+            "kind": "deposit",
+            "amountQuoteUsed": str(quote),
+            "amountBaseUsed": str(base),
+            "lpOut": str(lp),
+            "firstDeposit": True,
+            "as_of_block": pool.get("lastSyncBlock"),
+        }
+
+    base_optimal = quote * rb // rq
+    if base_optimal <= base:
+        used_q, used_b = quote, base_optimal
+    else:
+        used_q, used_b = base * rq // rb, base
+    lp = min(used_q * total // rq, used_b * total // rb)
+    return {
+        "ok": True,
+        "kind": "deposit",
+        "amountQuoteUsed": str(used_q),
+        "amountBaseUsed": str(used_b),
+        "lpOut": str(lp),
+        "firstDeposit": False,
+        "as_of_block": pool.get("lastSyncBlock"),
+    }

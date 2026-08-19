@@ -2249,6 +2249,30 @@ class State:
             )
 
     # track lp share balances from pool token transfers
+    # persist one lp deposit or withdrawal. amounts come from the mint/burn event,
+    # the receiving user and share count attach from the paired lp token transfer
+    def apply_pool_liquidity(self, kind, blk, ts, ev, log_addr, txh, log_idx, cur=None):
+        if not ev:
+            return
+        with self._lock:
+            market = (ev.get("market") or "").lower()
+            mi = self.addressToMarket.get(market)
+            if mi is None or int(getattr(mi, "marketType", 0) or 0) <= 1:
+                return
+            user = (ev.get("to") or "").lower() if kind == "burn" else ""
+            storage.insert_pool_liquidity_event(
+                txhash=(txh or ""),
+                log_index=int(log_idx or 0),
+                market=market,
+                kind=kind,
+                user_address=user,
+                amount_quote=int(ev.get("amountQuote", 0) or 0),
+                amount_base=int(ev.get("amountBase", 0) or 0),
+                block_number=int(blk or 0),
+                timestamp=int(ts or 0),
+                cur=cur,
+            )
+
     def apply_pool_transfer(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -2273,6 +2297,49 @@ class State:
                 if total < 0:
                     total = 0
             mi.totalShares = total
+
+            # lp mint and burn transfers attribute the same-tx liquidity event and
+            # move cost basis: mint adds the deposit amounts, burn releases pro rata
+            txh_attr = (ev.get("txhash") or "").lower()
+            if txh_attr:
+                if from_addr == zero and to_addr and to_addr != zero:
+                    storage.attach_pool_liquidity_shares(
+                        txhash=txh_attr,
+                        market=token,
+                        kind="mint",
+                        shares=amount,
+                        user_address=to_addr,
+                        cur=cur,
+                    )
+                    row = storage.get_pool_liquidity_amounts(txh_attr, token, "mint", cur=cur)
+                    if row:
+                        storage.apply_lp_cost_delta(market=token, user=to_addr, dq=row[0], db_=row[1], cur=cur)
+                elif to_addr == zero and from_addr and from_addr != zero:
+                    storage.attach_pool_liquidity_shares(
+                        txhash=txh_attr, market=token, kind="burn", shares=amount, cur=cur
+                    )
+                elif to_addr == token and from_addr and from_addr != zero:
+                    # user sends lp tokens to the pair ahead of burn: release the
+                    # user's cost basis in proportion to the shares leaving
+                    prior = int(storage.get_lp_user_shares(token, from_addr, cur=cur) or 0)
+                    if prior > 0:
+                        storage.apply_lp_cost_delta(
+                            market=token,
+                            user=from_addr,
+                            dq=0,
+                            db_=0,
+                            burn_fraction_num=min(amount, prior),
+                            burn_fraction_den=prior,
+                            cur=cur,
+                        )
+                        storage.attach_pool_liquidity_shares(
+                            txhash=txh_attr,
+                            market=token,
+                            kind="burn",
+                            shares=0,
+                            user_address=from_addr,
+                            cur=cur,
+                        )
 
             if from_addr and from_addr != zero:
                 storage.upsert_crystal_pool_lp_user_delta(

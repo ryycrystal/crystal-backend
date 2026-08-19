@@ -612,7 +612,16 @@ class Sequencer:
                 )
 
             elif tag in ("PMINT", "PBURN"):
-                pass
+                self._state.apply_pool_liquidity(
+                    "mint" if tag == "PMINT" else "burn",
+                    blk,
+                    blk_ts,
+                    parsed,
+                    log.get("address", "").lower(),
+                    txh,
+                    lii,
+                    cur=cur,
+                )
 
             elif tag in ("TC", "NFC"):
                 self._state.apply_token_created(blk, parsed, blk_ts, log["address"].lower(), cur=cur, batch=batch)
@@ -688,7 +697,12 @@ class Sequencer:
                         continue
                     if is_lp_token:
                         self._state.apply_pool_transfer(
-                            blk, blk_ts, parsed, log["address"].lower(), cur=cur, batch=batch
+                            blk,
+                            blk_ts,
+                            {**parsed, "txhash": (txh or "").lower()},
+                            log["address"].lower(),
+                            cur=cur,
+                            batch=batch,
                         )
                     else:
                         self._state.apply_token_transfer(
