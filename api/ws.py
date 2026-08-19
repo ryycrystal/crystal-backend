@@ -200,9 +200,11 @@ class Hub:
         if channel == "dev_tokens":
             return {"devTokens": await asyncio.to_thread(d.dev_tokens, token)}
         if channel == "tokens":
-            from api.routes.launchpad import _list_tokens_impl
+            # the cached variant: a reconnecting client heals in milliseconds with at
+            # most 3s-stale rows, and the first delta tick corrects them anyway
+            from api.routes.launchpad import _list_tokens_cached
 
-            body = await asyncio.to_thread(_list_tokens_impl, 0, 0, {})
+            body = await asyncio.to_thread(_list_tokens_cached, 0, 0)
             rows = {}
             for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
                 for r in body.get(bucket) or []:
