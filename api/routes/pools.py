@@ -5,7 +5,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 import core.storage as storage
-from core.storage import db_cursor
 
 router = APIRouter()
 
@@ -124,17 +123,7 @@ def _apy_history(market: str, tvl_history: list[dict]) -> list[dict]:
         return []
     lo = int(tvl_history[0]["timestamp"]) - 86400
     hi = int(tvl_history[-1]["timestamp"])
-    with db_cursor() as cur:
-        cur.execute(
-            """
-            SELECT timestamp, COALESCE(fees_usd, 0)
-            FROM crystal_pool_sync_events
-            WHERE market = %s AND timestamp BETWEEN %s AND %s AND COALESCE(fees_usd, 0) > 0
-            ORDER BY timestamp
-            """,
-            ((market or "").lower(), lo, hi),
-        )
-        fee_events = cur.fetchall()
+    fee_events = storage.list_pool_fee_events(market, lo, hi)
 
     out = []
     j = 0

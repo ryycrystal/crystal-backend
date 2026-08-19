@@ -620,3 +620,20 @@ def pool_invariant_growth_since(market: str, since_ts: int, cur=None) -> Decimal
         if ratio > 0:
             growth *= ratio.sqrt()
     return growth - Decimal(1)
+
+
+# fee events for a market in a window, for the historical apy series
+def list_pool_fee_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[int, float]]:
+    from .base import db_cursor
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT timestamp, COALESCE(fees_usd, 0)
+            FROM crystal_pool_sync_events
+            WHERE market = %s AND timestamp BETWEEN %s AND %s AND COALESCE(fees_usd, 0) > 0
+            ORDER BY timestamp
+            """,
+            ((market or "").lower(), int(lo_ts), int(hi_ts)),
+        )
+        return [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]

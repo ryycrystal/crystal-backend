@@ -505,6 +505,11 @@ def test_pools_route_get_pool_success_and_history_building():
             "list_crystal_pool_tvl_samples",
             return_value=samples,
         ) as list_hist,
+        patch.object(
+            pool_api.storage,
+            "list_pool_fee_events",
+            return_value=[(4500, 1.1)],
+        ),
     ):
         out = pool_api.get_pool("0xPOOL", history_seconds=1000, history_limit=7)
 
@@ -512,7 +517,13 @@ def test_pools_route_get_pool_success_and_history_building():
     helper.assert_called_once_with(row)
     list_hist.assert_called_once_with("0xpool", since_ts=4100, limit=7)
     assert out["tvlHistory"] == [{"timestamp": 4000, "tvl": 10.5}, {"timestamp": 5000, "tvl": 11.0}]
-    assert out["apyHistory"] == [{"timestamp": 4000, "apy": 0.12}, {"timestamp": 5000, "apy": 0.12}]
+    # honest series: the point before the fee event has no trailing fees, the one
+    # after annualizes 1.1 usd of fees against its 11.0 tvl. the old series repeated
+    # the current apy at every timestamp regardless of what the pool earned
+    assert out["apyHistory"] == [
+        {"timestamp": 4000, "apy": 0.0},
+        {"timestamp": 5000, "apy": (1.1 / 11.0) * 365.0 * 100.0},
+    ]
 
 
 def test_pools_route_get_pool_fallback_params_no_since_and_not_found():
