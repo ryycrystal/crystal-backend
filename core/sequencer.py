@@ -526,6 +526,9 @@ class Sequencer:
             if not record_processed:
                 return
             storage.record_block_processed(blk, cur=c)
+            bh = (logs[0].get("blockHash") or "") if logs else ""
+            if bh:
+                storage.record_chain_tip(blk, bh, cur=c)
 
         if cur is None:
             with db_cursor() as cur:

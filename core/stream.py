@@ -460,6 +460,10 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
                         fetched = await _fetch_and_add_indexed_logs_for_block(last_head_num, event_counts)
                         if not fetched:
                             last_head_ts = time.monotonic()
+                            if last_head_num is not None and blk + 64 < last_head_num:
+                                raise RuntimeError(
+                                    f"[FORK GUARD] streamed head {blk} regressed below {last_head_num}: chain rollback"
+                                )
                             last_head_num = blk
                             last_head_block_ts = blk_ts
                             continue

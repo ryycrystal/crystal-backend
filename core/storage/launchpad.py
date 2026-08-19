@@ -2168,3 +2168,31 @@ def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
     with db_cursor() as cur:
         cur.execute("SELECT LOWER(market), taker_fee FROM crystal_markets WHERE LOWER(market) = ANY(%s)", (markets,))
         return {r[0]: str(int(r[1] or 0)) for r in cur.fetchall()}
+
+
+# small key value store for indexer level facts, currently the chain tip identity
+def set_meta(key: str, value: str, cur=None) -> None:
+    sql = """
+        INSERT INTO launchpad_kv (key, value) VALUES (%s, %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    """
+    if cur is not None:
+        cur.execute(sql, (key, str(value)))
+        return
+    with db_cursor() as c:
+        c.execute(sql, (key, str(value)))
+
+
+def get_meta(key: str) -> str | None:
+    with db_cursor() as cur:
+        cur.execute("SELECT value FROM launchpad_kv WHERE key = %s", (key,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+# remember the newest block whose hash we know, so a restart can prove the chain
+# we resume on is the chain we left. a rollback style hard fork rewrites history
+# under our feet and this is the only trace that catches it
+def record_chain_tip(number: int, block_hash: str, cur=None) -> None:
+    set_meta("tip_block", str(int(number)), cur=cur)
+    set_meta("tip_hash", (block_hash or "").lower(), cur=cur)

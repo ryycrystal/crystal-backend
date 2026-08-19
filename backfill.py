@@ -393,3 +393,46 @@ async def backfill(start_block: int, batch: int) -> int:
             except Exception as recover_err:
                 print(f"[Backfill] Recovery failed {recover_err!r}", flush=True)
             await asyncio.sleep(5.0)
+
+
+# hard fork guards, run before the indexer starts following the chain.
+# monad cannot reorg under normal consensus, so anything these catch is a chain
+# level event where continuing would silently index garbage forever: a wrong or
+# split chain behind the rpc, or a rollback fork that rewrote history under us.
+# the correct response is a loud halt, and recovery is the reindex machinery
+EXPECTED_CHAIN_ID = int(os.getenv("EXPECTED_CHAIN_ID", "143"))
+FORK_HEAD_TOLERANCE = int(os.getenv("FORK_HEAD_TOLERANCE", "64"))
+
+
+async def verify_chain_continuity(storage_module) -> None:
+    data = await http_jsonrpc("eth_chainId", [])
+    chain_id = int(data["result"], 16)
+    if chain_id != EXPECTED_CHAIN_ID:
+        raise RuntimeError(
+            f"[FORK GUARD] rpc serves chain id {chain_id}, expected {EXPECTED_CHAIN_ID}: "
+            "wrong network or a chain split behind the rpc, refusing to index it"
+        )
+
+    last = int(storage_module.get_last_processed_block() or 0)
+    if last > 0:
+        head = await get_head_http()
+        if head + FORK_HEAD_TOLERANCE < last:
+            raise RuntimeError(
+                f"[FORK GUARD] chain head {head} is behind our last processed block {last}: "
+                "the chain rolled back, refusing to wait for history to repeat. "
+                "recover by reindexing from before the fork height"
+            )
+
+    tip_block = storage_module.get_meta("tip_block")
+    tip_hash = (storage_module.get_meta("tip_hash") or "").lower()
+    if tip_block and tip_hash:
+        data = await http_jsonrpc("eth_getBlockByNumber", [hex(int(tip_block)), False])
+        chain_hash = ((data.get("result") or {}).get("hash") or "").lower()
+        if chain_hash and chain_hash != tip_hash:
+            raise RuntimeError(
+                f"[FORK GUARD] block {tip_block} is {chain_hash} on chain but {tip_hash} "
+                "in our history: the chain was rewritten (hard fork / rollback). "
+                "recover by clearing the log cache and derived state from before "
+                f"block {tip_block} and reindexing"
+            )
+    print("[FORK GUARD] chain id, head continuity and tip hash all verified", flush=True)

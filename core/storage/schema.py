@@ -784,6 +784,16 @@ def init_db() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS launchpad_kv
+            (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            """
+        )
+
         # fee config per dex pair, read once from the pair's fee collector and cached
         # so the terminal never needs an on chain read before a swap
         cur.execute(

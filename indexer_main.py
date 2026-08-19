@@ -207,6 +207,7 @@ async def main() -> None:
             print("[IDX] Acquired Postgres advisory indexer lock", flush=True)
 
         storage.init_db()
+        await backfill.verify_chain_continuity(storage)
         storage.backfill_cost_basis()
         storage.backfill_realized_pnl()
         storage.backfill_pool_fees_k_growth()

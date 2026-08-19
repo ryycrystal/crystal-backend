@@ -646,3 +646,57 @@ def test_orderbook_raw_log_decoders(db):
     assert u["owner"] == caller
     assert u["orders"][0] == {"price": 500, "order_id": 7, "size": 12345, "is_buy": True, "is_cancel": False}
     assert u["orders"][1]["is_cancel"] is True and u["orders"][1]["is_buy"] is False
+
+
+# the fork guards: wrong chain, rolled back head, rewritten history. each must halt
+# loudly rather than let the indexer follow a chain that is not ours anymore
+def test_fork_guards_halt_on_divergence(db, clean, monkeypatch):
+    import asyncio
+
+    import backfill
+    import core.storage as st
+
+    async def fake_rpc_factory(chain_id_hex, tip_hash):
+        async def fake(method, params):
+            if method == "eth_chainId":
+                return {"result": chain_id_hex}
+            if method == "eth_getBlockByNumber":
+                return {"result": {"hash": tip_hash}}
+            raise AssertionError(method)
+
+        return fake
+
+    async def run(chain_id_hex="0x8f", head=1000, tip_hash="0xabc"):
+        monkeypatch.setattr(backfill, "http_jsonrpc", await fake_rpc_factory(chain_id_hex, tip_hash))
+
+        async def fake_head():
+            return head
+
+        monkeypatch.setattr(backfill, "get_head_http", fake_head)
+        await backfill.verify_chain_continuity(st)
+
+    # clean pass: right chain, sane head, matching tip
+    st.record_block_processed(900)
+    st.record_chain_tip(900, "0xabc")
+    asyncio.run(run())
+
+    # wrong chain id halts
+    try:
+        asyncio.run(run(chain_id_hex="0x1"))
+        raise AssertionError("wrong chain id must halt")
+    except RuntimeError as e:
+        assert "chain id" in str(e)
+
+    # head far behind our watermark halts
+    try:
+        asyncio.run(run(head=100))
+        raise AssertionError("rolled back head must halt")
+    except RuntimeError as e:
+        assert "rolled back" in str(e)
+
+    # rewritten history halts
+    try:
+        asyncio.run(run(tip_hash="0xdifferent"))
+        raise AssertionError("tip hash mismatch must halt")
+    except RuntimeError as e:
+        assert "rewritten" in str(e)
