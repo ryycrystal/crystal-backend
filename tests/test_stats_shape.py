@@ -566,3 +566,51 @@ def test_klines_stitch_open_to_previous_close(db, clean):
     assert D(second["high"]) >= max(D(second["open"]), D(second["close"]))
     assert D(second["low"]) <= min(D(second["open"]), D(second["close"]))
     assert D(second["close"]) != D(second["open"]), "a real move is no longer a flat doji"
+
+
+# the spot tab is one call: rows from the markets-derived token list, balances from
+# one batched rpc read, prices from our own markets. unknowns are null, not zero
+def test_spot_portfolio_one_call(db, clean, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import api.api
+    import api.spot_data as sd
+
+    with storage.db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO crystal_markets (market, is_canonical, quote_asset, base_asset,
+                quote_address, quote_decimals, quote_ticker, quote_name,
+                base_address, base_decimals, base_ticker, base_name, last_price, updated_at)
+            VALUES ('0xmkt1', TRUE, 'q', 'b',
+                %s, 18, 'WMON', 'Wrapped Monad',
+                '0x00000000000000000000000000000000000000b1', 18, 'ABC', 'Abc Token', 2.5, 100)
+            ON CONFLICT (market) DO UPDATE SET last_price = EXCLUDED.last_price
+            """,
+            (sd.WMON,),
+        )
+
+    def fake_balances(wallet, tokens):
+        return 12345, {"0x00000000000000000000000000000000000000b1": 4 * 10**18, sd.WMON: 0}, 2 * 10**18, False
+
+    monkeypatch.setattr(sd, "fetch_balances", fake_balances)
+    monkeypatch.setattr(api.api, "_mon_price_usd", lambda: Decimal(3))
+    import api.routes.launchpad as rl
+
+    monkeypatch.setattr(rl, "_mon_price_usd", lambda: Decimal(3))
+
+    client = TestClient(api.api.app)
+    r = client.get("/spot/0x" + "ab" * 20)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    rows = {row["address"]: row for row in d["rows"]}
+    # ABC: 4 tokens at 2.5 WMON x 3 usd = 30 usd; native MON: 2 x 3 = 6
+    assert rows["0x00000000000000000000000000000000000000b1"]["valueUsd"] == "30"
+    assert rows["native"]["valueUsd"] == "6"
+    assert d["summary"]["totalAccountValue"] == "36"
+    # wmon balance is zero so the row is filtered
+    assert sd.WMON not in rows
+    # unindexed stats are null, never fake zeros
+    assert d["summary"]["activeOrders"] is None and d["summary"]["totalVolume"] is None
+    assert d["balance_block"] == 12345 and d["stale"] is False
+    assert client.get("/spot/nope").status_code == 400

@@ -1980,6 +1980,73 @@ def chart_only(
 
 
 # total traded volume and trade count for one user
+# the whole spot portfolio tab in one call: rows, totals and the envelope. fields
+# whose source is not indexed yet (exchange trade history, open orders) are null
+# rather than zero, so the ui shows a dash instead of a number that lies
+@router.get("/spot/{wallet}")
+def spot_portfolio(wallet: str, all: bool = Query(False, description="include zero balances")) -> dict[str, Any]:
+    from api.spot_data import NATIVE, fetch_balances, spot_prices, spot_token_list
+
+    wallet = wallet.lower()
+    if not wallet.startswith("0x") or len(wallet) != 42:
+        raise HTTPException(status_code=400, detail="invalid wallet address")
+
+    tokens = spot_token_list()
+    try:
+        balance_block, balances, native_raw, stale = fetch_balances(wallet, [t["address"] for t in tokens])
+    except Exception:
+        raise HTTPException(status_code=503, detail="balance read failed and no cached snapshot exists")
+
+    prices = spot_prices(_mon_price_usd())
+    rows = []
+    total = Decimal(0)
+    for t in tokens:
+        addr = t["address"]
+        raw = native_raw if addr == NATIVE else balances.get(addr, 0)
+        if raw <= 0 and not all:
+            continue
+        bal = Decimal(raw) / Decimal(10) ** int(t["decimals"])
+        price = prices.get(addr)
+        value = (bal * price) if price is not None else None
+        if value is not None:
+            total += value
+        rows.append(
+            {
+                "address": addr,
+                "ticker": t["ticker"],
+                "name": t["name"],
+                "decimals": t["decimals"],
+                "balanceRaw": str(raw),
+                "balance": _fmt(bal),
+                "priceUsd": _fmt_usd(price) if price is not None else None,
+                # exchange trade history is not indexed until the orderbook decode
+                # lands, so a 24h change would be a guess. null renders as a dash
+                "priceChange24h": None,
+                "valueUsd": _fmt_usd(value) if value is not None else None,
+            }
+        )
+    rows.sort(key=lambda r: Decimal(r["valueUsd"] or 0), reverse=True)
+
+    return {
+        "wallet": wallet,
+        "rows": rows,
+        "summary": {
+            "totalAccountValue": _fmt_usd(total),
+            # these four light up with the orderbook event decode; see DESIGN.md
+            "totalVolume": None,
+            "buySellRatio": None,
+            "activeOrders": None,
+            "changePct": None,
+            "high": None,
+            "low": None,
+        },
+        "graph": None,
+        "as_of_block": storage.get_last_processed_block() or 0,
+        "balance_block": balance_block,
+        "stale": stale,
+    }
+
+
 @router.get("/volume/{user_addr}")
 def user_volume(user_addr: str) -> dict[str, Any]:
     user_addr = user_addr.lower()
