@@ -2038,7 +2038,7 @@ class State:
                     continue
                 mi.tvlUsd = tvl_usd
                 if tvl_usd > 0:
-                    mi.dailyYield24h = Decimal(getattr(mi, "fees24hUsd", Decimal(0)) or 0) / tvl_usd
+                    mi.dailyYield24h = storage.pool_invariant_growth_since(market, int(time.time()) - 24 * 3600)
                     mi.apy24h = mi.dailyYield24h * Decimal(365)
                 else:
                     mi.dailyYield24h = Decimal(0)
@@ -2176,6 +2176,11 @@ class State:
             mi.tvlUsd = tvl_usd
             mi.volume24hUsd = vol_24h
             mi.fees24hUsd = fees_24h
+            # yield is invariant growth per share over the window, not fee x volume:
+            # the fee is a spread, so a round trip nets less than 2x the rate and
+            # price impact reverses to zero. fee x volume let wash flow inflate apy
+            mi.dailyYield24h = storage.pool_invariant_growth_since(market, max(0, int(ts or 0) - 24 * 3600), cur=cur)
+            mi.apy24h = mi.dailyYield24h * Decimal(365)
 
             storage.insert_crystal_pool_tvl_sample(
                 market=market,

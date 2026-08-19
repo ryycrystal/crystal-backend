@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import traceback
 from decimal import Decimal
 from typing import Any
@@ -180,6 +181,7 @@ def list_tokens(
     exclude_ca: str = Query("", description="comma separated token addresses"),
     exclude_website: str = Query("", description="comma separated bare hostnames"),
     exclude_twitter: str = Query("", description="comma separated bare handles"),
+    filters: str = Query("", description="url encoded json: per-bucket search filters"),
 ) -> dict[str, Any]:
     ex = {
         "exclude_dev": _csv(exclude_dev),
@@ -187,6 +189,33 @@ def list_tokens(
         "exclude_website": _csv(exclude_website),
         "exclude_twitter": _csv(exclude_twitter),
     }
+    # one call, three independently filtered columns: filters is url encoded json
+    # keyed by bucket, each value the same filter names /search/query takes, e.g.
+    # {"graduated":{"marketcap_min":200},"new":{"marketcap_min":20}}
+    if filters:
+        try:
+            per_bucket = json.loads(filters)
+            assert isinstance(per_bucket, dict)
+        except Exception:
+            raise HTTPException(status_code=400, detail="filters must be a json object keyed by bucket") from None
+        excluded = _internal_addrs()
+        phase_by_bucket = {"new": "new", "approaching": "graduating", "graduated": "graduated"}
+        out: dict[str, Any] = {}
+        applied: dict[str, list] = {}
+        for bucket, phase in phase_by_bucket.items():
+            f = dict(per_bucket.get(bucket) or {})
+            f.update(ex)
+            f["phase"] = phase
+            res = _search_impl(str(f.pop("query", "") or ""), str(f.pop("sort", "") or ""), 30, 0, f, excluded)
+            key = {"new": "recent_created", "approaching": "recent_approaching", "graduated": "recent_graduated"}[
+                bucket
+            ]
+            out[key] = res["results"]
+            out[key + "_total"] = res["total"]
+            applied[bucket] = res["applied_filters"]
+        out["applied_filters"] = applied
+        out["as_of_block"] = storage.get_last_processed_block() or 0
+        return out
     if not any(ex.values()):
         return _list_tokens_cached(since_block, since)
     return _list_tokens_impl(since_block, since, ex)

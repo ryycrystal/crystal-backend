@@ -590,3 +590,33 @@ def get_crystal_pool_with_state(market: str):
             ((market or "").lower(),),
         )
         return cur.fetchone()
+
+
+# true lp yield for a window: the invariant sqrt(rq*rb) only grows on a swap by the
+# fee actually kept, and swaps do not move shares, so compounding the per swap
+# growth is per share yield by construction. fee x volume overstates it: a round
+# trip pays the spread on a shrinking notional and price impact reverses to zero
+def pool_invariant_growth_since(market: str, since_ts: int, cur=None) -> Decimal:
+    sql = """
+        SELECT prev_reserve_quote, prev_reserve_base, reserve_quote, reserve_base
+        FROM crystal_pool_sync_events
+        WHERE market = %s AND timestamp >= %s
+          AND kind = 'trade'
+          AND COALESCE(prev_reserve_quote, 0) > 0 AND COALESCE(prev_reserve_base, 0) > 0
+          AND reserve_quote > 0 AND reserve_base > 0
+        ORDER BY block_number, log_index
+    """
+    params = ((market or "").lower(), int(since_ts))
+    if cur is not None:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    else:
+        with db_cursor() as c:
+            c.execute(sql, params)
+            rows = c.fetchall()
+    growth = Decimal(1)
+    for prq, prb, rq, rb in rows:
+        ratio = (Decimal(int(rq)) * Decimal(int(rb))) / (Decimal(int(prq)) * Decimal(int(prb)))
+        if ratio > 0:
+            growth *= ratio.sqrt()
+    return growth - Decimal(1)
