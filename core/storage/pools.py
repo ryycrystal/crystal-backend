@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 import psycopg2
@@ -622,21 +623,28 @@ def pool_invariant_growth_since(market: str, since_ts: int, cur=None) -> Decimal
     return growth - Decimal(1)
 
 
-# fee events for a market in a window, for the historical apy series
-def list_pool_fee_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[int, float]]:
-    from .base import db_cursor
-
+# per trade invariant log growth events for the historical apy series
+def list_pool_growth_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[int, float]]:
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT timestamp, COALESCE(fees_usd, 0)
+            SELECT timestamp, prev_reserve_quote, prev_reserve_base, reserve_quote, reserve_base
             FROM crystal_pool_sync_events
-            WHERE market = %s AND timestamp BETWEEN %s AND %s AND COALESCE(fees_usd, 0) > 0
-            ORDER BY timestamp
+            WHERE market = %s AND timestamp BETWEEN %s AND %s
+              AND kind = 'trade'
+              AND COALESCE(prev_reserve_quote, 0) > 0 AND COALESCE(prev_reserve_base, 0) > 0
+              AND reserve_quote > 0 AND reserve_base > 0
+            ORDER BY timestamp, block_number, log_index
             """,
             ((market or "").lower(), int(lo_ts), int(hi_ts)),
         )
-        return [(int(r[0]), float(r[1] or 0.0)) for r in cur.fetchall()]
+        out = []
+        for ts, prq, prb, rq, rb in cur.fetchall():
+            k0 = float(prq) * float(prb)
+            k1 = float(rq) * float(rb)
+            if k0 > 0 and k1 > 0:
+                out.append((int(ts), 0.5 * math.log(k1 / k0)))
+        return out
 
 
 # lp share positions for one wallet across pools, the first reader of the table the

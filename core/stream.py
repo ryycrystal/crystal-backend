@@ -157,15 +157,17 @@ async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_n
             if len(results) != 2 * len(chunk):
                 raise ValueError(f"multicall result length mismatch {len(results)} != {2 * len(chunk)}")
             for j, vaddr in enumerate(chunk):
+                supply = None
+                ok_ts, raw_ts = results[2 * j + 1]
+                if ok_ts and isinstance(raw_ts, (bytes, bytearray)) and len(raw_ts) >= 32:
+                    supply = int.from_bytes(raw_ts[:32], "big")
+                    state.reconcile_vault_shares(vaddr, supply)
                 ok, raw = results[2 * j]
                 if ok:
                     decoded = _decode_vault_get_balances_return(raw)
                     if decoded:
                         quote_bal, base_bal = decoded
-                        state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal)
-                ok_ts, raw_ts = results[2 * j + 1]
-                if ok_ts and isinstance(raw_ts, (bytes, bytearray)) and len(raw_ts) >= 32:
-                    state.reconcile_vault_shares(vaddr, int.from_bytes(raw_ts[:32], "big"))
+                        state.record_vault_balance_sample(vaddr, blk_num, ts, quote_bal, base_bal, shares=supply)
         except Exception as e:
             print(f"[SAMPLER] Multicall fallback for chunk {i}-{i + len(chunk) - 1}: {e!r}", flush=True)
             await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)

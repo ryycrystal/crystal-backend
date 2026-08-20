@@ -2214,23 +2214,6 @@ class State:
                 cur=cur,
             )
 
-            avg_tvl_24h = Decimal(
-                storage.time_weighted_avg_crystal_pool_tvl_since(
-                    market,
-                    since_ts=max(0, int(ts or 0) - 24 * 3600),
-                    end_ts=int(ts or 0),
-                    cur=cur,
-                )
-                or 0
-            )
-            denom_tvl = avg_tvl_24h if avg_tvl_24h > 0 else tvl_usd
-            if denom_tvl > 0:
-                mi.dailyYield24h = fees_24h / denom_tvl
-                mi.apy24h = mi.dailyYield24h * Decimal(365)
-            else:
-                mi.dailyYield24h = Decimal(0)
-                mi.apy24h = Decimal(0)
-
             storage.upsert_crystal_pool_state(
                 market=market,
                 reserve_quote=new_rq,
@@ -2804,13 +2787,15 @@ class State:
 
     # store one sampled vault balance and its usd value
     def record_vault_balance_sample(
-        self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int
+        self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int, shares: int | None = None
     ) -> None:
         vaddr = (vault or "").lower()
         with self._lock:
             v = self.vaults.get(vaddr)
             if v is None:
                 return
+
+            shares_val = int(shares) if shares is not None else int(getattr(v, "circulatingShares", 0) or 0)
 
             qd = int(getattr(v, "quoteDecimals", 0) or 0)
             bd = int(getattr(v, "baseDecimals", 0) or 0)
@@ -2838,6 +2823,7 @@ class State:
                 "quoteBalance": int(quote_balance),
                 "baseBalance": int(base_balance),
                 "usdValue": usd_value,
+                "shares": shares_val,
             }
 
             day = self.vaultBalancesDay.setdefault(vaddr, deque())
@@ -2860,6 +2846,7 @@ class State:
                 quote_balance=int(quote_balance),
                 base_balance=int(base_balance),
                 usd_value=Decimal(str(usd_value)),
+                shares=shares_val,
             )
 
     # replay cached logs to rebuild pool market and vault state

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -108,38 +109,34 @@ def get_pool(
     tvl_history = [{"timestamp": int(ts or 0), "tvl": float(v or 0.0)} for ts, v in samples]
     tvl_history = _sample_pool_chart_points(tvl_history, 48)
     out["tvlHistory"] = tvl_history
-    # real historical apy per chart point: fees actually earned in the trailing 24h
-    # window before each point, annualized against the tvl at that point. the old
-    # series repeated the current apy across every timestamp, a chart shaped like a
-    # ruler no matter what the pool did
     out["apyHistory"] = _apy_history(out["market"], tvl_history)
 
     return out
 
 
-# annualized apy at each tvl point from the fees ledger, null when tvl is unknown
+# annualized apy at each tvl point from trailing 24h invariant growth per lp share, null when tvl is unknown
 def _apy_history(market: str, tvl_history: list[dict]) -> list[dict]:
     if not tvl_history:
         return []
     lo = int(tvl_history[0]["timestamp"]) - 86400
     hi = int(tvl_history[-1]["timestamp"])
-    fee_events = storage.list_pool_fee_events(market, lo, hi)
+    events = storage.list_pool_growth_events(market, lo, hi)
 
     out = []
     j = 0
     window: list[tuple[int, float]] = []
-    total = 0.0
+    total_log = 0.0
     for p in tvl_history:
         ts = int(p["timestamp"])
-        while j < len(fee_events) and int(fee_events[j][0]) <= ts:
-            f = float(fee_events[j][1] or 0.0)
-            window.append((int(fee_events[j][0]), f))
-            total += f
+        while j < len(events) and int(events[j][0]) <= ts:
+            g = float(events[j][1] or 0.0)
+            window.append((int(events[j][0]), g))
+            total_log += g
             j += 1
         while window and window[0][0] < ts - 86400:
-            total -= window.pop(0)[1]
+            total_log -= window.pop(0)[1]
         tvl = float(p.get("tvl") or 0.0)
-        apy = (total / tvl) * 365.0 * 100.0 if tvl > 0 else None
+        apy = (math.exp(total_log) - 1.0) * 365.0 * 100.0 if tvl > 0 else None
         out.append({"timestamp": ts, "apy": apy})
     return out
 

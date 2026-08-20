@@ -752,6 +752,12 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE crystal_vault_balance_samples
+            ADD COLUMN IF NOT EXISTS shares NUMERIC(78, 0);
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_crystal_vault_balances_vault_ts
             ON crystal_vault_balance_samples (vault, timestamp DESC);
             """

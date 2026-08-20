@@ -121,6 +121,47 @@ def _vault_user_lockup_fields(
     }
 
 
+# pnl from value per share so deposits and withdrawals do not read as performance
+def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
+    shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
+    if shared:
+        base = shared[0]
+        base_vps = float(base["usdValue"]) / float(base["shares"])
+        out = []
+        for p in pts:
+            sh = float(int(p.get("shares") or 0))
+            if sh > 0 and base_vps > 0:
+                vps = float(p["usdValue"]) / sh
+                pct = ((vps / base_vps) - 1.0) * 100.0
+                usd = (vps - base_vps) * sh
+            else:
+                pct = 0.0
+                usd = 0.0
+            out.append({"timestamp": int(p["timestamp"]), "pnlUsd": usd, "pnlPct": pct})
+        return out
+    base_usd = float(pts[0]["usdValue"]) if pts else 0.0
+    out = []
+    for p in pts:
+        cur_usd = float(p["usdValue"])
+        usd = cur_usd - base_usd
+        pct = ((cur_usd / base_usd) - 1.0) * 100.0 if base_usd > 0 else 0.0
+        out.append({"timestamp": int(p["timestamp"]), "pnlUsd": usd, "pnlPct": pct})
+    return out
+
+
+# percent change of value per share across a sample window, tvl based when shares are absent
+def _per_share_pct_change(pts: list[dict]) -> float:
+    shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
+    if shared:
+        first_vps = float(shared[0]["usdValue"]) / float(shared[0]["shares"])
+        last_vps = float(shared[-1]["usdValue"]) / float(shared[-1]["shares"])
+        return ((last_vps / first_vps) - 1.0) * 100.0 if first_vps > 0 else 0.0
+    values = [float(p.get("usdValue") or 0.0) for p in pts]
+    first = values[0] if values else 0.0
+    last = values[-1] if values else 0.0
+    return ((last / first) - 1.0) * 100.0 if first > 0 else 0.0
+
+
 def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: int = 0) -> dict | None:
     now_ts = int(time.time())
     if timeframe == 1:
@@ -141,6 +182,7 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
             "block": int(r[0] or 0),
             "timestamp": int(r[1] or 0),
             "usdValue": float(r[4] or 0.0),
+            "shares": int(r[5] or 0) if len(r) > 5 else 0,
         }
         for r in rows
     ]
@@ -150,9 +192,8 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
 
     tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
     values = [float(p["usdValue"]) for p in pts]
-    first = values[0] if values else 0.0
     last = values[-1] if values else 0.0
-    pct = ((last / first) - 1.0) * 100.0 if first > 0 else 0.0
+    pct = _per_share_pct_change(pts)
     return {
         "timeframe": int(timeframe),
         "tvl": tvl,
@@ -641,6 +682,7 @@ def vault_history(
             "quoteBalance": int(r[2] or 0),
             "baseBalance": int(r[3] or 0),
             "usdValue": float(r[4] or 0.0),
+            "shares": int(r[5] or 0) if len(r) > 5 else 0,
         }
         for r in pts_rows
     ]
@@ -648,13 +690,7 @@ def vault_history(
     pts = _sample_evenly_by_time(pts, 48, lambda p: int(p.get("timestamp") or 0))
 
     tvl_series = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
-    base_usd = float(pts[0]["usdValue"]) if pts else 0.0
-    pnl_series = []
-    for p in pts:
-        cur_usd = float(p["usdValue"])
-        pnl_usd = cur_usd - base_usd
-        pnl_pct = ((cur_usd / base_usd) - 1.0) * 100.0 if base_usd > 0 else 0.0
-        pnl_series.append({"timestamp": int(p["timestamp"]), "pnlUsd": pnl_usd, "pnlPct": pnl_pct})
+    pnl_series = _per_share_pnl_series(pts)
 
     tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe_i]
     return {

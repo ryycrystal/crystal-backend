@@ -282,18 +282,20 @@ def upsert_crystal_vault_balance_sample(
     quote_balance: int,
     base_balance: int,
     usd_value,
+    shares: int | None = None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     sql = """
         INSERT INTO crystal_vault_balance_samples (
-            vault, block_number, timestamp, quote_balance, base_balance, usd_value
+            vault, block_number, timestamp, quote_balance, base_balance, usd_value, shares
         )
-        VALUES (%s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (vault, block_number) DO UPDATE SET
             timestamp = EXCLUDED.timestamp,
             quote_balance = EXCLUDED.quote_balance,
             base_balance = EXCLUDED.base_balance,
-            usd_value = EXCLUDED.usd_value;
+            usd_value = EXCLUDED.usd_value,
+            shares = COALESCE(EXCLUDED.shares, crystal_vault_balance_samples.shares);
     """
     params = (
         vault.lower(),
@@ -302,6 +304,7 @@ def upsert_crystal_vault_balance_sample(
         int(quote_balance or 0),
         int(base_balance or 0),
         Decimal(str(usd_value or 0)),
+        int(shares) if shares is not None else None,
     )
     if cur is None:
         with db_cursor() as cur2:
@@ -566,7 +569,7 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
             if limit and limit > 0:
                 cur.execute(
                     """
-                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
                     FROM crystal_vault_balance_samples
                     WHERE vault = %s
                     ORDER BY timestamp DESC, block_number DESC
@@ -577,7 +580,7 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
             else:
                 cur.execute(
                     """
-                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
                     FROM crystal_vault_balance_samples
                     WHERE vault = %s
                     ORDER BY timestamp DESC, block_number DESC
@@ -588,7 +591,7 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
             if limit and limit > 0:
                 cur.execute(
                     """
-                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
                     FROM crystal_vault_balance_samples
                     WHERE vault = %s AND timestamp >= %s
                     ORDER BY timestamp DESC, block_number DESC
@@ -599,7 +602,7 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
             else:
                 cur.execute(
                     """
-                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value
+                    SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
                     FROM crystal_vault_balance_samples
                     WHERE vault = %s AND timestamp >= %s
                     ORDER BY timestamp DESC, block_number DESC

@@ -1452,8 +1452,57 @@ def test_vault_storage_list_balance_samples_query_variants_and_ordering():
     assert out_d == list(reversed(rows_d))
 
 
+# deposits that mint shares at nav must not read as vault pnl
+def test_vault_history_per_share_pnl_ignores_flows():
+    vault_row = _vault_row(vault="0xv")
+    pts_rows = [
+        (1, 1000, 0, 0, 100.0, 1000),
+        (2, 1010, 0, 0, 200.0, 2000),
+        (3, 1020, 0, 0, 220.0, 2000),
+    ]
+    with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=pts_rows):
+            out = vault_api.vault_history("0xV", 4, limit=0)
+    pnl = out["series"]["pnl"]
+    assert pnl[0]["pnlPct"] == 0.0
+    assert pnl[1]["pnlPct"] == 0.0
+    assert abs(pnl[2]["pnlPct"] - 10.0) < 1e-9
+    assert abs(pnl[2]["pnlUsd"] - 20.0) < 1e-9
+    assert [p["tvlUsd"] for p in out["series"]["tvl"]] == [100.0, 200.0, 220.0]
+
+
+# samples without shares keep the old tvl based pnl for legacy rows
+def test_vault_history_legacy_rows_fall_back_to_tvl_pnl():
+    vault_row = _vault_row(vault="0xv")
+    pts_rows = [
+        (1, 1000, 0, 0, 1.0),
+        (2, 1010, 0, 0, 2.0),
+    ]
+    with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=pts_rows):
+            out = vault_api.vault_history("0xV", 4, limit=0)
+    pnl = out["series"]["pnl"]
+    assert [p["pnlUsd"] for p in pnl] == [0.0, 1.0]
+    assert [p["pnlPct"] for p in pnl] == [0.0, 100.0]
+
+
+# snapshot pct change also normalizes by shares when they exist
+def test_vault_snapshot_pct_change_is_per_share():
+    rows = [
+        (1, 1000, 0, 0, 100.0, 1000),
+        (2, 1010, 0, 0, 200.0, 2000),
+    ]
+    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+        snap = vault_api._vault_snapshot_from_samples("0xv", timeframe=4)
+    assert abs(snap["stats"]["pctChange"]) < 1e-9
+    assert snap["stats"]["lastUsd"] == 200.0
+
+
 if __name__ == "__main__":
     for fn in [
+        test_vault_history_per_share_pnl_ignores_flows,
+        test_vault_history_legacy_rows_fall_back_to_tvl_pnl,
+        test_vault_snapshot_pct_change_is_per_share,
         test_vaults_module_helpers,
         test_parse_vault_created_with_metadata,
         test_parse_vault_created_without_metadata_and_with_bad_metadata_hex,
