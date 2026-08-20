@@ -392,6 +392,88 @@ After the mount is applied, scale the indexer up:
 az containerapp update --name crystal-indexer --resource-group $env:AZ_RG --min-replicas 1 --max-replicas 1
 ```
 
+## Data Integrity
+
+`doctor.py` answers "is the backend missing data" and repairs the raw log cache.
+It needs the PG* env vars (point them at whichever DB you are checking) and RPC
+access. It reports:
+
+- **processed gaps** — blocks the indexer never processed at all (events never
+  indexed).
+- **cache holes** — processed blocks with no `launchpad_block_logs` row. Their
+  events live in derived state now but a clean reindex would silently drop them.
+  This is the class behind the 2026-08-19 vanished-tokens incident.
+- **head lag**, **per-range cache density**, and **orphans** (trade/position
+  tokens whose create row is missing from `launchpad_tokens` — the visible
+  symptom of past holes).
+
+```powershell
+python doctor.py
+```
+
+Cross-check sampled cached blocks against fresh RPC logs (N per 10M-block range):
+
+```powershell
+python doctor.py --verify-rpc 5
+```
+
+Refill cache holes from RPC. Idempotent and resumable (`ON CONFLICT DO NOTHING`);
+re-run after any interruption and it recomputes what is still missing:
+
+```powershell
+python doctor.py --refill
+```
+
+The live indexer caches raw logs for every block it processes (stream, gap
+worker, and RPC backfill all write `launchpad_block_logs`), so holes should only
+appear after operational surgery on the table or crashes; `doctor.py` in a cron
+or before any reindex catches them.
+
+### Built-In Self Check
+
+The indexer also watches itself: an integrity worker (`core/integrity.py`) runs
+alongside the stream and every `INTEGRITY_INTERVAL` (default 300s) sweeps the
+trailing `INTEGRITY_WINDOW` blocks (default 100k, minus a `INTEGRITY_TIP_MARGIN`
+of 256 still in flight) for processed gaps and cache holes, plus a stall check
+(`INTEGRITY_STALL_LIMIT`, 60s) and head lag check (`INTEGRITY_HEAD_LAG_LIMIT`,
+100 blocks). Findings print as `[INTEGRITY] PROBLEMS: ...` in the indexer logs,
+and every sweep result is published to `launchpad_kv` under `integrity_last`.
+
+The API serves it at `GET /integrity`: `ok` is false whenever the last sweep had
+findings, no sweep has been published, or no block has been processed within the
+stall limit — point an uptime monitor at it and alert on `ok: false`. The sweep
+covers the recent window only; `doctor.py` remains the full-history audit.
+
+### Clean Reindex Guard
+
+`--mode reindex` without `--clean` resumes and never destroys data. A **clean**
+reindex now refuses to start while cache holes exist, because replaying a gappy
+cache is how data vanishes silently. Fix with `--refill` first, or accept the
+loss explicitly with the `REINDEX_MAX_CACHE_HOLES` env var (default 0).
+
+### Quick Recovery Runbook
+
+1. Size the damage: run `python doctor.py` with PG* pointed at prod.
+2. Refill: `python doctor.py --refill` (any machine with DB + RPC access; safe
+   while the indexer keeps running).
+3. Flip the prod indexer to a clean reindex. The args live in
+   `crystal-indexer.yaml` (`containers[0].args`); set them to
+   `[indexer_main.py, --mode, reindex, --clean]` and apply:
+
+```powershell
+az containerapp update --name crystal-indexer --resource-group $env:AZ_RG --yaml crystal-indexer.yaml
+```
+
+4. Watch logs until the replay reaches the head, then restore the normal args
+   (`[indexer_main.py, --mode, resume]`) and apply the yaml again — leaving
+   `--clean` in place wipes derived state on every restart:
+
+```powershell
+az containerapp update --name crystal-indexer --resource-group $env:AZ_RG --yaml crystal-indexer.yaml
+```
+
+The API stays up on stale data for the whole replay; only the indexer restarts.
+
 ## Checks
 
 Compile-check changed Python files:

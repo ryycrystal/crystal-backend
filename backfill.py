@@ -26,6 +26,10 @@ async def _process_metadata_batch_for_resync() -> int:
         return 0
 
 
+# cap on processed blocks missing from the log cache before a clean reindex refuses to run
+REINDEX_MAX_CACHE_HOLES = int(os.getenv("REINDEX_MAX_CACHE_HOLES", "0"))
+
+
 async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
     min_cached, max_cached = storage.get_cached_block_range()
     if min_cached is None:
@@ -45,6 +49,13 @@ async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
         print(f"[Reindex] Resuming from block {start_block} (db had {last_db})")
         SEQUENCER._state.rebuild_from_db()
     else:
+        holes = storage.count_uncached_processed_blocks(start_block, max_cached)
+        if holes > REINDEX_MAX_CACHE_HOLES:
+            raise RuntimeError(
+                f"[REINDEX GUARD] {holes} processed blocks in {start_block}-{max_cached} have no cached logs, "
+                "so a clean reindex would silently drop their events. "
+                "run 'python doctor.py --refill' first, or raise REINDEX_MAX_CACHE_HOLES to accept the loss"
+            )
         print(f"[Reindex] Clean reindex from block {start_block}")
         with storage.db_cursor() as cur:
             storage.clear_derived_state_from_block(start_block, cur)

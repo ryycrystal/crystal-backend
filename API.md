@@ -97,4 +97,7 @@ Channels:
 Reconnect contract (client already implements): ping ≤25s; on close reconnect with jittered backoff and resubscribe everything; every resubscribe yields a fresh snapshot so missed state heals wholesale; `seq` restarting at 1 on a new connection is normal (per-connection numbering); a `seq` gap mid-connection = refetch once. Drops are expected on backend deploys — recovery is the mechanism, not drop-avoidance.
 
 ## 8. Ops
-`/health`, `/openapi.json` (full route list), `/sync`, `/debug/mon_price`. Pools/markets/vaults: `/pools/list`, `/pools/{addr}`, `/markets/list`, `/vaults/*`. Pool `apy24h`/`dailyYield24h` = invariant growth per share (wash-resistant), not fee×volume.
+`/health`, `/openapi.json` (full route list), `/sync`, `/debug/mon_price`.
+`/integrity` reports the indexer's self-check: `ok`, `last_block`,
+`seconds_since_last_block`, and the last sweep (processed gaps, cache holes,
+head lag, stall) — alert on `ok: false`. Pools/markets/vaults: `/pools/list`, `/pools/{addr}`, `/markets/list`, `/vaults/*`. Pool `apy24h`/`dailyYield24h` = invariant growth per share (wash-resistant), not fee×volume.

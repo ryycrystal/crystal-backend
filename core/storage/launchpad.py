@@ -2196,3 +2196,19 @@ def get_meta(key: str) -> str | None:
 def record_chain_tip(number: int, block_hash: str, cur=None) -> None:
     set_meta("tip_block", str(int(number)), cur=cur)
     set_meta("tip_hash", (block_hash or "").lower(), cur=cur)
+
+
+# processed blocks in a window with no cached log row, which a clean reindex would silently drop
+def count_uncached_processed_blocks(start_block: int, end_block: int, cur=None) -> int:
+    sql = """
+        SELECT COUNT(*)
+        FROM launchpad_blocks b
+        LEFT JOIN launchpad_block_logs l ON l.number = b.number
+        WHERE b.number BETWEEN %s AND %s AND l.number IS NULL
+    """
+    if cur is not None:
+        cur.execute(sql, (start_block, end_block))
+        return int(cur.fetchone()[0])
+    with db_cursor() as c:
+        c.execute(sql, (start_block, end_block))
+        return int(c.fetchone()[0])

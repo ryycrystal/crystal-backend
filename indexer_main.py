@@ -8,6 +8,7 @@ from pathlib import Path
 import backfill
 import core.storage as storage
 import export_logs
+from core.integrity import integrity_worker
 from core.sequencer import SEQUENCER
 from core.stream import BACKFILL_BATCH, stream_logs, vault_sampler
 from modules import nadfun
@@ -170,6 +171,7 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
+        asyncio.create_task(integrity_worker()),
     ]
     if args.live_dump_dir:
         print(

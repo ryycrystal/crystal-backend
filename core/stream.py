@@ -8,6 +8,7 @@ from collections import deque
 import websockets
 
 import backfill
+import core.storage as storage
 from core import chain as h
 from core.sequencer import SEQUENCER
 
@@ -205,6 +206,11 @@ async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) ->
         _add_missing(blk)
         return False
 
+    try:
+        storage.write_block_logs(blk, logs)
+    except Exception as e:
+        print(f"[WS] Failed to cache logs for block {blk}: {e!r}", flush=True)
+
     by_block: dict[int, list[dict]] = {}
     for log in logs:
         topics = log.get("topics") or []
@@ -278,6 +284,21 @@ async def _gap_worker(event_counts, should_exit_flag: list):
                     )
                 )
                 resp = await asyncio.wait_for(h.ack(gap_ws, rid), timeout=30.0)
+
+            raw_by_block: dict[int, list[dict]] = {}
+            for log in resp.get("result", []):
+                blk_hex = log.get("blockNumber")
+                blk_num = int(blk_hex, 16) if isinstance(blk_hex, str) else int(blk_hex or 0)
+                if blk_start <= blk_num <= blk_end:
+                    raw_by_block.setdefault(blk_num, []).append(log)
+
+            try:
+                with storage.db_cursor() as cur:
+                    storage.write_block_logs_batch(
+                        {blk: raw_by_block.get(blk, []) for blk in range(blk_start, blk_end + 1)}, cur
+                    )
+            except Exception as e:
+                print(f"[Gap] Failed to cache logs for {blk_start}-{blk_end}: {e!r}", flush=True)
 
             by_block: dict[int, list[dict]] = {}
             for log in resp.get("result", []):
