@@ -149,6 +149,87 @@ def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
     return out
 
 
+# annualized per-share return from the trailing sample window, null when unknowable
+def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
+    now_ts = int(time.time())
+    try:
+        rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=now_ts - window_days * 86400, limit=0)
+    except Exception:
+        return None
+    shared = [
+        (int(r[1] or 0), float(r[4] or 0.0), int(r[5] or 0))
+        for r in rows
+        if len(r) > 5 and int(r[5] or 0) > 0 and float(r[4] or 0.0) > 0
+    ]
+    if len(shared) < 2:
+        return None
+    shared.sort(key=lambda p: p[0])
+    t_first, usd_first, sh_first = shared[0]
+    t_last, usd_last, sh_last = shared[-1]
+    window = t_last - t_first
+    if window <= 0:
+        return None
+    first_vps = usd_first / sh_first
+    last_vps = usd_last / sh_last
+    if first_vps <= 0:
+        return None
+    pct = ((last_vps / first_vps) - 1.0) * 100.0
+    return pct * (365.0 * 86400.0 / window)
+
+
+# average cost basis over signed share flows priced at nav, pure for unit tests
+def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[float, float, float]:
+    pos = 0.0
+    cost = 0.0
+    realized = 0.0
+    for shares, nav in flows:
+        if shares > 0:
+            cost += shares * nav
+            pos += float(shares)
+        elif shares < 0 and pos > 0:
+            take = min(float(-shares), pos)
+            avg = cost / pos
+            realized += take * (nav - avg)
+            cost -= take * avg
+            pos -= take
+    entry = (cost / pos) if pos > 0 else 0.0
+    return pos, entry, realized
+
+
+# user pnl from the flow ledger, nav at each flow reconstructed from samples and supply
+def _vault_user_pnl(vault_addr: str, user_addr: str, circ_now: int, tvl_usd_now: float) -> dict | None:
+    flows = storage.list_crystal_vault_user_flows(vault_addr, user_addr)
+    if not flows or circ_now <= 0 or tvl_usd_now <= 0:
+        return None
+    priced: list[tuple[int, float]] = []
+    for ts, shares in flows:
+        usd = storage.nearest_vault_sample_usd(vault_addr, ts)
+        if usd is None or usd <= 0:
+            return None
+        minted_after, burned_after = storage.sum_vault_share_flows_after(vault_addr, ts)
+        supply_at = circ_now - minted_after + burned_after
+        if supply_at <= 0:
+            return None
+        priced.append((shares, usd / supply_at))
+    pos, entry_nav, realized = _avg_cost_from_flows(priced)
+    if pos <= 0 or entry_nav <= 0:
+        return {
+            "entryNav": None,
+            "navNow": tvl_usd_now / circ_now,
+            "unrealizedPnlUsd": 0.0,
+            "unrealizedPnlPct": 0.0,
+            "realizedPnlUsd": realized,
+        }
+    nav_now = tvl_usd_now / circ_now
+    return {
+        "entryNav": entry_nav,
+        "navNow": nav_now,
+        "unrealizedPnlUsd": pos * (nav_now - entry_nav),
+        "unrealizedPnlPct": ((nav_now / entry_nav) - 1.0) * 100.0,
+        "realizedPnlUsd": realized,
+    }
+
+
 # percent change of value per share across a sample window, tvl based when shares are absent
 def _per_share_pct_change(pts: list[dict]) -> float:
     shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
@@ -326,6 +407,7 @@ def list_vaults(
                 "quoteName": quote_name or "",
                 "baseName": base_name or "",
                 "lastDeposit": int(last_deposit or 0),
+                "apyPct": _vault_apy_pct(str(vault_addr).lower()),
                 "latestBalance": {
                     "block": int(latest_block or 0),
                     "timestamp": int(latest_ts or 0),
@@ -457,6 +539,7 @@ def vault_refresh_balance(
     return {
         "ok": True,
         "vault": str(vault_addr or "").lower(),
+        "totalShares": str(circ),
         "latestBalance": {
             "block": int(blk_num),
             "timestamp": int(ts),
@@ -483,7 +566,7 @@ def vault_user_summary(
     uaddr = user.lower()
     v = storage.get_crystal_vault(vaddr)
     if not v:
-        return {"ok": False, "error": "vault not found", "vault": vaddr}
+        raise HTTPException(status_code=404, detail="vault not found")
     (
         vault_addr,
         quote,
@@ -594,6 +677,18 @@ def vault_user_summary(
             },
         }
 
+    user_pnl = None
+    try:
+        user_pnl = _vault_user_pnl(vaddr, uaddr, circ, float(latest["usdValue"] or 0.0))
+    except Exception:
+        user_pnl = None
+
+    apy_pct = None
+    try:
+        apy_pct = _vault_apy_pct(vaddr)
+    except Exception:
+        apy_pct = None
+
     return {
         "ok": True,
         "vault": {
@@ -616,12 +711,14 @@ def vault_user_summary(
         "status": {"locked": bool(locked), "closed": bool(closed)},
         "latestBalance": latest,
         "tvlUsd": latest["usdValue"],
+        "apyPct": apy_pct,
         "userBalance": {
             "address": uaddr,
             "shares": u_shares,
             "sharePct": share_pct,
             "quoteBalance": user_quote,
             "baseBalance": user_base,
+            "pnl": user_pnl,
             **lock_fields,
         },
         "depositHistory": deposit_history,

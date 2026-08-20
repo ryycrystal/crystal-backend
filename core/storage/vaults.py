@@ -562,6 +562,70 @@ def list_crystal_vault_users(vault: str):
         return cur.fetchall()
 
 
+# one user's share flows for a vault in time order, deposits positive and withdrawals negative
+def list_crystal_vault_user_flows(vault: str, user: str):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT timestamp, shares FROM crystal_vault_deposits
+            WHERE vault = %s AND user_address = %s
+            UNION ALL
+            SELECT timestamp, -shares FROM crystal_vault_withdrawals
+            WHERE vault = %s AND user_address = %s
+            ORDER BY 1
+            """,
+            (vault.lower(), user.lower(), vault.lower(), user.lower()),
+        )
+        return [(int(r[0] or 0), int(r[1] or 0)) for r in cur.fetchall()]
+
+
+# vault share mints and burns strictly after a timestamp, for supply reconstruction
+def sum_vault_share_flows_after(vault: str, ts: int) -> tuple[int, int]:
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(shares), 0) FROM crystal_vault_deposits WHERE vault = %s AND timestamp > %s",
+            (vault.lower(), int(ts)),
+        )
+        minted = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            "SELECT COALESCE(SUM(shares), 0) FROM crystal_vault_withdrawals WHERE vault = %s AND timestamp > %s",
+            (vault.lower(), int(ts)),
+        )
+        burned = int(cur.fetchone()[0] or 0)
+    return minted, burned
+
+
+# usd value of the balance sample nearest to a timestamp
+def nearest_vault_sample_usd(vault: str, ts: int) -> float | None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT timestamp, usd_value FROM crystal_vault_balance_samples
+            WHERE vault = %s AND timestamp <= %s
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (vault.lower(), int(ts)),
+        )
+        before = cur.fetchone()
+        cur.execute(
+            """
+            SELECT timestamp, usd_value FROM crystal_vault_balance_samples
+            WHERE vault = %s AND timestamp > %s
+            ORDER BY timestamp ASC LIMIT 1
+            """,
+            (vault.lower(), int(ts)),
+        )
+        after = cur.fetchone()
+    best = None
+    for row in (before, after):
+        if row is None or row[1] is None:
+            continue
+        dist = abs(int(row[0] or 0) - int(ts))
+        if best is None or dist < best[0]:
+            best = (dist, float(row[1]))
+    return best[1] if best else None
+
+
 # list vault balance samples in ascending time order for charts
 def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, limit: int = 0):
     with db_cursor() as cur:

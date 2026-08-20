@@ -520,13 +520,15 @@ def test_vault_user_lockup_fields_helper():
 
 def test_vault_user_summary_not_found_and_fallback_snapshot():
     with patch.object(vault_api.storage, "get_crystal_vault", return_value=None):
-        out = vault_api.vault_user_summary(
-            "0xvault",
-            "0x0000000000000000000000000000000000000000",
-            history_limit=1,
-            snapshot_timeframe=1,
+        _assert_http_exc(
+            lambda: vault_api.vault_user_summary(
+                "0xvault",
+                "0x0000000000000000000000000000000000000000",
+                history_limit=1,
+                snapshot_timeframe=1,
+            ),
+            404,
         )
-    assert out == {"ok": False, "error": "vault not found", "vault": "0xvault"}
 
     latest_row = (100, 1000, 10, 20, 12.34)
     with ExitStack() as st:
@@ -1452,6 +1454,43 @@ def test_vault_storage_list_balance_samples_query_variants_and_ordering():
     assert out_d == list(reversed(rows_d))
 
 
+# average cost basis: deposits accumulate, withdrawals realize at avg entry
+def test_avg_cost_from_flows_math():
+    pos, entry, realized = vault_api._avg_cost_from_flows([(100, 1.0)])
+    assert (pos, entry, realized) == (100.0, 1.0, 0.0)
+
+    pos, entry, realized = vault_api._avg_cost_from_flows([(100, 1.0), (100, 2.0)])
+    assert pos == 200.0
+    assert abs(entry - 1.5) < 1e-9
+    assert realized == 0.0
+
+    pos, entry, realized = vault_api._avg_cost_from_flows([(100, 1.0), (100, 2.0), (-100, 3.0)])
+    assert pos == 100.0
+    assert abs(entry - 1.5) < 1e-9
+    assert abs(realized - 150.0) < 1e-9
+
+    pos, entry, realized = vault_api._avg_cost_from_flows([(-50, 1.0)])
+    assert (pos, entry, realized) == (0.0, 0.0, 0.0)
+
+
+# annualized vault apy comes from per-share growth over the sample window
+def test_vault_apy_pct_from_samples():
+    day = 86400
+    now = 2_100_000_000
+    rows = [
+        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (2, now - day, 0, 0, 101.0, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+            apy = vault_api._vault_apy_pct("0xv")
+    assert apy is not None
+    assert abs(apy - 1.0 * 365.0) < 1e-6
+
+    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[rows[0]]):
+        assert vault_api._vault_apy_pct("0xv") is None
+
+
 # deposits that mint shares at nav must not read as vault pnl
 def test_vault_history_per_share_pnl_ignores_flows():
     vault_row = _vault_row(vault="0xv")
@@ -1500,6 +1539,8 @@ def test_vault_snapshot_pct_change_is_per_share():
 
 if __name__ == "__main__":
     for fn in [
+        test_avg_cost_from_flows_math,
+        test_vault_apy_pct_from_samples,
         test_vault_history_per_share_pnl_ignores_flows,
         test_vault_history_legacy_rows_fall_back_to_tvl_pnl,
         test_vault_snapshot_pct_change_is_per_share,
