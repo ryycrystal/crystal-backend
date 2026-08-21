@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import traceback
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -17,7 +18,6 @@ from api.api import (
     _fmt,
     _fmt_usd,
     _holders_for_token,
-    _internal_addrs,
     _lifecycle_fields,
     _mon_price_usd,
     _nadfun_version,
@@ -25,6 +25,8 @@ from api.api import (
     _parse_positions_cursor,
     _quote_price_usd,
     _scaled_price,
+    _sql_not_internal,
+    _static_internal_addrs,
     db_cursor,
     log,
     storage,
@@ -73,11 +75,10 @@ def token_holders(
     sort: str = Query("balance", pattern="^(balance|pnl)$"),
 ) -> dict[str, Any]:
     token_addr = token_addr.lower()
-    excluded = _internal_addrs()
     needle = (q or "").strip().lower()
 
-    where = ["token = %s", "balance_token > 0", "user_address <> ALL(%s)"]
-    params: list[Any] = [token_addr, list(excluded)]
+    where = ["token = %s", "balance_token > 0", "user_address <> ALL(%s)", _sql_not_internal("user_address")]
+    params: list[Any] = [token_addr, list(_static_internal_addrs())]
     if needle:
         where.append("user_address LIKE %s")
         params.append(f"%{needle}%")
@@ -104,11 +105,16 @@ def token_holders(
         )
         rows = cur.fetchall()
 
-    core = _get_token_core_stats(token_addr, int(time.time()) - 86400, excluded)
-    last_price_native = (core or {}).get("last_price_native") or Decimal(0)
-    quote_price_usd = _quote_price_usd((core or {}).get("quote_token"))
-    symbol = (core or {}).get("symbol") or ""
-    name = (core or {}).get("name") or ""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT symbol, name, last_price_native, quote_token FROM launchpad_tokens WHERE token = %s",
+            (token_addr,),
+        )
+        core_row = cur.fetchone()
+    symbol = (core_row[0] if core_row else "") or ""
+    name = (core_row[1] if core_row else "") or ""
+    last_price_native = (core_row[2] if core_row else None) or Decimal(0)
+    quote_price_usd = _quote_price_usd(core_row[3] if core_row else None)
 
     holders: list[dict[str, Any]] = []
     for (
@@ -168,7 +174,7 @@ def token_holders(
 # grouped token lists for recently created approaching and graduated tokens
 # the cached variant, for the common case of no blacklist. a 1000 entry list would
 # otherwise become part of the cache key and mint a private entry per user
-@ttl_cache("tokens:list", ttl_seconds=3)
+@ttl_cache("tokens:list", ttl_seconds=3, serve_stale_seconds=30)
 def _list_tokens_cached(since_block: int, since: int) -> dict[str, Any]:
     return _list_tokens_impl(since_block, since, {})
 
@@ -198,7 +204,6 @@ def list_tokens(
             assert isinstance(per_bucket, dict)
         except Exception:
             raise HTTPException(status_code=400, detail="filters must be a json object keyed by bucket") from None
-        excluded = _internal_addrs()
         phase_by_bucket = {"new": "new", "approaching": "graduating", "graduated": "graduated"}
         out: dict[str, Any] = {}
         applied: dict[str, list] = {}
@@ -206,7 +211,7 @@ def list_tokens(
             f = dict(per_bucket.get(bucket) or {})
             f.update(ex)
             f["phase"] = phase
-            res = _search_impl(str(f.pop("query", "") or ""), str(f.pop("sort", "") or ""), 30, 0, f, excluded)
+            res = _search_impl(str(f.pop("query", "") or ""), str(f.pop("sort", "") or ""), 30, 0, f)
             key = {"new": "recent_created", "approaching": "recent_approaching", "graduated": "recent_graduated"}[
                 bucket
             ]
@@ -225,7 +230,6 @@ def list_tokens(
 # is replaced by the next candidate instead of leaving a short column
 def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     t0 = time.time()
-    excluded = _internal_addrs()
     bl_where, bl_params = storage.blacklist_clauses(ex, "")
     bl_sql = ("".join(f" AND {c}" for c in bl_where)) if bl_where else ""
     with db_cursor() as cur:
@@ -299,7 +303,7 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
 
     all_token_addrs = [t for t, _ in grad_rows + appr_rows + created_rows]
     circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
-    token_data = _batch_serialize_tokens(all_token_addrs, excluded)
+    token_data = _batch_serialize_tokens(all_token_addrs)
 
     # attach graduation progress to a serialized token
     def with_graduation_pct(token_addr):
@@ -345,19 +349,21 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
 
 
 # one query for a token core row, holders, 24h stats and creator counts
-def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> dict | None:
-    excluded_list = list(excluded)
+def _get_token_core_stats(token_addr: str, day_ago: int) -> dict | None:
+    excluded_list = list(_static_internal_addrs())
+    not_internal = _sql_not_internal("user_address")
     with db_cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH token_data AS (
                 SELECT * FROM launchpad_tokens WHERE token = %s
             ),
             holder_stats AS (
                 SELECT
-                    COUNT(*) FILTER (WHERE user_address <> ALL(%s)) as holder_count
+                    COUNT(*) as holder_count
                 FROM launchpad_positions
                 WHERE token = %s AND balance_token > 1
+                  AND user_address <> ALL(%s) AND {not_internal}
             ),
             trade_stats_24h AS (
                 SELECT
@@ -370,10 +376,11 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
             ),
             buyer_seller_counts AS (
                 SELECT
-                    COUNT(*) FILTER (WHERE buy_count > 0 AND user_address <> ALL(%s)) as distinct_buyers,
-                    COUNT(*) FILTER (WHERE sell_count > 0 AND user_address <> ALL(%s)) as distinct_sellers
+                    COUNT(*) FILTER (WHERE buy_count > 0) as distinct_buyers,
+                    COUNT(*) FILTER (WHERE sell_count > 0) as distinct_sellers
                 FROM launchpad_positions
                 WHERE token = %s
+                  AND user_address <> ALL(%s) AND {not_internal}
             ),
             creator_stats AS (
                 SELECT
@@ -402,7 +409,7 @@ def _get_token_core_stats(token_addr: str, day_ago: int, excluded: set[str]) -> 
             CROSS JOIN buyer_seller_counts b
             LEFT JOIN creator_stats c ON true
         """,
-            (token_addr, excluded_list, token_addr, token_addr, day_ago, excluded_list, excluded_list, token_addr),
+            (token_addr, token_addr, excluded_list, token_addr, day_ago, token_addr, excluded_list),
         )
         row = cur.fetchone()
 
@@ -647,7 +654,7 @@ def token_overview_graph(
     from core.adapters import nadfun as _nadfun_geo
 
     t0 = time.time()
-    excluded = _internal_addrs()
+    excluded_static = list(_static_internal_addrs())
 
     try:
         if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
@@ -657,7 +664,7 @@ def token_overview_graph(
         now_ts = int(time.time())
         day_ago = now_ts - 86400
 
-        core = _get_token_core_stats(token_addr, day_ago, excluded)
+        core = _get_token_core_stats(token_addr, day_ago)
         if core is None:
             raise HTTPException(status_code=404)
 
@@ -716,7 +723,7 @@ def token_overview_graph(
 
         with db_cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     user_address,
                     balance_token,
@@ -732,10 +739,11 @@ def token_overview_graph(
                     token_sold
                 FROM launchpad_positions
                 WHERE token = %s AND balance_token > 0 AND user_address <> ALL(%s)
+                  AND {_sql_not_internal("user_address")}
                 ORDER BY balance_token DESC
                 LIMIT 50
                 """,
-                (token_addr, list(excluded)),
+                (token_addr, excluded_static),
             )
             pos_rows = cur.fetchall()
 
@@ -800,7 +808,7 @@ def token_overview_graph(
 
         with db_cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     user_address,
                     balance_token,
@@ -816,10 +824,11 @@ def token_overview_graph(
                     token_sold
                 FROM launchpad_positions
                 WHERE token = %s AND user_address <> ALL(%s) AND balance_token >= 0
+                  AND {_sql_not_internal("user_address")}
                 ORDER BY total_pnl_native DESC
                 LIMIT 50
                 """,
-                (token_addr, list(excluded)),
+                (token_addr, excluded_static),
             )
             trader_rows = cur.fetchall()
 
@@ -1201,8 +1210,9 @@ def token_overview_graph(
 # MUST stay registered above /user/{user_addr} or that route claims the bare path
 @router.get("/user")
 def users_portfolio_batch(
-    addresses: str = Query("", description="comma separated wallet addresses, max 25"),
+    addresses: str = Query("", description="comma separated wallet addresses, max 25 (100 when merged)"),
     token: str = Query("", description="optional, restrict positions to one token"),
+    merged: bool = False,
 ) -> dict[str, Any]:
     addrs: list[str] = []
     for a in (addresses or "").split(","):
@@ -1211,10 +1221,18 @@ def users_portfolio_batch(
             addrs.append(a)
     if not addrs:
         return {"users": {}, "count": 0}
-    if len(addrs) > 25:
-        raise HTTPException(status_code=400, detail="max 25 addresses")
+    if len(addrs) > (100 if merged else 25):
+        raise HTTPException(status_code=400, detail="max 100 addresses merged, 25 otherwise")
 
     tok = (token or "").strip().lower()
+
+    if merged:
+        return {
+            "merged": _merged_portfolio(addrs, tok or None),
+            "addresses": addrs,
+            "count": len(addrs),
+            "token": tok or None,
+        }
 
     out: dict[str, Any] = {}
     for a in addrs:
@@ -1227,9 +1245,150 @@ def users_portfolio_batch(
     return {"users": out, "count": len(out), "token": tok or None}
 
 
+# one combined position list across a wallet set, summed per token in a single
+# query so the multi wallet portfolio stops merging n responses in the browser
+def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
+    mon_price = _mon_price_usd()
+
+    where = "p.user_address = ANY(%s)"
+    params: tuple = (addrs,)
+    if tok:
+        where += " AND p.token = %s"
+        params = (addrs, tok)
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+                p.token,
+                SUM(p.token_bought),
+                SUM(p.token_sold),
+                SUM(p.native_spent),
+                SUM(p.native_received),
+                SUM(p.balance_token),
+                SUM(p.realized_pnl_native),
+                SUM(p.unrealized_pnl_native),
+                SUM(p.total_pnl_native),
+                SUM(p.trade_count),
+                SUM(p.buy_count),
+                SUM(p.sell_count),
+                COUNT(*),
+                t.name,
+                t.symbol,
+                t.metadata_cid,
+                t.last_price_native,
+                t.market,
+                t.source
+            FROM launchpad_positions p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE {where}
+            GROUP BY p.token, t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    positions: list[dict[str, Any]] = []
+    total_value_native = Decimal(0)
+    total_realized_pnl = Decimal(0)
+    total_unrealized_pnl = Decimal(0)
+    total_native_spent = 0
+    total_native_received = 0
+    total_trades = 0
+
+    for (
+        token,
+        token_bought,
+        token_sold,
+        native_spent,
+        native_received,
+        balance_token,
+        realized_pnl,
+        unrealized_pnl,
+        total_pnl,
+        trade_count,
+        buy_count,
+        sell_count,
+        wallet_count,
+        name,
+        symbol,
+        metadata_cid,
+        last_price_native,
+        market,
+        source,
+    ) in rows:
+        last_price_native = last_price_native or Decimal(0)
+        balance_token = int(balance_token or 0)
+        realized_pnl = realized_pnl or Decimal(0)
+        unrealized_pnl = unrealized_pnl or Decimal(0)
+        total_pnl = total_pnl or (realized_pnl + unrealized_pnl)
+        current_value_native = Decimal(balance_token) * last_price_native
+
+        total_value_native += current_value_native
+        total_realized_pnl += realized_pnl
+        total_unrealized_pnl += unrealized_pnl
+        total_native_spent += int(native_spent or 0)
+        total_native_received += int(native_received or 0)
+        total_trades += int(trade_count or 0)
+
+        current_value_usd = current_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
+        total_pnl_usd = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
+
+        positions.append(
+            {
+                "token": token,
+                "symbol": symbol,
+                "name": name,
+                "metadata_cid": metadata_cid or "",
+                "balance_token": str(balance_token),
+                "balance_native": _fmt(current_value_native),
+                "balance_usd": _fmt_usd(current_value_usd),
+                "native_spent": str(int(native_spent or 0)),
+                "native_received": str(int(native_received or 0)),
+                "realized_pnl_native": _fmt(realized_pnl),
+                "unrealized_pnl_native": _fmt(unrealized_pnl),
+                "total_pnl_native": _fmt(total_pnl),
+                "total_pnl_usd": _fmt_usd(total_pnl_usd),
+                "last_price_native": _fmt(last_price_native),
+                "trade_count": int(trade_count or 0),
+                "buy_count": int(buy_count or 0),
+                "sell_count": int(sell_count or 0),
+                "token_bought": str(int(token_bought or 0)),
+                "token_sold": str(int(token_sold or 0)),
+                "wallet_count": int(wallet_count or 0),
+                "market": market or None,
+                "source": _api_source(source),
+            }
+        )
+
+    positions.sort(
+        key=lambda p: Decimal(p["total_pnl_native"]) if p["total_pnl_native"] is not None else Decimal(0),
+        reverse=True,
+    )
+
+    total_pnl_native_val = total_realized_pnl + total_unrealized_pnl
+    total_value_usd = total_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
+    total_pnl_usd = total_pnl_native_val * mon_price / _WEI if mon_price > 0 else Decimal(0)
+
+    summary = {
+        "portfolio_value_native": _fmt(total_value_native),
+        "portfolio_value_usd": _fmt_usd(total_value_usd),
+        "realized_pnl_native": _fmt(total_realized_pnl),
+        "unrealized_pnl_native": _fmt(total_unrealized_pnl),
+        "total_pnl_native": _fmt(total_pnl_native_val),
+        "total_pnl_usd": _fmt_usd(total_pnl_usd),
+        "native_spent": str(total_native_spent),
+        "native_received": str(total_native_received),
+        "trade_count": int(total_trades),
+        "tokens_traded": len(positions),
+    }
+
+    return {"summary": summary, "positions": positions}
+
+
 # legacy user portfolio summary and positions
 @router.get("/user/{user_addr}")
-def user_portfolio(user_addr: str) -> dict[str, Any]:
+def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, Any]:
     user_addr = user_addr.lower()
     mon_price = _mon_price_usd()
 
@@ -1334,6 +1493,7 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
                 "unrealized_pnl_native": _fmt(unrealized_pnl_val),
                 "total_pnl_native": _fmt(total_pnl),
                 "total_pnl_usd": _fmt_usd(total_pnl_usd),
+                "last_price_native": _fmt(last_price_native),
                 "trade_count": int(trade_count or 0),
                 "buy_count": int(buy_count or 0),
                 "sell_count": int(sell_count or 0),
@@ -1373,11 +1533,27 @@ def user_portfolio(user_addr: str) -> dict[str, Any]:
         "tokens_traded": len(positions),
     }
 
-    return {
+    out = {
         "user": user_addr,
         "summary": summary,
         "positions": positions,
     }
+
+    if include_native:
+        from api.spot_data import fetch_native_balance
+
+        # a transport failure sends null rather than a zero that reads as broke
+        try:
+            native_block, native_raw, native_stale = fetch_native_balance(user_addr)
+            out["native_balance"] = str(native_raw)
+            out["native_balance_block"] = native_block
+            out["native_stale"] = native_stale
+        except Exception:
+            out["native_balance"] = None
+            out["native_balance_block"] = None
+            out["native_stale"] = True
+
+    return out
 
 
 # aggregated portfolio metrics for one user
@@ -1692,6 +1868,101 @@ def portfolio_history(
     }
 
 
+# realized pnl and flow per utc day, on the same average cost basis the position
+# columns are maintained with: cumulative sums per token, realized read at each
+# day end, the day's pnl being the difference. observed data only, no baselines
+@router.get("/portfolio/{address}/daily")
+def portfolio_daily(
+    address: str,
+    days: int = Query(90, ge=1, le=365, description="trailing utc days to return"),
+) -> dict[str, Any]:
+    user_addr = address.lower()
+    since_day = datetime.now(UTC).date() - timedelta(days=days - 1)
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            WITH tr AS (
+                SELECT (to_timestamp(timestamp) AT TIME ZONE 'UTC')::date AS day,
+                       token, is_buy, timestamp, log_index,
+                       native_amount::numeric AS na,
+                       token_amount::numeric AS ta,
+                       usd_amount
+                FROM launchpad_trades
+                WHERE user_address = %s
+            ),
+            cum AS (
+                SELECT day, token,
+                       SUM(CASE WHEN is_buy THEN na ELSE 0 END) OVER w AS spent_cum,
+                       SUM(CASE WHEN NOT is_buy THEN na ELSE 0 END) OVER w AS recv_cum,
+                       SUM(CASE WHEN is_buy THEN ta ELSE 0 END) OVER w AS bought_cum,
+                       SUM(CASE WHEN NOT is_buy THEN ta ELSE 0 END) OVER w AS sold_cum,
+                       ROW_NUMBER() OVER (PARTITION BY token, day ORDER BY timestamp DESC, log_index DESC) AS rn
+                FROM tr
+                WINDOW w AS (PARTITION BY token ORDER BY timestamp, log_index ROWS UNBOUNDED PRECEDING)
+            ),
+            eod AS (
+                SELECT day, token,
+                       recv_cum - CASE WHEN bought_cum > 0
+                                       THEN ROUND(spent_cum * LEAST(sold_cum, bought_cum) / bought_cum)
+                                       ELSE 0 END AS realized_cum
+                FROM cum WHERE rn = 1
+            ),
+            daily_tok AS (
+                SELECT day,
+                       realized_cum - COALESCE(LAG(realized_cum) OVER (PARTITION BY token ORDER BY day), 0)
+                       AS realized_day
+                FROM eod
+            ),
+            per_day_real AS (
+                SELECT day, SUM(realized_day) AS realized FROM daily_tok GROUP BY day
+            ),
+            per_day_flow AS (
+                SELECT day,
+                       SUM(na) AS volume_native,
+                       SUM(COALESCE(usd_amount, 0)) AS volume_usd,
+                       SUM(CASE WHEN is_buy THEN na ELSE 0 END) AS buy_native,
+                       SUM(CASE WHEN NOT is_buy THEN na ELSE 0 END) AS sell_native,
+                       COUNT(*) AS trade_count,
+                       COUNT(*) FILTER (WHERE is_buy) AS buy_count,
+                       COUNT(*) FILTER (WHERE NOT is_buy) AS sell_count
+                FROM tr GROUP BY day
+            )
+            SELECT f.day, COALESCE(r.realized, 0), f.volume_native, f.volume_usd,
+                   f.buy_native, f.sell_native, f.trade_count, f.buy_count, f.sell_count
+            FROM per_day_flow f
+            LEFT JOIN per_day_real r ON r.day = f.day
+            WHERE f.day >= %s
+            ORDER BY f.day
+            """,
+            (user_addr, since_day),
+        )
+        rows = cur.fetchall()
+
+    out_rows = []
+    for day, realized, vol_native, vol_usd, buy_native, sell_native, trade_count, buy_count, sell_count in rows:
+        out_rows.append(
+            {
+                "day": day.isoformat(),
+                "realized_pnl_native": _fmt(realized or Decimal(0)),
+                "volume_native": str(int(vol_native or 0)),
+                "volume_usd": _fmt_usd(vol_usd or Decimal(0)),
+                "buy_volume_native": str(int(buy_native or 0)),
+                "sell_volume_native": str(int(sell_native or 0)),
+                "trade_count": int(trade_count or 0),
+                "buy_count": int(buy_count or 0),
+                "sell_count": int(sell_count or 0),
+            }
+        )
+
+    return {
+        "user": user_addr,
+        "days": days,
+        "rows": out_rows,
+        "as_of_block": storage.get_last_processed_block() or 0,
+    }
+
+
 # ranked users by pnl volume or winrate
 @router.get("/leaderboard")
 def leaderboard(
@@ -1985,65 +2256,30 @@ def chart_only(
 # rather than zero, so the ui shows a dash instead of a number that lies
 @router.get("/spot/{wallet}")
 def spot_portfolio(wallet: str, all: bool = Query(False, description="include zero balances")) -> dict[str, Any]:
-    from api.spot_data import NATIVE, fetch_balances, spot_prices, spot_token_list
+    from api.spot_data import spot_body
+    from api.spot_graph import RESOLUTION, ensure_fill, graph_for
 
     wallet = wallet.lower()
     if not wallet.startswith("0x") or len(wallet) != 42:
         raise HTTPException(status_code=400, detail="invalid wallet address")
 
-    tokens = spot_token_list()
     try:
-        balance_block, balances, native_raw, stale = fetch_balances(wallet, [t["address"] for t in tokens])
+        body = spot_body(wallet, include_zero=all)
     except Exception:
         raise HTTPException(status_code=503, detail="balance read failed and no cached snapshot exists")
 
-    prices = spot_prices(_mon_price_usd())
-    rows = []
-    total = Decimal(0)
-    for t in tokens:
-        addr = t["address"]
-        raw = native_raw if addr == NATIVE else balances.get(addr, 0)
-        if raw <= 0 and not all:
-            continue
-        bal = Decimal(raw) / Decimal(10) ** int(t["decimals"])
-        price = prices.get(addr)
-        value = (bal * price) if price is not None else None
-        if value is not None:
-            total += value
-        rows.append(
-            {
-                "address": addr,
-                "ticker": t["ticker"],
-                "name": t["name"],
-                "decimals": t["decimals"],
-                "balanceRaw": str(raw),
-                "balance": _fmt(bal),
-                "priceUsd": _fmt_usd(price) if price is not None else None,
-                # exchange trade history is not indexed until the orderbook decode
-                # lands, so a 24h change would be a guess. null renders as a dash
-                "priceChange24h": None,
-                "valueUsd": _fmt_usd(value) if value is not None else None,
-            }
-        )
-    rows.sort(key=lambda r: Decimal(r["valueUsd"] or 0), reverse=True)
+    if body["supported"]:
+        # the bucket series is cached forever; a request for an unfilled wallet
+        # kicks a background fill and the client re-polls until complete
+        ensure_fill(wallet)
+        graph = graph_for(wallet)
+    else:
+        graph = {"resolution": RESOLUTION, "points": [], "complete": True}
 
     return {
-        "wallet": wallet,
-        "rows": rows,
-        "summary": {
-            "totalAccountValue": _fmt_usd(total),
-            # these four light up with the orderbook event decode; see DESIGN.md
-            "totalVolume": None,
-            "buySellRatio": None,
-            "activeOrders": None,
-            "changePct": None,
-            "high": None,
-            "low": None,
-        },
-        "graph": None,
+        **body,
+        "graph": graph,
         "as_of_block": storage.get_last_processed_block() or 0,
-        "balance_block": balance_block,
-        "stale": stale,
     }
 
 
@@ -2077,11 +2313,21 @@ def user_volume(user_addr: str) -> dict[str, Any]:
         if trade_count > 0:
             seen_tokens.add(token)
 
+    # usd summed at each trade's own price, so the figure is what actually traded
+    # rather than today's price applied to history
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(SUM(usd_amount), 0) FROM launchpad_trades WHERE user_address = %s",
+            (user_addr,),
+        )
+        total_usd_volume = cur.fetchone()[0] or Decimal(0)
+
     total_native_volume_dec = Decimal(total_native_volume)
 
     return {
         "user": user_addr,
         "volume_native": str(total_native_volume_dec),
+        "volume_usd": _fmt_usd(total_usd_volume),
         "trade_count": int(total_trades),
         "tokens_traded": len(seen_tokens),
     }
@@ -2134,8 +2380,6 @@ def search_tokens_api(
     has_telegram: bool = Query(False),
     has_discord: bool = Query(False),
 ) -> dict[str, Any]:
-    excluded = _internal_addrs()
-
     filters = {
         "phase": phase,
         "age_min": age_min,
@@ -2177,7 +2421,7 @@ def search_tokens_api(
         "has_discord": has_discord,
     }
 
-    return _search_impl(query, sort, limit, offset, filters, excluded)
+    return _search_impl(query, sort, limit, offset, filters)
 
 
 # a blacklist at the documented 1000 entry cap is roughly 43kb of query string, and
@@ -2186,7 +2430,6 @@ def search_tokens_api(
 @router.post("/search/query")
 def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
     b = body or {}
-    excluded = _internal_addrs()
 
     def lst(key):
         v = b.get(key)
@@ -2204,12 +2447,11 @@ def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
         int(b.get("limit") or 50),
         int(b.get("offset") or 0),
         filters,
-        excluded,
     )
 
 
 # shared body behind the get and post forms of the search
-def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict, excluded: set) -> dict[str, Any]:
+def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict) -> dict[str, Any]:
     token_addrs, circ_map, total = storage.search_tokens_filtered(
         query=query,
         filters=filters,
@@ -2242,7 +2484,7 @@ def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict, 
     if not token_addrs:
         return {**base, "count": 0, "results": []}
 
-    token_data = _batch_serialize_tokens(token_addrs, excluded)
+    token_data = _batch_serialize_tokens(token_addrs)
     results = []
     for t in token_addrs:
         data = token_data.get(t)

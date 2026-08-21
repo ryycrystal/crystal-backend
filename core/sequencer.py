@@ -507,6 +507,8 @@ class Sequencer:
                 "V2SWAP": 0,
                 "TF": 0,
                 "V3SWAP": 0,
+                "OBU": 0,
+                "OBF": 0,
             }
         )
         seen = set()
@@ -529,6 +531,9 @@ class Sequencer:
             bh = (logs[0].get("blockHash") or "") if logs else ""
             if bh:
                 storage.record_chain_tip(blk, bh, cur=c)
+            # delivered at commit, this turns the api hub's watermark poll into a
+            # push: one notify per block instead of a 300ms select loop
+            c.execute("NOTIFY crystal_new_block")
 
         if cur is None:
             with db_cursor() as cur:
@@ -599,6 +604,14 @@ class Sequencer:
                 self._state.apply_market_trade(
                     blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx
                 )
+
+            elif tag == "OBU":
+                self._state.apply_orderbook_orders(
+                    blk, blk_ts, parsed, log.get("address", "").lower(), txh, lii, cur=cur
+                )
+
+            elif tag == "OBF":
+                self._state.apply_orderbook_fill(blk, blk_ts, parsed, log.get("address", "").lower(), txh, lii, cur=cur)
 
             elif tag == "PSYNC":
                 sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)
@@ -768,6 +781,8 @@ class Sequencer:
             "TF": 0,
             "V2SWAP": 0,
             "V3SWAP": 0,
+            "OBU": 0,
+            "OBF": 0,
         }
 
         batch = BatchAccumulator()

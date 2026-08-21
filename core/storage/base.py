@@ -82,6 +82,16 @@ def close_pool() -> None:
         _POOL = None
 
 
+# one standalone autocommit connection outside the pool, for LISTEN/NOTIFY where
+# a pooled connection must not be parked on a blocking select
+def listen_connection() -> psycopg2.extensions.connection:
+    if _DATABASE_URL is None:
+        raise RuntimeError("[DB] Missing DB URL")
+    conn = psycopg2.connect(dsn=_DATABASE_URL)
+    conn.autocommit = True
+    return conn
+
+
 # return the pool creating it on first use
 def _get_pool() -> ThreadedConnectionPool:
     global _POOL

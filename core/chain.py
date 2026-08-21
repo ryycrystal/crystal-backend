@@ -7,6 +7,7 @@ import time
 import modules.launchpad as lp
 import modules.markets as m
 import modules.nadfun as n
+import modules.orderbook as ob
 import modules.pools as p
 import modules.vaults as v
 from env_loader import load_env
@@ -128,6 +129,8 @@ EVENT_SIGS = {
     "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822": "V2SWAP",
     "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67": "V3SWAP",
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
+    ob.ORDERS_UPDATED_TOPIC: "OBU",
+    ob.FILL_TOPIC: "OBF",
 }
 TOPICS = list(EVENT_SIGS.keys())
 
@@ -159,9 +162,11 @@ PARSERS = {
     "V2SWAP": n.parse_v2_pair_swap,
     "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
+    "OBU": ob.parse_orders_updated,
+    "OBF": ob.parse_fill,
 }
 
-ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG"}
+ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG", "OBU", "OBF"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 NADFUN_AUX_EVENT_TAGS = {"NFPEN"}

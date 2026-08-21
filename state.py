@@ -2256,6 +2256,18 @@ class State:
                 cur=cur,
             )
 
+    # persist a decoded orders-updated batch, replay safety lives in storage
+    def apply_orderbook_orders(self, blk, ts, ev, log_addr, txh, log_idx, cur=None):
+        if not ev or not ev.get("orders"):
+            return
+        storage.apply_orderbook_updates(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
+
+    # persist one maker fill, replay safety lives in storage
+    def apply_orderbook_fill(self, blk, ts, ev, log_addr, txh, log_idx, cur=None):
+        if not ev:
+            return
+        storage.apply_orderbook_fill(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
+
     def apply_pool_transfer(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return

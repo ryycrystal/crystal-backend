@@ -45,7 +45,16 @@ Everything stored for one token, unshaped: `raw` = every DB column verbatim, plu
 - `/holders/{addr}` — holder list with PnL fields, USD values.
 - `/token/{addr}/trades?limit=&before=` — range-queryable trades. Trade id = `txhash-logIndex` (decimal logIndex).
 - `/chart/{addr}/{res}` — klines only, same stitched builder as the overview.
-- `/user/{addr}`, `/portfolio/{addr}[...]` — per-wallet positions/summary. Spot portfolio is its own one-call endpoint.
+- **Portfolio scope**: the backend only carries wallets that have interacted with
+  Crystal (any indexed position, orderbook order, LP share, or vault deposit).
+  `/spot/{wallet}` answers `supported: false` with empty rows/graph for anyone
+  else — no RPC is spent on them, and clients should render "no activity", not
+  zeros. The cheap DB endpoints simply return empty for unknown wallets.
+- `/user/{addr}` — per-wallet positions + summary. Rows carry `realized/unrealized/total_pnl_native` and `last_price_native` — render these, never re-derive. `?include_native=1` adds `native_balance` (wei string, null on RPC failure, `native_stale` flag) so spectator views need no client RPC.
+- `/user?addresses=a,b&merged=1` — one combined position list summed per token across up to 100 wallets in a single query (`wallet_count` per row); unmerged form unchanged (max 25).
+- `/portfolio/{addr}[...]` — summary, paginated `/positions`, `/history` (real per-trade history — use for the History tab), and `/daily?days=N`: per-UTC-day `realized_pnl_native` (same average-cost basis as the position columns), `volume_native/usd`, `buy/sell_volume_native`, trade/buy/sell counts. Feeds the PnL calendar and realized-PnL chart.
+- `/volume/{addr}` — now also `volume_usd`, summed at each trade's own price.
+- `/pools/positions/{addr}` — LP share positions from indexed transfers; no more per-pool chain reads.
 
 ## 3. Filters (used by `/search/query` and per-bucket in `/tokens?filters=`)
 
@@ -81,6 +90,7 @@ One socket per app. Client protocol:
 ```jsonc
 {"op":"subscribe","token":"0x…","channels":["token","stats","trades","holders","positions","top_traders","dev_tokens"],"addresses":["0xwallet"]}
 {"op":"subscribe","token":"tokens","channels":["tokens"]}   // the explorer list — literal pseudo-token "tokens"
+{"op":"subscribe","token":"portfolio","channels":["user_positions"],"addresses":["0xmain","0xsub1"]}  // wallet-scoped, all tokens — literal pseudo-token "portfolio"
 {"op":"unsubscribe","token":"…","channels":[…]}             // omit channels = all for that token
 {"op":"ping"} -> {"op":"pong"}                              // send every ≤25s; silent sockets are dropped at 300s
 {"op":"query","id":123,"filters":{…§3…,"limit":50}} -> {"op":"query_result","id":123, …same shape as /search/query}
@@ -90,7 +100,7 @@ On subscribe you always get a full `snapshot`; deltas follow only when data chan
 
 Channels:
 - `tokens` (the explorer): snapshot = full `/tokens` response. Delta = `{new:[full rows], u:{addr:{changed fields only}}, gone:[addrs], ids:{bucket membership}}`. Apply patches over held rows; drop rows absent from `ids`. New tokens arrive as complete, quick-buy-ready rows ~0.5–1s after on-chain create.
-- `token` — per-trade half of the detail page (24h `volumeNative`/`buyTxs`/`sellTxs` matching REST; lifetime under `*Lifetime` keys). `stats` — the `/stats` body. `trades` — `{added:[…]}` append-only; ignore any notion of removal. `holders`/`top_traders` — `{upserts, removed}` keyed by address (top_traders ranked by PnL). `positions` — wallet-scoped; `addresses` array on subscribe **replaces** the set. `dev_tokens` — creator's launches.
+- `token` — per-trade half of the detail page (24h `volumeNative`/`buyTxs`/`sellTxs` matching REST; lifetime under `*Lifetime` keys). `stats` — the `/stats` body. `trades` — `{added:[…]}` append-only; ignore any notion of removal. `holders`/`top_traders` — `{upserts, removed}` keyed by address (top_traders ranked by PnL). `positions` — wallet-scoped; `addresses` array on subscribe **replaces** the set. `user_positions` — like `positions` but across **every** token for the wallet set (pseudo-token `portfolio`); rows carry the full `/user` row shape keyed `address:token`, so the portfolio page can drop its positions poll. `dev_tokens` — creator's launches.
 
 **Filters never touch the socket.** The `tokens` channel is unfiltered; apply your active filter predicates to incoming rows client-side (every filterable field is on the row), and run one `query` op (or REST call) on filter commit for full-universe discovery. Adding/changing a filter = **no disconnect, no resubscribe, nothing** — the subscription is filter-agnostic by design.
 

@@ -217,6 +217,22 @@ def _internal_addrs() -> set[str]:
     return base
 
 
+# the small static half of the internal set for sql params. pools and the denylist
+# are excluded in sql as anti joins so the 30k address array never ships per query
+def _static_internal_addrs() -> set[str]:
+    base: set[str] = {AGGREGATOR_ADDR}
+    base.update(a.lower() for a in getattr(h, "ADDRS", []))
+    return base
+
+
+# sql fragment excluding pool and denylisted addresses for a position column
+def _sql_not_internal(col: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM launchpad_pools _ex_p WHERE _ex_p.pool = {col})"
+        f" AND NOT EXISTS (SELECT 1 FROM holder_denylist _ex_d WHERE _ex_d.address = {col})"
+    )
+
+
 _nadfun_v2_cache: set[str] | None = None
 _nadfun_v2_ts: float = 0
 
@@ -247,6 +263,7 @@ def _nadfun_version(token: str, source) -> int:
     return 0
 
 
+import threading
 from collections import OrderedDict
 from functools import wraps
 
@@ -269,6 +286,14 @@ class TTLCache:
         self._cache.move_to_end(key)
         return value, True
 
+    # value, freshness and expiry without evicting stale entries
+    def get_stale(self, key: str) -> tuple[Any, bool, float]:
+        if key not in self._cache:
+            return None, False, 0.0
+        value, expires = self._cache[key]
+        self._cache.move_to_end(key)
+        return value, time.time() <= expires, expires
+
     # store a value with a ttl, evicting the oldest when full
     def set(self, key: str, value: Any, ttl_seconds: float) -> None:
         if key in self._cache:
@@ -289,8 +314,34 @@ class TTLCache:
 _cache = TTLCache(max_size=2000)
 
 
-# decorator caching an endpoint result under a prefixed key
-def ttl_cache(prefix: str, ttl_seconds: float = 60):
+_refresh_inflight: set[str] = set()
+_refresh_guard = threading.Lock()
+
+
+# recompute one cache key in a daemon thread unless a refresh is already running
+def _spawn_refresh(cache_key, func, args, kwargs, ttl_seconds: float) -> None:
+    with _refresh_guard:
+        if cache_key in _refresh_inflight:
+            return
+        _refresh_inflight.add(cache_key)
+
+    # compute the fresh value off the request path and release the in flight flag
+    def run():
+        try:
+            _cache.set(cache_key, func(*args, **kwargs), ttl_seconds)
+        except Exception as e:
+            log.warning("cache refresh failed for %s: %r", cache_key, e)
+        finally:
+            with _refresh_guard:
+                _refresh_inflight.discard(cache_key)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+# decorator caching an endpoint result under a prefixed key. with serve_stale_seconds
+# an expired value is returned immediately while one background thread recomputes, so
+# no request ever pays the recompute latency while the entry stays warm
+def ttl_cache(prefix: str, ttl_seconds: float = 60, serve_stale_seconds: float = 0):
     # wrap the endpoint with a cache lookup and store
     def decorator(func):
         @wraps(func)
@@ -301,9 +352,17 @@ def ttl_cache(prefix: str, ttl_seconds: float = 60):
                 for k in sorted(kwargs.keys()):
                     key_parts.append(f"{k}={kwargs[k]}")
             cache_key = f"{prefix}:{':'.join(key_parts)}"
-            value, hit = _cache.get(cache_key)
-            if hit:
-                return value
+            if serve_stale_seconds > 0:
+                value, fresh, expires = _cache.get_stale(cache_key)
+                if fresh:
+                    return value
+                if expires > 0 and (time.time() - expires) <= serve_stale_seconds:
+                    _spawn_refresh(cache_key, func, args, kwargs, ttl_seconds)
+                    return value
+            else:
+                value, hit = _cache.get(cache_key)
+                if hit:
+                    return value
             result = func(*args, **kwargs)
             _cache.set(cache_key, result, ttl_seconds)
             return result
@@ -376,107 +435,77 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
         return {}
     token_addrs = [(t or "").lower() for t in token_addrs if t]
     excluded_list = [a.lower() for a in (excluded or set()) if a]
+    not_internal = _sql_not_internal("p.user_address")
 
     with db_cursor() as cur:
         cur.execute(
-            """
-            WITH req AS (
+            f"""
+            SELECT
+                r.token,
+                COALESCE(hc.cnt, 0) AS holder_count,
+                COALESCE(dev.bal, 0) AS dev_holding,
+                COALESCE(t10.addrs, ARRAY[]::text[]) AS top10_addresses,
+                COALESCE(t10.total, 0) AS top10_holding,
+                COALESCE(sn.cnt, 0) AS sniper_count,
+                COALESCE(sn.addrs, ARRAY[]::text[]) AS sniper_addresses,
+                COALESCE(sn.total, 0) AS sniper_holding,
+                COALESCE(ins.total, 0) AS insider_holding,
+                COALESCE(pt.cnt, 0) AS pro_traders
+            FROM (
                 SELECT token, LOWER(COALESCE(creator, '')) AS creator
                 FROM launchpad_tokens
                 WHERE token = ANY(%s)
-            ),
-            pos AS (
-                SELECT LOWER(token) AS token, LOWER(user_address) AS user_address, balance_token
-                FROM launchpad_positions
-                WHERE token = ANY(%s)
-            ),
-            holder_counts AS (
-                SELECT token, COUNT(*) AS cnt
-                FROM pos
-                WHERE balance_token > 1
-                  AND (%s::text[] IS NULL OR NOT (user_address = ANY(%s)))
-                GROUP BY token
-            ),
-            dev_holdings AS (
-                SELECT p.token, p.balance_token AS dev_bal
-                FROM pos p
-                JOIN req r ON r.token = p.token
-                WHERE p.balance_token > 0 AND p.user_address = r.creator
-            ),
-            ranked_top AS (
-                SELECT
-                    token,
-                    user_address,
-                    balance_token,
-                    ROW_NUMBER() OVER (PARTITION BY token ORDER BY balance_token DESC, user_address ASC) AS rn
-                FROM pos
-                WHERE balance_token > 1
-                  AND (%s::text[] IS NULL OR NOT (user_address = ANY(%s)))
-            ),
-            top10 AS (
-                SELECT
-                    token,
-                    array_agg(user_address ORDER BY rn) AS top10_addrs,
-                    SUM(balance_token) AS top10_sum
-                FROM ranked_top
-                WHERE rn <= 10
-                GROUP BY token
-            ),
-            -- these three were only computed on the single token path, so every list
-            -- row carried a hardcoded zero for a field the search can filter on
-            sniper_holdings AS (
-                SELECT p.token,
-                       COUNT(*) AS sniper_cnt,
-                       array_agg(p.user_address) AS sniper_addrs,
-                       SUM(p.balance_token) AS sniper_sum
-                FROM pos p
-                JOIN launchpad_snipers s
-                  ON LOWER(s.token) = p.token AND LOWER(s.user_address) = p.user_address
-                GROUP BY p.token
-            ),
-            insider_holdings AS (
-                SELECT token, SUM(balance_token) AS insider_sum
-                FROM launchpad_positions
-                WHERE token = ANY(%s)
-                  AND balance_token > (token_bought - token_sold) + 1e18
-                GROUP BY token
-            ),
-            pro_traders AS (
-                SELECT token, COUNT(*) AS pro_cnt
-                FROM launchpad_positions
-                WHERE token = ANY(%s)
-                  AND realized_pnl_native > 0
-                  AND trade_count >= 10
-                GROUP BY token
-            )
-            SELECT
-                r.token,
-                COALESCE(h.cnt, 0) AS holder_count,
-                COALESCE(d.dev_bal, 0) AS dev_holding,
-                COALESCE(t.top10_addrs, ARRAY[]::text[]) AS top10_addresses,
-                COALESCE(t.top10_sum, 0) AS top10_holding,
-                COALESCE(sn.sniper_cnt, 0) AS sniper_count,
-                COALESCE(sn.sniper_addrs, ARRAY[]::text[]) AS sniper_addresses,
-                COALESCE(sn.sniper_sum, 0) AS sniper_holding,
-                COALESCE(ins.insider_sum, 0) AS insider_holding,
-                COALESCE(pt.pro_cnt, 0) AS pro_traders
-            FROM req r
-            LEFT JOIN holder_counts h ON h.token = r.token
-            LEFT JOIN dev_holdings d ON d.token = r.token
-            LEFT JOIN top10 t ON t.token = r.token
-            LEFT JOIN sniper_holdings sn ON sn.token = r.token
-            LEFT JOIN insider_holdings ins ON LOWER(ins.token) = r.token
-            LEFT JOIN pro_traders pt ON LOWER(pt.token) = r.token
+            ) r
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS cnt
+                FROM launchpad_positions p
+                WHERE p.token = r.token AND p.balance_token > 1
+                  AND (%s::text[] IS NULL OR NOT (p.user_address = ANY(%s)))
+                  AND {not_internal}
+            ) hc ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT p.balance_token AS bal
+                FROM launchpad_positions p
+                WHERE p.token = r.token AND p.user_address = r.creator AND p.balance_token > 0
+            ) dev ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT array_agg(x.user_address ORDER BY x.balance_token DESC, x.user_address ASC) AS addrs,
+                       SUM(x.balance_token) AS total
+                FROM (
+                    SELECT p.user_address, p.balance_token
+                    FROM launchpad_positions p
+                    WHERE p.token = r.token AND p.balance_token > 1
+                      AND (%s::text[] IS NULL OR NOT (p.user_address = ANY(%s)))
+                      AND {not_internal}
+                    ORDER BY p.balance_token DESC, p.user_address ASC
+                    LIMIT 10
+                ) x
+            ) t10 ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS cnt,
+                       array_agg(p.user_address) AS addrs,
+                       SUM(p.balance_token) AS total
+                FROM launchpad_snipers s
+                JOIN launchpad_positions p ON p.token = r.token AND p.user_address = s.user_address
+                WHERE s.token = r.token
+            ) sn ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT SUM(p.balance_token) AS total
+                FROM launchpad_positions p
+                WHERE p.token = r.token AND p.balance_token > (p.token_bought - p.token_sold) + 1e18
+            ) ins ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS cnt
+                FROM launchpad_positions p
+                WHERE p.token = r.token AND p.realized_pnl_native > 0 AND p.trade_count >= 10
+            ) pt ON TRUE
         """,
             (
                 token_addrs,
-                token_addrs,
                 excluded_list if excluded_list else None,
                 excluded_list if excluded_list else None,
                 excluded_list if excluded_list else None,
                 excluded_list if excluded_list else None,
-                token_addrs,
-                token_addrs,
             ),
         )
         rows = cur.fetchall()
@@ -564,7 +593,7 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
 
 
 # serialize many tokens for list endpoints in one round trip
-def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[str, dict]:
+def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
     if not token_addrs:
         return {}
 
@@ -655,7 +684,7 @@ def _batch_serialize_tokens(token_addrs: list[str], excluded: set[str]) -> dict[
             "developer_tokens_graduated": int(row[31] or 0),
         }
 
-    holder_stats = _batch_get_holder_stats(token_addrs, excluded=excluded)
+    holder_stats = _batch_get_holder_stats(token_addrs, excluded=_static_internal_addrs())
 
     for token, data in token_data.items():
         stats = holder_stats.get(token, {})

@@ -15,10 +15,11 @@ from api.api import (
     _api_source,
     _fmt,
     _fmt_usd,
-    _internal_addrs,
     _lifecycle_fields,
     _quote_price_usd,
     _scaled_price,
+    _sql_not_internal,
+    _static_internal_addrs,
 )
 from core.storage import db_cursor
 
@@ -140,10 +141,10 @@ def _position_rows(
 # top holders by balance, excluding internal addresses
 def top_holders(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
-    excluded = list(_internal_addrs())
+    excluded = list(_static_internal_addrs())
     return _position_rows(
         token,
-        "token = %s AND balance_token > 0 AND user_address <> ALL(%s)",
+        f"token = %s AND balance_token > 0 AND user_address <> ALL(%s) AND {_sql_not_internal('user_address')}",
         (token, excluded),
         HOLDERS_LIMIT,
     )
@@ -154,10 +155,10 @@ def top_holders(token: str) -> list[dict[str, Any]]:
 # who sold out at a large profit ranked last and fell off the list entirely
 def top_traders(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
-    excluded = list(_internal_addrs())
+    excluded = list(_static_internal_addrs())
     return _position_rows(
         token,
-        "token = %s AND trade_count > 0 AND user_address <> ALL(%s)",
+        f"token = %s AND trade_count > 0 AND user_address <> ALL(%s) AND {_sql_not_internal('user_address')}",
         (token, excluded),
         TOP_TRADERS_LIMIT,
         order_by="total_pnl_native DESC",
@@ -186,6 +187,81 @@ def positions_for(token: str, addresses: list[str]) -> list[dict[str, Any]]:
         r["balance_native"] = _fmt(value_native)
         r["balance_usd"] = _fmt_usd(value_native * quote / _WEI) if quote > 0 else "0"
     return rows
+
+
+# every position for a wallet set across all tokens, shaped like the rest rows so
+# the portfolio renders socket and rest data identically
+def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
+    addrs = [a.lower() for a in addresses if a]
+    if not addrs:
+        return []
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.user_address, p.token, p.balance_token, p.token_bought, p.token_sold,
+                   p.native_spent, p.native_received, p.realized_pnl_native,
+                   p.unrealized_pnl_native, p.total_pnl_native, p.trade_count,
+                   p.buy_count, p.sell_count,
+                   t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+            FROM launchpad_positions p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.user_address = ANY(%s)
+            """,
+            (addrs,),
+        )
+        rows = cur.fetchall()
+
+    quote = _quote_price_usd(None)
+    out = []
+    for (
+        addr,
+        token,
+        balance,
+        bought,
+        sold,
+        spent,
+        received,
+        realized,
+        unrealized,
+        total,
+        trades,
+        buys,
+        sells,
+        name,
+        symbol,
+        cid,
+        last_price,
+        market,
+        source,
+    ) in rows:
+        last_price = last_price or Decimal(0)
+        value_native = Decimal(int(balance or 0)) * last_price
+        out.append(
+            {
+                "address": (addr or "").lower(),
+                "token": (token or "").lower(),
+                "symbol": symbol,
+                "name": name,
+                "metadata_cid": cid or "",
+                "balance_token": str(int(balance or 0)),
+                "balance_native": _fmt(value_native),
+                "balance_usd": _fmt_usd(value_native * quote / _WEI) if quote > 0 else "0",
+                "last_price_native": _fmt(last_price),
+                "token_bought": str(int(bought or 0)),
+                "token_sold": str(int(sold or 0)),
+                "native_spent": str(int(spent or 0)),
+                "native_received": str(int(received or 0)),
+                "realized_pnl_native": _fmt(realized or Decimal(0)),
+                "unrealized_pnl_native": _fmt(unrealized or Decimal(0)),
+                "total_pnl_native": _fmt(total or Decimal(0)),
+                "trade_count": int(trades or 0),
+                "buy_count": int(buys or 0),
+                "sell_count": int(sells or 0),
+                "market": market or None,
+                "source": _api_source(source),
+            }
+        )
+    return out
 
 
 # tokens launched by this token's creator
@@ -248,11 +324,12 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
 # (name, symbol, socials, creator, image) never changes and is deliberately omitted
 def token_state(token: str) -> dict[str, Any]:
     token = (token or "").lower()
-    excluded = list(_internal_addrs())
+    excluded = list(_static_internal_addrs())
+    not_internal = _sql_not_internal("p.user_address")
     day_ago = int(time.time()) - 86400
     with db_cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 t.last_price_native, t.native_volume, t.token_volume, t.volume_usd,
                 t.fees_usd, t.buy_count, t.sell_count, t.tx_count,
@@ -262,13 +339,13 @@ def token_state(token: str) -> dict[str, Any]:
                 t.curve_native_reserve, t.curve_token_reserve,
                 (SELECT COUNT(*) FROM launchpad_positions p
                   WHERE p.token = t.token AND p.balance_token > 1
-                    AND p.user_address <> ALL(%s)),
+                    AND p.user_address <> ALL(%s) AND {not_internal}),
                 (SELECT COUNT(*) FROM launchpad_positions p
                   WHERE p.token = t.token AND p.buy_count > 0
-                    AND p.user_address <> ALL(%s)),
+                    AND p.user_address <> ALL(%s) AND {not_internal}),
                 (SELECT COUNT(*) FROM launchpad_positions p
                   WHERE p.token = t.token AND p.sell_count > 0
-                    AND p.user_address <> ALL(%s)),
+                    AND p.user_address <> ALL(%s) AND {not_internal}),
                 -- the rest endpoint reports these over 24h under the same key names.
                 -- pushing lifetime totals here made the page jump by orders of
                 -- magnitude a moment after it loaded

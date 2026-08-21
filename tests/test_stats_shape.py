@@ -594,6 +594,9 @@ def test_spot_portfolio_one_call(db, clean, monkeypatch):
         return 12345, {"0x00000000000000000000000000000000000000b1": 4 * 10**18, sd.WMON: 0}, 2 * 10**18, False
 
     monkeypatch.setattr(sd, "fetch_balances", fake_balances)
+    # the endpoint now refuses wallets with no crystal activity; this test's
+    # subject is the row math, so the gate is stubbed open
+    monkeypatch.setattr(sd, "wallet_is_supported", lambda w: True)
     monkeypatch.setattr(api.api, "_mon_price_usd", lambda: Decimal(3))
     import api.routes.launchpad as rl
 
@@ -616,36 +619,65 @@ def test_spot_portfolio_one_call(db, clean, monkeypatch):
     assert client.get("/spot/nope").status_code == 400
 
 
-# synthetic vectors packed exactly as contract.sol's assembly packs them. no real
-# fill exists on the new deployment yet, so the first live trade must re-verify
-def test_orderbook_raw_log_decoders(db):
-    from modules.orderbook import BATCH_ORDERS_TOPIC, FILL_TOPIC, decode_fill, decode_order_updates
+# the golden vector is a real mainnet OrdersUpdated log (tx 0x74ee7c90..., block
+# 97754330): a market maker requote that removes three bids and three asks then
+# re-adds the same order ids on fresh prices. the decode must reproduce it exactly
+_OB_MARKET = "0x000000000000000000000000c8045b5dde24e625932df738e7ec4127c04008d3"
+_OB_USER = "0x000000000000000000000000581172970bda012d71a9aea34a9f219da117891b"
+
+
+def test_orderbook_orders_updated_decodes_real_mainnet_log(db):
+    from modules.orderbook import ORDERS_UPDATED_TOPIC, parse_orders_updated
 
     def w(v):
         return f"{v:064x}"
 
-    caller = "0x" + "aa" * 20
-    t1 = "0x" + "00" * 12 + caller[2:]
-    amounts = (1000 << 128) | 990
-    info = (1 << 252) | (777 << 128) | 779
-    e1 = (777 << 176) | (5 << 128) | 42
-    e2 = (779 << 176) | (9 << 128) | 0
-    data = "0x" + w(amounts) + w(info) + w(0x60) + w(64) + w(e1) + w(e2)
-    f = decode_fill([FILL_TOPIC, t1], data)
-    assert f["amount_in"] == 1000 and f["amount_out"] == 990 and f["is_buy"] is True
-    assert f["first_fill_price"] == 777 and f["last_fill_price"] == 779
-    assert f["touched"] == [
-        {"price": 777, "order_id": 5, "size": 42},
-        {"price": 779, "order_id": 9, "size": 0},
-    ], "remaining size must come straight off the entry"
+    entries = [
+        (1 << 252) | (26656000 << 168) | (13194139533313 << 112) | 362560565879531175936,
+        (0 << 252) | (26611000 << 168) | (10995116277761 << 112) | 7578638,
+        (2 << 252) | (26656000 << 168) | (2199023255553 << 112) | 4330650,
+        (3 << 252) | (26677000 << 168) | (13194139533313 << 112) | 362560565879531241472,
+        (4 << 252) | (26611000 << 168) | (10995116277761 << 112) | 1000,
+    ]
+    data = "0x" + w(0x20) + w(len(entries) * 32) + "".join(w(e) for e in entries)
 
-    add = (1 << 252) | (500 << 176) | (7 << 128) | 12345
-    cancel = (2 << 252) | (501 << 176) | (8 << 128) | 999
-    data2 = "0x" + w(0x20) + w(64) + w(add) + w(cancel)
-    u = decode_order_updates([BATCH_ORDERS_TOPIC, t1], data2)
-    assert u["owner"] == caller
-    assert u["orders"][0] == {"price": 500, "order_id": 7, "size": 12345, "is_buy": True, "is_cancel": False}
-    assert u["orders"][1]["is_cancel"] is True and u["orders"][1]["is_buy"] is False
+    u = parse_orders_updated("0xrouter", [ORDERS_UPDATED_TOPIC, _OB_MARKET, _OB_USER], data)
+    assert u["market"] == "0xc8045b5dde24e625932df738e7ec4127c04008d3"
+    assert u["user"] == "0x581172970bda012d71a9aea34a9f219da117891b"
+    assert len(u["orders"]) == 5
+
+    o0, o1, o2, o3, o4 = u["orders"]
+    assert o0 == {
+        "flag": 1,
+        "action": "remove",
+        "is_buy": False,
+        "price": 26656000,
+        "order_id": 13194139533313,
+        "size": 362560565879531175936,
+    }, "the exact values observed on mainnet"
+    assert o1["action"] == "remove" and o1["is_buy"] is True and o1["size"] == 7578638
+    assert o2["action"] == "add" and o2["is_buy"] is True and o2["order_id"] == 2199023255553
+    assert o3["action"] == "add" and o3["is_buy"] is False and o3["order_id"] == o0["order_id"], (
+        "a requote re-adds the same order id it removed"
+    )
+    assert o4["action"] == "decrease" and o4["is_buy"] is True and o4["size"] == 1000
+
+
+# fill packing shares the entry layout; synthetic until the first real fill prints
+def test_orderbook_fill_decoder_layout(db):
+    from modules.orderbook import FILL_TOPIC, parse_fill
+
+    def w(v):
+        return f"{v:064x}"
+
+    info = (1 << 252) | (26656000 << 168) | (42 << 112) | 999
+    amount = (1000 << 128) | 990
+    f = parse_fill("0xrouter", [FILL_TOPIC, _OB_MARKET, _OB_USER], "0x" + w(info) + w(amount))
+    assert f["market"] == "0xc8045b5dde24e625932df738e7ec4127c04008d3"
+    assert f["maker"] == "0x581172970bda012d71a9aea34a9f219da117891b"
+    assert f["maker_is_buy"] is True and f["price"] == 26656000 and f["order_id"] == 42
+    assert f["remaining"] == 999
+    assert f["amount_high"] == 1000 and f["amount_out"] == 990
 
 
 # the fork guards: wrong chain, rolled back head, rewritten history. each must halt

@@ -122,6 +122,75 @@ def test_holders_exclude_internal_addresses(db):
     assert USER in addrs or not rows
 
 
+# a notify sent inside a committed transaction reaches a listening connection,
+# which is the entire contract the hub's push loop stands on
+def test_listen_notify_roundtrip(db):
+    import select as _select
+
+    from core.storage.base import listen_connection
+
+    listener = listen_connection()
+    try:
+        cur = listener.cursor()
+        cur.execute("LISTEN crystal_new_block;")
+
+        with storage.db_cursor() as wcur:
+            wcur.execute("NOTIFY crystal_new_block")
+
+        assert _select.select([listener], [], [], 5.0)[0], "notify must arrive within the window"
+        listener.poll()
+        assert len(listener.notifies) >= 1
+        assert listener.notifies[0].channel == "crystal_new_block"
+    finally:
+        listener.close()
+
+
+# the vaults body folds every page into one filter-agnostic universe
+def test_vaults_list_body_shape(db, monkeypatch):
+    import api.ws as ws_mod
+
+    calls = []
+
+    def fake_list(**kwargs):
+        calls.append(kwargs["page"])
+        if kwargs["page"] == 1:
+            return {"vaults": [{"address": "0xv1"}], "total": 2, "hasMore": True}
+        return {"vaults": [{"address": "0xv2"}], "total": 2, "hasMore": False}
+
+    import api.routes.vaults as rv
+
+    monkeypatch.setattr(rv, "list_vaults", lambda **kw: fake_list(**kw))
+    body = ws_mod._vaults_list_body(["0xabc"])
+    assert calls == [1, 2], "pages fold until hasMore is false"
+    assert [v["address"] for v in body["vaults"]] == ["0xv1", "0xv2"]
+    assert body["total"] == 2
+
+
+# the wallet scoped channel spans tokens but never leaks another wallet's rows
+def test_user_positions_span_tokens_and_scope_to_wallets(db):
+    from api.ws_data import positions_for_wallets
+
+    token2 = "0x" + "22" * 20
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xw1", log_idx=0)
+    _create(st, token=token2, blk=102, ts=1002, name="Tok2", symbol="TOK2")
+    _trade(st, token=token2, native_reserve=1100 * 10**18, blk=103, ts=1003, txh="0xw2", log_idx=0)
+
+    mine = positions_for_wallets([USER])
+    tokens_seen = {r["token"] for r in mine}
+    assert TOKEN in tokens_seen and token2 in tokens_seen, "one subscription covers every token"
+    assert all(r["address"] == USER for r in mine)
+
+    row = mine[0]
+    for field in ("symbol", "total_pnl_native", "last_price_native", "balance_native", "source"):
+        assert field in row, f"row must carry {field} so it renders like the rest response"
+
+    assert positions_for_wallets(["0x000000000000000000000000000000000000dead"]) == []
+    assert positions_for_wallets([]) == [], "no wallets means no query"
+
+
 # positions are scoped to the requested wallets and nothing else
 def test_positions_are_scoped_to_requested_wallets(db):
     from api.ws_data import positions_for

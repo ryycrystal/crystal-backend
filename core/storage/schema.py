@@ -71,6 +71,12 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_trades_ts
+            ON launchpad_trades (timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_trades_user_token
             ON launchpad_trades (user_address, token);
             """
@@ -218,6 +224,18 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_tokens_approaching
             ON launchpad_tokens (circulating_supply DESC)
             WHERE approaching_75 = TRUE AND migrated = FALSE;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_created_order
+            ON launchpad_tokens (created_at DESC NULLS LAST, created_block DESC NULLS LAST);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_migrated_order
+            ON launchpad_tokens (migrated, migrated_at DESC NULLS LAST, migrated_block DESC NULLS LAST);
             """
         )
 
@@ -614,6 +632,12 @@ def init_db() -> None:
             ON crystal_pool_lp_users (market, shares DESC, user_address ASC);
             """
         )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_pool_lp_users_user
+            ON crystal_pool_lp_users (user_address);
+            """
+        )
         _migrate_lp_user_cost_columns(cur)
 
         cur.execute(
@@ -683,6 +707,12 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_crystal_vault_users_vault_lastdep_shares_addr
             ON crystal_vault_users (vault, last_deposit DESC, shares DESC, user_address ASC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_vault_users_user
+            ON crystal_vault_users (user_address);
             """
         )
 
@@ -796,6 +826,115 @@ def init_db() -> None:
             (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            """
+        )
+
+        # every decoded orders-updated entry, one row per packed entry. the primary
+        # key doubles as the replay guard for the order-state mutations
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_orderbook_events
+            (
+                txhash       TEXT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                entry_index  INTEGER NOT NULL,
+                block_number BIGINT NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                market       TEXT NOT NULL,
+                user_address TEXT NOT NULL,
+                flag         SMALLINT NOT NULL,
+                is_buy       BOOLEAN NOT NULL,
+                action       TEXT NOT NULL,
+                price        NUMERIC(30, 0) NOT NULL,
+                order_id     BIGINT NOT NULL,
+                size         NUMERIC(40, 0) NOT NULL,
+                PRIMARY KEY (txhash, log_index, entry_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_events_user_ts
+            ON crystal_orderbook_events (user_address, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_events_market_ts
+            ON crystal_orderbook_events (market, timestamp DESC);
+            """
+        )
+
+        # current view of every resting order ever seen, evolved from the events
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_orderbook_orders
+            (
+                market        TEXT NOT NULL,
+                order_id      BIGINT NOT NULL,
+                user_address  TEXT NOT NULL,
+                is_buy        BOOLEAN NOT NULL,
+                price         NUMERIC(30, 0) NOT NULL,
+                size          NUMERIC(40, 0) NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'open',
+                created_block BIGINT NOT NULL DEFAULT 0,
+                created_ts    BIGINT NOT NULL DEFAULT 0,
+                updated_block BIGINT NOT NULL DEFAULT 0,
+                updated_ts    BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (market, order_id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_orders_user_status
+            ON crystal_orderbook_orders (user_address, status);
+            """
+        )
+
+        # maker side fills. decode is unverified until the first real fill prints,
+        # so nothing here is served yet
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_orderbook_fills
+            (
+                txhash       TEXT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                block_number BIGINT NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                market       TEXT NOT NULL,
+                maker        TEXT NOT NULL,
+                maker_is_buy BOOLEAN NOT NULL,
+                price        NUMERIC(30, 0) NOT NULL,
+                order_id     BIGINT NOT NULL,
+                remaining    NUMERIC(40, 0) NOT NULL,
+                amount_high  NUMERIC(40, 0) NOT NULL,
+                amount_out   NUMERIC(40, 0) NOT NULL,
+                PRIMARY KEY (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_fills_maker_ts
+            ON crystal_orderbook_fills (maker, timestamp DESC);
+            """
+        )
+
+        # spot portfolio value per wallet per time bucket. history is immutable, so
+        # each row is computed from one archive read ever and then served forever
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spot_graph_buckets
+            (
+                wallet       TEXT NOT NULL,
+                bucket_ts    BIGINT NOT NULL,
+                block_number BIGINT NOT NULL,
+                value_usd    NUMERIC(50, 18) NOT NULL,
+                value_native NUMERIC(50, 18) NOT NULL,
+                balances     JSONB NOT NULL,
+                PRIMARY KEY (wallet, bucket_ts)
             );
             """
         )

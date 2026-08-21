@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import select
+import threading
 import time
 from typing import Any
 
@@ -26,14 +28,43 @@ router = APIRouter()
 
 # channels a client may subscribe to. stats is implemented; the rest are declared
 # so a client subscribing early gets an explicit "not yet" rather than silence
-KNOWN_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens", "tokens")
-IMPLEMENTED_CHANNELS = ("token", "stats", "trades", "holders", "positions", "top_traders", "dev_tokens", "tokens")
+KNOWN_CHANNELS = (
+    "token",
+    "stats",
+    "trades",
+    "holders",
+    "positions",
+    "top_traders",
+    "dev_tokens",
+    "tokens",
+    "user_positions",
+    "balances",
+    "vaults",
+)
+IMPLEMENTED_CHANNELS = (
+    "token",
+    "stats",
+    "trades",
+    "holders",
+    "positions",
+    "top_traders",
+    "dev_tokens",
+    "tokens",
+    "user_positions",
+    "balances",
+    "vaults",
+)
+
+# subscription keys that are page scopes rather than token addresses. "tokens" is
+# the explorer list, "portfolio" carries the wallet scoped position channel
+PSEUDO_TOKENS = ("tokens", "portfolio", "vaults")
 
 # channels that send the whole object every time rather than a diff
 SNAPSHOT_CHANNELS = ("token", "stats", "dev_tokens")
 
-# how often the fanout task checks whether the indexer has moved
-# one tick per monad block (300ms): pushing faster than blocks land is pure waste
+# fallback tick when the listen connection is down: ticks degrade to this pace
+# instead of the hub freezing. with notify flowing, ticks land per block commit
+FALLBACK_TICK_SECONDS = 2.0
 POLL_INTERVAL_SECONDS = 0.3
 
 # a socket that has not pinged or subscribed in this long is dropped
@@ -47,9 +78,81 @@ MAX_CONCURRENT_TOKEN_PUSHES = 6
 # a busy token cannot spin here forever, the last attempt is served either way
 SNAPSHOT_READ_ATTEMPTS = 3
 
+# how often the vault universe is recomputed for its subscribers. vault state
+# moves on deposits and the 30s balance sampler, so once per this interval is
+# the honest cadence rather than a per block recompute
+VAULTS_INTERVAL_SECONDS = 5.0
+
+# how often a subscribed wallet's balances are re-read. one shared ttl read per
+# wallet per interval regardless of viewer count, pushed only when a body changed
+BALANCES_INTERVAL_SECONDS = 3.0
+
 # stamped into the stats body by the rest handler, so they move every block regardless
 # of whether the token did. excluded when deciding if a stats frame is worth sending
 _STATS_VOLATILE = frozenset({"as_of_block", "as_of_ts"})
+
+
+# wake the hub queue from the listener thread, dropping the signal when a tick
+# is already pending because one tick drains every queued block anyway
+def _offer_wake(queue: asyncio.Queue) -> None:
+    with contextlib.suppress(asyncio.QueueFull):
+        queue.put_nowait(True)
+
+
+# blocking listen loop on its own connection and thread: indexer commits NOTIFY
+# per block, each one becomes a hub tick. any failure tears the connection down
+# and reconnects, and the hub's timeout fallback covers the gap
+def _listen_blocks(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stop: threading.Event) -> None:
+    from core.storage.base import listen_connection
+
+    while not stop.is_set():
+        conn = None
+        try:
+            conn = listen_connection()
+            cur = conn.cursor()
+            cur.execute("LISTEN crystal_new_block;")
+            while not stop.is_set():
+                if select.select([conn], [], [], 1.0)[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        conn.notifies.clear()
+                        loop.call_soon_threadsafe(_offer_wake, queue)
+        except Exception:
+            time.sleep(2.0)
+        finally:
+            with contextlib.suppress(Exception):
+                if conn is not None:
+                    conn.close()
+
+
+# the full vault universe for one socket, every page folded into one body so the
+# channel stays filter-agnostic like the tokens channel
+def _vaults_list_body(addresses: list[str]) -> dict[str, Any]:
+    from api.routes.vaults import list_vaults
+
+    user = addresses[0] if addresses else None
+    rows: list[dict] = []
+    total = 0
+    page = 1
+    while page <= 20:
+        body = list_vaults(
+            user=user,
+            search=None,
+            status="all",
+            sort="latest_deposit",
+            order="desc",
+            page=page,
+            limit=50,
+            include_snapshot=True,
+            snapshot_timeframe="1",
+            snapshot_points=48,
+        )
+        rows.extend(body.get("vaults") or [])
+        total = int(body.get("total") or len(rows))
+        if not body.get("hasMore"):
+            break
+        page += 1
+    return {"vaults": rows, "total": total}
 
 
 # one connected client and everything it asked for
@@ -105,6 +208,9 @@ class Hub:
         self._prev_rows: dict[tuple[str, str], dict[str, dict]] = {}
         self._task: asyncio.Task | None = None
         self._push_sem = asyncio.Semaphore(MAX_CONCURRENT_TOKEN_PUSHES)
+        # wallet -> monotonic time of its last balances computation
+        self._balances_checked: dict[str, float] = {}
+        self._vaults_checked = 0.0
 
     # register a new socket
     async def add(self, sub: Subscriber) -> None:
@@ -217,28 +323,53 @@ class Hub:
             # the same token
             addrs = sorted(sub.addresses)
             return {"upserts": await asyncio.to_thread(d.positions_for, token, addrs)}
+        if channel == "user_positions":
+            addrs = sorted(sub.addresses)
+            return {"upserts": await asyncio.to_thread(d.positions_for_wallets, addrs)}
+        if channel == "balances":
+            from api.spot_data import spot_body
+
+            bodies: dict[str, dict] = {}
+            for a in sorted(sub.addresses):
+                try:
+                    bodies[a] = await asyncio.to_thread(spot_body, a)
+                except Exception:
+                    continue
+            return {"wallets": bodies}
+        if channel == "vaults":
+            return await asyncio.to_thread(_vaults_list_body, sorted(sub.addresses))
         return None
 
-    # recompute subscribed tokens whenever the indexer watermark advances
+    # recompute subscribed tokens when the indexer commits a block: a NOTIFY per
+    # commit wakes the loop, so push latency is block time plus one query rather
+    # than a 300ms poll, and an idle chain costs zero queries
     async def _run(self) -> None:
-        while True:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            try:
-                tokens = await self.active_tokens()
-                if not tokens:
+        wake: asyncio.Queue = asyncio.Queue(maxsize=1)
+        stop = threading.Event()
+        listener = threading.Thread(target=_listen_blocks, args=(asyncio.get_running_loop(), wake, stop), daemon=True)
+        listener.start()
+        try:
+            while True:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(wake.get(), timeout=FALLBACK_TICK_SECONDS)
+                try:
+                    tokens = await self.active_tokens()
+                    if not tokens:
+                        continue
+                    # tokens are pushed concurrently: a serial loop made one pass cost the
+                    # sum of every token, so the tick started slipping at about five
+                    # tokens in view. concurrently it costs the slowest one instead
+                    await asyncio.gather(
+                        *(self._push_token_guarded(t) for t in tokens),
+                        return_exceptions=True,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # a failure here must never kill the fanout loop
                     continue
-                # tokens are pushed concurrently: a serial loop made one pass cost the
-                # sum of every token, so the tick started slipping at about five
-                # tokens in view. concurrently it costs the slowest one instead
-                await asyncio.gather(
-                    *(self._push_token_guarded(t) for t in tokens),
-                    return_exceptions=True,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # a failure here must never kill the fanout loop
-                continue
+        finally:
+            stop.set()
 
     # bound how many tokens refresh at once so the connection pool is not starved
     async def _push_token_guarded(self, token: str) -> None:
@@ -259,7 +390,10 @@ class Hub:
             key = (token, channel)
             # positions depend on the wallet set, so they cannot be skipped on
             # watermark alone -- a client can add an address at any time
-            if channel != "positions" and self._last_sent.get(key) == watermark:
+            if (
+                channel not in ("positions", "user_positions", "balances", "vaults")
+                and self._last_sent.get(key) == watermark
+            ):
                 continue
             self._last_sent[key] = watermark
             fn = {
@@ -271,6 +405,9 @@ class Hub:
                 "top_traders": self._push_top_traders,
                 "dev_tokens": self._push_dev_tokens,
                 "positions": self._push_positions,
+                "user_positions": self._push_user_positions,
+                "balances": self._push_balances,
+                "vaults": self._push_vaults,
             }.get(channel)
             if fn is not None:
                 await fn(token, watermark)
@@ -467,6 +604,114 @@ class Hub:
                 payload["removed"] = removed
             await sub.send(payload)
 
+    # wallet scoped positions across every token, for the portfolio page. one query
+    # covers the union of subscriber wallets, each socket gets its own diffed slice
+    async def _push_user_positions(self, token: str, watermark: int) -> None:
+        from api.ws_data import positions_for_wallets
+
+        async with self.lock:
+            targets = [
+                s
+                for s in self.subscribers
+                if s.wants(token, "user_positions") and s.addresses and (token, "user_positions") in s.primed
+            ]
+        if not targets:
+            return
+
+        union = sorted({a for s in targets for a in s.addresses})
+        rows = await asyncio.to_thread(positions_for_wallets, union)
+        by_key: dict[str, dict] = {f"{r['address']}:{r['token']}": r for r in rows}
+
+        for sub in targets:
+            mine = {k: v for k, v in by_key.items() if v["address"] in sub.addresses}
+            key = (token, f"user_positions:{id(sub)}")
+            prev = self._prev_rows.get(key)
+            self._prev_rows[key] = mine
+            if prev is None:
+                upserts, removed = list(mine.values()), []
+            else:
+                upserts = [v for k, v in mine.items() if prev.get(k) != v]
+                removed = [k for k in prev if k not in mine]
+            if not upserts and not removed:
+                continue
+            env = self._envelope(token, "user_positions", watermark, "delta")
+            payload = {**env, "upserts": upserts, "seq": sub.next_seq(token, "user_positions")}
+            if removed:
+                payload["removed"] = removed
+            await sub.send(payload)
+
+    # balances move off-watermark (native mon has no event), so the channel
+    # samples subscribed wallets on its own cadence and pushes full per-wallet
+    # bodies only when something material changed. the read is the same ttl
+    # cached batch the rest endpoint uses, shared across every viewer
+    async def _push_balances(self, token: str, watermark: int) -> None:
+        from api.spot_data import spot_body
+
+        async with self.lock:
+            targets = [
+                s
+                for s in self.subscribers
+                if s.wants(token, "balances") and s.addresses and (token, "balances") in s.primed
+            ]
+        if not targets:
+            return
+
+        now = time.time()
+        union = sorted({a for s in targets for a in s.addresses})
+        changed: dict[str, dict] = {}
+        for a in union:
+            if now - self._balances_checked.get(a, 0.0) < BALANCES_INTERVAL_SECONDS:
+                continue
+            self._balances_checked[a] = now
+            try:
+                body = await asyncio.to_thread(spot_body, a)
+            except Exception:
+                continue
+            material = {k: v for k, v in body.items() if k != "balance_block"}
+            key = (token, f"balances:{a}")
+            if self._prev_rows.get(key) == {"all": material}:
+                continue
+            self._prev_rows[key] = {"all": material}
+            changed[a] = body
+        if not changed:
+            return
+        for sub in targets:
+            mine = {a: b for a, b in changed.items() if a in sub.addresses}
+            if not mine:
+                continue
+            env = self._envelope(token, "balances", watermark, "delta")
+            await sub.send({**env, "wallets": mine, "seq": sub.next_seq(token, "balances")})
+
+    # the vault universe, recomputed on its own cadence and resent per socket only
+    # when the body actually changed. one compute is shared per distinct wallet
+    async def _push_vaults(self, token: str, watermark: int) -> None:
+        async with self.lock:
+            targets = [s for s in self.subscribers if s.wants(token, "vaults") and (token, "vaults") in s.primed]
+        if not targets:
+            return
+        now = time.time()
+        if now - self._vaults_checked < VAULTS_INTERVAL_SECONDS:
+            return
+        self._vaults_checked = now
+
+        bodies: dict[str, dict | None] = {}
+        for sub in targets:
+            ukey = sorted(sub.addresses)[0] if sub.addresses else ""
+            if ukey not in bodies:
+                try:
+                    bodies[ukey] = await asyncio.to_thread(_vaults_list_body, sorted(sub.addresses))
+                except Exception:
+                    bodies[ukey] = None
+            body = bodies.get(ukey)
+            if body is None:
+                continue
+            key = (token, f"vaults:{id(sub)}")
+            if self._prev_rows.get(key) == {"all": body}:
+                continue
+            self._prev_rows[key] = {"all": body}
+            env = self._envelope(token, "vaults", watermark, "snapshot")
+            await sub.send({**env, **body, "seq": sub.next_seq(token, "vaults")})
+
 
 def _watermark() -> int:
     from api.ws_data import indexer_watermark
@@ -481,7 +726,7 @@ HUB = Hub()
 async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, Any]:
     token = str(msg.get("token") or "").lower().strip()
     channels = msg.get("channels") or []
-    if token != "tokens" and (not token.startswith("0x") or len(token) != 42):
+    if token not in PSEUDO_TOKENS and (not token.startswith("0x") or len(token) != 42):
         return {"op": "error", "error": "invalid token address"}
     if not isinstance(channels, list) or not channels:
         return {"op": "error", "error": "channels must be a non-empty list"}
@@ -510,6 +755,8 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
                 # the baseline is stale for a different wallet set
                 for tok, _ch in list(sub.primed):
                     sub.primed.discard((tok, "positions"))
+                    sub.primed.discard((tok, "user_positions"))
+                    sub.primed.discard((tok, "balances"))
 
     reply = {
         "op": "subscribed",
@@ -517,7 +764,7 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
         "channels": accepted,
         "not_yet_implemented": pending,
     }
-    if "positions" in accepted:
+    if "positions" in accepted or "user_positions" in accepted or "balances" in accepted:
         reply["addresses"] = sorted(sub.addresses)
         if not sub.addresses:
             reply["warning"] = "positions needs an addresses array, none were accepted"
@@ -586,7 +833,6 @@ async def websocket_endpoint(socket: WebSocket) -> None:
             elif op == "unsubscribe":
                 await sub.send(await _apply_unsubscribe(sub, msg))
             elif op == "query":
-                from api.api import _internal_addrs
                 from api.routes.launchpad import _search_impl
 
                 f = msg.get("filters") or {}
@@ -598,7 +844,6 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                         int(f.pop("limit", 50) or 50),
                         int(f.pop("offset", 0) or 0),
                         f,
-                        _internal_addrs(),
                     )
                     await sub.send({"op": "query_result", "id": msg.get("id"), **res})
                 except Exception:

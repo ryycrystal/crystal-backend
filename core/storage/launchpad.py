@@ -1927,6 +1927,9 @@ def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM launchpad_tokens")
     cur.execute("DELETE FROM launchpad_pools")
     cur.execute("DELETE FROM launchpad_daily_pnl")
+    cur.execute("DELETE FROM crystal_orderbook_events")
+    cur.execute("DELETE FROM crystal_orderbook_orders")
+    cur.execute("DELETE FROM crystal_orderbook_fills")
     cur.execute("DELETE FROM launchpad_blocks")
 
 
@@ -2196,6 +2199,75 @@ def get_meta(key: str) -> str | None:
 def record_chain_tip(number: int, block_hash: str, cur=None) -> None:
     set_meta("tip_block", str(int(number)), cur=cur)
     set_meta("tip_hash", (block_hash or "").lower(), cur=cur)
+
+
+# true when a wallet has ever touched crystal: traded any indexed launchpad token,
+# placed an orderbook order, held lp shares, or deposited into a vault. wallets
+# outside this set get no server side rpc spend, they are not our users
+def wallet_has_crystal_activity(wallet: str) -> bool:
+    addr = (wallet or "").lower()
+    if not addr:
+        return False
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (SELECT 1 FROM launchpad_positions WHERE user_address = %(a)s)
+                OR EXISTS (SELECT 1 FROM crystal_orderbook_events WHERE user_address = %(a)s)
+                OR EXISTS (SELECT 1 FROM crystal_pool_lp_users WHERE user_address = %(a)s)
+                OR EXISTS (SELECT 1 FROM crystal_vault_users WHERE user_address = %(a)s)
+            """,
+            {"a": addr},
+        )
+        row = cur.fetchone()
+    return bool(row and row[0])
+
+
+# one immutable spot graph bucket, first write wins because history cannot change
+def write_spot_graph_bucket(
+    wallet: str,
+    bucket_ts: int,
+    block_number: int,
+    value_usd,
+    value_native,
+    balances: dict,
+    cur=None,
+) -> None:
+    sql = """
+        INSERT INTO spot_graph_buckets (wallet, bucket_ts, block_number, value_usd, value_native, balances)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (wallet, bucket_ts) DO NOTHING
+    """
+    params = ((wallet or "").lower(), int(bucket_ts), int(block_number), value_usd, value_native, Json(balances))
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+# cached spot graph buckets for one wallet, oldest first
+def get_spot_graph_buckets(wallet: str, since_ts: int) -> list[tuple[int, Decimal, Decimal]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT bucket_ts, value_usd, value_native
+            FROM spot_graph_buckets
+            WHERE wallet = %s AND bucket_ts >= %s
+            ORDER BY bucket_ts
+            """,
+            ((wallet or "").lower(), int(since_ts)),
+        )
+        return [(int(t), v or Decimal(0), n or Decimal(0)) for t, v, n in cur.fetchall()]
+
+
+# bucket timestamps already computed for one wallet
+def get_spot_graph_bucket_set(wallet: str, since_ts: int) -> set[int]:
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT bucket_ts FROM spot_graph_buckets WHERE wallet = %s AND bucket_ts >= %s",
+            ((wallet or "").lower(), int(since_ts)),
+        )
+        return {int(r[0]) for r in cur.fetchall()}
 
 
 # processed blocks in a window with no cached log row, which a clean reindex would silently drop

@@ -1,66 +1,96 @@
-# decoders for the orderbook's raw log2 events. these two topics are emitted via
-# assembly rather than emit, so generic abi tooling never sees them, which is why
-# batch placed orders were invisible and remaining sizes went stale.
+# decoders for the orderbook events of the deployed crystal contracts.
 #
-# layouts read directly from contract.sol's emission assembly. no real fill exists
-# on the current deployment yet, so the vectors in tests are synthetic: the first
-# real exchange trade must be checked against these decoders before they are
-# trusted for balances or order state
+# OrdersUpdated is emitted as a raw log3 (sig, market, user) whose data is one
+# abi bytes payload of packed entries: flag<<252 | price<<168 | orderId<<112 |
+# size, per CrystalMarket.sol's _addToOrdersUpdatedEvent call sites. the entry
+# layout was verified against a real mainnet log (tx 0x74ee7c9091d6969fd601c879
+# 3f460282c1fe635f8e0d3fe9395df07312b5924d, block 97754330). the fill decode was
+# validated against 239 real mainnet fills on 2026-08-20: price, maker and side
+# all agree with the resting order's add at fill time, and the amount halves
+# reconcile with the same tx's Trade event (tx 0x6e38463447a9b5c87e1e11ccf7ed42
+# f106041aa4aac99fa125f0f0670bd19754: amount_out equals Trade.amountOut exactly,
+# amount_high equals Trade.amountIn net of the taker fee)
 
 from __future__ import annotations
 
-FILL_TOPIC = "0xc3bcf95b5242764f3f2dc3e504ce05823a3b50c4ccef5e660d13beab2f51f2ca"
-BATCH_ORDERS_TOPIC = "0x1c87843c023cd30242ff04316b77102e873496e3d8924ef015475cf066c1d4f4"
+FILL_TOPIC = "0xa195980963150be5fcca4acd6a80bf5a9de7f9c862258501b7c705e7d2c2d2f4"
+ORDERS_UPDATED_TOPIC = "0x7ebb55d14fb18179d0ee498ab0f21c070fad7368e44487d51cdac53d6f74812c"
 
 _U128 = (1 << 128) - 1
+_U112 = (1 << 112) - 1
 _U80 = (1 << 80) - 1
-_U48 = (1 << 48) - 1
+_U56 = (1 << 56) - 1
+
+# flag nibble: 0/1 buy/sell removal (cancelled or fully consumed), 2/3 buy/sell
+# add, 4/5 buy/sell size decrease where the size field carries the decrement
+ACTIONS = {0: "remove", 1: "remove", 2: "add", 3: "add", 4: "decrease", 5: "decrease"}
 
 
-# one packed resting-order entry: price<<176 | orderId<<128 | size
-def _entry(word: int) -> dict:
-    return {"price": word >> 176 & _U80, "order_id": word >> 128 & _U48, "size": word & _U128}
+# hex event data into 32 byte words, tolerant of a leading 0x
+def _words(data: str) -> list[int]:
+    d = data or ""
+    if d.startswith("0x"):
+        d = d[2:]
+    return [int(d[i * 64 : (i + 1) * 64], 16) for i in range(len(d) // 64)]
 
 
-# OrdersFilled raw log: abi words (amounts, info, offset, len, entries...). the
-# entries carry each touched resting order's REMAINING size, zero when fully filled
-def decode_fill(topics: list[str], data: str) -> dict | None:
-    if not topics or topics[0].lower() != FILL_TOPIC:
+# one packed order entry, none when the flag nibble is not a known action
+def _entry(word: int) -> dict | None:
+    flag = word >> 252
+    action = ACTIONS.get(flag)
+    if action is None:
         return None
-    d = (data or "")[2:]
-    words = [int(d[i * 64 : (i + 1) * 64], 16) for i in range(len(d) // 64)]
-    if len(words) < 4:
-        return None
-    amounts, info, _, blen = words[0], words[1], words[2], words[3]
-    n = blen // 32
-    entries = [_entry(w) for w in words[4 : 4 + n]]
     return {
-        "caller": "0x" + topics[1][-40:].lower(),
-        "amount_in": amounts >> 128,
-        "amount_out": amounts & _U128,
-        "is_buy": bool(info >> 252 & 1),
-        "first_fill_price": info >> 128 & _U80,
-        "last_fill_price": info & _U128,
-        "touched": entries,
+        "flag": flag,
+        "action": action,
+        "is_buy": flag % 2 == 0,
+        "price": (word >> 168) & _U80,
+        "order_id": (word >> 112) & _U56,
+        "size": word & _U112,
     }
 
 
-# OrdersUpdated, both the emit form and the batch raw form share entry packing:
-# flag(word>>252): 0 sell-add, 1 buy-add, 2 sell-cancel, 3 buy-cancel
-def decode_order_updates(topics: list[str], data: str) -> dict | None:
-    if not topics or topics[0].lower() != BATCH_ORDERS_TOPIC:
+# OrdersUpdated raw log3: market and user in topics, abi bytes of entries in data
+def parse_orders_updated(addr: str, topics: list[str], data: str) -> dict | None:
+    if len(topics) < 3:
         return None
-    d = (data or "")[2:]
-    words = [int(d[i * 64 : (i + 1) * 64], 16) for i in range(len(d) // 64)]
+    words = _words(data)
     if len(words) < 2:
         return None
-    blen = words[1]
-    n = blen // 32
-    out = []
+    n = min(words[1] // 32, max(len(words) - 2, 0))
+    orders = []
     for w in words[2 : 2 + n]:
-        flag = w >> 252
-        e = _entry(w & ((1 << 252) - 1))
-        e["is_buy"] = flag in (1, 3)
-        e["is_cancel"] = flag in (2, 3)
-        out.append(e)
-    return {"owner": "0x" + topics[1][-40:].lower(), "orders": out}
+        e = _entry(w)
+        if e is not None:
+            orders.append(e)
+    return {
+        "market": "0x" + topics[1][-40:].lower(),
+        "user": "0x" + topics[2][-40:].lower(),
+        "orders": orders,
+    }
+
+
+# Fill(market indexed, maker indexed, fillInfo, fillAmount): fillInfo shares the
+# entry packing with the taker's side in the flag nibble (0 = taker bought, so
+# the maker order was a sell) and the maker order's remaining size in the low
+# bits. fillAmount halves: high = taker input net of the taker fee, low = taker
+# output, both confirmed against the paired Trade event on mainnet
+def parse_fill(addr: str, topics: list[str], data: str) -> dict | None:
+    if len(topics) < 3:
+        return None
+    words = _words(data)
+    if len(words) < 2:
+        return None
+    info, amount = words[0], words[1]
+    flag = info >> 252
+    return {
+        "market": "0x" + topics[1][-40:].lower(),
+        "maker": "0x" + topics[2][-40:].lower(),
+        "flag": flag,
+        "maker_is_buy": flag == 1,
+        "price": (info >> 168) & _U80,
+        "order_id": (info >> 112) & _U56,
+        "remaining": info & _U112,
+        "amount_high": amount >> 128,
+        "amount_out": amount & _U128,
+    }

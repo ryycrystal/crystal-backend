@@ -10,6 +10,10 @@ import websockets
 import backfill
 import core.storage as storage
 from core import chain as h
+from core.multicall import MULTICALL3_ADDR
+from core.multicall import decode_multicall3_aggregate3_result as _decode_multicall3_aggregate3_result
+from core.multicall import encode_multicall3_aggregate3 as _encode_multicall3_aggregate3
+from core.multicall import u256_at as _u256_at
 from core.sequencer import SEQUENCER
 
 HEAD_TIMEOUT = 60.0
@@ -18,94 +22,13 @@ HEAD_TIMEOUT = 60.0
 BACKFILL_BATCH = int(os.getenv("BACKFILL_BATCH", "100"))
 VAULT_SAMPLER_INTERVAL = 30
 VAULT_SAMPLER_MULTICALL_CHUNK = 200
-MULTICALL3_ADDR = "0xca11bde05977b3631167028862be2a173976ca11"
 GET_BALANCES_CALLDATA = bytes.fromhex("00113e08")
 # erc20 totalSupply(), piggybacked on the same multicall so the event-replay share
 # counter is reconciled against the chain on every sweep instead of drifting silently
 TOTAL_SUPPLY_CALLDATA = bytes.fromhex("18160ddd")
-MULTICALL3_AGGREGATE3_SELECTOR = bytes.fromhex("82ad56cb")
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
-
-
-# read one uint256 at a byte offset
-def _u256_at(buf: bytes, off: int) -> int:
-    if off < 0 or (off + 32) > len(buf):
-        return 0
-    return int.from_bytes(buf[off : off + 32], "big")
-
-
-# abi encode a uint256
-def _abi_u256(n: int) -> bytes:
-    return int(n).to_bytes(32, "big")
-
-
-# abi encode an address
-def _abi_addr(addr: str) -> bytes:
-    h = str(addr or "").lower().replace("0x", "")[-40:].rjust(40, "0")
-    return (b"\x00" * 12) + bytes.fromhex(h)
-
-
-# abi encode a bool
-def _abi_bool(v: bool) -> bytes:
-    return _abi_u256(1 if v else 0)
-
-
-# abi encode a dynamic bytes argument
-def _abi_bytes(data: bytes) -> bytes:
-    d = data or b""
-    pad = (-len(d)) % 32
-    return _abi_u256(len(d)) + d + (b"\x00" * pad)
-
-
-# build multicall3 aggregate3 calldata for a batch of calls
-def _encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
-    elems = []
-    for target, calldata in calls:
-        body = _abi_addr(target) + _abi_bool(False) + _abi_u256(96) + _abi_bytes(calldata)
-        elems.append(body)
-    n = len(elems)
-    arr_heads_size = 32 * n
-    cur = arr_heads_size
-    arr_offsets = []
-    for e in elems:
-        arr_offsets.append(cur)
-        cur += len(e)
-    arr = _abi_u256(n) + b"".join(_abi_u256(o) for o in arr_offsets) + b"".join(elems)
-    payload = MULTICALL3_AGGREGATE3_SELECTOR + _abi_u256(32) + arr
-    return "0x" + payload.hex()
-
-
-# decode multicall3 aggregate3 output into success and return bytes
-def _decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, bytes]]:
-    if not isinstance(data_hex, str) or not data_hex.startswith("0x"):
-        return []
-    try:
-        buf = bytes.fromhex(data_hex[2:])
-    except Exception:
-        return []
-    top_off = _u256_at(buf, 0)
-    base = top_off
-    if (base + 32) > len(buf):
-        return []
-    n = _u256_at(buf, base)
-    tuple_base = base + 32
-    out = []
-    for i in range(n):
-        off = _u256_at(buf, tuple_base + (32 * i))
-        elem = tuple_base + off
-        success = bool(_u256_at(buf, elem))
-        bytes_off = _u256_at(buf, elem + 32)
-        bpos = elem + bytes_off
-        blen = _u256_at(buf, bpos)
-        bstart = bpos + 32
-        bend = bstart + blen
-        if bstart > len(buf):
-            out.append((success, b""))
-            continue
-        out.append((success, buf[bstart : min(bend, len(buf))]))
-    return out
 
 
 # decode a vault getbalances return into quote and base
