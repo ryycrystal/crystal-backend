@@ -167,17 +167,22 @@ async def _run_live_dump(args: argparse.Namespace, start_block: int) -> None:
 async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     print(f"[IDX] Starting live stream from block {start_block}", flush=True)
     await nadfun.start_metadata_worker(storage)
-    try:
-        await backfill.seed_referral_bindings(DEFAULT_START_BLOCK)
-    except Exception as e:
-        print(f"[REF] Referral seed failed {e!r}, live events still index", flush=True)
     SEQUENCER.set_next_block(start_block)
+
+    # the historical seed can take a while on range capped rpcs, so it runs
+    # beside the stream instead of delaying it; live REF events index either way
+    async def _seed_referrals():
+        try:
+            await backfill.seed_referral_bindings(DEFAULT_START_BLOCK)
+        except Exception as e:
+            print(f"[REF] Referral seed failed {e!r}, live events still index", flush=True)
 
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
         asyncio.create_task(integrity_worker()),
         asyncio.create_task(referral_rewards_worker()),
+        asyncio.create_task(_seed_referrals()),
     ]
     if args.live_dump_dir:
         print(

@@ -409,8 +409,9 @@ async def backfill(start_block: int, batch: int) -> int:
 
 
 # one shot historical fetch of referral binding events, marked done in kv so it
-# never reruns. chunk size shrinks on provider range caps and the marker is only
-# written after a full clean pass
+# never reruns. resumable via a progress marker, chunk size shrinks on any
+# fetch failure, and repeated failures at the floor skip forward rather than
+# aborting the whole seed
 async def seed_referral_bindings(start_block: int) -> None:
     if storage.get_meta("referral_seeded"):
         return
@@ -420,8 +421,11 @@ async def seed_referral_bindings(start_block: int) -> None:
     manager = h.CONTRACTS["REFERRALS"].lower()
     chunk = int(os.getenv("REFERRAL_SEED_CHUNK", "50000"))
     total = 0
-    blk = int(start_block)
-    print(f"[REF] Seeding referral bindings {blk} -> {head}", flush=True)
+    resumed = storage.get_meta("referral_seed_progress")
+    blk = max(int(start_block), int(resumed) + 1) if resumed else int(start_block)
+    print(f"[REF] Seeding referral bindings {blk} -> {head} (chunk {chunk})", flush=True)
+    calls = 0
+    failures_at_floor = 0
     while blk <= head:
         end = min(blk + chunk - 1, head)
         try:
@@ -436,14 +440,21 @@ async def seed_referral_bindings(start_block: int) -> None:
                     }
                 ],
             )
-        except RuntimeError as e:
-            err = e.args[0] if e.args else {}
-            code = err.get("error", {}).get("code") if isinstance(err, dict) else None
-            if code in (-32602, -32005) and chunk > 100:
+        except Exception as e:
+            if chunk > 100:
                 chunk = max(100, chunk // 10)
-                print(f"[REF] Provider range cap, shrinking seed chunk to {chunk}", flush=True)
+                print(f"[REF] Seed fetch failed ({e!r}), shrinking chunk to {chunk}", flush=True)
+                await asyncio.sleep(1.0)
                 continue
-            raise
+            failures_at_floor += 1
+            if failures_at_floor >= 5:
+                print(f"[REF] Skipping unfetchable range {blk}-{end} after retries", flush=True)
+                blk = end + 1
+                failures_at_floor = 0
+                continue
+            await asyncio.sleep(2.0 * failures_at_floor)
+            continue
+        failures_at_floor = 0
         for log in data.get("result") or []:
             tops = log.get("topics") or []
             if not tops or tops[0].lower() != REFERRAL_TOPIC:
@@ -455,9 +466,19 @@ async def seed_referral_bindings(start_block: int) -> None:
             lii = int(li, 16) if isinstance(li, str) else int(li or 0)
             ts_raw = log.get("blockTimestamp")
             ts = int(ts_raw, 16) if isinstance(ts_raw, str) else int(ts_raw or 0)
+            if ts == 0:
+                try:
+                    ts = await get_block_timestamp_http(blk_num)
+                except Exception:
+                    ts = 0
             storage.upsert_referral_binding(parsed["referee"], parsed["referrer"], blk_num, lii, ts)
             total += 1
         blk = end + 1
+        calls += 1
+        if calls % 200 == 0:
+            storage.set_meta("referral_seed_progress", str(end))
+            pct = 100.0 * (end - int(start_block)) / max(1, head - int(start_block))
+            print(f"[REF] Seed progress {end} ({pct:.1f}%), {total} events so far", flush=True)
     storage.set_meta("referral_seeded", str(head))
     print(f"[REF] Referral seed complete: {total} events through block {head}", flush=True)
 
