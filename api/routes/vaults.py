@@ -121,32 +121,32 @@ def _vault_user_lockup_fields(
     }
 
 
-# pnl from value per share so deposits and withdrawals do not read as performance
+# pnl from value per share: pct against the first priced sample, dollars as cumulative
+# value creation sum(shares * dvps), so flows scale neither series retroactively.
+# unpriceable points carry the previous values forward instead of faking a drop
 def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
-    shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
-    if shared:
-        base = shared[0]
-        base_vps = float(base["usdValue"]) / float(base["shares"])
-        out = []
-        for p in pts:
-            sh = float(int(p.get("shares") or 0))
-            if sh > 0 and base_vps > 0:
-                vps = float(p["usdValue"]) / sh
-                pct = ((vps / base_vps) - 1.0) * 100.0
-                usd = (vps - base_vps) * sh
-            else:
-                pct = 0.0
-                usd = 0.0
-            out.append({"timestamp": int(p["timestamp"]), "pnlUsd": usd, "pnlPct": pct})
-        return out
-    base_usd = float(pts[0]["usdValue"]) if pts else 0.0
     out = []
+    base_vps = None
+    prev_vps = None
+    cum_usd = 0.0
+    last_pct = 0.0
     for p in pts:
-        cur_usd = float(p["usdValue"])
-        usd = cur_usd - base_usd
-        pct = ((cur_usd / base_usd) - 1.0) * 100.0 if base_usd > 0 else 0.0
-        out.append({"timestamp": int(p["timestamp"]), "pnlUsd": usd, "pnlPct": pct})
+        sh = int(p.get("shares") or 0)
+        usd = float(p.get("usdValue") or 0.0)
+        if sh > 0 and usd > 0:
+            vps = usd / sh
+            if base_vps is None:
+                base_vps = vps
+                prev_vps = vps
+            cum_usd += float(sh) * (vps - prev_vps)
+            prev_vps = vps
+            last_pct = ((vps / base_vps) - 1.0) * 100.0
+        out.append({"timestamp": int(p["timestamp"]), "pnlUsd": cum_usd, "pnlPct": last_pct})
     return out
+
+
+# annualizing anything shorter than this window is noise, not yield
+VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
 
 
 # annualized per-share return from the trailing sample window, null when unknowable
@@ -167,7 +167,7 @@ def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
     t_first, usd_first, sh_first = shared[0]
     t_last, usd_last, sh_last = shared[-1]
     window = t_last - t_first
-    if window <= 0:
+    if window < VAULT_APY_MIN_WINDOW_SECS:
         return None
     first_vps = usd_first / sh_first
     last_vps = usd_last / sh_last
@@ -177,17 +177,18 @@ def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
     return pct * (365.0 * 86400.0 / window)
 
 
-# average cost basis over signed share flows priced at nav, pure for unit tests
-def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[float, float, float]:
-    pos = 0.0
+# average cost basis over signed share flows priced at nav, pure for unit tests.
+# position stays integral so a full exit lands on exactly zero shares
+def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[int, float, float]:
+    pos = 0
     cost = 0.0
     realized = 0.0
     for shares, nav in flows:
         if shares > 0:
             cost += shares * nav
-            pos += float(shares)
+            pos += int(shares)
         elif shares < 0 and pos > 0:
-            take = min(float(-shares), pos)
+            take = min(int(-shares), pos)
             avg = cost / pos
             realized += take * (nav - avg)
             cost -= take * avg
@@ -196,31 +197,47 @@ def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[float, float, 
     return pos, entry, realized
 
 
+# nav at one flow: pre flow tvl over pre flow supply, post flow pair for a vault seeding deposit
+def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> float | None:
+    minted_incl, burned_incl = storage.sum_vault_share_flows_after(vault_addr, ts, inclusive=True)
+    supply_before = circ_now - minted_incl + burned_incl
+    usd_before = storage.vault_sample_usd_before(vault_addr, ts)
+    if usd_before is not None and supply_before > 0:
+        return usd_before / supply_before
+    minted_after, burned_after = storage.sum_vault_share_flows_after(vault_addr, ts)
+    supply_after = circ_now - minted_after + burned_after
+    usd_after = storage.vault_sample_usd_at_or_after(vault_addr, ts)
+    if usd_after is not None and supply_after > 0:
+        return usd_after / supply_after
+    return None
+
+
 # user pnl from the flow ledger, nav at each flow reconstructed from samples and supply
-def _vault_user_pnl(vault_addr: str, user_addr: str, circ_now: int, tvl_usd_now: float) -> dict | None:
+def _vault_user_pnl(
+    vault_addr: str, user_addr: str, circ_now: int, tvl_usd_now: float, nav_now: float | None = None
+) -> dict | None:
     flows = storage.list_crystal_vault_user_flows(vault_addr, user_addr)
-    if not flows or circ_now <= 0 or tvl_usd_now <= 0:
+    if not flows or circ_now <= 0:
         return None
     priced: list[tuple[int, float]] = []
     for ts, shares in flows:
-        usd = storage.nearest_vault_sample_usd(vault_addr, ts)
-        if usd is None or usd <= 0:
+        nav = _nav_at_flow(vault_addr, ts, circ_now)
+        if nav is None or nav <= 0:
             return None
-        minted_after, burned_after = storage.sum_vault_share_flows_after(vault_addr, ts)
-        supply_at = circ_now - minted_after + burned_after
-        if supply_at <= 0:
-            return None
-        priced.append((shares, usd / supply_at))
+        priced.append((shares, nav))
     pos, entry_nav, realized = _avg_cost_from_flows(priced)
+    if nav_now is None:
+        nav_now = (tvl_usd_now / circ_now) if tvl_usd_now > 0 else None
+    if nav_now is None or nav_now <= 0:
+        return None
     if pos <= 0 or entry_nav <= 0:
         return {
             "entryNav": None,
-            "navNow": tvl_usd_now / circ_now,
+            "navNow": nav_now,
             "unrealizedPnlUsd": 0.0,
             "unrealizedPnlPct": 0.0,
             "realizedPnlUsd": realized,
         }
-    nav_now = tvl_usd_now / circ_now
     return {
         "entryNav": entry_nav,
         "navNow": nav_now,
@@ -230,17 +247,14 @@ def _vault_user_pnl(vault_addr: str, user_addr: str, circ_now: int, tvl_usd_now:
     }
 
 
-# percent change of value per share across a sample window, tvl based when shares are absent
+# percent change of value per share across a sample window, zero when no priced samples exist
 def _per_share_pct_change(pts: list[dict]) -> float:
     shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
-    if shared:
-        first_vps = float(shared[0]["usdValue"]) / float(shared[0]["shares"])
-        last_vps = float(shared[-1]["usdValue"]) / float(shared[-1]["shares"])
-        return ((last_vps / first_vps) - 1.0) * 100.0 if first_vps > 0 else 0.0
-    values = [float(p.get("usdValue") or 0.0) for p in pts]
-    first = values[0] if values else 0.0
-    last = values[-1] if values else 0.0
-    return ((last / first) - 1.0) * 100.0 if first > 0 else 0.0
+    if not shared:
+        return 0.0
+    first_vps = float(shared[0]["usdValue"]) / float(shared[0]["shares"])
+    last_vps = float(shared[-1]["usdValue"]) / float(shared[-1]["shares"])
+    return ((last_vps / first_vps) - 1.0) * 100.0 if first_vps > 0 else 0.0
 
 
 def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: int = 0) -> dict | None:
@@ -268,13 +282,15 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
         for r in rows
     ]
     pts.sort(key=lambda p: int(p["timestamp"]))
+
+    values = [float(p["usdValue"]) for p in pts]
+    last = values[-1] if values else 0.0
+    pct = _per_share_pct_change(pts)
+
     if points and int(points) > 0:
         pts = _sample_evenly_by_time(pts, int(points), lambda p: int(p.get("timestamp") or 0))
 
     tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
-    values = [float(p["usdValue"]) for p in pts]
-    last = values[-1] if values else 0.0
-    pct = _per_share_pct_change(pts)
     return {
         "timeframe": int(timeframe),
         "tvl": tvl,
@@ -597,8 +613,13 @@ def vault_user_summary(
             "baseBalance": int(latest_row[3] or 0),
             "usdValue": float(latest_row[4] or 0.0),
         }
+        latest_shares = int(latest_row[5] or 0) if len(latest_row) > 5 else 0
     else:
         latest = {"quoteBalance": 0, "baseBalance": 0, "timestamp": 0, "usdValue": 0.0, "block": 0}
+        latest_shares = 0
+
+    # nav from one sample's own usd and shares pair, never a stale tvl over a live count
+    nav_now = (latest["usdValue"] / latest_shares) if latest_shares > 0 and latest["usdValue"] > 0 else None
 
     circ = int(circulating_shares or 0)
     user_row = storage.get_crystal_vault_user(vaddr, uaddr)
@@ -679,7 +700,7 @@ def vault_user_summary(
 
     user_pnl = None
     try:
-        user_pnl = _vault_user_pnl(vaddr, uaddr, circ, float(latest["usdValue"] or 0.0))
+        user_pnl = _vault_user_pnl(vaddr, uaddr, circ, float(latest["usdValue"] or 0.0), nav_now=nav_now)
     except Exception:
         user_pnl = None
 
@@ -784,10 +805,13 @@ def vault_history(
         for r in pts_rows
     ]
     raw_count = len(pts)
-    pts = _sample_evenly_by_time(pts, 48, lambda p: int(p.get("timestamp") or 0))
 
-    tvl_series = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
-    pnl_series = _per_share_pnl_series(pts)
+    # both series are built at full resolution and downsampled afterwards, so the
+    # pnl base point and the cumulative dollar sum cannot shift with the sampling
+    tvl_full = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
+    pnl_full = _per_share_pnl_series(pts)
+    tvl_series = _sample_evenly_by_time(tvl_full, 48, lambda p: int(p.get("timestamp") or 0))
+    pnl_series = _sample_evenly_by_time(pnl_full, 48, lambda p: int(p.get("timestamp") or 0))
 
     tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe_i]
     return {
@@ -803,5 +827,5 @@ def vault_history(
             "circulatingShares": int(circulating_shares or 0),
         },
         "series": {"tvl": tvl_series, "pnl": pnl_series},
-        "info": {"timeframe": tf_name, "count": len(pts), "rawCount": raw_count},
+        "info": {"timeframe": tf_name, "count": len(tvl_series), "rawCount": raw_count},
     }

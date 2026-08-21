@@ -1051,8 +1051,8 @@ def test_vault_history_timeframe_calls_and_series_math():
         assert out["info"]["timeframe"] == tf_name
         assert [p["timestamp"] for p in out["series"]["tvl"]] == [1000, 1010, 1020]
         assert [p["tvlUsd"] for p in out["series"]["tvl"]] == [1.0, 2.0, 1.5]
-        assert [p["pnlUsd"] for p in out["series"]["pnl"]] == [0.0, 1.0, 0.5]
-        assert [p["pnlPct"] for p in out["series"]["pnl"]] == [0.0, 100.0, 50.0]
+        assert [p["pnlUsd"] for p in out["series"]["pnl"]] == [0.0, 0.0, 0.0]
+        assert [p["pnlPct"] for p in out["series"]["pnl"]] == [0.0, 0.0, 0.0]
 
 
 def test_vault_storage_upsert_vault_sql_and_cursor_paths():
@@ -1510,8 +1510,8 @@ def test_vault_history_per_share_pnl_ignores_flows():
     assert [p["tvlUsd"] for p in out["series"]["tvl"]] == [100.0, 200.0, 220.0]
 
 
-# samples without shares keep the old tvl based pnl for legacy rows
-def test_vault_history_legacy_rows_fall_back_to_tvl_pnl():
+# samples without shares are unpriceable and must report flat zero, never tvl deltas
+def test_vault_history_legacy_rows_report_flat_pnl():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
         (1, 1000, 0, 0, 1.0),
@@ -1521,8 +1521,52 @@ def test_vault_history_legacy_rows_fall_back_to_tvl_pnl():
         with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=pts_rows):
             out = vault_api.vault_history("0xV", 4, limit=0)
     pnl = out["series"]["pnl"]
-    assert [p["pnlUsd"] for p in pnl] == [0.0, 1.0]
-    assert [p["pnlPct"] for p in pnl] == [0.0, 100.0]
+    assert [p["pnlUsd"] for p in pnl] == [0.0, 0.0]
+    assert [p["pnlPct"] for p in pnl] == [0.0, 0.0]
+
+
+# a whale deposit at flat value per share must not move the dollar pnl series
+def test_vault_history_dollar_series_is_flow_invariant():
+    vault_row = _vault_row(vault="0xv")
+    pts_rows = [
+        (1, 1000, 0, 0, 100.0, 1000),
+        (2, 1010, 0, 0, 110.0, 1000),
+        (3, 1020, 0, 0, 110110.0, 1001000),
+    ]
+    with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=pts_rows):
+            out = vault_api.vault_history("0xV", 4, limit=0)
+    pnl = out["series"]["pnl"]
+    assert abs(pnl[1]["pnlUsd"] - 10.0) < 1e-9
+    assert abs(pnl[2]["pnlUsd"] - 10.0) < 1e-6
+    assert abs(pnl[2]["pnlPct"] - 10.0) < 1e-9
+
+
+# a zero usd sample carries the previous pnl forward instead of printing minus one hundred
+def test_vault_history_zero_usd_sample_carries_forward():
+    vault_row = _vault_row(vault="0xv")
+    pts_rows = [
+        (1, 1000, 0, 0, 100.0, 1000),
+        (2, 1010, 0, 0, 0.0, 1000),
+        (3, 1020, 0, 0, 110.0, 1000),
+    ]
+    with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=pts_rows):
+            out = vault_api.vault_history("0xV", 4, limit=0)
+    pnl = out["series"]["pnl"]
+    assert pnl[1]["pnlPct"] == 0.0
+    assert pnl[1]["pnlUsd"] == 0.0
+    assert abs(pnl[2]["pnlPct"] - 10.0) < 1e-9
+
+
+# an exact full exit with 1e18 scale share counts leaves no float residue
+def test_avg_cost_full_exit_is_exact():
+    a = 4539448776366754703
+    b = 1190396360377453094
+    pos, entry, realized = vault_api._avg_cost_from_flows([(a, 1.0), (b, 2.0), (-(a + b), 3.0)])
+    assert pos == 0
+    assert entry == 0.0
+    assert realized > 0.0
 
 
 # snapshot pct change also normalizes by shares when they exist
@@ -1540,9 +1584,12 @@ def test_vault_snapshot_pct_change_is_per_share():
 if __name__ == "__main__":
     for fn in [
         test_avg_cost_from_flows_math,
+        test_avg_cost_full_exit_is_exact,
         test_vault_apy_pct_from_samples,
         test_vault_history_per_share_pnl_ignores_flows,
-        test_vault_history_legacy_rows_fall_back_to_tvl_pnl,
+        test_vault_history_legacy_rows_report_flat_pnl,
+        test_vault_history_dollar_series_is_flow_invariant,
+        test_vault_history_zero_usd_sample_carries_forward,
         test_vault_snapshot_pct_change_is_per_share,
         test_vaults_module_helpers,
         test_parse_vault_created_with_metadata,
