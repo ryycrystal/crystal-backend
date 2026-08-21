@@ -63,12 +63,18 @@ def test_referral_summary_shape():
     ):
         with patch.object(ref_api.storage, "list_referees", return_value=[("0xDEF", 222)]):
             with patch.object(ref_api.storage, "get_referral_rewards", return_value=[("0xT", 10, 25, 333)]):
-                out = ref_api.referral_summary("0x" + "9" * 40)
+                with patch.object(ref_api, "_quote_decimals", return_value={"0xt": 6}):
+                    with patch.object(ref_api, "_cached_state", side_effect=RuntimeError("no db")):
+                        out = ref_api.referral_summary("0x" + "9" * 40)
     assert out["ok"] is True
     assert out["referrer"] == "0xaaa0000000000000000000000000000000000abc"
     assert out["referredCount"] == 1
     assert out["referees"] == [{"address": "0xdef", "since": 222}]
-    assert out["rewards"] == [{"token": "0xt", "claimable": "10", "earned": "25", "updatedAt": 333}]
+    assert out["rewards"] == [
+        {"token": "0xt", "claimable": "10", "earned": "25", "claimableUsd": 0.0, "earnedUsd": 0.0, "updatedAt": 333}
+    ]
+    assert out["totalClaimableUsd"] == 0.0
+    assert out["totalEarnedUsd"] == 0.0
 
     try:
         ref_api.referral_summary("nothex")
