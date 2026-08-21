@@ -94,3 +94,20 @@ def parse_fill(addr: str, topics: list[str], data: str) -> dict | None:
         "amount_high": amount >> 128,
         "amount_out": amount & _U128,
     }
+
+
+# UserRegistered(bool indexed isMargin, address indexed user, uint256 indexed
+# userId): the on-chain user registry. client order ids embed the user id as
+# their low 41 bits, so this is how orders resolve to owning wallets
+USER_REGISTERED_TOPIC = "0xc9c1b51eb96995e1cfea90cc81876d702d5d0a6bf11011d9963fd4d96886f102"
+
+
+# decode a userregistered log into the id and its owning wallet
+def parse_user_registered(addr: str, topics: list[str], data: str) -> dict | None:
+    if len(topics) < 4:
+        return None
+    return {
+        "is_margin": int(topics[1], 16) != 0,
+        "user": "0x" + topics[2][-40:].lower(),
+        "user_id": int(topics[3], 16),
+    }

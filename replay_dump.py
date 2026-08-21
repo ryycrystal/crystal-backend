@@ -194,6 +194,7 @@ def replay_dump_range(
 
     SEQUENCER.reset_pending(first_block)
     nadfun._PENDING_SYNC.clear()
+    nadfun._PENDING_PAIR_SYNC.clear()
     nadfun.METADATA_QUEUE.clear()
 
     for chunk in chunks:

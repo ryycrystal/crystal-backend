@@ -11,6 +11,7 @@ from state import RPC_HTTP
 BUCKET = 10_000_000
 DEFAULT_RPS = 10.0
 DEFAULT_BATCH = 100
+REFILL_CALLS_PER_BATCH = 10
 HEAD_LAG_LIMIT = 100
 
 
@@ -25,17 +26,31 @@ class Rpc:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def call(self, method: str, params: list) -> dict:
+    async def _pace(self) -> None:
         wait = self.min_interval - (time.monotonic() - self.last_request)
         if wait > 0:
             await asyncio.sleep(wait)
         self.last_request = time.monotonic()
+
+    async def call(self, method: str, params: list) -> dict:
+        await self._pace()
         resp = await self.client.post(self.url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
         resp.raise_for_status()
         data = resp.json()
         if "error" in data:
             raise RuntimeError(data)
         return data
+
+    async def batch(self, calls: list[tuple[str, list]]) -> list[dict]:
+        await self._pace()
+        payload = [{"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, (m, p) in enumerate(calls)]
+        resp = await self.client.post(self.url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise RuntimeError(data)
+        by_id = {d.get("id"): d for d in data}
+        return [by_id.get(i) or {} for i in range(len(calls))]
 
 
 # current chain head
@@ -91,7 +106,7 @@ def fetch_processed_gaps() -> list[tuple[int, int]]:
 
 
 # contiguous ranges of processed blocks that have no cached log row
-def fetch_cache_holes() -> list[tuple[int, int]]:
+def fetch_cache_holes(start_block: int | None = None, end_block: int | None = None) -> list[tuple[int, int]]:
     with storage.db_cursor() as cur:
         cur.execute(
             """
@@ -100,12 +115,15 @@ def fetch_cache_holes() -> list[tuple[int, int]]:
                 FROM launchpad_blocks b
                 LEFT JOIN launchpad_block_logs l ON l.number = b.number
                 WHERE l.number IS NULL
+                  AND b.number >= COALESCE(%s, b.number)
+                  AND b.number <= COALESCE(%s, b.number)
             ),
             grouped AS (
                 SELECT number, number - ROW_NUMBER() OVER (ORDER BY number) AS grp FROM holes
             )
             SELECT MIN(number), MAX(number) FROM grouped GROUP BY grp ORDER BY 1
-            """
+            """,
+            (start_block, end_block),
         )
         return [(int(a), int(b)) for a, b in cur.fetchall()]
 
@@ -221,42 +239,61 @@ async def run_check(rpc: Rpc, verbose_ranges: int) -> int:
     return problems
 
 
-# refill uncached processed ranges from rpc so a reindex stops losing data
-async def run_refill(rpc: Rpc, batch: int) -> None:
-    holes = fetch_cache_holes()
+# refill uncached processed ranges from rpc so a reindex stops losing data. the
+# chunks ride json-rpc batches, because one wide-topic getLogs takes seconds on
+# the public rpc and a chunk at a time makes big holes take days
+async def run_refill(rpc: Rpc, batch: int, start_block: int | None = None, end_block: int | None = None) -> None:
+    holes = fetch_cache_holes(start_block, end_block)
     if not holes:
         print("[DOCTOR] no cache holes to refill", flush=True)
         return
     total = sum(e - s + 1 for s, e in holes)
     print(f"[DOCTOR] refilling {total:,} blocks across {len(holes)} ranges", flush=True)
-    done = 0
-    started = time.monotonic()
+
+    chunks: list[tuple[int, int]] = []
     for r_start, r_end in holes:
         for c_start in range(r_start, r_end + 1, batch):
-            c_end = min(c_start + batch - 1, r_end)
-            logs = None
-            for attempt in range(5):
-                try:
-                    logs = await rpc_logs(rpc, c_start, c_end)
-                    break
-                except Exception as e:
-                    print(f"[DOCTOR] fetch {c_start}-{c_end} failed ({e!r}), retry {attempt + 1}/5", flush=True)
-                    await asyncio.sleep(2.0 * (attempt + 1))
-            if logs is None:
-                raise RuntimeError(f"refill failed for range {c_start}-{c_end}")
+            chunks.append((c_start, min(c_start + batch - 1, r_end)))
+
+    done = 0
+    started = time.monotonic()
+    for gi in range(0, len(chunks), REFILL_CALLS_PER_BATCH):
+        group = chunks[gi : gi + REFILL_CALLS_PER_BATCH]
+        calls = [
+            ("eth_getLogs", [{"fromBlock": hex(f), "toBlock": hex(t), "topics": [h.TOPICS]}]) for f, t in group
+        ]
+        results = None
+        for attempt in range(5):
+            try:
+                results = await rpc.batch(calls)
+                for r in results:
+                    if "error" in r:
+                        raise RuntimeError(f"getLogs error: {r['error']}")
+                break
+            except Exception as e:
+                print(f"[DOCTOR] group at {group[0][0]} failed ({e!r}), retry {attempt + 1}/5", flush=True)
+                results = None
+                await asyncio.sleep(2.0 * (attempt + 1))
+        if results is None:
+            raise RuntimeError(f"refill failed for group at {group[0][0]}")
+
+        rows: dict[int, list[dict]] = {}
+        for (c_start, c_end), res in zip(group, results):
             by_block: dict[int, list[dict]] = {}
-            for log in logs:
+            for log in res.get("result") or []:
                 raw = log.get("blockNumber")
                 blk = int(raw, 16) if isinstance(raw, str) else int(raw or 0)
                 if c_start <= blk <= c_end:
                     by_block.setdefault(blk, []).append(log)
-            with storage.db_cursor() as cur:
-                storage.write_block_logs_batch({blk: by_block.get(blk, []) for blk in range(c_start, c_end + 1)}, cur)
+            rows.update({blk: by_block.get(blk, []) for blk in range(c_start, c_end + 1)})
             done += c_end - c_start + 1
-            if done % (batch * 50) < batch:
-                rate = done / max(time.monotonic() - started, 0.001)
-                eta = (total - done) / max(rate, 0.001)
-                print(f"[DOCTOR] refilled {done:,}/{total:,} blocks ({rate:,.0f}/s, eta {eta / 3600:.1f}h)", flush=True)
+        with storage.db_cursor() as cur:
+            storage.write_block_logs_batch(rows, cur)
+
+        if gi % (REFILL_CALLS_PER_BATCH * 5) < REFILL_CALLS_PER_BATCH:
+            rate = done / max(time.monotonic() - started, 0.001)
+            eta = (total - done) / max(rate, 0.001)
+            print(f"[DOCTOR] refilled {done:,}/{total:,} blocks ({rate:,.0f}/s, eta {eta / 3600:.1f}h)", flush=True)
     print(f"[DOCTOR] refill complete: {done:,} blocks", flush=True)
 
 
@@ -283,13 +320,15 @@ async def main() -> None:
     parser.add_argument("--ranges", type=int, default=10, help="worst ranges to print per finding")
     parser.add_argument("--refill", action="store_true", help="fetch logs for cache holes over rpc and write them")
     parser.add_argument("--verify-rpc", type=int, default=0, help="sampled blocks per 10m bucket to check against rpc")
+    parser.add_argument("--start-block", type=lambda x: int(x, 0), default=None, help="restrict refill to holes at or after this block")
+    parser.add_argument("--end-block", type=lambda x: int(x, 0), default=None, help="restrict refill to holes at or before this block")
     args = parser.parse_args()
 
     storage.init_pool()
     rpc = Rpc(args.rpc, args.rps)
     try:
         if args.refill:
-            await run_refill(rpc, args.batch)
+            await run_refill(rpc, args.batch, args.start_block, args.end_block)
         problems = await run_check(rpc, args.ranges)
         if args.verify_rpc > 0:
             problems += await run_verify(rpc, args.verify_rpc)

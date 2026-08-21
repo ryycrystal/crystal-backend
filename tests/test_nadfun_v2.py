@@ -146,6 +146,23 @@ def test_v2_pair_swap_is_address_gated_and_decoded_as_pool_delta():
     assert parsed["sqrt_price_x96"] == 0
 
 
+def test_v2_pair_sync_is_gated_and_stashes_post_swap_reserves():
+    pool = "0x697be25fe455c09b1aa6fccba95a028bad57ba5c"
+    unrelated_pool = "0x1111111111111111111111111111111111111111"
+    if pool.lower() not in chain.ADDRS:
+        chain.ADDRS.append(pool.lower())
+
+    assert chain.EVENT_SIGS[nadfun.V2_PAIR_SYNC_TOPIC] == "V2SYNC"
+    assert chain.accepts_log_for_indexing("V2SYNC", pool)
+    assert not chain.accepts_log_for_indexing("V2SYNC", unrelated_pool)
+
+    data = _word(1000) + _word(4)
+    assert nadfun.parse_v2_pair_sync(pool, [nadfun.V2_PAIR_SYNC_TOPIC], data) is None
+
+    assert nadfun.consume_pair_sync(pool) == (1000, 4)
+    assert nadfun.consume_pair_sync(pool) == (0, 0)
+
+
 def test_v2_create_registers_pair_before_swap_filtering():
     original_addrs = list(chain.ADDRS)
     pair = "0x2222222222222222222222222222222222222222"

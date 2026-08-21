@@ -1610,17 +1610,15 @@ def write_block_logs(block_number: int, logs: list[dict], cur: psycopg2.extensio
         )
 
 
-# cache raw logs for many blocks at once
+# cache raw logs for many blocks at once, one statement so a remote database
+# costs one round trip instead of one per block
 def write_block_logs_batch(blocks: dict[int, list[dict]], cur) -> None:
     if not blocks:
         return
     data = [(blk, Json(logs or [])) for blk, logs in blocks.items()]
-    cur.executemany(
-        """
-        INSERT INTO launchpad_block_logs (number, logs)
-        VALUES (%s, %s)
-        ON CONFLICT (number) DO NOTHING
-        """,
+    execute_values(
+        cur,
+        "INSERT INTO launchpad_block_logs (number, logs) VALUES %s ON CONFLICT (number) DO NOTHING",
         data,
     )
 
@@ -1928,6 +1926,7 @@ def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM launchpad_pools")
     cur.execute("DELETE FROM launchpad_daily_pnl")
     cur.execute("DELETE FROM crystal_orderbook_events")
+    cur.execute("DELETE FROM crystal_market_trades")
     cur.execute("DELETE FROM crystal_orderbook_orders")
     cur.execute("DELETE FROM crystal_orderbook_fills")
     cur.execute("DELETE FROM launchpad_blocks")

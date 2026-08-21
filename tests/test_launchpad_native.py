@@ -836,6 +836,40 @@ def test_pool_swap_trade_does_not_crash_on_missing_curve_reserve(monkeypatch):
     assert lp.tx_count >= 1, "the pool swap should have been recorded"
 
 
+# swap amounts are gross of the pair fee on buys and net on sells, so the price must
+# come from the post swap reserves the sync stashed, not the raw amount ratio
+def test_pool_swap_prices_from_synced_reserves_not_amounts(monkeypatch):
+    import models
+    from modules import nadfun as nf_events
+
+    st = _fresh_state(monkeypatch)
+    _create_token(st)
+
+    pool = "0x697be25fe455c09b1aa6fccba95a028bad57ba5c"
+    st.v3_pools[pool] = models.PoolInfo(pool=pool, token_addr=TOKEN, native_addr=WMON, token_is_0=False)
+    lp = st.launchpad_tokens[TOKEN]
+    lp.source = 1
+
+    nf_events.parse_v2_pair_sync(pool, [], _word(200 * 10**18) + _word(1000 * 10**18))
+    ev = {
+        "pool": pool,
+        "user": USER,
+        "amount0": 21 * 10**18,
+        "amount1": -(100 * 10**18),
+        "sqrt_price_x96": 0,
+    }
+    st.apply_launchpad_trade(ev, 201, 2001, "0xsyncswap", 0, pool)
+
+    assert lp.last_price_native == Decimal(200) / Decimal(1000), "synced reserve ratio must win"
+
+    ev2 = {**ev, "amount0": 22 * 10**18}
+    st.apply_launchpad_trade(ev2, 202, 2002, "0xnosync", 0, pool)
+
+    assert lp.last_price_native == Decimal(22 * 10**18) / Decimal(100 * 10**18), (
+        "without a pending sync the amount ratio fallback must hold"
+    )
+
+
 def test_recovered_token_takes_the_source_of_the_emitting_contract(monkeypatch):
     """A trade for a token whose TokenCreated was never seen used to be recovered
     as native regardless of origin. A nad.fun curve measured against native

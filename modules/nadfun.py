@@ -38,6 +38,9 @@ V2_BUY_TOPIC = "0x89f5adc174562e07c9c9b1cae7109bbecb21cf9d1b2847e550042b8653c54a
 V2_SELL_TOPIC = "0xa082022e93cfcd9f1da5f9236718053910f7e840da080c789c7845698dc032ff"
 V2_SNIPING_PENALTY_TOPIC = "0x9cf337bf5592ea341168705a5dd168d5d26aaedb4d4725f6f13dd30aeae3322d"
 V2_PAIR_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+V2_PAIR_SYNC_TOPIC = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
+
+_PENDING_PAIR_SYNC: dict[str, tuple[int, int]] = {}
 
 
 # take up to limit tokens off the pending metadata queue
@@ -572,6 +575,35 @@ def parse_v2_pair_swap(addr, tops, data):
         "amount1": amount1_in - amount1_out,
         "sqrt_price_x96": 0,
     }
+
+
+# decode a univ2 pair sync log and stash its post swap reserves for the next swap,
+# whose raw amounts are gross of the pair fee and cannot price the trade honestly
+def parse_v2_pair_sync(addr, _tops, data):
+    pool = (addr or "").lower()
+
+    if isinstance(data, str) and data.startswith("0x"):
+        hex_data = data[2:]
+    else:
+        hex_data = data
+
+    words = list(_chunks(hex_data, 64))
+    if len(words) < 2:
+        return None
+
+    try:
+        reserve0 = int(words[0], 16)
+        reserve1 = int(words[1], 16)
+    except Exception:
+        return None
+
+    _PENDING_PAIR_SYNC[pool] = (reserve0, reserve1)
+    return None
+
+
+# take the stashed post swap reserves for a pair, zeros when none are pending
+def consume_pair_sync(pool: str) -> tuple[int, int]:
+    return _PENDING_PAIR_SYNC.pop((pool or "").lower(), (0, 0))
 
 
 # re-queue tokens that still have no metadata but do have a uri to fetch from.

@@ -1,16 +1,16 @@
 import argparse
 import asyncio
-import json
 import time
 
 import httpx
-from psycopg2.extras import Json
+import psycopg2.errors
+from psycopg2.extras import Json, execute_values
 
 import core.storage as storage
+from core import chain as h
+from core.storage import orderbook as ob_storage
 from modules.orderbook import FILL_TOPIC, ORDERS_UPDATED_TOPIC, parse_fill, parse_orders_updated
 from state import RPC_HTTP
-
-from core import chain as h
 
 WINDOW = 100
 WINDOWS_PER_BATCH = 20
@@ -65,52 +65,127 @@ def default_start_block() -> int | None:
     return int(row[0]) if row and row[0] is not None else None
 
 
-# merge new-topic logs into a cached block row without duplicating what is there
-def _merge_into_cache(blk: int, new_logs: list[dict], cur) -> None:
-    existing = storage.get_block_logs(blk) or []
-    seen = {((log.get("transactionHash") or "").lower(), str(log.get("logIndex") or "")) for log in existing}
-    fresh = [
-        log
-        for log in new_logs
-        if ((log.get("transactionHash") or "").lower(), str(log.get("logIndex") or "")) not in seen
-    ]
-    if not fresh:
-        return
-    cur.execute(
-        """
-        INSERT INTO launchpad_block_logs (number, logs) VALUES (%s, %s)
-        ON CONFLICT (number) DO UPDATE SET logs = launchpad_block_logs.logs || EXCLUDED.logs
-        """,
-        (int(blk), Json(fresh)),
-    )
+def _int_field(log: dict, key: str) -> int:
+    raw = log.get(key)
+    return int(raw, 16) if isinstance(raw, str) else int(raw or 0)
 
 
-# decode one raw log and apply it through the replay safe storage appliers
-def _apply_log(log: dict, cur) -> str | None:
-    topics = log.get("topics") or []
-    if not topics:
-        return None
-    topic0 = topics[0].lower()
-    blk_raw = log.get("blockNumber")
-    blk = int(blk_raw, 16) if isinstance(blk_raw, str) else int(blk_raw or 0)
-    ts_raw = log.get("blockTimestamp")
-    ts = int(ts_raw, 16) if isinstance(ts_raw, str) else int(ts_raw or 0)
-    txh = (log.get("transactionHash") or "").lower()
-    li_raw = log.get("logIndex")
-    li = int(li_raw, 16) if isinstance(li_raw, str) else int(li_raw or 0)
-    data = log.get("data") or "0x"
+# decode a group's logs into ordered event and fill work items, all client side
+def _parse_group(by_block: dict[int, list[dict]]) -> list[dict]:
+    ops: list[dict] = []
+    for blk in sorted(by_block):
+        for log in by_block[blk]:
+            topics = log.get("topics") or []
+            if not topics:
+                continue
+            topic0 = topics[0].lower()
+            ts = _int_field(log, "blockTimestamp")
+            txh = (log.get("transactionHash") or "").lower()
+            li = _int_field(log, "logIndex")
+            data = log.get("data") or "0x"
 
-    if topic0 == ORDERS_UPDATED_TOPIC:
-        parsed = parse_orders_updated(log.get("address", ""), topics, data)
-        if parsed and parsed["orders"]:
-            storage.apply_orderbook_updates(parsed, blk, ts, txh, li, cur=cur)
-        return "OBU"
-    if topic0 == FILL_TOPIC:
-        parsed = parse_fill(log.get("address", ""), topics, data)
-        if parsed:
-            storage.apply_orderbook_fill(parsed, blk, ts, txh, li, cur=cur)
-        return "OBF"
-    return None
+            if topic0 == ORDERS_UPDATED_TOPIC:
+                parsed = parse_orders_updated(log.get("address", ""), topics, data)
+                if not parsed:
+                    continue
+                market = (parsed.get("market") or "").lower()
+                user = (parsed.get("user") or "").lower()
+                for i, o in enumerate(parsed.get("orders") or []):
+                    ops.append(
+                        {
+                            "kind": "entry",
+                            "sort": (blk, li, i),
+                            "key": (txh, li, i),
+                            "order_key": (market, int(o["price"]), int(o["order_id"])),
+                            "row": (
+                                txh, li, i, blk, ts, market, user,
+                                int(o["flag"]), bool(o["is_buy"]), o["action"],
+                                int(o["price"]), int(o["order_id"]), int(o["size"]),
+                            ),
+                            "o": o,
+                            "market": market,
+                            "user": user,
+                            "blk": blk,
+                            "ts": ts,
+                        }
+                    )
+            elif topic0 == FILL_TOPIC:
+                parsed = parse_fill(log.get("address", ""), topics, data)
+                if not parsed:
+                    continue
+                market = (parsed.get("market") or "").lower()
+                ops.append(
+                    {
+                        "kind": "fill",
+                        "sort": (blk, li, 0),
+                        "key": (txh, li),
+                        "order_key": (market, int(parsed["price"]), int(parsed["order_id"])),
+                        "row": (
+                            txh, li, blk, ts, market, (parsed.get("maker") or "").lower(),
+                            bool(parsed["maker_is_buy"]), int(parsed["price"]),
+                            int(parsed["order_id"]), int(parsed["remaining"]),
+                            int(parsed["amount_high"]), int(parsed["amount_out"]),
+                        ),
+                        "parsed": parsed,
+                        "market": market,
+                        "blk": blk,
+                        "ts": ts,
+                    }
+                )
+    ops.sort(key=lambda op: op["sort"])
+    return ops
+
+
+# apply one group in a handful of statements: batched cache merge, batched event
+# and fill inserts, then state mutations only for fresh rows the live indexer
+# has not already moved past. short transactions keep the sequencer unblocked
+def _apply_group(by_block: dict[int, list[dict]], ops: list[dict]) -> dict[str, int]:
+    with storage.db_cursor() as cur:
+        blocks = sorted(by_block)
+        cur.execute("SELECT number, logs FROM launchpad_block_logs WHERE number IN %s", (tuple(blocks),))
+        existing = {int(n): logs or [] for n, logs in cur.fetchall()}
+
+        merge_rows = []
+        for blk in blocks:
+            seen = {
+                ((log.get("transactionHash") or "").lower(), str(log.get("logIndex") or ""))
+                for log in existing.get(blk, [])
+            }
+            fresh = [
+                log
+                for log in by_block[blk]
+                if ((log.get("transactionHash") or "").lower(), str(log.get("logIndex") or "")) not in seen
+            ]
+            if fresh:
+                merge_rows.append((int(blk), Json(fresh)))
+        if merge_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO launchpad_block_logs (number, logs) VALUES %s
+                ON CONFLICT (number) DO UPDATE SET logs = launchpad_block_logs.logs || EXCLUDED.logs
+                """,
+                merge_rows,
+            )
+
+        fresh_events = storage.batch_insert_orderbook_events(
+            [op["row"] for op in ops if op["kind"] == "entry"], cur
+        )
+        fresh_fills = storage.batch_insert_orderbook_fills([op["row"] for op in ops if op["kind"] == "fill"], cur)
+
+        latest = storage.get_order_updated_blocks(sorted({op["order_key"] for op in ops}), cur)
+        for op in ops:
+            if op["kind"] == "entry":
+                if op["key"] not in fresh_events or latest.get(op["order_key"], -1) > op["blk"]:
+                    continue
+                ob_storage._apply_order_entry(op["o"], op["market"], op["user"], op["blk"], op["ts"], cur)
+            else:
+                if op["key"] not in fresh_fills or latest.get(op["order_key"], -1) > op["blk"]:
+                    continue
+                ob_storage._apply_fill_mutation(op["parsed"], op["market"], op["blk"], op["ts"], cur)
+            latest[op["order_key"]] = op["blk"]
+
+    return {"OBU": len(fresh_events), "OBF": len(fresh_fills)}
 
 
 # entrypoint
@@ -199,13 +274,21 @@ async def main() -> None:
                     by_block.setdefault(blk, []).append(log)
 
             if by_block:
-                with storage.db_cursor() as cur:
-                    for blk in sorted(by_block):
-                        _merge_into_cache(blk, by_block[blk], cur)
-                        for log in by_block[blk]:
-                            tag = _apply_log(log, cur)
-                            if tag:
-                                counts[tag] += 1
+                # the live indexer upserts the same order rows concurrently, so a
+                # deadlock is possible and transient. everything in the group is
+                # replay safe, so rolling back and re-applying is always correct
+                ops = _parse_group(by_block)
+                for db_attempt in range(5):
+                    try:
+                        group_counts = _apply_group(by_block, ops)
+                        counts["OBU"] += group_counts["OBU"]
+                        counts["OBF"] += group_counts["OBF"]
+                        break
+                    except psycopg2.errors.DeadlockDetected:
+                        if db_attempt == 4:
+                            raise
+                        print(f"[OB-SWEEP] deadlock at group {group[0][0]}, re-applying", flush=True)
+                        await asyncio.sleep(0.5 * (db_attempt + 1))
 
             # the checkpoint only advances past groups that succeeded, and never
             # past a skipped range, so a rerun retries exactly what is missing
