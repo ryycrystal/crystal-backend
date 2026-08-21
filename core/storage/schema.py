@@ -830,6 +830,38 @@ def init_db() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_bindings
+            (
+                referee      TEXT PRIMARY KEY,
+                referrer     TEXT NOT NULL,
+                block_number BIGINT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                timestamp    BIGINT NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_referral_bindings_referrer
+            ON referral_bindings (referrer);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_rewards
+            (
+                referrer   TEXT NOT NULL,
+                token      TEXT NOT NULL,
+                claimable  NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                earned     NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (referrer, token)
+            );
+            """
+        )
+
         # every decoded orders-updated entry, one row per packed entry. the primary
         # key doubles as the replay guard for the order-state mutations
         cur.execute(
@@ -866,23 +898,37 @@ def init_db() -> None:
             """
         )
 
-        # current view of every resting order ever seen, evolved from the events
+        # current view of every resting order ever seen, evolved from the events.
+        # order identity on this book is (market, price, id): native ids are
+        # per-price-level counters, so the same small id recurs at every level,
+        # while client ids arrive pre-encoded as (cloid << 41 | user_id). an old
+        # deploy keyed this by (market, order_id) which collapses price levels,
+        # so a two-column primary key drops the table for a rebuild from events
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.key_column_usage
+            WHERE table_name = 'crystal_orderbook_orders'
+              AND constraint_name = 'crystal_orderbook_orders_pkey'
+            """
+        )
+        if int(cur.fetchone()[0] or 0) == 2:
+            cur.execute("DROP TABLE crystal_orderbook_orders")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_orderbook_orders
             (
                 market        TEXT NOT NULL,
+                price         NUMERIC(30, 0) NOT NULL,
                 order_id      BIGINT NOT NULL,
                 user_address  TEXT NOT NULL,
                 is_buy        BOOLEAN NOT NULL,
-                price         NUMERIC(30, 0) NOT NULL,
                 size          NUMERIC(40, 0) NOT NULL,
                 status        TEXT NOT NULL DEFAULT 'open',
                 created_block BIGINT NOT NULL DEFAULT 0,
                 created_ts    BIGINT NOT NULL DEFAULT 0,
                 updated_block BIGINT NOT NULL DEFAULT 0,
                 updated_ts    BIGINT NOT NULL DEFAULT 0,
-                PRIMARY KEY (market, order_id)
+                PRIMARY KEY (market, price, order_id)
             );
             """
         )
@@ -890,6 +936,26 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ob_orders_user_status
             ON crystal_orderbook_orders (user_address, status);
+            """
+        )
+
+        # the on-chain user registry: every wallet that registered gets a numeric
+        # user id, and client order ids embed it as the low 41 bits
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_users
+            (
+                user_id      BIGINT PRIMARY KEY,
+                user_address TEXT NOT NULL,
+                is_margin    BOOLEAN NOT NULL DEFAULT FALSE,
+                block_number BIGINT NOT NULL DEFAULT 0,
+                timestamp    BIGINT NOT NULL DEFAULT 0
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_users_addr ON crystal_users (user_address);
             """
         )
 
@@ -919,6 +985,40 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ob_fills_maker_ts
             ON crystal_orderbook_fills (maker, timestamp DESC);
+            """
+        )
+
+        # taker side exchange trades, one row per Trade event. the maker side
+        # lives in crystal_orderbook_fills; together they are the full history
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_market_trades
+            (
+                txhash       TEXT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                block_number BIGINT NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                market       TEXT NOT NULL,
+                user_address TEXT NOT NULL,
+                is_buy       BOOLEAN NOT NULL,
+                amount_in    NUMERIC(50, 0) NOT NULL,
+                amount_out   NUMERIC(50, 0) NOT NULL,
+                start_price  NUMERIC(30, 0) NOT NULL,
+                end_price    NUMERIC(30, 0) NOT NULL,
+                PRIMARY KEY (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mkt_trades_user_ts
+            ON crystal_market_trades (user_address, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mkt_trades_market_ts
+            ON crystal_market_trades (market, timestamp DESC);
             """
         )
 

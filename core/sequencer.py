@@ -509,6 +509,7 @@ class Sequencer:
                 "V3SWAP": 0,
                 "OBU": 0,
                 "OBF": 0,
+                "UR": 0,
             }
         )
         seen = set()
@@ -612,6 +613,12 @@ class Sequencer:
 
             elif tag == "OBF":
                 self._state.apply_orderbook_fill(blk, blk_ts, parsed, log.get("address", "").lower(), txh, lii, cur=cur)
+
+            elif tag == "UR":
+                self._state.apply_user_registered(blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur)
+
+            elif tag == "REF":
+                self._state.apply_referral(blk, blk_ts, parsed, log_idx=lii, cur=cur)
 
             elif tag == "PSYNC":
                 sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)

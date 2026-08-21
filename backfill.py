@@ -63,6 +63,7 @@ async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
 
     SEQUENCER.reset_pending(start_block)
     nadfun._PENDING_SYNC.clear()
+    nadfun._PENDING_PAIR_SYNC.clear()
 
     last_processed = start_block - 1
     total_metadata_fetched = 0
@@ -400,10 +401,65 @@ async def backfill(start_block: int, batch: int) -> int:
                 SEQUENCER._state.rebuild_from_db()
                 SEQUENCER.reset_pending(resume_from)
                 nadfun._PENDING_SYNC.clear()
+                nadfun._PENDING_PAIR_SYNC.clear()
                 start_block = resume_from
             except Exception as recover_err:
                 print(f"[Backfill] Recovery failed {recover_err!r}", flush=True)
             await asyncio.sleep(5.0)
+
+
+# one shot historical fetch of referral binding events, marked done in kv so it
+# never reruns. chunk size shrinks on provider range caps and the marker is only
+# written after a full clean pass
+async def seed_referral_bindings(start_block: int) -> None:
+    if storage.get_meta("referral_seeded"):
+        return
+    from modules.referrals import REFERRAL_TOPIC
+
+    head = await get_head_http()
+    manager = h.CONTRACTS["REFERRALS"].lower()
+    chunk = int(os.getenv("REFERRAL_SEED_CHUNK", "50000"))
+    total = 0
+    blk = int(start_block)
+    print(f"[REF] Seeding referral bindings {blk} -> {head}", flush=True)
+    while blk <= head:
+        end = min(blk + chunk - 1, head)
+        try:
+            data = await http_jsonrpc(
+                "eth_getLogs",
+                [
+                    {
+                        "fromBlock": hex(blk),
+                        "toBlock": hex(end),
+                        "address": manager,
+                        "topics": [[REFERRAL_TOPIC]],
+                    }
+                ],
+            )
+        except RuntimeError as e:
+            err = e.args[0] if e.args else {}
+            code = err.get("error", {}).get("code") if isinstance(err, dict) else None
+            if code in (-32602, -32005) and chunk > 100:
+                chunk = max(100, chunk // 10)
+                print(f"[REF] Provider range cap, shrinking seed chunk to {chunk}", flush=True)
+                continue
+            raise
+        for log in data.get("result") or []:
+            tops = log.get("topics") or []
+            if not tops or tops[0].lower() != REFERRAL_TOPIC:
+                continue
+            parsed = h.PARSERS["REF"](str(log.get("address", "")).lower(), tops, str(log.get("data", "0x"))[2:])
+            blk_hex = log.get("blockNumber")
+            blk_num = int(blk_hex, 16) if isinstance(blk_hex, str) else int(blk_hex or 0)
+            li = log.get("logIndex")
+            lii = int(li, 16) if isinstance(li, str) else int(li or 0)
+            ts_raw = log.get("blockTimestamp")
+            ts = int(ts_raw, 16) if isinstance(ts_raw, str) else int(ts_raw or 0)
+            storage.upsert_referral_binding(parsed["referee"], parsed["referrer"], blk_num, lii, ts)
+            total += 1
+        blk = end + 1
+    storage.set_meta("referral_seeded", str(head))
+    print(f"[REF] Referral seed complete: {total} events through block {head}", flush=True)
 
 
 # hard fork guards, run before the indexer starts following the chain.

@@ -936,23 +936,36 @@ class State:
                 amount_in = native_amt if is_buy_flag else token_amt
                 amount_out = token_amt if is_buy_flag else native_amt
 
-                price_raw = ev.get("sqrt_price_x96") or 0
-                try:
-                    if int(price_raw) <= 0:
-                        price_native = Decimal(native_amt) / Decimal(token_amt)
-                    else:
-                        sqrt_p = Decimal(int(price_raw)) / Decimal(1 << 96)
-                        ratio = sqrt_p * sqrt_p
+                from modules import nadfun
 
-                        if ratio <= 0:
+                sync_r0, sync_r1 = nadfun.consume_pair_sync(pool_addr)
+                if pi.token_is_0:
+                    pair_token_res, pair_native_res = sync_r0, sync_r1
+                else:
+                    pair_token_res, pair_native_res = sync_r1, sync_r0
+
+                # swap amounts are gross of the pair fee on buys and net on sells, which
+                # splits the chart into two bands, so the post swap reserve ratio wins
+                if pair_native_res > 0 and pair_token_res > 0:
+                    price_native = Decimal(pair_native_res) / Decimal(pair_token_res)
+                else:
+                    price_raw = ev.get("sqrt_price_x96") or 0
+                    try:
+                        if int(price_raw) <= 0:
                             price_native = Decimal(native_amt) / Decimal(token_amt)
                         else:
-                            if pi.token_is_0:
-                                price_native = ratio
+                            sqrt_p = Decimal(int(price_raw)) / Decimal(1 << 96)
+                            ratio = sqrt_p * sqrt_p
+
+                            if ratio <= 0:
+                                price_native = Decimal(native_amt) / Decimal(token_amt)
                             else:
-                                price_native = Decimal(1) / ratio
-                except Exception:
-                    price_native = Decimal(0)
+                                if pi.token_is_0:
+                                    price_native = ratio
+                                else:
+                                    price_native = Decimal(1) / ratio
+                    except Exception:
+                        price_native = Decimal(0)
 
             self._basis_reset_if_new_block(blk)
             prev_native_reserve = 0
@@ -1883,6 +1896,10 @@ class State:
             if mi is None:
                 return
 
+            # every exchange trade persists as a row: the taker half of the
+            # history ordercenter serves, maker fills live in the fills table
+            storage.insert_market_trade(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
+
             try:
                 pf = int(mi.quoteDecimals) + int(mi.scaleFactor) - int(mi.baseDecimals)
                 if pf < 0:
@@ -2267,6 +2284,12 @@ class State:
         if not ev:
             return
         storage.apply_orderbook_fill(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
+
+    # persist one user registration, replay safety lives in storage
+    def apply_user_registered(self, blk, ts, ev, log_addr, cur=None):
+        if not ev:
+            return
+        storage.insert_crystal_user(ev, int(blk or 0), int(ts or 0), cur=cur)
 
     def apply_pool_transfer(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
@@ -2777,6 +2800,19 @@ class State:
     # the share counter is replayed from events, and any missed or double applied
     # event mis-prices every depositor from then on. the chain total supply is the
     # truth, so the sampler hands it here and a divergence is corrected and logged
+    # record a referral binding from the manager's event
+    def apply_referral(self, blk: int, ts: int, ev: dict, log_idx: int = 0, cur=None) -> None:
+        if not ev or not ev.get("referee"):
+            return
+        storage.upsert_referral_binding(
+            ev.get("referee", ""),
+            ev.get("referrer", ""),
+            int(blk or 0),
+            int(log_idx or 0),
+            int(ts or 0),
+            cur=cur,
+        )
+
     def reconcile_vault_shares(self, vault: str, chain_supply: int) -> None:
         vaddr = (vault or "").lower()
         with self._lock:

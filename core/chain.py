@@ -9,6 +9,7 @@ import modules.markets as m
 import modules.nadfun as n
 import modules.orderbook as ob
 import modules.pools as p
+import modules.referrals as ref
 import modules.vaults as v
 from env_loader import load_env
 
@@ -78,6 +79,10 @@ NADFUN_V2_ADDR = _addr_from_env(
     "0x9f3832732923252A21044F21eE6bd87F09514ae4",
     "NADFUN_V2_ADDRESS",
 )
+REFERRAL_MANAGER_ADDR = _addr_from_env(
+    "0xEAD8A2796bc3609BDBbE426b08A20f9C143F7d14",
+    "REFERRAL_MANAGER_ADDRESS",
+)
 NADFUN_ADDRS = _addrs_from_env(
     [
         NADFUN_ADDR,
@@ -92,6 +97,7 @@ CONTRACTS = {
     "VAULTS": VAULT_FACTORY_ADDR,
     "VAULT_FACTORY": VAULT_FACTORY_ADDR,
     "NADFUN": NADFUN_ADDR,
+    "REFERRALS": REFERRAL_MANAGER_ADDR,
 }
 ADDRS = list(dict.fromkeys([*(a.lower() for a in CONTRACTS.values()), *NADFUN_ADDRS]))
 
@@ -127,10 +133,13 @@ EVENT_SIGS = {
     "0x381d54fa425631e6266af114239150fae1d5db67bb65b4fa9ecc65013107e07e": "NFT",
     "0x9cf337bf5592ea341168705a5dd168d5d26aaedb4d4725f6f13dd30aeae3322d": "NFPEN",
     "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822": "V2SWAP",
+    "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1": "V2SYNC",
     "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67": "V3SWAP",
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
     ob.ORDERS_UPDATED_TOPIC: "OBU",
     ob.FILL_TOPIC: "OBF",
+    ob.USER_REGISTERED_TOPIC: "UR",
+    ref.REFERRAL_TOPIC: "REF",
 }
 TOPICS = list(EVENT_SIGS.keys())
 
@@ -160,17 +169,21 @@ PARSERS = {
     "NFT": n.parse_nadfun_graduated,
     "NFPEN": n.parse_nadfun_sniping_penalty,
     "V2SWAP": n.parse_v2_pair_swap,
+    "V2SYNC": n.parse_v2_pair_sync,
     "V3SWAP": n.parse_v3_trade,
     "TF": _parse_transfer,
     "OBU": ob.parse_orders_updated,
     "OBF": ob.parse_fill,
+    "UR": ob.parse_user_registered,
+    "REF": ref.parse_referral,
 }
 
-ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG", "OBU", "OBF"}
+ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG", "OBU", "OBF", "UR"}
+REFERRAL_EVENT_TAGS = {"REF"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 NADFUN_AUX_EVENT_TAGS = {"NFPEN"}
-V2_PAIR_EVENT_TAGS = {"V2SWAP"}
+V2_PAIR_EVENT_TAGS = {"V2SWAP", "V2SYNC"}
 PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
 NADFUN_V2_DIRECT_TRADE_TOPICS = {n.V2_BUY_TOPIC, n.V2_SELL_TOPIC}
 
@@ -218,6 +231,8 @@ def accepts_log_for_indexing(tag: str, addr: str) -> bool:
         return addr == CONTRACTS["ROUTER"].lower()
     if tag in VAULT_FACTORY_EVENT_TAGS:
         return addr == CONTRACTS["VAULTS"].lower()
+    if tag in REFERRAL_EVENT_TAGS:
+        return addr == CONTRACTS["REFERRALS"].lower()
     if tag in NADFUN_EVENT_TAGS:
         return is_nadfun_address(addr)
     if tag in NADFUN_AUX_EVENT_TAGS:

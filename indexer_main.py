@@ -9,6 +9,7 @@ import backfill
 import core.storage as storage
 import export_logs
 from core.integrity import integrity_worker
+from core.referral_rewards import referral_rewards_worker
 from core.sequencer import SEQUENCER
 from core.stream import BACKFILL_BATCH, stream_logs, vault_sampler
 from modules import nadfun
@@ -166,12 +167,17 @@ async def _run_live_dump(args: argparse.Namespace, start_block: int) -> None:
 async def _start_live(args: argparse.Namespace, start_block: int) -> None:
     print(f"[IDX] Starting live stream from block {start_block}", flush=True)
     await nadfun.start_metadata_worker(storage)
+    try:
+        await backfill.seed_referral_bindings(DEFAULT_START_BLOCK)
+    except Exception as e:
+        print(f"[REF] Referral seed failed {e!r}, live events still index", flush=True)
     SEQUENCER.set_next_block(start_block)
 
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
         asyncio.create_task(integrity_worker()),
+        asyncio.create_task(referral_rewards_worker()),
     ]
     if args.live_dump_dir:
         print(
