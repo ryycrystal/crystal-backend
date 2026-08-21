@@ -596,34 +596,34 @@ def sum_vault_share_flows_after(vault: str, ts: int, inclusive: bool = False) ->
     return minted, burned
 
 
-# usd of the last priced sample strictly before a timestamp
-def vault_sample_usd_before(vault: str, ts: int) -> float | None:
+# timestamp and usd of the last priced sample strictly before a timestamp
+def vault_sample_usd_before(vault: str, ts: int) -> tuple[int, float] | None:
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT usd_value FROM crystal_vault_balance_samples
+            SELECT timestamp, usd_value FROM crystal_vault_balance_samples
             WHERE vault = %s AND timestamp < %s AND usd_value > 0
             ORDER BY timestamp DESC LIMIT 1
             """,
             (vault.lower(), int(ts)),
         )
         row = cur.fetchone()
-    return float(row[0]) if row and row[0] is not None else None
+    return (int(row[0] or 0), float(row[1])) if row and row[1] is not None else None
 
 
-# usd of the first priced sample at or after a timestamp
-def vault_sample_usd_at_or_after(vault: str, ts: int) -> float | None:
+# timestamp and usd of the first priced sample at or after a timestamp
+def vault_sample_usd_at_or_after(vault: str, ts: int) -> tuple[int, float] | None:
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT usd_value FROM crystal_vault_balance_samples
+            SELECT timestamp, usd_value FROM crystal_vault_balance_samples
             WHERE vault = %s AND timestamp >= %s AND usd_value > 0
             ORDER BY timestamp ASC LIMIT 1
             """,
             (vault.lower(), int(ts)),
         )
         row = cur.fetchone()
-    return float(row[0]) if row and row[0] is not None else None
+    return (int(row[0] or 0), float(row[1])) if row and row[1] is not None else None
 
 
 # list vault balance samples in ascending time order for charts

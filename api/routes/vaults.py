@@ -149,8 +149,8 @@ def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
 VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
 
 
-# annualized per-share return from the trailing sample window, null when unknowable
-def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
+# annualized per-share return and the window it was measured over, null when unknowable
+def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | None:
     now_ts = int(time.time())
     try:
         rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=now_ts - window_days * 86400, limit=0)
@@ -174,7 +174,13 @@ def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
     if first_vps <= 0:
         return None
     pct = ((last_vps / first_vps) - 1.0) * 100.0
-    return pct * (365.0 * 86400.0 / window)
+    return (pct * (365.0 * 86400.0 / window), window)
+
+
+# annualized per-share return alone, kept for callers that only want the number
+def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
+    out = _vault_apy(vault_addr, window_days)
+    return out[0] if out else None
 
 
 # average cost basis over signed share flows priced at nav, pure for unit tests.
@@ -197,18 +203,20 @@ def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[int, float, fl
     return pos, entry, realized
 
 
-# nav at one flow: pre flow tvl over pre flow supply, post flow pair for a vault seeding deposit
-def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> float | None:
+# nav at one flow with the sample timestamp it was priced from: pre flow tvl over
+# pre flow supply when history reaches back that far, else the first later sample,
+# which measures from tracking start rather than the user's true entry
+def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> tuple[float, int, bool] | None:
     minted_incl, burned_incl = storage.sum_vault_share_flows_after(vault_addr, ts, inclusive=True)
     supply_before = circ_now - minted_incl + burned_incl
-    usd_before = storage.vault_sample_usd_before(vault_addr, ts)
-    if usd_before is not None and supply_before > 0:
-        return usd_before / supply_before
+    before = storage.vault_sample_usd_before(vault_addr, ts)
+    if before is not None and supply_before > 0:
+        return (before[1] / supply_before, before[0], False)
     minted_after, burned_after = storage.sum_vault_share_flows_after(vault_addr, ts)
     supply_after = circ_now - minted_after + burned_after
-    usd_after = storage.vault_sample_usd_at_or_after(vault_addr, ts)
-    if usd_after is not None and supply_after > 0:
-        return usd_after / supply_after
+    after = storage.vault_sample_usd_at_or_after(vault_addr, ts)
+    if after is not None and supply_after > 0:
+        return (after[1] / supply_after, after[0], True)
     return None
 
 
@@ -220,11 +228,17 @@ def _vault_user_pnl(
     if not flows or circ_now <= 0:
         return None
     priced: list[tuple[int, float]] = []
+    entry_estimated = False
+    tracked_since = None
     for ts, shares in flows:
         nav = _nav_at_flow(vault_addr, ts, circ_now)
-        if nav is None or nav <= 0:
+        if nav is None or nav[0] <= 0:
             return None
-        priced.append((shares, nav))
+        nav_val, sample_ts, estimated = nav
+        entry_estimated = entry_estimated or estimated
+        if tracked_since is None or sample_ts < tracked_since:
+            tracked_since = sample_ts
+        priced.append((shares, nav_val))
     pos, entry_nav, realized = _avg_cost_from_flows(priced)
     if nav_now is None:
         nav_now = (tvl_usd_now / circ_now) if tvl_usd_now > 0 else None
@@ -237,6 +251,8 @@ def _vault_user_pnl(
             "unrealizedPnlUsd": 0.0,
             "unrealizedPnlPct": 0.0,
             "realizedPnlUsd": realized,
+            "entryEstimated": entry_estimated,
+            "trackedSince": tracked_since,
         }
     return {
         "entryNav": entry_nav,
@@ -244,6 +260,8 @@ def _vault_user_pnl(
         "unrealizedPnlUsd": pos * (nav_now - entry_nav),
         "unrealizedPnlPct": ((nav_now / entry_nav) - 1.0) * 100.0,
         "realizedPnlUsd": realized,
+        "entryEstimated": entry_estimated,
+        "trackedSince": tracked_since,
     }
 
 
@@ -377,6 +395,7 @@ def list_vaults(
         circ = int(circulating_shares or 0)
         u_shares = int(user_shares or 0)
         user_share_pct = (u_shares / circ) if circ > 0 and u_shares > 0 else 0.0
+        row_apy = _vault_apy(str(vault_addr).lower())
         snapshot = None
         if include_snapshot:
             snapshot = _vault_snapshot_from_samples(
@@ -423,7 +442,8 @@ def list_vaults(
                 "quoteName": quote_name or "",
                 "baseName": base_name or "",
                 "lastDeposit": int(last_deposit or 0),
-                "apyPct": _vault_apy_pct(str(vault_addr).lower()),
+                "apyPct": row_apy[0] if row_apy else None,
+                "apyWindowSecs": row_apy[1] if row_apy else None,
                 "latestBalance": {
                     "block": int(latest_block or 0),
                     "timestamp": int(latest_ts or 0),
@@ -705,10 +725,14 @@ def vault_user_summary(
         user_pnl = None
 
     apy_pct = None
+    apy_window_secs = None
     try:
-        apy_pct = _vault_apy_pct(vaddr)
+        apy_out = _vault_apy(vaddr)
+        if apy_out:
+            apy_pct, apy_window_secs = apy_out
     except Exception:
         apy_pct = None
+        apy_window_secs = None
 
     return {
         "ok": True,
@@ -733,6 +757,7 @@ def vault_user_summary(
         "latestBalance": latest,
         "tvlUsd": latest["usdValue"],
         "apyPct": apy_pct,
+        "apyWindowSecs": apy_window_secs,
         "userBalance": {
             "address": uaddr,
             "shares": u_shares,
