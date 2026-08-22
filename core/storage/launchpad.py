@@ -2289,3 +2289,12 @@ def count_uncached_processed_blocks(start_block: int, end_block: int, cur=None) 
     with db_cursor() as c:
         c.execute(sql, (start_block, end_block))
         return int(c.fetchone()[0])
+
+
+# the newest indexed trade's chain timestamp: trades flow every block on this
+# chain, so an old value means the indexer is replaying history, not at head
+def latest_trade_timestamp() -> int:
+    with db_cursor() as cur:
+        cur.execute("SELECT MAX(timestamp) FROM launchpad_trades")
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0

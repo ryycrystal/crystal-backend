@@ -283,6 +283,23 @@ def test_order_history_includes_fills(db):
     assert rows[0]["size"] == "2990", "a fill row carries the executed amount"
 
 
+# while a reindex replays history the routes must refuse rather than serve an
+# empty book that would stop the client falling back
+def test_stale_indexer_refuses_orderbook_reads(db, monkeypatch):
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from api.routes import orderbook as ob_routes
+
+    monkeypatch.setattr(ob_routes, "STALE_SECONDS", 300.0)
+    with _pytest.raises(HTTPException) as exc:
+        ob_routes.open_orders(USER)
+    assert exc.value.status_code == 503, "history-era data serves 503, not an empty 200"
+
+    monkeypatch.setattr(ob_routes, "STALE_SECONDS", 0.0)
+    assert ob_routes.open_orders(USER)["orders"] == [], "a disabled gate serves normally"
+
+
 # the rest endpoints are direct-callable and wrap the readers verbatim
 def test_orderbook_routes_serve_the_readers(db):
     from api.routes import orderbook as ob_routes

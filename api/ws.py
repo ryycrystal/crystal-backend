@@ -64,7 +64,8 @@ IMPLEMENTED_CHANNELS = (
 # wallet scoped orderbook channels share one push shape: per wallet bodies,
 # resent only when the body materially changed
 ORDERBOOK_CHANNELS = ("user_orders", "user_trades", "user_history")
-ORDERBOOK_HISTORY_LIMIT = 50
+# matches the rest page size, so a push frame never shrinks the visible history
+ORDERBOOK_HISTORY_LIMIT = 500
 
 
 # the per wallet body each orderbook channel serves, shared by the subscribe
@@ -76,7 +77,7 @@ def _orderbook_wallet_body(channel: str, wallet: str) -> dict:
         return {"orders": storage.list_open_orders(wallet)}
     if channel == "user_trades":
         return {"trades": storage.list_exchange_trades(wallet, limit=ORDERBOOK_HISTORY_LIMIT)}
-    return {"events": storage.list_order_history(wallet, limit=ORDERBOOK_HISTORY_LIMIT)}
+    return {"orders": storage.list_wallet_orders(wallet, limit=ORDERBOOK_HISTORY_LIMIT)}
 
 # subscription keys that are page scopes rather than token addresses. "tokens" is
 # the explorer list, "portfolio" carries the wallet scoped position channel
@@ -362,6 +363,12 @@ class Hub:
         if channel == "vaults":
             return await asyncio.to_thread(_vaults_list_body, sorted(sub.addresses))
         if channel in ORDERBOOK_CHANNELS:
+            from api.routes.orderbook import orderbook_data_is_stale
+
+            # no snapshot while a reindex replays history: an empty snapshot
+            # would overwrite whatever the client's fallback path is showing
+            if await asyncio.to_thread(orderbook_data_is_stale):
+                return None
             bodies: dict[str, dict] = {}
             for a in sorted(sub.addresses):
                 try:
@@ -717,8 +724,13 @@ class Hub:
 
     # wallet scoped orderbook data, pushed per block commit. one query per
     # subscribed wallet per tick, resent only when the body materially changed,
-    # so an untouched book costs one indexed read and no frames
+    # so an untouched book costs one indexed read and no frames. while a reindex
+    # replays history nothing is pushed, so the client's fallback data survives
     async def _push_orderbook_channel(self, token: str, watermark: int, channel: str) -> None:
+        from api.routes.orderbook import orderbook_data_is_stale
+
+        if await asyncio.to_thread(orderbook_data_is_stale):
+            return
         async with self.lock:
             targets = [
                 s

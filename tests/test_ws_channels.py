@@ -650,7 +650,9 @@ def test_orderbook_channels_snapshot_and_push(db):
                 break
         assert set(snaps) == {"user_orders", "user_trades", "user_history"}
         assert snaps["user_orders"]["wallets"][wallet]["orders"][0]["order_id"] == 7
-        assert snaps["user_history"]["wallets"][wallet]["events"][0]["action"] == "add"
+        assert snaps["user_history"]["wallets"][wallet]["orders"][0]["status"] == "open", (
+            "history serves the order universe the ui renders, not the raw event stream"
+        )
 
     # the push path: an unchanged book sends nothing, a change sends one frame
     sent = []
