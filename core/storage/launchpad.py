@@ -1915,7 +1915,9 @@ def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM crystal_pool_sync_events")
     cur.execute("DELETE FROM crystal_pool_lp_users")
     cur.execute("DELETE FROM crystal_pools")
-    cur.execute("DELETE FROM crystal_vault_balance_samples")
+    # crystal_vault_balance_samples is sampler observed over rpc, not log derived:
+    # a replay cannot rebuild it, so wiping it permanently destroys the per share
+    # nav history behind vault pnl and apy. it must survive every reindex
     cur.execute("DELETE FROM crystal_vault_deposits")
     cur.execute("DELETE FROM crystal_vault_withdrawals")
     cur.execute("DELETE FROM crystal_vault_users")
