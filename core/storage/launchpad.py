@@ -1906,6 +1906,10 @@ def clear_derived_state_from_block(start_block: int, cur=None) -> None:
 
 
 # the deletes behind clear derived state
+# referral_bindings, referral_rewards and the referral_seed kv markers are
+# deliberately NOT cleared here: pre deploy cached logs contain no referral
+# events, so a reindex cannot re-derive them and clearing loses them forever.
+# if they are ever cleared, the referral_seeded marker must be cleared with them
 def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM crystal_pool_tvl_samples")
     cur.execute("DELETE FROM crystal_pool_sync_events")

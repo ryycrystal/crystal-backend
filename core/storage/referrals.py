@@ -44,16 +44,27 @@ def get_referral_binding(referee: str):
 
 
 # all referees currently bound to a referrer, newest first
-def list_referees(referrer: str):
+def list_referees(referrer: str, limit: int = 0):
     with db_cursor() as cur:
-        cur.execute(
-            """
-            SELECT referee, timestamp FROM referral_bindings
-            WHERE referrer = %s
-            ORDER BY timestamp DESC
-            """,
-            ((referrer or "").lower(),),
-        )
+        if limit and limit > 0:
+            cur.execute(
+                """
+                SELECT referee, timestamp FROM referral_bindings
+                WHERE referrer = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """,
+                ((referrer or "").lower(), int(limit)),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT referee, timestamp FROM referral_bindings
+                WHERE referrer = %s
+                ORDER BY timestamp DESC
+                """,
+                ((referrer or "").lower(),),
+            )
         return cur.fetchall()
 
 
@@ -69,7 +80,10 @@ def list_active_referrers() -> list[str]:
         return [str(r[0]) for r in cur.fetchall()]
 
 
-# journal one claimable observation: increases accrue into earned, decreases are claims
+# journal one claimable observation: increases accrue into earned, decreases are claims.
+# earned is a lower bound: an accrual and a claim landing inside one poll window
+# cancel out and cannot be recovered without a chain event for the credit.
+# the updated_at guard rejects stale observations from concurrent or retried sweeps
 def record_referral_reward(referrer: str, token: str, claimable: int, ts: int) -> None:
     with db_cursor() as cur:
         cur.execute(
@@ -81,6 +95,7 @@ def record_referral_reward(referrer: str, token: str, claimable: int, ts: int) -
                     + GREATEST(EXCLUDED.claimable - referral_rewards.claimable, 0),
                 claimable = EXCLUDED.claimable,
                 updated_at = EXCLUDED.updated_at
+            WHERE EXCLUDED.updated_at >= referral_rewards.updated_at
             """,
             ((referrer or "").lower(), (token or "").lower(), int(claimable), int(claimable), int(ts)),
         )

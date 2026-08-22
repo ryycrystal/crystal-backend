@@ -8,7 +8,6 @@ from psycopg2.extras import Json, execute_values
 
 import core.storage as storage
 from core import chain as h
-from core.storage import orderbook as ob_storage
 from modules.orderbook import FILL_TOPIC, ORDERS_UPDATED_TOPIC, parse_fill, parse_orders_updated
 from state import RPC_HTTP
 
@@ -70,9 +69,10 @@ def _int_field(log: dict, key: str) -> int:
     return int(raw, 16) if isinstance(raw, str) else int(raw or 0)
 
 
-# decode a group's logs into ordered event and fill work items, all client side
-def _parse_group(by_block: dict[int, list[dict]]) -> list[dict]:
-    ops: list[dict] = []
+# decode a group's logs into event and fill insert rows, all client side
+def _parse_group(by_block: dict[int, list[dict]]) -> tuple[list[tuple], list[tuple]]:
+    event_rows: list[tuple] = []
+    fill_rows: list[tuple] = []
     for blk in sorted(by_block):
         for log in by_block[blk]:
             topics = log.get("topics") or []
@@ -91,55 +91,34 @@ def _parse_group(by_block: dict[int, list[dict]]) -> list[dict]:
                 market = (parsed.get("market") or "").lower()
                 user = (parsed.get("user") or "").lower()
                 for i, o in enumerate(parsed.get("orders") or []):
-                    ops.append(
-                        {
-                            "kind": "entry",
-                            "sort": (blk, li, i),
-                            "key": (txh, li, i),
-                            "order_key": (market, int(o["price"]), int(o["order_id"])),
-                            "row": (
-                                txh, li, i, blk, ts, market, user,
-                                int(o["flag"]), bool(o["is_buy"]), o["action"],
-                                int(o["price"]), int(o["order_id"]), int(o["size"]),
-                            ),
-                            "o": o,
-                            "market": market,
-                            "user": user,
-                            "blk": blk,
-                            "ts": ts,
-                        }
+                    event_rows.append(
+                        (
+                            txh, li, i, blk, ts, market, user,
+                            int(o["flag"]), bool(o["is_buy"]), o["action"],
+                            int(o["price"]), int(o["order_id"]), int(o["size"]),
+                        )
                     )
             elif topic0 == FILL_TOPIC:
                 parsed = parse_fill(log.get("address", ""), topics, data)
                 if not parsed:
                     continue
-                market = (parsed.get("market") or "").lower()
-                ops.append(
-                    {
-                        "kind": "fill",
-                        "sort": (blk, li, 0),
-                        "key": (txh, li),
-                        "order_key": (market, int(parsed["price"]), int(parsed["order_id"])),
-                        "row": (
-                            txh, li, blk, ts, market, (parsed.get("maker") or "").lower(),
-                            bool(parsed["maker_is_buy"]), int(parsed["price"]),
-                            int(parsed["order_id"]), int(parsed["remaining"]),
-                            int(parsed["amount_high"]), int(parsed["amount_out"]),
-                        ),
-                        "parsed": parsed,
-                        "market": market,
-                        "blk": blk,
-                        "ts": ts,
-                    }
+                fill_rows.append(
+                    (
+                        txh, li, blk, ts, (parsed.get("market") or "").lower(),
+                        (parsed.get("maker") or "").lower(),
+                        bool(parsed["maker_is_buy"]), int(parsed["price"]),
+                        int(parsed["order_id"]), int(parsed["remaining"]),
+                        int(parsed["amount_high"]), int(parsed["amount_out"]),
+                    )
                 )
-    ops.sort(key=lambda op: op["sort"])
-    return ops
+    return event_rows, fill_rows
 
 
-# apply one group in a handful of statements: batched cache merge, batched event
-# and fill inserts, then state mutations only for fresh rows the live indexer
-# has not already moved past. short transactions keep the sequencer unblocked
-def _apply_group(by_block: dict[int, list[dict]], ops: list[dict]) -> dict[str, int]:
+# apply one group in a handful of statements: batched cache merge plus batched
+# event and fill inserts. the sweep never touches the orders table, so it can
+# never contend with the live sequencer; rebuild_orderbook_orders.py folds the
+# accumulated history into current order state once the sweep completes
+def _apply_group(by_block: dict[int, list[dict]], event_rows: list[tuple], fill_rows: list[tuple]) -> dict[str, int]:
     with storage.db_cursor() as cur:
         blocks = sorted(by_block)
         cur.execute("SELECT number, logs FROM launchpad_block_logs WHERE number IN %s", (tuple(blocks),))
@@ -168,22 +147,8 @@ def _apply_group(by_block: dict[int, list[dict]], ops: list[dict]) -> dict[str, 
                 merge_rows,
             )
 
-        fresh_events = storage.batch_insert_orderbook_events(
-            [op["row"] for op in ops if op["kind"] == "entry"], cur
-        )
-        fresh_fills = storage.batch_insert_orderbook_fills([op["row"] for op in ops if op["kind"] == "fill"], cur)
-
-        latest = storage.get_order_updated_blocks(sorted({op["order_key"] for op in ops}), cur)
-        for op in ops:
-            if op["kind"] == "entry":
-                if op["key"] not in fresh_events or latest.get(op["order_key"], -1) > op["blk"]:
-                    continue
-                ob_storage._apply_order_entry(op["o"], op["market"], op["user"], op["blk"], op["ts"], cur)
-            else:
-                if op["key"] not in fresh_fills or latest.get(op["order_key"], -1) > op["blk"]:
-                    continue
-                ob_storage._apply_fill_mutation(op["parsed"], op["market"], op["blk"], op["ts"], cur)
-            latest[op["order_key"]] = op["blk"]
+        fresh_events = storage.batch_insert_orderbook_events(event_rows, cur)
+        fresh_fills = storage.batch_insert_orderbook_fills(fill_rows, cur)
 
     return {"OBU": len(fresh_events), "OBF": len(fresh_fills)}
 
@@ -274,13 +239,13 @@ async def main() -> None:
                     by_block.setdefault(blk, []).append(log)
 
             if by_block:
-                # the live indexer upserts the same order rows concurrently, so a
-                # deadlock is possible and transient. everything in the group is
-                # replay safe, so rolling back and re-applying is always correct
-                ops = _parse_group(by_block)
+                # the cache merge can race the refill on the same block rows, so
+                # a deadlock is possible and transient. everything in the group
+                # is replay safe, so rolling back and re-applying is always fine
+                event_rows, fill_rows = _parse_group(by_block)
                 for db_attempt in range(5):
                     try:
-                        group_counts = _apply_group(by_block, ops)
+                        group_counts = _apply_group(by_block, event_rows, fill_rows)
                         counts["OBU"] += group_counts["OBU"]
                         counts["OBF"] += group_counts["OBF"]
                         break
@@ -308,6 +273,7 @@ async def main() -> None:
         await rpc.close()
 
     print(f"[OB-SWEEP] complete: OBU {counts['OBU']}, OBF {counts['OBF']}", flush=True)
+    print("[OB-SWEEP] run rebuild_orderbook_orders.py to fold the history into order state", flush=True)
     if skipped:
         for f, t in skipped:
             print(f"[OB-SWEEP] SKIPPED {f}..{t} after repeated failures, rerun to retry", flush=True)

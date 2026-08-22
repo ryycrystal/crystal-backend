@@ -19,16 +19,19 @@ def _claimable_calldata(token: str, referrer: str) -> bytes:
     return CLAIMABLE_REWARDS_SELECTOR + t + r
 
 
-# quote tokens whose fees can accrue to referrers
+# quote tokens whose fees can accrue to referrers, plus any token already holding
+# a reward row so a retired quote asset keeps updating instead of freezing stale
 def _reward_tokens() -> list[str]:
-    tokens: list[str] = []
+    tokens: set[str] = set()
     try:
         with storage.db_cursor() as cur:
             cur.execute("SELECT DISTINCT quote_address FROM crystal_markets WHERE quote_address <> ''")
-            tokens = [str(r[0]).lower() for r in cur.fetchall()]
+            tokens.update(str(r[0]).lower() for r in cur.fetchall())
+            cur.execute("SELECT DISTINCT token FROM referral_rewards")
+            tokens.update(str(r[0]).lower() for r in cur.fetchall())
     except Exception:
-        tokens = []
-    return tokens
+        pass
+    return sorted(tokens)
 
 
 # one sweep: read claimable rewards for every referrer and token pair and journal deltas

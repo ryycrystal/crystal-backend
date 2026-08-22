@@ -419,43 +419,20 @@ async def seed_referral_bindings(start_block: int) -> None:
 
     head = await get_head_http()
     manager = h.CONTRACTS["REFERRALS"].lower()
-    chunk = int(os.getenv("REFERRAL_SEED_CHUNK", "50000"))
+    initial_chunk = int(os.getenv("REFERRAL_SEED_CHUNK", "50000"))
+    chunk = initial_chunk
     total = 0
     resumed = storage.get_meta("referral_seed_progress")
     blk = max(int(start_block), int(resumed) + 1) if resumed else int(start_block)
     print(f"[REF] Seeding referral bindings {blk} -> {head} (chunk {chunk})", flush=True)
     calls = 0
+    clean_streak = 0
     failures_at_floor = 0
-    while blk <= head:
-        end = min(blk + chunk - 1, head)
-        try:
-            data = await http_jsonrpc(
-                "eth_getLogs",
-                [
-                    {
-                        "fromBlock": hex(blk),
-                        "toBlock": hex(end),
-                        "address": manager,
-                        "topics": [[REFERRAL_TOPIC]],
-                    }
-                ],
-            )
-        except Exception as e:
-            if chunk > 100:
-                chunk = max(100, chunk // 10)
-                print(f"[REF] Seed fetch failed ({e!r}), shrinking chunk to {chunk}", flush=True)
-                await asyncio.sleep(1.0)
-                continue
-            failures_at_floor += 1
-            if failures_at_floor >= 5:
-                print(f"[REF] Skipping unfetchable range {blk}-{end} after retries", flush=True)
-                blk = end + 1
-                failures_at_floor = 0
-                continue
-            await asyncio.sleep(2.0 * failures_at_floor)
-            continue
-        failures_at_floor = 0
-        for log in data.get("result") or []:
+    skipped: list[tuple[int, int]] = []
+
+    async def _ingest(logs: list) -> int:
+        count = 0
+        for log in logs:
             tops = log.get("topics") or []
             if not tops or tops[0].lower() != REFERRAL_TOPIC:
                 continue
@@ -472,14 +449,75 @@ async def seed_referral_bindings(start_block: int) -> None:
                 except Exception:
                     ts = 0
             storage.upsert_referral_binding(parsed["referee"], parsed["referrer"], blk_num, lii, ts)
-            total += 1
+            count += 1
+        return count
+
+    async def _fetch(frm: int, to: int) -> list:
+        data = await http_jsonrpc(
+            "eth_getLogs",
+            [
+                {
+                    "fromBlock": hex(frm),
+                    "toBlock": hex(to),
+                    "address": manager,
+                    "topics": [[REFERRAL_TOPIC]],
+                }
+            ],
+        )
+        return data.get("result") or []
+
+    while blk <= head:
+        end = min(blk + chunk - 1, head)
+        try:
+            logs = await _fetch(blk, end)
+        except Exception as e:
+            clean_streak = 0
+            if chunk > 100:
+                chunk = max(100, chunk // 10)
+                print(f"[REF] Seed fetch failed ({e!r}), shrinking chunk to {chunk}", flush=True)
+                await asyncio.sleep(1.0)
+                continue
+            failures_at_floor += 1
+            if failures_at_floor >= 5:
+                print(f"[REF] Deferring unfetchable range {blk}-{end} for a retry pass", flush=True)
+                skipped.append((blk, end))
+                blk = end + 1
+                failures_at_floor = 0
+                continue
+            await asyncio.sleep(2.0 * failures_at_floor)
+            continue
+        failures_at_floor = 0
+        clean_streak += 1
+        if clean_streak >= 500 and chunk < initial_chunk:
+            chunk = min(initial_chunk, chunk * 10)
+            clean_streak = 0
+            print(f"[REF] Regrowing seed chunk to {chunk}", flush=True)
+        total += await _ingest(logs)
         blk = end + 1
         calls += 1
         if calls % 200 == 0:
             storage.set_meta("referral_seed_progress", str(end))
             pct = 100.0 * (end - int(start_block)) / max(1, head - int(start_block))
             print(f"[REF] Seed progress {end} ({pct:.1f}%), {total} events so far", flush=True)
+
+    still_skipped: list[tuple[int, int]] = []
+    for s, e in skipped:
+        try:
+            total += await _ingest(await _fetch(s, e))
+        except Exception:
+            still_skipped.append((s, e))
+    if still_skipped:
+        import json as _json
+
+        storage.set_meta("referral_seed_skipped", _json.dumps(still_skipped))
+        storage.set_meta("referral_seed_progress", str(min(s for s, _ in still_skipped) - 1))
+        print(
+            f"[REF] Seed NOT marked complete: {len(still_skipped)} ranges unfetchable, will retry on restart",
+            flush=True,
+        )
+        return
     storage.set_meta("referral_seeded", str(head))
+    storage.set_meta("referral_seed_progress", str(head))
     print(f"[REF] Referral seed complete: {total} events through block {head}", flush=True)
 
 

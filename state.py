@@ -2802,7 +2802,7 @@ class State:
     # truth, so the sampler hands it here and a divergence is corrected and logged
     # record a referral binding from the manager's event
     def apply_referral(self, blk: int, ts: int, ev: dict, log_idx: int = 0, cur=None) -> None:
-        if not ev or not ev.get("referee"):
+        if not ev or not ev.get("referee") or ev.get("referee") == "0x" + "0" * 40:
             return
         storage.upsert_referral_binding(
             ev.get("referee", ""),
