@@ -47,7 +47,8 @@ def main() -> None:
                 "user": user or "",
                 "is_buy": is_buy,
                 "size": 0,
-                "status": "removed",
+                "original": 0,
+                "status": "canceled",
                 "cb": bn,
                 "cts": ts,
                 "ub": bn,
@@ -55,18 +56,18 @@ def main() -> None:
             }
         row["ub"], row["uts"] = bn, ts
         if action == "add":
-            row.update(user=user or row["user"], is_buy=is_buy, size=size, status="open")
+            row.update(user=user or row["user"], is_buy=is_buy, size=size, original=size, status="open")
         elif action == "remove":
-            row.update(size=0, status="removed")
+            row.update(size=0, status="filled" if row["status"] == "filled" else "canceled")
         elif action == "decrease":
             row["size"] = max(row["size"] - size, 0)
         elif action == "fill":
             row["size"] = size
             if size == 0:
-                row["status"] = "removed"
+                row["status"] = "filled"
 
     rows = [
-        (m, p, oid, r["user"], r["is_buy"], r["size"], r["status"], r["cb"], r["cts"], r["ub"], r["uts"])
+        (m, p, oid, r["user"], r["is_buy"], r["size"], r["original"], r["status"], r["cb"], r["cts"], r["ub"], r["uts"])
         for (m, p, oid), r in orders.items()
     ]
     print(f"[REBUILD] folded into {len(rows)} orders", flush=True)
@@ -76,13 +77,14 @@ def main() -> None:
             cur,
             """
             INSERT INTO crystal_orderbook_orders
-                (market, price, order_id, user_address, is_buy, size, status,
+                (market, price, order_id, user_address, is_buy, size, original_size, status,
                  created_block, created_ts, updated_block, updated_ts)
             VALUES %s
             ON CONFLICT (market, price, order_id) DO UPDATE SET
                 user_address = EXCLUDED.user_address,
                 is_buy = EXCLUDED.is_buy,
                 size = EXCLUDED.size,
+                original_size = EXCLUDED.original_size,
                 status = EXCLUDED.status,
                 updated_block = EXCLUDED.updated_block,
                 updated_ts = EXCLUDED.updated_ts

@@ -923,6 +923,7 @@ def init_db() -> None:
                 user_address  TEXT NOT NULL,
                 is_buy        BOOLEAN NOT NULL,
                 size          NUMERIC(40, 0) NOT NULL,
+                original_size NUMERIC(40, 0) NOT NULL DEFAULT 0,
                 status        TEXT NOT NULL DEFAULT 'open',
                 created_block BIGINT NOT NULL DEFAULT 0,
                 created_ts    BIGINT NOT NULL DEFAULT 0,
@@ -930,6 +931,18 @@ def init_db() -> None:
                 updated_ts    BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (market, price, order_id)
             );
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE crystal_orderbook_orders
+            ADD COLUMN IF NOT EXISTS original_size NUMERIC(40, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_events_order
+            ON crystal_orderbook_events (market, price, order_id);
             """
         )
         cur.execute(

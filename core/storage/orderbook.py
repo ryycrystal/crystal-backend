@@ -63,13 +63,14 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
         cur.execute(
             """
             INSERT INTO crystal_orderbook_orders
-                (market, price, order_id, user_address, is_buy, size, status,
+                (market, price, order_id, user_address, is_buy, size, original_size, status,
                  created_block, created_ts, updated_block, updated_ts)
-            VALUES (%s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s)
             ON CONFLICT (market, price, order_id) DO UPDATE SET
                 user_address = EXCLUDED.user_address,
                 is_buy = EXCLUDED.is_buy,
                 size = EXCLUDED.size,
+                original_size = EXCLUDED.original_size,
                 status = 'open',
                 updated_block = EXCLUDED.updated_block,
                 updated_ts = EXCLUDED.updated_ts
@@ -82,6 +83,7 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
                 user,
                 bool(o["is_buy"]),
                 int(o["size"]),
+                int(o["size"]),
                 blk,
                 blk_ts,
                 blk,
@@ -89,14 +91,19 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
             ),
         )
     elif o["action"] == "remove":
+        # taker sweeps emit removes alongside their fills, so a fill-closed order
+        # keeps reading 'filled'; a remove landing on a live order is a cancel
         cur.execute(
             """
             INSERT INTO crystal_orderbook_orders
                 (market, price, order_id, user_address, is_buy, size, status,
                  created_block, created_ts, updated_block, updated_ts)
-            VALUES (%s, %s, %s, %s, %s, 0, 'removed', %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, 0, 'canceled', %s, %s, %s, %s)
             ON CONFLICT (market, price, order_id) DO UPDATE SET
-                status = 'removed',
+                status = CASE
+                    WHEN crystal_orderbook_orders.status = 'filled' THEN 'filled'
+                    ELSE 'canceled'
+                END,
                 size = 0,
                 updated_block = EXCLUDED.updated_block,
                 updated_ts = EXCLUDED.updated_ts
@@ -162,7 +169,7 @@ def _apply_fill_mutation(parsed: dict, market: str, blk: int, blk_ts: int, cur) 
         """
         UPDATE crystal_orderbook_orders
         SET size = %s,
-            status = CASE WHEN %s = 0 THEN 'removed' ELSE status END,
+            status = CASE WHEN %s = 0 THEN 'filled' ELSE status END,
             updated_block = %s, updated_ts = %s
         WHERE market = %s AND price = %s AND order_id = %s AND updated_block <= %s
         """,
@@ -254,39 +261,88 @@ def list_user_ids(user: str) -> list[int]:
 
 # open orders for one wallet, newest activity first
 def list_open_orders(user: str, market: str | None = None) -> list[dict[str, Any]]:
-    where = "user_address = %s AND status = 'open' AND size > 0"
+    where = "o.user_address = %s AND o.status = 'open' AND o.size > 0"
     params: tuple = ((user or "").lower(),)
     if market:
-        where += " AND market = %s"
+        where += " AND o.market = %s"
         params = ((user or "").lower(), (market or "").lower())
     with db_cursor() as cur:
         cur.execute(
             f"""
-            SELECT market, order_id, is_buy, price, size, created_block, created_ts, updated_block, updated_ts
-            FROM crystal_orderbook_orders
+            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.status,
+                   o.created_block, o.created_ts, o.updated_block, o.updated_ts, COALESCE(a.txhash, '')
+            FROM crystal_orderbook_orders o
+            {_ADD_TX_JOIN}
             WHERE {where}
-            ORDER BY updated_ts DESC, order_id DESC
+            ORDER BY o.updated_ts DESC, o.order_id DESC
             """,
             params,
         )
         rows = cur.fetchall()
-    return [
-        {
-            "market": m,
-            "order_id": int(oid),
-            # client ids arrive on chain as (cloid << 41 | user_id), native
-            # per-level ids stay below that range
-            "cloid": int(oid) >> 41 if int(oid) >> 41 else None,
-            "is_buy": bool(b),
-            "price": str(int(p)),
-            "size": str(int(s)),
-            "created_block": int(cb),
-            "created_ts": int(cts),
-            "updated_block": int(ub),
-            "updated_ts": int(uts),
-        }
-        for m, oid, b, p, s, cb, cts, ub, uts in rows
-    ]
+    return [_order_row(r) for r in rows]
+
+
+# the transaction that placed an order's current incarnation, for the tx link
+_ADD_TX_JOIN = """
+            LEFT JOIN LATERAL (
+                SELECT txhash FROM crystal_orderbook_events e
+                WHERE e.market = o.market AND e.price = o.price AND e.order_id = o.order_id
+                  AND e.action = 'add'
+                ORDER BY e.block_number DESC, e.log_index DESC, e.entry_index DESC
+                LIMIT 1
+            ) a ON TRUE
+"""
+
+
+# one order row in the served shape
+def _order_row(r: tuple) -> dict[str, Any]:
+    m, oid, b, p, s, orig, st, cb, cts, ub, uts, txh = r
+    return {
+        "market": m,
+        "order_id": int(oid),
+        # client ids arrive on chain as (cloid << 41 | user_id), native
+        # per-level ids stay below that range
+        "cloid": int(oid) >> 41 if int(oid) >> 41 else None,
+        "is_buy": bool(b),
+        "price": str(int(p)),
+        "size": str(int(s)),
+        "original_size": str(int(orig)),
+        "status": st,
+        "txhash": txh,
+        "created_block": int(cb),
+        "created_ts": int(cts),
+        "updated_block": int(ub),
+        "updated_ts": int(uts),
+    }
+
+
+# every order a wallet has ever owned, any status, newest activity first
+def list_wallet_orders(
+    user: str, market: str | None = None, limit: int = 200, before_ts: int | None = None
+) -> list[dict[str, Any]]:
+    where = "o.user_address = %(u)s"
+    params: dict[str, Any] = {"u": (user or "").lower(), "lim": int(limit)}
+    if market:
+        where += " AND o.market = %(m)s"
+        params["m"] = (market or "").lower()
+    if before_ts is not None:
+        where += " AND o.updated_ts < %(cut)s"
+        params["cut"] = int(before_ts)
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.status,
+                   o.created_block, o.created_ts, o.updated_block, o.updated_ts, COALESCE(a.txhash, '')
+            FROM crystal_orderbook_orders o
+            {_ADD_TX_JOIN}
+            WHERE {where}
+            ORDER BY o.updated_ts DESC, o.order_id DESC
+            LIMIT %(lim)s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return [_order_row(r) for r in rows]
 
 
 # decoded order events for one wallet, newest first
@@ -353,6 +409,25 @@ def insert_market_trade(parsed: dict, blk: int, blk_ts: int, txhash: str, log_in
     )
 
 
+# insert many taker trades in one statement, primary key deduping replays.
+# rows: (txhash, log_index, block_number, timestamp, market, user_address,
+#        is_buy, amount_in, amount_out, start_price, end_price)
+def batch_insert_market_trades(rows: list[tuple], cur) -> None:
+    if not rows:
+        return
+    execute_values(
+        cur,
+        """
+        INSERT INTO crystal_market_trades
+            (txhash, log_index, block_number, timestamp, market, user_address,
+             is_buy, amount_in, amount_out, start_price, end_price)
+        VALUES %s
+        ON CONFLICT (txhash, log_index) DO NOTHING
+        """,
+        rows,
+    )
+
+
 # the full exchange trade history for one wallet: taker trades and maker fills
 # merged newest first, so ordercenter shows both sides of every execution
 def list_exchange_trades(
@@ -374,19 +449,32 @@ def list_exchange_trades(
         maker_where += " AND timestamp < %(cut)s"
         params["cut"] = cutoff
 
+    # one row per execution: a batch order lands as several on-chain trade or
+    # fill logs in one transaction, and the served history folds them into one
+    # row per (tx, market, side) with exact summed amounts. the maker rows use
+    # the maker's perspective: in = what the taker paid out, out = the proceeds
     with db_cursor() as cur:
         cur.execute(
             f"""
             SELECT * FROM (
-                SELECT 'taker' AS side_kind, txhash, log_index, block_number, timestamp,
-                       market, is_buy, amount_in, amount_out, start_price, end_price,
-                       NULL::bigint AS order_id
+                SELECT 'taker' AS side_kind, txhash, MIN(log_index) AS log_index,
+                       MIN(block_number) AS block_number, MIN(timestamp) AS timestamp,
+                       market, is_buy, SUM(amount_in) AS amount_in, SUM(amount_out) AS amount_out,
+                       (ARRAY_AGG(start_price ORDER BY log_index))[1] AS start_price,
+                       (ARRAY_AGG(end_price ORDER BY log_index DESC))[1] AS end_price,
+                       NULL::bigint AS order_id, COUNT(*) AS legs
                 FROM crystal_market_trades WHERE {taker_where}
+                GROUP BY txhash, market, is_buy
                 UNION ALL
-                SELECT 'maker' AS side_kind, txhash, log_index, block_number, timestamp,
-                       market, maker_is_buy AS is_buy, amount_high AS amount_in,
-                       amount_out, price AS start_price, price AS end_price, order_id
+                SELECT 'maker' AS side_kind, txhash, MIN(log_index) AS log_index,
+                       MIN(block_number) AS block_number, MIN(timestamp) AS timestamp,
+                       market, maker_is_buy AS is_buy, SUM(amount_out) AS amount_in,
+                       SUM(amount_high) AS amount_out,
+                       (ARRAY_AGG(price ORDER BY log_index))[1] AS start_price,
+                       (ARRAY_AGG(price ORDER BY log_index DESC))[1] AS end_price,
+                       CASE WHEN COUNT(*) = 1 THEN MIN(order_id) END AS order_id, COUNT(*) AS legs
                 FROM crystal_orderbook_fills WHERE {maker_where}
+                GROUP BY txhash, market, maker_is_buy
             ) u
             ORDER BY timestamp DESC, log_index DESC
             LIMIT %(lim)s
@@ -408,8 +496,9 @@ def list_exchange_trades(
             "start_price": str(int(sp or 0)),
             "end_price": str(int(ep or 0)),
             "order_id": int(oid) if oid is not None else None,
+            "legs": int(lg),
         }
-        for k, tx, li, bn, ts, m, b, ai, ao, sp, ep, oid in rows
+        for k, tx, li, bn, ts, m, b, ai, ao, sp, ep, oid, lg in rows
     ]
 
 

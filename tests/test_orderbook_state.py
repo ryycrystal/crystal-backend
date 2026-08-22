@@ -231,6 +231,37 @@ def test_exchange_trades_merges_taker_and_maker(db):
     assert only == [], "a market filter excludes other markets"
 
 
+# a batch order lands as several trade logs in one transaction, and the served
+# history folds them into one row with exact summed amounts
+def test_batch_tx_trades_merge_into_one_row(db):
+    _trade("0xbatchtx", 5000, li=3)
+    _trade("0xbatchtx", 5000, li=7)
+
+    rows = storage.list_exchange_trades(USER, before_ts=5001)
+    assert len(rows) == 1, "two trade legs in one tx serve as one row"
+    assert rows[0]["amount_in"] == "2000" and rows[0]["amount_out"] == "1980", "amounts are exact sums"
+    assert rows[0]["legs"] == 2
+
+    fill = {
+        "market": MARKET,
+        "maker": USER,
+        "flag": 1,
+        "maker_is_buy": True,
+        "price": 700,
+        "order_id": 31,
+        "remaining": 5,
+        "amount_high": 3000,
+        "amount_out": 2990,
+    }
+    storage.apply_orderbook_fill(fill, 110, 6000, "0xsweeptx", 2)
+    storage.apply_orderbook_fill({**fill, "order_id": 32, "remaining": 0}, 110, 6000, "0xsweeptx", 5)
+    rows = storage.list_exchange_trades(USER, before_ts=6001)
+    top = rows[0]
+    assert top["kind"] == "maker" and top["legs"] == 2, "two fills in one sweep serve as one row"
+    assert top["amount_in"] == "5980" and top["amount_out"] == "6000", "maker view: in is what the taker paid out"
+    assert top["order_id"] is None, "a merged row spans orders, so no single order id"
+
+
 # order history folds lifecycle events and fills into one newest-first stream
 def test_order_history_includes_fills(db):
     _apply([_entry(3, 700, 11, 5000)], "0xob7", blk=100, ts=1000)

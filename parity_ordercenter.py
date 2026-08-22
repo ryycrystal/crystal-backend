@@ -5,7 +5,7 @@ import httpx
 
 import core.storage as storage
 
-GRAPH_URL = "https://api.goldsky.com/api/public/project_cmssodtytvdwv01onckcx2jvl/subgraphs/crystal/1.0.3/gn"
+GRAPH_URL = "https://api.goldsky.com/api/public/project_cmssodtytvdwv01onckcx2jvl/subgraphs/crystal/1.0.5/gn"
 
 ACCOUNT_QUERY = """
 query ($id: ID!) {
@@ -127,15 +127,21 @@ def _backend_orders(wallet: str) -> dict[tuple[str, int, int], dict]:
     }
 
 
-# backend taker trades as the same multiset shape
+# backend trades as the same multiset shape goldsky serves: the taker rows plus
+# a mirrored maker row per fill (goldsky synthesizes both sides — the maker's
+# amountIn is the taker's output and its amountOut is the taker's input net of
+# the taker fee, which is exactly our fill's amount_out / amount_high pair)
 def _backend_trades(wallet: str) -> Counter:
     with storage.db_cursor() as cur:
         cur.execute(
             """
             SELECT txhash, market, is_buy, amount_in, amount_out, start_price, end_price, timestamp
             FROM crystal_market_trades WHERE user_address = %s
+            UNION ALL
+            SELECT txhash, market, maker_is_buy, amount_out, amount_high, price, price, timestamp
+            FROM crystal_orderbook_fills WHERE maker = %s AND order_id < 2199023255552
             """,
-            (wallet.lower(),),
+            (wallet.lower(), wallet.lower()),
         )
         rows = cur.fetchall()
     return Counter((tx, m, bool(b), int(ai), int(ao), int(sp), int(ep), int(ts)) for tx, m, b, ai, ao, sp, ep, ts in rows)

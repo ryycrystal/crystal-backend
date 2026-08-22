@@ -50,6 +50,7 @@ def main() -> None:
                 (range_start, range_end, f'[{{"topics": ["{TRADE_TOPIC}"]}}]'),
             )
             rows = cur.fetchall()
+            trade_rows: list[tuple] = []
             for blk, logs in rows:
                 for log in logs or []:
                     topics = log.get("topics") or []
@@ -70,10 +71,23 @@ def main() -> None:
                         continue
                     li_raw = log.get("logIndex")
                     li = int(li_raw, 16) if isinstance(li_raw, str) else int(li_raw or 0)
-                    storage.insert_market_trade(
-                        parsed, int(blk), ts, (log.get("transactionHash") or "").lower(), li, cur=cur
+                    trade_rows.append(
+                        (
+                            (log.get("transactionHash") or "").lower(),
+                            li,
+                            int(blk),
+                            ts,
+                            (parsed.get("market") or "").lower(),
+                            (parsed.get("user") or "").lower(),
+                            bool(parsed.get("is_buy")),
+                            int(parsed.get("amount_in") or 0),
+                            int(parsed.get("amount_out") or 0),
+                            int(parsed.get("start_price") or 0),
+                            int(parsed.get("end_price") or 0),
+                        )
                     )
-                    inserted += 1
+            storage.batch_insert_market_trades(trade_rows, cur)
+            inserted += len(trade_rows)
         scanned += range_end - range_start + 1
         if scanned % (RANGE * 10) < RANGE:
             rate = scanned / max(time.monotonic() - started, 0.001)

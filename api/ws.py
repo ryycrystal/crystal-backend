@@ -40,6 +40,9 @@ KNOWN_CHANNELS = (
     "user_positions",
     "balances",
     "vaults",
+    "user_orders",
+    "user_trades",
+    "user_history",
 )
 IMPLEMENTED_CHANNELS = (
     "token",
@@ -53,7 +56,27 @@ IMPLEMENTED_CHANNELS = (
     "user_positions",
     "balances",
     "vaults",
+    "user_orders",
+    "user_trades",
+    "user_history",
 )
+
+# wallet scoped orderbook channels share one push shape: per wallet bodies,
+# resent only when the body materially changed
+ORDERBOOK_CHANNELS = ("user_orders", "user_trades", "user_history")
+ORDERBOOK_HISTORY_LIMIT = 50
+
+
+# the per wallet body each orderbook channel serves, shared by the subscribe
+# snapshot and the per block push so both sides are always the same shape
+def _orderbook_wallet_body(channel: str, wallet: str) -> dict:
+    import core.storage as storage
+
+    if channel == "user_orders":
+        return {"orders": storage.list_open_orders(wallet)}
+    if channel == "user_trades":
+        return {"trades": storage.list_exchange_trades(wallet, limit=ORDERBOOK_HISTORY_LIMIT)}
+    return {"events": storage.list_order_history(wallet, limit=ORDERBOOK_HISTORY_LIMIT)}
 
 # subscription keys that are page scopes rather than token addresses. "tokens" is
 # the explorer list, "portfolio" carries the wallet scoped position channel
@@ -338,6 +361,14 @@ class Hub:
             return {"wallets": bodies}
         if channel == "vaults":
             return await asyncio.to_thread(_vaults_list_body, sorted(sub.addresses))
+        if channel in ORDERBOOK_CHANNELS:
+            bodies: dict[str, dict] = {}
+            for a in sorted(sub.addresses):
+                try:
+                    bodies[a] = await asyncio.to_thread(_orderbook_wallet_body, channel, a)
+                except Exception:
+                    continue
+            return {"wallets": bodies}
         return None
 
     # recompute subscribed tokens when the indexer commits a block: a NOTIFY per
@@ -391,7 +422,7 @@ class Hub:
             # positions depend on the wallet set, so they cannot be skipped on
             # watermark alone -- a client can add an address at any time
             if (
-                channel not in ("positions", "user_positions", "balances", "vaults")
+                channel not in ("positions", "user_positions", "balances", "vaults", *ORDERBOOK_CHANNELS)
                 and self._last_sent.get(key) == watermark
             ):
                 continue
@@ -411,6 +442,8 @@ class Hub:
             }.get(channel)
             if fn is not None:
                 await fn(token, watermark)
+            elif channel in ORDERBOOK_CHANNELS:
+                await self._push_orderbook_channel(token, watermark, channel)
 
     # the explorer list: one frame per tick carrying full rows for tokens that
     # entered, per field patches for tokens that changed, and the membership ids.
@@ -682,6 +715,40 @@ class Hub:
             env = self._envelope(token, "balances", watermark, "delta")
             await sub.send({**env, "wallets": mine, "seq": sub.next_seq(token, "balances")})
 
+    # wallet scoped orderbook data, pushed per block commit. one query per
+    # subscribed wallet per tick, resent only when the body materially changed,
+    # so an untouched book costs one indexed read and no frames
+    async def _push_orderbook_channel(self, token: str, watermark: int, channel: str) -> None:
+        async with self.lock:
+            targets = [
+                s
+                for s in self.subscribers
+                if s.wants(token, channel) and s.addresses and (token, channel) in s.primed
+            ]
+        if not targets:
+            return
+
+        union = sorted({a for s in targets for a in s.addresses})
+        changed: dict[str, dict] = {}
+        for a in union:
+            try:
+                body = await asyncio.to_thread(_orderbook_wallet_body, channel, a)
+            except Exception:
+                continue
+            key = (token, f"{channel}:{a}")
+            if self._prev_rows.get(key) == {"all": body}:
+                continue
+            self._prev_rows[key] = {"all": body}
+            changed[a] = body
+        if not changed:
+            return
+        for sub in targets:
+            mine = {a: b for a, b in changed.items() if a in sub.addresses}
+            if not mine:
+                continue
+            env = self._envelope(token, channel, watermark, "delta")
+            await sub.send({**env, "wallets": mine, "seq": sub.next_seq(token, channel)})
+
     # the vault universe, recomputed on its own cadence and resent per socket only
     # when the body actually changed. one compute is shared per distinct wallet
     async def _push_vaults(self, token: str, watermark: int) -> None:
@@ -757,6 +824,8 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
                     sub.primed.discard((tok, "positions"))
                     sub.primed.discard((tok, "user_positions"))
                     sub.primed.discard((tok, "balances"))
+                    for ch in ORDERBOOK_CHANNELS:
+                        sub.primed.discard((tok, ch))
 
     reply = {
         "op": "subscribed",
@@ -764,7 +833,7 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
         "channels": accepted,
         "not_yet_implemented": pending,
     }
-    if "positions" in accepted or "user_positions" in accepted or "balances" in accepted:
+    if any(c in accepted for c in ("positions", "user_positions", "balances", *ORDERBOOK_CHANNELS)):
         reply["addresses"] = sorted(sub.addresses)
         if not sub.addresses:
             reply["warning"] = "positions needs an addresses array, none were accepted"

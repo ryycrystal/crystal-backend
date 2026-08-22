@@ -591,3 +591,105 @@ def test_tokens_list_channel_snapshot_and_field_diffs(db):
         assert "ids" in frame
 
     HUB.subscribers.clear()
+
+
+# the orderbook channels: subscribe on the portfolio pseudo-token with a wallet,
+# get a per-wallet snapshot, and the push path resends only on material change
+def test_orderbook_channels_snapshot_and_push(db):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import api.api
+    from api.ws import HUB, _orderbook_wallet_body
+
+    wallet = "0x581172970bda012d71a9aea34a9f219da117891b"
+    market = "0xc8045b5dde24e625932df738e7ec4127c04008d3"
+    with storage.db_cursor() as cur:
+        for t in ("crystal_orderbook_events", "crystal_orderbook_orders", "crystal_orderbook_fills"):
+            cur.execute(f"DELETE FROM {t}")
+    storage.apply_orderbook_updates(
+        {
+            "market": market,
+            "user": wallet,
+            "orders": [{"flag": 2, "action": "add", "is_buy": True, "price": 500, "order_id": 7, "size": 1000}],
+        },
+        100,
+        1000,
+        "0xwsob1",
+        0,
+    )
+
+    body = _orderbook_wallet_body("user_orders", wallet)
+    assert body["orders"][0]["order_id"] == 7, "the shared body serves the decoded plane"
+
+    client = TestClient(api.api.app)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "token": "portfolio",
+                    "channels": ["user_orders", "user_trades", "user_history"],
+                    "addresses": [wallet],
+                }
+            )
+        )
+        reply = ws.receive_json()
+        assert reply["op"] == "subscribed"
+        assert set(reply["channels"]) == {"user_orders", "user_trades", "user_history"}
+        assert reply["addresses"] == [wallet]
+
+        snaps = {}
+        for _ in range(10):
+            m = ws.receive_json()
+            if m.get("kind") == "snapshot" and m.get("channel", "").startswith("user_"):
+                snaps[m["channel"]] = m
+            if len(snaps) == 3:
+                break
+        assert set(snaps) == {"user_orders", "user_trades", "user_history"}
+        assert snaps["user_orders"]["wallets"][wallet]["orders"][0]["order_id"] == 7
+        assert snaps["user_history"]["wallets"][wallet]["events"][0]["action"] == "add"
+
+    # the push path: an unchanged book sends nothing, a change sends one frame
+    sent = []
+
+    class _FakeSub:
+        addresses = {wallet}
+        primed = {("portfolio", "user_orders")}
+
+        def wants(self, token, channel):
+            return token == "portfolio" and channel == "user_orders"
+
+        def next_seq(self, token, channel):
+            return 1
+
+        async def send(self, payload):
+            sent.append(payload)
+
+    fake = _FakeSub()
+    HUB.subscribers.add(fake)
+    try:
+        HUB._prev_rows.pop(("portfolio", f"user_orders:{wallet}"), None)
+        asyncio.run(HUB._push_orderbook_channel("portfolio", 100, "user_orders"))
+        assert len(sent) == 1, "the first push carries the baseline"
+        asyncio.run(HUB._push_orderbook_channel("portfolio", 101, "user_orders"))
+        assert len(sent) == 1, "an unchanged book pushes nothing"
+
+        storage.apply_orderbook_updates(
+            {
+                "market": market,
+                "user": wallet,
+                "orders": [{"flag": 0, "action": "remove", "is_buy": True, "price": 500, "order_id": 7, "size": 1000}],
+            },
+            102,
+            1002,
+            "0xwsob2",
+            0,
+        )
+        asyncio.run(HUB._push_orderbook_channel("portfolio", 102, "user_orders"))
+        assert len(sent) == 2, "a book change pushes one frame"
+        assert sent[1]["wallets"][wallet]["orders"] == [], "the frame carries the emptied book"
+    finally:
+        HUB.subscribers.discard(fake)

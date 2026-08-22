@@ -36,6 +36,24 @@ def open_orders(wallet: str, market: str = "") -> dict[str, Any]:
     }
 
 
+# every order a wallet has ever owned with its current status, the order
+# history surface: places still live, cancels and fills already resolved
+@router.get("/orderbook/orders/{wallet}")
+def wallet_orders(
+    wallet: str, market: str = "", limit: int = 200, before_ts: int | None = None
+) -> dict[str, Any]:
+    w = _wallet(wallet)
+    lim = max(1, min(int(limit or 200), 500))
+    rows = storage.list_wallet_orders(w, market=(market or "").lower() or None, limit=lim, before_ts=before_ts)
+    return {
+        "wallet": w,
+        "orders": rows,
+        "count": len(rows),
+        "next_before_ts": rows[-1]["updated_ts"] if len(rows) >= lim else None,
+        "as_of_block": int(storage.get_last_processed_block() or 0),
+    }
+
+
 # exchange trade history for one wallet: taker trades and maker fills merged,
 # newest first. before_ts pages backwards through time
 @router.get("/orderbook/trades/{wallet}")
