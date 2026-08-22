@@ -274,12 +274,20 @@ def list_open_orders(user: str, market: str | None = None) -> list[dict[str, Any
             FROM crystal_orderbook_orders o
             {_ADD_TX_JOIN}
             WHERE {where}
-            ORDER BY o.updated_ts DESC, o.order_id DESC
+            ORDER BY {_ORDER_SORT}
             """,
             params,
         )
         rows = cur.fetchall()
     return [_order_row(r) for r in rows]
+
+
+# a fully unique sort key. the same order id recurs at every price level, so
+# ties on (updated_ts, order_id) are common: the market maker cancels and
+# requotes a slot in one block. without the rest of the primary key postgres is
+# free to return equal rows in any order, and the list visibly reshuffles on
+# every push. price leads the tiebreak so a ladder still reads in price order
+_ORDER_SORT = "o.updated_ts DESC, o.price DESC, o.order_id DESC, o.market DESC"
 
 
 # the transaction that placed an order's current incarnation, for the tx link
@@ -336,7 +344,7 @@ def list_wallet_orders(
             FROM crystal_orderbook_orders o
             {_ADD_TX_JOIN}
             WHERE {where}
-            ORDER BY o.updated_ts DESC, o.order_id DESC
+            ORDER BY {_ORDER_SORT}
             LIMIT %(lim)s
             """,
             params,
@@ -354,7 +362,7 @@ def list_orderbook_events(user: str, limit: int = 100) -> list[dict[str, Any]]:
                    flag, is_buy, action, price, order_id, size
             FROM crystal_orderbook_events
             WHERE user_address = %s
-            ORDER BY timestamp DESC, log_index DESC, entry_index DESC
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC, entry_index DESC, txhash DESC
             LIMIT %s
             """,
             ((user or "").lower(), int(limit)),
@@ -476,7 +484,7 @@ def list_exchange_trades(
                 FROM crystal_orderbook_fills WHERE {maker_where}
                 GROUP BY txhash, market, maker_is_buy
             ) u
-            ORDER BY timestamp DESC, log_index DESC
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC, is_buy DESC
             LIMIT %(lim)s
             """,
             params,
@@ -536,7 +544,7 @@ def list_order_history(
                        amount_out AS size
                 FROM crystal_orderbook_fills WHERE {fill_where}
             ) u
-            ORDER BY timestamp DESC, log_index DESC, entry_index DESC
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC, entry_index DESC, txhash DESC
             LIMIT %(lim)s
             """,
             params,

@@ -170,6 +170,30 @@ def test_batch_inserts_report_fresh_rows_once(db):
     assert latest == {(MARKET, 500, 21): 200}, "only rows that exist come back, at their live block"
 
 
+# the same order id recurs at every price level, so rows tie on (timestamp,
+# order_id) whenever a slot is requoted in one block. the served order must be
+# fully determined anyway, or the list reshuffles on every push
+def test_same_timestamp_rows_have_a_stable_order(db):
+    for price in (500, 900, 700, 300, 1100):
+        _apply([_entry(2, price, 1, 1000)], f"0xtie{price}", li=price, blk=100, ts=1000)
+        _trade(f"0xtietr{price}", 1000, li=price)
+
+    def snapshot():
+        return (
+            [(r["price"], r["order_id"]) for r in storage.list_open_orders(USER)],
+            [(r["price"], r["order_id"]) for r in storage.list_wallet_orders(USER)],
+            [r["txhash"] for r in storage.list_exchange_trades(USER)],
+            [(r["txhash"], r["log_index"]) for r in storage.list_order_history(USER)],
+        )
+
+    first = snapshot()
+    assert first[0] == [("1100", 1), ("900", 1), ("700", 1), ("500", 1), ("300", 1)], (
+        "tied rows fall back to price, so a ladder reads in price order"
+    )
+    for _ in range(5):
+        assert snapshot() == first, "repeated reads must not reshuffle tied rows"
+
+
 # native order ids are per-price-level counters, so the same small id at two
 # prices is two independent orders and must never collapse into one row
 def test_same_native_id_at_two_price_levels(db):
