@@ -924,6 +924,7 @@ def init_db() -> None:
                 is_buy        BOOLEAN NOT NULL,
                 size          NUMERIC(40, 0) NOT NULL,
                 original_size NUMERIC(40, 0) NOT NULL DEFAULT 0,
+                filled_size   NUMERIC(40, 0) NOT NULL DEFAULT 0,
                 status        TEXT NOT NULL DEFAULT 'open',
                 created_block BIGINT NOT NULL DEFAULT 0,
                 created_ts    BIGINT NOT NULL DEFAULT 0,
@@ -937,6 +938,15 @@ def init_db() -> None:
             """
             ALTER TABLE crystal_orderbook_orders
             ADD COLUMN IF NOT EXISTS original_size NUMERIC(40, 0) NOT NULL DEFAULT 0;
+            """
+        )
+        # how much of the order actually executed. size alone cannot answer this:
+        # a cancel zeroes the resting size too, so original minus size reads a
+        # fully cancelled order as fully filled. only fills move this column
+        cur.execute(
+            """
+            ALTER TABLE crystal_orderbook_orders
+            ADD COLUMN IF NOT EXISTS filled_size NUMERIC(40, 0) NOT NULL DEFAULT 0;
             """
         )
         cur.execute(

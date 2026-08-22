@@ -170,6 +170,47 @@ def test_batch_inserts_report_fresh_rows_once(db):
     assert latest == {(MARKET, 500, 21): 200}, "only rows that exist come back, at their live block"
 
 
+# a cancel returns the unfilled remainder, so it must never read as executed.
+# size alone cannot say: a cancel zeroes it exactly like a full fill does
+def test_canceled_order_is_not_reported_as_filled(db):
+    _apply([_entry(2, 500, 41, 1000)], "0xcan1", blk=100, ts=1000)
+    _apply([_entry(0, 500, 41, 1000)], "0xcan2", blk=101, ts=1001)
+
+    row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 41)
+    assert row["status"] == "canceled"
+    assert row["filled_size"] == "0", "a cancelled order executed nothing"
+    assert row["original_size"] == "1000"
+
+    # partially filled, then cancelled: only the executed part counts as filled
+    _apply([_entry(3, 700, 42, 1000)], "0xcan3", blk=102, ts=1002)
+    fill = {
+        "market": MARKET,
+        "maker": USER,
+        "flag": 1,
+        "maker_is_buy": True,
+        "price": 700,
+        "order_id": 42,
+        "remaining": 600,
+        "amount_high": 400,
+        "amount_out": 399,
+    }
+    storage.apply_orderbook_fill(fill, 103, 1003, "0xcan4", 0)
+    _apply([_entry(1, 700, 42, 600)], "0xcan5", blk=104, ts=1004)
+
+    row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 42)
+    assert row["status"] == "canceled" and row["filled_size"] == "400", (
+        "a partial fill then cancel reports only the executed amount"
+    )
+
+    # fully filled: filled_size reaches the original and the status says so
+    _apply([_entry(3, 900, 43, 1000)], "0xcan6", blk=105, ts=1005)
+    storage.apply_orderbook_fill(
+        {**fill, "price": 900, "order_id": 43, "remaining": 0}, 106, 1006, "0xcan7", 0
+    )
+    row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 43)
+    assert row["status"] == "filled" and row["filled_size"] == "1000"
+
+
 # the same order id recurs at every price level, so rows tie on (timestamp,
 # order_id) whenever a slot is requoted in one block. the served order must be
 # fully determined anyway, or the list reshuffles on every push

@@ -63,14 +63,15 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
         cur.execute(
             """
             INSERT INTO crystal_orderbook_orders
-                (market, price, order_id, user_address, is_buy, size, original_size, status,
+                (market, price, order_id, user_address, is_buy, size, original_size, filled_size, status,
                  created_block, created_ts, updated_block, updated_ts)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 0, 'open', %s, %s, %s, %s)
             ON CONFLICT (market, price, order_id) DO UPDATE SET
                 user_address = EXCLUDED.user_address,
                 is_buy = EXCLUDED.is_buy,
                 size = EXCLUDED.size,
                 original_size = EXCLUDED.original_size,
+                filled_size = 0,
                 status = 'open',
                 updated_block = EXCLUDED.updated_block,
                 updated_ts = EXCLUDED.updated_ts
@@ -164,16 +165,30 @@ def apply_orderbook_fill(parsed: dict, blk: int, blk_ts: int, txhash: str, log_i
 
 # the order-row consequence of one fresh fill, shared with the batched sweep path
 def _apply_fill_mutation(parsed: dict, market: str, blk: int, blk_ts: int, cur) -> None:
+    # a fill is the only thing that moves filled_size: the executed amount is
+    # whatever the resting size dropped by, and the assignment reads the row's
+    # pre-update size, so repeated partial fills accumulate exactly
     remaining = int(parsed["remaining"])
     cur.execute(
         """
         UPDATE crystal_orderbook_orders
-        SET size = %s,
+        SET filled_size = filled_size + GREATEST(size - %s, 0),
+            size = %s,
             status = CASE WHEN %s = 0 THEN 'filled' ELSE status END,
             updated_block = %s, updated_ts = %s
         WHERE market = %s AND price = %s AND order_id = %s AND updated_block <= %s
         """,
-        (remaining, remaining, blk, blk_ts, market, int(parsed["price"]), int(parsed["order_id"]), int(blk)),
+        (
+            remaining,
+            remaining,
+            remaining,
+            blk,
+            blk_ts,
+            market,
+            int(parsed["price"]),
+            int(parsed["order_id"]),
+            int(blk),
+        ),
     )
 
 
@@ -269,7 +284,7 @@ def list_open_orders(user: str, market: str | None = None) -> list[dict[str, Any
     with db_cursor() as cur:
         cur.execute(
             f"""
-            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.status,
+            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.filled_size, o.status,
                    o.created_block, o.created_ts, o.updated_block, o.updated_ts, COALESCE(a.txhash, '')
             FROM crystal_orderbook_orders o
             {_ADD_TX_JOIN}
@@ -304,7 +319,7 @@ _ADD_TX_JOIN = """
 
 # one order row in the served shape
 def _order_row(r: tuple) -> dict[str, Any]:
-    m, oid, b, p, s, orig, st, cb, cts, ub, uts, txh = r
+    m, oid, b, p, s, orig, fil, st, cb, cts, ub, uts, txh = r
     return {
         "market": m,
         "order_id": int(oid),
@@ -315,6 +330,7 @@ def _order_row(r: tuple) -> dict[str, Any]:
         "price": str(int(p)),
         "size": str(int(s)),
         "original_size": str(int(orig)),
+        "filled_size": str(int(fil)),
         "status": st,
         "txhash": txh,
         "created_block": int(cb),
@@ -339,7 +355,7 @@ def list_wallet_orders(
     with db_cursor() as cur:
         cur.execute(
             f"""
-            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.status,
+            SELECT o.market, o.order_id, o.is_buy, o.price, o.size, o.original_size, o.filled_size, o.status,
                    o.created_block, o.created_ts, o.updated_block, o.updated_ts, COALESCE(a.txhash, '')
             FROM crystal_orderbook_orders o
             {_ADD_TX_JOIN}
