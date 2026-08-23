@@ -253,3 +253,50 @@ def test_user_include_native_balance(db, monkeypatch):
 
     plain = user_portfolio(USER)
     assert "native_balance" not in plain, "the flag must stay opt in"
+
+
+# unrealized profit is what a position is worth now minus what it cost. storing
+# the market value instead made every untouched position report its whole size
+# as profit, so a break even bag showed as a near total gain
+def test_unrealized_pnl_subtracts_cost_basis(db):
+    import core.storage as storage
+
+    wallet = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
+    token = "0x350035555e10d9afaf1566aaebfced5ba6c27777"
+    # bought 4210.75 tokens for 290.59 native, nothing sold, price barely moved
+    tokens_held = 4210753505605066288927
+    spent = 290589750000000000000
+    price = Decimal("0.068578")
+
+    storage.upsert_position(
+        user_address=wallet,
+        token=token,
+        token_bought_delta=tokens_held,
+        token_sold_delta=0,
+        native_spent_delta=spent,
+        native_received_delta=0,
+        balance_token_delta=tokens_held,
+        realized_pnl_delta=0,
+        trade_count_delta=1,
+        buy_count_delta=1,
+        sell_count_delta=0,
+        last_price_native=price,
+        cost_basis_delta=spent,
+    )
+
+    with storage.db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT unrealized_pnl_native, total_pnl_native, cost_basis_native
+            FROM launchpad_positions WHERE user_address=%s AND token=%s
+            """,
+            (wallet, token),
+        )
+        unrealized, total, cost_basis = cur.fetchone()
+
+    expected = Decimal(tokens_held) * price - Decimal(spent)
+    assert abs(unrealized - expected) < Decimal("1e-6"), "unrealized is value minus cost, not value"
+    assert unrealized < 0, "a position worth slightly less than it cost is a loss"
+    assert abs(unrealized) < Decimal(spent) / 10, "the loss is small, not the size of the position"
+    assert total == unrealized, "nothing was sold, so total pnl is the unrealized part"
+    assert cost_basis == Decimal(spent)

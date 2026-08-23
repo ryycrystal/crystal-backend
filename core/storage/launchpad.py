@@ -451,7 +451,7 @@ def upsert_position(
 
     cb = int(cost_basis_delta)
     balance_insert = max(bd, 0)
-    unrealized_insert = Decimal(balance_insert) * Decimal(last_price_native)
+    unrealized_insert = Decimal(balance_insert) * Decimal(last_price_native) - Decimal(max(cb, 0))
     total_insert = Decimal(realized_pnl_delta) + unrealized_insert
 
     if cur is None:
@@ -487,10 +487,16 @@ def upsert_position(
                     buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                     sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                     cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                    unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s,
+                    -- unrealized profit is what the position is worth now minus what
+                    -- it cost to hold. without the cost basis this stored the market
+                    -- value itself, so an untouched position reported its whole size
+                    -- as profit
+                    unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
+                        - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
                     total_pnl_native = (
                         launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
-                    ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s;
+                    ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
+                        - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0);
                 """,
                 (
                     addr,
@@ -543,10 +549,13 @@ def upsert_position(
                 buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                 sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                 cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s,
+                -- see above: market value minus cost basis, not market value
+                unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
+                    - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
                 total_pnl_native = (
                     launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
-                ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s;
+                ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
+                    - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0);
             """,
             (
                 addr,
@@ -1780,7 +1789,9 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
     data = []
     for (addr, tok), p in position_updates.items():
         balance_insert = max(int(p["balance_token_delta"]), 0)
-        unrealized_insert = Decimal(balance_insert) * Decimal(p["last_price_native"])
+        unrealized_insert = (
+            Decimal(balance_insert) * Decimal(p["last_price_native"]) - Decimal(max(int(p["cost_basis_delta"]), 0))
+        )
         total_insert = Decimal(p["realized_pnl_delta"]) + unrealized_insert
         data.append(
             (
@@ -1829,8 +1840,9 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         cur.execute(
             """
             UPDATE launchpad_positions SET
-                unrealized_pnl_native = GREATEST(balance_token, 0) * %s,
-                total_pnl_native = realized_pnl_native + GREATEST(balance_token, 0) * %s
+                unrealized_pnl_native = GREATEST(balance_token, 0) * %s - GREATEST(cost_basis_native, 0),
+                total_pnl_native = realized_pnl_native
+                    + GREATEST(balance_token, 0) * %s - GREATEST(cost_basis_native, 0)
             WHERE user_address = %s AND token = %s
             """,
             (p["last_price_native"], p["last_price_native"], addr, tok),
