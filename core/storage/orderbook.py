@@ -113,13 +113,27 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
             (market, int(o["price"]), int(o["order_id"]), user, bool(o["is_buy"]), blk, blk_ts, blk, blk_ts),
         )
     elif o["action"] == "decrease":
+        # a decrease shrinks the order itself, so the original shrinks with it.
+        # otherwise the order keeps reporting the size it was placed at and its
+        # fill ratio is measured against an amount that is no longer on offer
         cur.execute(
             """
             UPDATE crystal_orderbook_orders
-            SET size = GREATEST(size - %s, 0), updated_block = %s, updated_ts = %s
+            SET size = GREATEST(size - %s, 0),
+                original_size = GREATEST(original_size - %s, filled_size),
+                updated_block = %s, updated_ts = %s
             WHERE market = %s AND price = %s AND order_id = %s AND updated_block <= %s
             """,
-            (int(o["size"]), blk, blk_ts, market, int(o["price"]), int(o["order_id"]), int(blk)),
+            (
+                int(o["size"]),
+                int(o["size"]),
+                blk,
+                blk_ts,
+                market,
+                int(o["price"]),
+                int(o["order_id"]),
+                int(blk),
+            ),
         )
 
 

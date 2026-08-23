@@ -63,7 +63,10 @@ def main() -> None:
             # order without executing anything, so filled stays where it is
             row.update(size=0, status="filled" if row["status"] == "filled" else "canceled")
         elif action == "decrease":
+            # the order itself shrinks, so the original shrinks with it, never
+            # below what already executed
             row["size"] = max(row["size"] - size, 0)
+            row["original"] = max(row["original"] - size, row["filled"])
         elif action == "fill":
             row["filled"] += max(row["size"] - size, 0)
             row["size"] = size

@@ -170,6 +170,34 @@ def test_batch_inserts_report_fresh_rows_once(db):
     assert latest == {(MARKET, 500, 21): 200}, "only rows that exist come back, at their live block"
 
 
+# a decrease shrinks the order, so the size on offer and the amount the fill
+# ratio is measured against both shrink with it
+def test_decrease_shrinks_the_order_not_just_the_remainder(db):
+    _apply([_entry(2, 500, 61, 1000)], "0xdec1", blk=100, ts=1000)
+    _apply([_entry(4, 500, 61, 300)], "0xdec2", blk=101, ts=1001)
+
+    row = next(r for r in storage.list_open_orders(USER) if r["order_id"] == 61)
+    assert row["size"] == "700", "the resting size drops by the decreased amount"
+    assert row["original_size"] == "700", "the order is now a 700 order, not a 1000 order"
+    assert row["filled_size"] == "0", "a decrease executes nothing"
+
+    # a decrease after a partial fill can never push the original below what
+    # already executed, which would report more than 100% filled
+    _apply([_entry(3, 900, 62, 1000)], "0xdec3", blk=102, ts=1002)
+    storage.apply_orderbook_fill(
+        {
+            "market": MARKET, "maker": USER, "flag": 1, "maker_is_buy": True,
+            "price": 900, "order_id": 62, "remaining": 400,
+            "amount_high": 600, "amount_out": 599,
+        },
+        103, 1003, "0xdec4", 0,
+    )
+    _apply([_entry(5, 900, 62, 900)], "0xdec5", blk=104, ts=1004)
+    row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 62)
+    assert row["filled_size"] == "600"
+    assert int(row["original_size"]) >= int(row["filled_size"]), "filled can never exceed the original"
+
+
 # a cancel returns the unfilled remainder, so it must never read as executed.
 # size alone cannot say: a cancel zeroes it exactly like a full fill does
 def test_canceled_order_is_not_reported_as_filled(db):
