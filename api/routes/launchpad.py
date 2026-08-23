@@ -903,7 +903,11 @@ def token_overview_graph(
                     txhash
                 FROM launchpad_trades
                 WHERE token = %s
-                ORDER BY timestamp DESC
+                -- several trades share one block, and one transaction can carry
+                -- several of them, so log_index is what puts them in chain order.
+                -- without it equal timestamps come back arbitrarily ordered, and
+                -- the LIMIT can even return a different set between calls
+                ORDER BY timestamp DESC, log_index DESC, txhash DESC
                 LIMIT 50
                 """,
                 (token_addr,),
@@ -2186,7 +2190,8 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                 token
             FROM launchpad_trades
             WHERE user_address = ANY(%s)
-            ORDER BY timestamp DESC
+            -- log_index keeps same block trades in chain order, see above
+            ORDER BY timestamp DESC, log_index DESC, txhash DESC
             LIMIT 50
             """,
             (list(addrs),),
