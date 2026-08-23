@@ -14,6 +14,7 @@ import urllib.request
 from decimal import Decimal
 from typing import Any
 
+import core.storage as storage
 from core.storage import db_cursor
 
 _BALANCE_TTL_SECONDS = 3.0
@@ -123,8 +124,12 @@ def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
             "wallet": wallet,
             "supported": False,
             "rows": [],
+            "vaults": [],
             "summary": {
                 "totalAccountValue": None,
+                "walletValue": None,
+                "ordersValue": None,
+                "vaultsValue": None,
                 "totalVolume": None,
                 "buySellRatio": None,
                 "activeOrders": None,
@@ -139,19 +144,33 @@ def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
     tokens = spot_token_list()
     balance_block, balances, native_raw, stale = fetch_balances(wallet, [t["address"] for t in tokens])
 
+    # funds resting on the book and funds deposited into vaults have left the
+    # wallet balance but still belong to the user, so an account total built from
+    # wallet balances alone understates it by exactly those two amounts
+    locked = storage.open_order_locked_by_token(wallet)
+    vaults_total, vault_rows = storage.vault_positions_usd(wallet)
+
     prices = spot_prices(_mon_price_usd())
     rows = []
-    total = Decimal(0)
+    wallet_total = Decimal(0)
+    orders_total = Decimal(0)
     for t in tokens:
         addr = t["address"]
         raw = native_raw if addr == NATIVE else balances.get(addr, 0)
-        if raw <= 0 and not include_zero:
+        locked_raw = locked.get(addr, 0)
+        if raw <= 0 and locked_raw <= 0 and not include_zero:
             continue
-        bal = Decimal(raw) / Decimal(10) ** int(t["decimals"])
+        unit = Decimal(10) ** int(t["decimals"])
+        bal = Decimal(raw) / unit
+        locked_bal = Decimal(locked_raw) / unit
         price = prices.get(addr)
         value = (bal * price) if price is not None else None
+        locked_value = (locked_bal * price) if price is not None else None
         if value is not None:
-            total += value
+            wallet_total += value
+        if locked_value is not None:
+            orders_total += locked_value
+        combined = None if price is None else (value or Decimal(0)) + (locked_value or Decimal(0))
         rows.append(
             {
                 "address": addr,
@@ -160,21 +179,37 @@ def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
                 "decimals": t["decimals"],
                 "balanceRaw": str(raw),
                 "balance": _fmt(bal),
+                "lockedRaw": str(locked_raw),
+                "locked": _fmt(locked_bal),
+                "lockedValueUsd": _fmt_usd(locked_value) if locked_value is not None else None,
                 "priceUsd": _fmt_usd(price) if price is not None else None,
                 # exchange trade history is not indexed until the orderbook decode
                 # lands, so a 24h change would be a guess. null renders as a dash
                 "priceChange24h": None,
                 "valueUsd": _fmt_usd(value) if value is not None else None,
+                # wallet plus what this token has locked on the book, which is
+                # what the row is really worth to the holder
+                "totalValueUsd": _fmt_usd(combined) if combined is not None else None,
             }
         )
-    rows.sort(key=lambda r: Decimal(r["valueUsd"] or 0), reverse=True)
+    rows.sort(key=lambda r: Decimal(r["totalValueUsd"] or r["valueUsd"] or 0), reverse=True)
+    total = wallet_total + orders_total + vaults_total
 
     return {
         "wallet": wallet,
         "supported": True,
         "rows": rows,
+        "vaults": [
+            {**v, "valueUsd": _fmt_usd(v["valueUsd"]) if v["valueUsd"] is not None else None}
+            for v in vault_rows
+        ],
         "summary": {
+            # the total is wallet plus book plus vaults; the parts are broken out
+            # so the ui can show where the money actually sits
             "totalAccountValue": _fmt_usd(total),
+            "walletValue": _fmt_usd(wallet_total),
+            "ordersValue": _fmt_usd(orders_total),
+            "vaultsValue": _fmt_usd(vaults_total),
             # these four light up with the orderbook serving layer; see DESIGN.md
             "totalVolume": None,
             "buySellRatio": None,

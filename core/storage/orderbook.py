@@ -596,3 +596,23 @@ def list_order_history(
         }
         for a, tx, li, ei, bn, ts, m, b, p, oid, sz in rows
     ]
+
+
+# the collateral a wallet has resting on the book, keyed by the token that is
+# actually locked. a buy locks the quote asset it would spend, a sell locks the
+# base asset it is offering, which is the unit each order's size is denominated
+# in. these funds have left the wallet balance but still belong to the user
+def open_order_locked_by_token(user: str) -> dict[str, int]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT LOWER(CASE WHEN o.is_buy THEN m.quote_address ELSE m.base_address END) AS token,
+                   SUM(o.size) AS locked
+            FROM crystal_orderbook_orders o
+            JOIN crystal_markets m ON m.market = o.market
+            WHERE o.user_address = %s AND o.status = 'open' AND o.size > 0
+            GROUP BY 1
+            """,
+            ((user or "").lower(),),
+        )
+        return {t: int(v) for t, v in cur.fetchall() if t}

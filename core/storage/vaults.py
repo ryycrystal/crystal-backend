@@ -676,3 +676,50 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
         rows = cur.fetchall()
     rows.reverse()
     return rows
+
+
+# what a wallet's vault shares are currently worth, per vault and in total.
+# a vault's own balance sample carries both its usd value and the share count it
+# was taken against, so a user's slice is their shares over that supply. vault
+# deposits leave the wallet balance entirely, so without this they vanish from
+# an account total
+def vault_positions_usd(user: str) -> tuple[Decimal, list[dict]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT vu.vault, vu.shares, v.name, v.circulating_shares,
+                   s.usd_value, s.shares AS sample_shares
+            FROM crystal_vault_users vu
+            JOIN crystal_vaults v ON v.vault = vu.vault
+            LEFT JOIN LATERAL (
+                SELECT usd_value, shares
+                FROM crystal_vault_balance_samples b
+                WHERE b.vault = vu.vault
+                ORDER BY b.timestamp DESC, b.block_number DESC
+                LIMIT 1
+            ) s ON TRUE
+            WHERE vu.user_address = %s AND vu.shares > 0
+            ORDER BY vu.vault
+            """,
+            ((user or "").lower(),),
+        )
+        rows = cur.fetchall()
+
+    total = Decimal(0)
+    out: list[dict] = []
+    for vault, shares, name, circulating, usd_value, sample_shares in rows:
+        supply = Decimal(sample_shares or 0) or Decimal(circulating or 0)
+        # no sample yet, or a vault whose supply is not known: report the
+        # position without a value rather than inventing one
+        value = (Decimal(shares) / supply * Decimal(usd_value or 0)) if supply > 0 else None
+        if value is not None:
+            total += value
+        out.append(
+            {
+                "vault": vault,
+                "name": name or "",
+                "shares": str(int(shares)),
+                "valueUsd": value,
+            }
+        )
+    return total, out
