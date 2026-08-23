@@ -300,3 +300,40 @@ def test_unrealized_pnl_subtracts_cost_basis(db):
     assert abs(unrealized) < Decimal(spent) / 10, "the loss is small, not the size of the position"
     assert total == unrealized, "nothing was sold, so total pnl is the unrealized part"
     assert cost_basis == Decimal(spent)
+
+
+
+# a pair reports reserve0/reserve1 positionally, so which side is the token
+# depends on the address ordering recorded when the pool was discovered
+def test_pool_reserves_follow_token_ordering(db):
+    import core.storage as storage
+
+    token = "0x350035555e10d9afaf1566aaebfced5ba6c27777"
+    native = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+    with storage.db_cursor() as cur:
+        cur.execute("DELETE FROM launchpad_pools WHERE pool IN ('0xpool0', '0xpool1')")
+        cur.execute(
+            "INSERT INTO launchpad_pools (pool, token_addr, native_addr, token_is_0) VALUES (%s,%s,%s,TRUE)",
+            ("0xpool0", token, native),
+        )
+        cur.execute(
+            "INSERT INTO launchpad_pools (pool, token_addr, native_addr, token_is_0) VALUES (%s,%s,%s,FALSE)",
+            ("0xpool1", token, native),
+        )
+
+    # reserve0=1000 tokens, reserve1=7 native
+    storage.update_pool_reserves("0xpool0", 1000, 7, 100, 1000)
+    storage.update_pool_reserves("0xpool1", 1000, 7, 100, 1000)
+
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT pool, reserve_token, reserve_native FROM launchpad_pools WHERE pool LIKE '0xpool%' ORDER BY pool")
+        got = {p: (int(rt), int(rn)) for p, rt, rn in cur.fetchall()}
+    assert got["0xpool0"] == (1000, 7), "token is reserve0 here"
+    assert got["0xpool1"] == (7, 1000), "token is reserve1 here, so the sides swap"
+
+    # an older sync must not overwrite a newer one, the same monotonic rule the
+    # orderbook appliers use
+    storage.update_pool_reserves("0xpool0", 1, 1, 50, 500)
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT reserve_token FROM launchpad_pools WHERE pool = '0xpool0'")
+        assert int(cur.fetchone()[0]) == 1000, "a stale sync is ignored"

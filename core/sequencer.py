@@ -9,6 +9,7 @@ import state as _st
 from core import chain as h
 from core import oracle
 from core.storage import db_cursor
+from modules import nadfun
 
 
 # buffers one block worth of writes so they flush in a single round trip
@@ -505,6 +506,7 @@ class Sequencer:
                 "NFPEN": 0,
                 "NFT": 0,
                 "V2SWAP": 0,
+                "V2SYNC": 0,
                 "TF": 0,
                 "V3SWAP": 0,
                 "OBU": 0,
@@ -732,6 +734,16 @@ class Sequencer:
                             parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch
                         )
 
+            elif tag == "V2SYNC":
+                # a graduated token's liquidity sits in its amm pair, and the
+                # pair reports its reserves on every sync, which covers trades
+                # and liquidity moves alike. the parser stashes them for the swap
+                # handler, so this peeks rather than consuming
+                pool_addr = (log.get("address") or "").lower()
+                sync_r0, sync_r1 = nadfun.peek_pair_sync(pool_addr)
+                if sync_r0 or sync_r1:
+                    storage.update_pool_reserves(pool_addr, sync_r0, sync_r1, blk, blk_ts, cur=cur)
+
             elif tag in ("V2SWAP", "V3SWAP"):
                 pool_addr = (log.get("address") or "").lower()
                 if tag == "V3SWAP" and pool_addr == "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower():
@@ -787,6 +799,7 @@ class Sequencer:
             "NFT": 0,
             "TF": 0,
             "V2SWAP": 0,
+            "V2SYNC": 0,
             "V3SWAP": 0,
             "OBU": 0,
             "OBF": 0,

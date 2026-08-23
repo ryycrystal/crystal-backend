@@ -606,6 +606,13 @@ def consume_pair_sync(pool: str) -> tuple[int, int]:
     return _PENDING_PAIR_SYNC.pop((pool or "").lower(), (0, 0))
 
 
+# read the stashed reserves without taking them, so reserve tracking can persist
+# a sync that no swap will consume, which is exactly what a liquidity add or
+# remove looks like on a pair
+def peek_pair_sync(pool: str) -> tuple[int, int]:
+    return _PENDING_PAIR_SYNC.get((pool or "").lower(), (0, 0))
+
+
 # re-queue tokens that still have no metadata but do have a uri to fetch from.
 # the queue is in memory, so a restart mid fetch strands a token forever otherwise,
 # and retries are exhausted after about fifteen minutes with no path back

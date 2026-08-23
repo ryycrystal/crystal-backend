@@ -2310,3 +2310,49 @@ def latest_trade_timestamp() -> int:
         cur.execute("SELECT MAX(timestamp) FROM launchpad_trades")
         row = cur.fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+# a graduated pair's reserves, straight off its sync log. reserve0/reserve1 are
+# positional on the pair, so token_is_0 decides which side is the token
+def update_pool_reserves(pool: str, reserve0: int, reserve1: int, blk: int, blk_ts: int, cur=None) -> None:
+    sql = """
+        UPDATE launchpad_pools
+        SET reserve_token = CASE WHEN token_is_0 THEN %s ELSE %s END,
+            reserve_native = CASE WHEN token_is_0 THEN %s ELSE %s END,
+            last_sync_block = %s,
+            last_sync_at = %s
+        WHERE pool = %s AND COALESCE(last_sync_block, 0) <= %s
+    """
+    args = (
+        int(reserve0), int(reserve1),
+        int(reserve1), int(reserve0),
+        int(blk), int(blk_ts), (pool or "").lower(), int(blk),
+    )
+    if cur is None:
+        with db_cursor() as c:
+            c.execute(sql, args)
+    else:
+        cur.execute(sql, args)
+
+
+# reserves for the pools of many tokens at once, for list serialisation
+def pool_reserves_for_tokens(tokens: list[str], cur=None) -> dict[str, dict]:
+    if not tokens:
+        return {}
+    sql = """
+        SELECT token_addr, pool, reserve_token, reserve_native, last_sync_at
+        FROM launchpad_pools
+        WHERE token_addr = ANY(%s) AND (reserve_token > 0 OR reserve_native > 0)
+    """
+    args = ([t.lower() for t in tokens],)
+    if cur is None:
+        with db_cursor() as c:
+            c.execute(sql, args)
+            rows = c.fetchall()
+    else:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+    return {
+        t: {"pool": p, "reserveToken": str(int(rt)), "reserveNative": str(int(rn)), "syncedAt": int(ts or 0)}
+        for t, p, rt, rn, ts in rows
+    }

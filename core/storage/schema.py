@@ -365,6 +365,16 @@ def init_db() -> None:
             ON launchpad_pools (token_addr);
             """
         )
+        # a graduated token's liquidity lives in its amm pair, so the pair's
+        # reserves are what the frontend needs to show liquidity after migration.
+        # the sync log carries them on every trade
+        for _col in (
+            "reserve_token NUMERIC(78, 0) NOT NULL DEFAULT 0",
+            "reserve_native NUMERIC(78, 0) NOT NULL DEFAULT 0",
+            "last_sync_block BIGINT",
+            "last_sync_at BIGINT",
+        ):
+            cur.execute(f"ALTER TABLE launchpad_pools ADD COLUMN IF NOT EXISTS {_col};")
 
         cur.execute(
             """

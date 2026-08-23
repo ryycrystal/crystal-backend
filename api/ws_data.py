@@ -337,6 +337,10 @@ def token_state(token: str) -> dict[str, Any]:
                 t.approaching_75, t.approaching_75_block, t.approaching_75_at,
                 COALESCE(t.ath_price_native, 0),
                 t.curve_native_reserve, t.curve_token_reserve,
+                (SELECT lp.reserve_native FROM launchpad_pools lp WHERE lp.token_addr = t.token
+                  ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
+                (SELECT lp.reserve_token FROM launchpad_pools lp WHERE lp.token_addr = t.token
+                  ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
                 (SELECT COUNT(*) FROM launchpad_positions p
                   WHERE p.token = t.token AND p.balance_token > 1
                     AND p.user_address <> ALL(%s) AND {not_internal}),
@@ -387,6 +391,8 @@ def token_state(token: str) -> dict[str, Any]:
         ath_price,
         curve_native,
         curve_token,
+        pool_native,
+        pool_token,
         holders,
         distinct_buyers,
         distinct_sellers,
@@ -438,6 +444,11 @@ def token_state(token: str) -> dict[str, Any]:
         "circulating_supply": str(int(circulating or 0)),
         "curveNativeReserve": str(int(curve_native or 0)),
         "curveTokenReserve": str(int(curve_token or 0)),
+        # after graduation the liquidity is the amm pair's reserves, not the
+        # curve's. both ride the same frame so a client can show liquidity on
+        # either side of migration without a second request
+        "poolNativeReserve": str(int(pool_native or 0)),
+        "poolTokenReserve": str(int(pool_token or 0)),
         # the 75% threshold flag and when it fired
         "approaching_75": bool(approaching),
         # null rather than 0 when the threshold was never crossed, matching rest. a
