@@ -144,6 +144,17 @@ def init_db() -> None:
             ADD COLUMN IF NOT EXISTS token_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
             """
         )
+        # realized pnl for the sell that produced this row, on the same moving
+        # average cost basis the position column uses. storing it per trade is
+        # what keeps the daily calendar and the position totals the same number:
+        # any second formula that re-derives realized from lifetime sums drifts
+        # the moment a wallet buys again after selling
+        cur.execute(
+            """
+            ALTER TABLE launchpad_trades
+            ADD COLUMN IF NOT EXISTS realized_native NUMERIC(50, 0) NOT NULL DEFAULT 0;
+            """
+        )
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_launchpad_trades_block
