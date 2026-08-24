@@ -137,3 +137,98 @@ def test_referral_summary_empty_user():
     assert out["referredCount"] == 0
     assert out["rewards"] == []
     assert out["totalEarnedUsd"] == 0.0
+
+
+LADDER = [
+    (0, "Basic", 0, 1, 1000),
+    (1, "Bronze", 10000, 1, 1000),
+    (2, "Silver", 100000, 2, 2000),
+    (3, "Gold", 1000000, 5, 3000),
+    (4, "Diamond", 10000000, 10, 4000),
+]
+
+
+# the ladder is served as configured, thresholds and benefits included
+def test_tier_ladder_shape():
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            out = ref_api.volume_tier_ladder.__wrapped__()
+    assert out["ok"] is True
+    assert out["windowDays"] == 30
+    assert [t["name"] for t in out["tiers"]] == ["Basic", "Bronze", "Silver", "Gold", "Diamond"]
+    assert [t["minVolumeUsd"] for t in out["tiers"]] == [0, 10000, 100000, 1000000, 10000000]
+    assert out["tiers"][2]["referralCommissionPercent"] == 20.0
+
+
+# volume below the first paid threshold stays on the basic tier
+def test_wallet_below_first_threshold_is_basic():
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            with patch.object(ref_api.storage, "wallet_launchpad_volume_usd", return_value=(2500, 7)):
+                out = ref_api.volume_tier_for_wallet.__wrapped__("0x" + "1" * 40)
+    assert out["tier"]["name"] == "Basic"
+    assert out["nextTier"]["name"] == "Bronze"
+    assert out["volumeUsd"] == 2500
+    assert out["tradeCount"] == 7
+    assert out["remainingUsd"] == 7500
+    assert out["progressBps"] == 2500
+
+
+# a wallet between two thresholds earns the lower one and progresses toward the next
+def test_wallet_between_thresholds():
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            with patch.object(ref_api.storage, "wallet_launchpad_volume_usd", return_value=(550000, 900)):
+                out = ref_api.volume_tier_for_wallet.__wrapped__("0x" + "2" * 40)
+    assert out["tier"]["name"] == "Silver"
+    assert out["nextTier"]["name"] == "Gold"
+    assert out["remainingUsd"] == 450000
+    assert out["progressBps"] == 5000
+
+
+# the top tier has nothing above it and reads as complete
+def test_wallet_at_top_tier_has_no_next():
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            with patch.object(ref_api.storage, "wallet_launchpad_volume_usd", return_value=(12_000_000, 5000)):
+                out = ref_api.volume_tier_for_wallet.__wrapped__("0x" + "3" * 40)
+    assert out["tier"]["name"] == "Diamond"
+    assert out["nextTier"] is None
+    assert out["remainingUsd"] == 0
+    assert out["progressBps"] == 10000
+
+
+# thresholds are data, so an edited ladder moves wallets without a code change
+def test_edited_thresholds_change_the_answer():
+    edited = [
+        (0, "Basic", 0, 1, 1000),
+        (1, "Bronze", 500, 1, 1000),
+        (2, "Silver", 1000, 2, 2000),
+    ]
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=edited):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            with patch.object(ref_api.storage, "wallet_launchpad_volume_usd", return_value=(750, 3)):
+                out = ref_api.volume_tier_for_wallet.__wrapped__("0x" + "4" * 40)
+    assert out["tier"]["name"] == "Bronze"
+    assert out["nextTier"]["name"] == "Silver"
+
+
+# a zero volume wallet still resolves rather than returning a null tier
+def test_zero_volume_wallet_resolves():
+    with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
+        with patch.object(ref_api.storage, "tier_window_days", return_value=30):
+            with patch.object(ref_api.storage, "wallet_launchpad_volume_usd", return_value=(0, 0)):
+                out = ref_api.volume_tier_for_wallet.__wrapped__("0x" + "5" * 40)
+    assert out["tier"]["name"] == "Basic"
+    assert out["volumeUsd"] == 0
+    assert out["progressBps"] == 0
+
+
+# a bad address is rejected before any query runs
+def test_tier_endpoint_rejects_bad_address():
+    for bad in ("nothex", "0x" + "z" * 40, "0x" + "0" * 40):
+        try:
+            ref_api.volume_tier_for_wallet.__wrapped__(bad)
+            raise AssertionError("expected 400")
+        except Exception as e:
+            assert getattr(e, "status_code", None) == 400

@@ -2356,3 +2356,31 @@ def pool_reserves_for_tokens(tokens: list[str], cur=None) -> dict[str, dict]:
         t: {"pool": p, "reserveToken": str(int(rt)), "reserveNative": str(int(rn)), "syncedAt": int(ts or 0)}
         for t, p, rt, rn, ts in rows
     }
+
+
+# mon priced in usd per time bucket, taken from indexed trades. every launchpad
+# trade records both its native amount and its usd value, so their ratio is an
+# observation of mon/usd at that moment. a chart denominated in usd has to
+# convert each candle with the rate from that candle's own time, otherwise the
+# whole history silently rewrites itself whenever mon moves
+def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) -> list[tuple[int, float]]:
+    resolution = max(int(resolution), 1)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT bucket, (ARRAY_AGG(rate ORDER BY timestamp DESC))[1] AS close_rate
+            FROM (
+                SELECT (timestamp / %s) * %s AS bucket,
+                       timestamp,
+                       usd_amount / (native_amount / 1e18) AS rate
+                FROM launchpad_trades
+                WHERE timestamp BETWEEN %s AND %s
+                  AND native_amount >= %s
+                  AND usd_amount > 0
+            ) t
+            GROUP BY bucket
+            ORDER BY bucket
+            """,
+            (resolution, resolution, int(start_ts), int(end_ts), int(min_wei)),
+        )
+        return [(int(b), float(r)) for b, r in cur.fetchall() if r is not None]

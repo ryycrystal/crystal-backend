@@ -113,3 +113,44 @@ def get_referral_rewards(referrer: str):
             ((referrer or "").lower(),),
         )
         return cur.fetchall()
+
+
+# the configured tier ladder, lowest threshold first
+def list_volume_tiers():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT tier, name, min_volume_usd, cashback_multiplier, referral_commission_bps
+            FROM volume_tiers
+            ORDER BY min_volume_usd ASC, tier ASC
+            """
+        )
+        return cur.fetchall()
+
+
+# trailing window in days that tier volume is measured over, 0 meaning lifetime
+def tier_window_days(default: int = 30) -> int:
+    with db_cursor() as cur:
+        cur.execute("SELECT value FROM launchpad_kv WHERE key = 'tier_volume_window_days'")
+        row = cur.fetchone()
+    if not row:
+        return default
+    try:
+        return max(int(str(row[0]).strip()), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+# launchpad and meme volume for one wallet, already priced in usd per trade
+def wallet_launchpad_volume_usd(address: str, since_ts: int = 0):
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(usd_amount), 0), COUNT(*)
+            FROM launchpad_trades
+            WHERE user_address = %s AND timestamp >= %s
+            """,
+            ((address or "").lower(), int(since_ts or 0)),
+        )
+        row = cur.fetchone()
+    return (row[0] if row else 0), int(row[1] if row else 0)

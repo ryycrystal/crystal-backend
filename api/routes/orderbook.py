@@ -171,3 +171,34 @@ def write_wallet_prefs(key: str, body: dict[str, Any]) -> dict[str, Any]:
     updated_at = int(time.time())
     storage.put_wallet_prefs(k, count, sorted(set(selected)), updated_at)
     return {"count": count, "selected": sorted(set(selected)), "updatedAt": updated_at}
+
+
+# mon priced in usd over time, so a client can denominate a chart in usd using
+# the rate from each candle's own moment rather than today's rate. `before` is
+# the last known rate at or before the range, so the first candles of a range
+# still convert when no trade landed inside their bucket
+@router.get("/mon-usd/series")
+def mon_usd_series(
+    from_ts: int = 0, to_ts: int = 0, resolution: int = 60
+) -> dict[str, Any]:
+    now = int(time.time())
+    end = int(to_ts) if to_ts else now
+    start = int(from_ts) if from_ts else end - 86400
+    if end <= start:
+        raise HTTPException(status_code=400, detail="to_ts must be after from_ts")
+    res = max(1, min(int(resolution or 60), 86400))
+    # a range cannot ask for an unbounded number of buckets
+    if (end - start) // res > 5000:
+        raise HTTPException(status_code=400, detail="range is too long for that resolution")
+
+    from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
+
+    points = storage.mon_usd_series(start, end, res, _MIN_PRICE_TRADE_WEI)
+    before = float(_mon_usd_at(start) or 0)
+    return {
+        "resolution": res,
+        "from": start,
+        "to": end,
+        "before": before or None,
+        "points": [{"t": t, "rate": r} for t, r in points],
+    }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,18 @@ router = APIRouter()
 
 ZERO_ADDR = "0x" + "0" * 40
 MAX_REFEREES = 500
+
+
+# reject anything that is not a plain lowercase-able 20 byte address
+def _require_address(address: str) -> str:
+    addr = (address or "").lower()
+    if not addr.startswith("0x") or len(addr) != 42 or addr == ZERO_ADDR:
+        raise HTTPException(status_code=400, detail="invalid address")
+    try:
+        int(addr, 16)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid address") from None
+    return addr
 
 
 # usd decimals for every quote asset that can hold referral rewards
@@ -34,13 +47,7 @@ def _price_state():
 @router.get("/referral/{address}")
 @ttl_cache("referral:summary", ttl_seconds=5)
 def referral_summary(address: str) -> dict[str, Any]:
-    addr = (address or "").lower()
-    if not addr.startswith("0x") or len(addr) != 42 or addr == ZERO_ADDR:
-        raise HTTPException(status_code=400, detail="invalid address")
-    try:
-        int(addr, 16)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid address")
+    addr = _require_address(address)
 
     binding = storage.get_referral_binding(addr)
     referrer = None
@@ -95,4 +102,73 @@ def referral_summary(address: str) -> dict[str, Any]:
         "rewards": rewards,
         "totalClaimableUsd": total_claimable_usd,
         "totalEarnedUsd": total_earned_usd,
+    }
+
+
+# shape one configured tier row for the wire
+def _tier_row(r) -> dict[str, Any]:
+    return {
+        "tier": int(r[0]),
+        "name": str(r[1] or ""),
+        "minVolumeUsd": float(r[2] or 0),
+        "cashbackMultiplier": float(r[3] or 0),
+        "referralCommissionBps": int(r[4] or 0),
+        "referralCommissionPercent": int(r[4] or 0) / 100.0,
+    }
+
+
+# the highest tier a volume clears, plus the one above it
+def _resolve_tier(volume_usd: float, tiers: list[dict]) -> tuple[dict | None, dict | None]:
+    current = None
+    nxt = None
+    for t in tiers:
+        if volume_usd >= t["minVolumeUsd"]:
+            current = t
+        elif nxt is None:
+            nxt = t
+    return current, nxt
+
+
+# the configured tier ladder on its own, for pages with no wallet connected
+@router.get("/tiers")
+@ttl_cache("tiers:ladder", ttl_seconds=60)
+def volume_tier_ladder() -> dict[str, Any]:
+    tiers = [_tier_row(r) for r in storage.list_volume_tiers()]
+    return {"ok": True, "windowDays": storage.tier_window_days(), "tiers": tiers}
+
+
+# one wallet's trailing volume, the tier it earns and how far the next one is
+@router.get("/tiers/{address}")
+@ttl_cache("tiers:wallet", ttl_seconds=15)
+def volume_tier_for_wallet(address: str) -> dict[str, Any]:
+    addr = _require_address(address)
+
+    window_days = storage.tier_window_days()
+    since_ts = int(time.time()) - (window_days * 86400) if window_days > 0 else 0
+
+    # launchpad and meme trading only, spot volume is deliberately not counted
+    volume_raw, trade_count = storage.wallet_launchpad_volume_usd(addr, since_ts)
+    volume_usd = float(volume_raw or 0)
+
+    tiers = [_tier_row(r) for r in storage.list_volume_tiers()]
+    current, nxt = _resolve_tier(volume_usd, tiers)
+
+    remaining = max(nxt["minVolumeUsd"] - volume_usd, 0.0) if nxt else 0.0
+    progress_bps = 10000
+    if nxt:
+        floor_usd = current["minVolumeUsd"] if current else 0.0
+        span = nxt["minVolumeUsd"] - floor_usd
+        progress_bps = int(max(min((volume_usd - floor_usd) / span, 1.0), 0.0) * 10000) if span > 0 else 0
+
+    return {
+        "ok": True,
+        "address": addr,
+        "windowDays": window_days,
+        "volumeUsd": volume_usd,
+        "tradeCount": trade_count,
+        "tier": current,
+        "nextTier": nxt,
+        "remainingUsd": remaining,
+        "progressBps": progress_bps,
+        "tiers": tiers,
     }

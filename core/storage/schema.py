@@ -872,6 +872,33 @@ def init_db() -> None:
             """
         )
 
+        # volume tier ladder, seeded once then owned by whoever edits the rows.
+        # thresholds and benefits are data so they change with an UPDATE, never a deploy
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS volume_tiers
+            (
+                tier                    INTEGER PRIMARY KEY,
+                name                    TEXT NOT NULL,
+                min_volume_usd          NUMERIC(50, 2) NOT NULL,
+                cashback_multiplier     NUMERIC(10, 2) NOT NULL DEFAULT 1,
+                referral_commission_bps INTEGER NOT NULL DEFAULT 1000
+            );
+            """
+        )
+        # do nothing on conflict, so an edited threshold survives every restart
+        cur.execute(
+            """
+            INSERT INTO volume_tiers (tier, name, min_volume_usd, cashback_multiplier, referral_commission_bps)
+            VALUES (0, 'Basic', 0, 1, 1000),
+                   (1, 'Bronze', 10000, 1, 1000),
+                   (2, 'Silver', 100000, 2, 2000),
+                   (3, 'Gold', 1000000, 5, 3000),
+                   (4, 'Diamond', 10000000, 10, 4000)
+            ON CONFLICT (tier) DO NOTHING;
+            """
+        )
+
         # every decoded orders-updated entry, one row per packed entry. the primary
         # key doubles as the replay guard for the order-state mutations
         cur.execute(
