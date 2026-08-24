@@ -971,6 +971,15 @@ def init_db() -> None:
             ON crystal_orderbook_orders (user_address, status);
             """
         )
+        # order history sorts by recency within a wallet and takes a page. without
+        # a matching index that is a full scan plus a disk sort on every call,
+        # which grows with the whole order table rather than the page size
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ob_orders_user_updated
+            ON crystal_orderbook_orders (user_address, updated_ts DESC, price DESC, order_id DESC);
+            """
+        )
 
         # the on-chain user registry: every wallet that registered gets a numeric
         # user id, and client order ids embed it as the low 41 bits
