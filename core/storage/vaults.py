@@ -683,7 +683,7 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
 # was taken against, so a user's slice is their shares over that supply. vault
 # deposits leave the wallet balance entirely, so without this they vanish from
 # an account total
-def vault_positions_usd(user: str) -> tuple[Decimal, list[dict]]:
+def vault_positions_usd(user) -> tuple[Decimal, list[dict]]:
     with db_cursor() as cur:
         cur.execute(
             """
@@ -698,15 +698,15 @@ def vault_positions_usd(user: str) -> tuple[Decimal, list[dict]]:
                 ORDER BY b.timestamp DESC, b.block_number DESC
                 LIMIT 1
             ) s ON TRUE
-            WHERE vu.user_address = %s AND vu.shares > 0
+            WHERE vu.user_address = ANY(%s) AND vu.shares > 0
             ORDER BY vu.vault
             """,
-            ((user or "").lower(),),
+            ([user.lower()] if isinstance(user, str) else [str(u).lower() for u in (user or [])],),
         )
         rows = cur.fetchall()
 
     total = Decimal(0)
-    out: list[dict] = []
+    folded: dict[str, dict] = {}
     for vault, shares, name, circulating, usd_value, sample_shares in rows:
         supply = Decimal(sample_shares or 0) or Decimal(circulating or 0)
         # no sample yet, or a vault whose supply is not known: report the
@@ -714,12 +714,18 @@ def vault_positions_usd(user: str) -> tuple[Decimal, list[dict]]:
         value = (Decimal(shares) / supply * Decimal(usd_value or 0)) if supply > 0 else None
         if value is not None:
             total += value
-        out.append(
-            {
+        # the same vault can be held from several selected wallets, and the user
+        # wants one line per vault rather than one per wallet
+        prev = folded.get(vault)
+        if prev is None:
+            folded[vault] = {
                 "vault": vault,
                 "name": name or "",
                 "shares": str(int(shares)),
                 "valueUsd": value,
             }
-        )
-    return total, out
+        else:
+            prev["shares"] = str(int(prev["shares"]) + int(shares))
+            if value is not None:
+                prev["valueUsd"] = (prev["valueUsd"] or Decimal(0)) + value
+    return total, list(folded.values())

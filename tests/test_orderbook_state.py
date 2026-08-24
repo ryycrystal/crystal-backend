@@ -415,3 +415,60 @@ def test_orderbook_routes_serve_the_readers(db):
 
     with _pytest.raises(HTTPException):
         ob_routes.open_orders("not-an-address")
+
+
+# a selected set of wallets reads as one account across every orderbook surface
+def test_reads_span_several_wallets(db):
+    other = "0x082345baa3bdf6029f27603ddeac103db0114c85"
+    _apply([_entry(2, 500, 71, 1000)], "0xmw1", blk=100, ts=1000)
+    storage.apply_orderbook_updates(
+        {"market": MARKET, "user": other, "orders": [_entry(3, 900, 72, 2000)]}, 101, 1001, "0xmw2", 0
+    )
+
+    assert len(storage.list_open_orders(USER)) == 1, "one wallet sees only its own"
+    assert len(storage.list_open_orders(other)) == 1
+    both = storage.list_open_orders([USER, other])
+    assert len(both) == 2, "the selected set sees the union"
+    assert {r["order_id"] for r in both} == {71, 72}
+
+    # locked collateral is attributed to the token each side actually locks, so
+    # the market's assets have to exist for the join to resolve
+    with storage.db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO crystal_markets
+                (market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
+                 quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name)
+            VALUES (%s, TRUE, 'USDC', 'WMON', %s, 6, 'USDC', 'USD Coin', %s, 18, 'WMON', 'Wrapped MON')
+            ON CONFLICT (market) DO NOTHING
+            """,
+            (MARKET, "0x" + "1" * 40, "0x" + "2" * 40),
+        )
+
+    one = storage.open_order_locked_by_token(USER)
+    union = storage.open_order_locked_by_token([USER, other])
+    assert sum(union.values()) > sum(one.values()), "the union locks more than one wallet alone"
+    # the buy locks quote, the sell locks base, so the union spans both tokens
+    assert set(union) == {"0x" + "1" * 40, "0x" + "2" * 40}
+
+    assert len(storage.list_wallet_orders([USER, other])) == 2
+    assert len(storage.list_order_history([USER, other])) == 2
+
+
+# the prefs record is opaque: indices only, and address shaped keys are refused
+def test_wallet_prefs_store_indices_under_an_opaque_key(db):
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from api.routes import orderbook as ob_routes
+
+    key = "a" * 64
+    assert ob_routes.read_wallet_prefs(key) == {"count": 0, "selected": [], "updatedAt": 0}
+    ob_routes.write_wallet_prefs(key, {"count": 5, "selected": [0, 2, 2, 3]})
+    got = ob_routes.read_wallet_prefs(key)
+    assert got["count"] == 5 and got["selected"] == [0, 2, 3], "duplicates collapse, order is stable"
+
+    with _pytest.raises(HTTPException):
+        ob_routes.read_wallet_prefs("0x25afd36012fa25336cc56a1b26c56e92dd77f0f3")
+    with _pytest.raises(HTTPException):
+        ob_routes.write_wallet_prefs(key, {"count": 99, "selected": []})

@@ -2260,7 +2260,13 @@ def chart_only(
 # whose source is not indexed yet (exchange trade history, open orders) are null
 # rather than zero, so the ui shows a dash instead of a number that lies
 @router.get("/spot/{wallet}")
-def spot_portfolio(wallet: str, all: bool = Query(False, description="include zero balances")) -> dict[str, Any]:
+def spot_portfolio(
+    wallet: str,
+    all: bool = Query(False, description="include zero balances"),
+    # a plain default, not Query(): these handlers are called directly in tests
+    # and a Query object is not a string
+    addresses: str = "",
+) -> dict[str, Any]:
     from api.spot_data import spot_body
     from api.spot_graph import RESOLUTION, ensure_fill, graph_for
 
@@ -2268,8 +2274,18 @@ def spot_portfolio(wallet: str, all: bool = Query(False, description="include ze
     if not wallet.startswith("0x") or len(wallet) != 42:
         raise HTTPException(status_code=400, detail="invalid wallet address")
 
+    # a selected set of derived wallets reads as one account. the path wallet
+    # stays the graph subject, since the graph is filled per wallet
+    selected = []
+    for a in (addresses or "").split(","):
+        a = a.strip().lower()
+        if a.startswith("0x") and len(a) == 42 and a not in selected:
+            selected.append(a)
+    if len(selected) > 16:
+        raise HTTPException(status_code=400, detail="at most 16 addresses")
+
     try:
-        body = spot_body(wallet, include_zero=all)
+        body = spot_body(selected or wallet, include_zero=all)
     except Exception:
         raise HTTPException(status_code=503, detail="balance read failed and no cached snapshot exists")
 

@@ -115,13 +115,19 @@ def wallet_is_supported(wallet: str) -> bool:
 # the whole spot body minus the graph, shared by the rest endpoint and the ws
 # balances channel so the two can never disagree. raises only when the balance
 # read fails cold with no cached snapshot to fall back on
-def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
+def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
     from api.api import _fmt, _fmt_usd, _mon_price_usd
 
-    wallet = (wallet or "").lower()
-    if not wallet_is_supported(wallet):
+    # a session can have several derived wallets selected at once, and the user
+    # wants one account view across them rather than one page per wallet
+    wallets = [(wallet or "").lower()] if isinstance(wallet, str) else [str(w).lower() for w in (wallet or [])]
+    wallets = [w for w in dict.fromkeys(wallets) if w]
+    wallet = wallets[0] if wallets else ""
+    supported = [w for w in wallets if wallet_is_supported(w)]
+    if not supported:
         return {
             "wallet": wallet,
+            "wallets": wallets,
             "supported": False,
             "rows": [],
             "vaults": [],
@@ -142,13 +148,26 @@ def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
         }
 
     tokens = spot_token_list()
-    balance_block, balances, native_raw, stale = fetch_balances(wallet, [t["address"] for t in tokens])
+    token_addrs = [t["address"] for t in tokens]
+    # one balance read per selected wallet, summed per token. each read has its
+    # own short lived cache, so a repeat view costs nothing extra
+    balances: dict[str, int] = {}
+    native_raw = 0
+    balance_block = 0
+    stale = False
+    for w in supported:
+        blk, bals, native, w_stale = fetch_balances(w, token_addrs)
+        for addr, raw in (bals or {}).items():
+            balances[addr] = balances.get(addr, 0) + int(raw or 0)
+        native_raw += int(native or 0)
+        balance_block = max(balance_block, int(blk or 0))
+        stale = stale or bool(w_stale)
 
     # funds resting on the book and funds deposited into vaults have left the
     # wallet balance but still belong to the user, so an account total built from
     # wallet balances alone understates it by exactly those two amounts
-    locked = storage.open_order_locked_by_token(wallet)
-    vaults_total, vault_rows = storage.vault_positions_usd(wallet)
+    locked = storage.open_order_locked_by_token(supported)
+    vaults_total, vault_rows = storage.vault_positions_usd(supported)
 
     prices = spot_prices(_mon_price_usd())
     rows = []
@@ -197,6 +216,7 @@ def spot_body(wallet: str, include_zero: bool = False) -> dict[str, Any]:
 
     return {
         "wallet": wallet,
+        "wallets": supported,
         "supported": True,
         "rows": rows,
         "vaults": [

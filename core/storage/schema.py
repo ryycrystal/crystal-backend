@@ -974,6 +974,23 @@ def init_db() -> None:
 
         # the on-chain user registry: every wallet that registered gets a numeric
         # user id, and client order ids embed it as the low 41 bits
+        # cross device sync for derived trading wallets. the key is an opaque
+        # value the client computes from its own session signature, so the server
+        # cannot map it to an eoa. wallets derive from that signature by index,
+        # so only the count and which indices are selected need to travel: no
+        # addresses, no keys, nothing that identifies anyone
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_wallet_prefs
+            (
+                key          TEXT PRIMARY KEY,
+                wallet_count INTEGER NOT NULL DEFAULT 0,
+                selected     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_at   BIGINT NOT NULL DEFAULT 0
+            );
+            """
+        )
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_users

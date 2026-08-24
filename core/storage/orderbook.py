@@ -7,11 +7,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from psycopg2.extras import execute_values
 
 from .base import db_cursor
+
+
+# a reader takes either one wallet or the set a user has selected, so every
+# query filters with ANY over a list and the callers stay identical
+def _addr_list(user) -> list[str]:
+    if isinstance(user, str):
+        return [user.lower()]
+    return [str(u).lower() for u in (user or [])]
 
 
 # apply one orders-updated log: record each entry and evolve the order it touches
@@ -289,12 +298,12 @@ def list_user_ids(user: str) -> list[int]:
 
 
 # open orders for one wallet, newest activity first
-def list_open_orders(user: str, market: str | None = None) -> list[dict[str, Any]]:
-    where = "o.user_address = %s AND o.status = 'open' AND o.size > 0"
-    params: tuple = ((user or "").lower(),)
+def list_open_orders(user, market: str | None = None) -> list[dict[str, Any]]:
+    where = "o.user_address = ANY(%s) AND o.status = 'open' AND o.size > 0"
+    params: tuple = (_addr_list(user),)
     if market:
         where += " AND o.market = %s"
-        params = ((user or "").lower(), (market or "").lower())
+        params = (_addr_list(user), (market or "").lower())
     with db_cursor() as cur:
         cur.execute(
             f"""
@@ -356,10 +365,10 @@ def _order_row(r: tuple) -> dict[str, Any]:
 
 # every order a wallet has ever owned, any status, newest activity first
 def list_wallet_orders(
-    user: str, market: str | None = None, limit: int = 200, before_ts: int | None = None
+    user, market: str | None = None, limit: int = 200, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
-    where = "o.user_address = %(u)s"
-    params: dict[str, Any] = {"u": (user or "").lower(), "lim": int(limit)}
+    where = "o.user_address = ANY(%(u)s)"
+    params: dict[str, Any] = {"u": _addr_list(user), "lim": int(limit)}
     if market:
         where += " AND o.market = %(m)s"
         params["m"] = (market or "").lower()
@@ -469,14 +478,14 @@ def batch_insert_market_trades(rows: list[tuple], cur) -> None:
 # the full exchange trade history for one wallet: taker trades and maker fills
 # merged newest first, so ordercenter shows both sides of every execution
 def list_exchange_trades(
-    user: str, market: str | None = None, limit: int = 100, before_ts: int | None = None
+    user, market: str | None = None, limit: int = 100, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
-    addr = (user or "").lower()
+    addr = _addr_list(user)
     mkt = (market or "").lower() if market else None
     cutoff = int(before_ts) if before_ts is not None else None
 
-    taker_where = "user_address = %(u)s"
-    maker_where = "maker = %(u)s"
+    taker_where = "user_address = ANY(%(u)s)"
+    maker_where = "maker = ANY(%(u)s)"
     params: dict[str, Any] = {"u": addr, "lim": int(limit)}
     if mkt:
         taker_where += " AND market = %(m)s"
@@ -543,14 +552,14 @@ def list_exchange_trades(
 # order lifecycle history for one wallet: places, cancels, decreases and the
 # fills that consumed them, newest first
 def list_order_history(
-    user: str, market: str | None = None, limit: int = 100, before_ts: int | None = None
+    user, market: str | None = None, limit: int = 100, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
-    addr = (user or "").lower()
+    addr = _addr_list(user)
     mkt = (market or "").lower() if market else None
     cutoff = int(before_ts) if before_ts is not None else None
 
-    ev_where = "user_address = %(u)s"
-    fill_where = "maker = %(u)s"
+    ev_where = "user_address = ANY(%(u)s)"
+    fill_where = "maker = ANY(%(u)s)"
     params: dict[str, Any] = {"u": addr, "lim": int(limit)}
     if mkt:
         ev_where += " AND market = %(m)s"
@@ -602,7 +611,7 @@ def list_order_history(
 # actually locked. a buy locks the quote asset it would spend, a sell locks the
 # base asset it is offering, which is the unit each order's size is denominated
 # in. these funds have left the wallet balance but still belong to the user
-def open_order_locked_by_token(user: str) -> dict[str, int]:
+def open_order_locked_by_token(user) -> dict[str, int]:
     with db_cursor() as cur:
         cur.execute(
             """
@@ -610,9 +619,38 @@ def open_order_locked_by_token(user: str) -> dict[str, int]:
                    SUM(o.size) AS locked
             FROM crystal_orderbook_orders o
             JOIN crystal_markets m ON m.market = o.market
-            WHERE o.user_address = %s AND o.status = 'open' AND o.size > 0
+            WHERE o.user_address = ANY(%s) AND o.status = 'open' AND o.size > 0
             GROUP BY 1
             """,
-            ((user or "").lower(),),
+            (_addr_list(user),),
         )
         return {t: int(v) for t, v in cur.fetchall() if t}
+
+
+# derived wallet preferences, stored under a client supplied opaque key. the
+# server never learns which eoa a key belongs to, and the payload is indices
+# rather than addresses, so nothing here identifies a user or their wallets
+def get_wallet_prefs(key: str) -> dict[str, Any] | None:
+    with db_cursor() as cur:
+        cur.execute("SELECT wallet_count, selected, updated_at FROM crystal_wallet_prefs WHERE key = %s", (key,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    count, selected, updated = row
+    return {"count": int(count or 0), "selected": list(selected or []), "updatedAt": int(updated or 0)}
+
+
+def put_wallet_prefs(key: str, count: int, selected: list[int], updated_at: int) -> None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO crystal_wallet_prefs (key, wallet_count, selected, updated_at)
+            VALUES (%s, %s, %s::jsonb, %s)
+            ON CONFLICT (key) DO UPDATE SET
+                wallet_count = EXCLUDED.wallet_count,
+                selected = EXCLUDED.selected,
+                updated_at = EXCLUDED.updated_at
+            WHERE crystal_wallet_prefs.updated_at <= EXCLUDED.updated_at
+            """,
+            (key, int(count), json.dumps([int(i) for i in selected]), int(updated_at)),
+        )
