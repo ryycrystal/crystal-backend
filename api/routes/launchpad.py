@@ -961,7 +961,37 @@ def token_overview_graph(
                     tracked_addrs.add(a)
 
         tracked_trades_out: list[dict[str, Any]] = []
-        if tracked_addrs and recent_trades_raw:
+        # how much of a tracked wallet's past to import. it renders as chart
+        # marks, so this is a display budget rather than a data limit
+        TRACKED_HISTORY_LIMIT = 500
+        # a tracked wallet's history is its own query, not a filter over the
+        # token's newest fifty trades. on a busy token that window is minutes
+        # wide, so importing a wallet used to show none of what it had already
+        # done here
+        tracked_rows: list = []
+        if tracked_addrs:
+            with db_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        log_index,
+                        timestamp,
+                        user_address,
+                        is_buy,
+                        native_amount,
+                        token_amount,
+                        price_native,
+                        txhash
+                    FROM launchpad_trades
+                    WHERE token = %s AND user_address = ANY(%s)
+                    ORDER BY timestamp DESC, log_index DESC, txhash DESC
+                    LIMIT %s
+                    """,
+                    (token_addr, sorted(tracked_addrs), TRACKED_HISTORY_LIMIT),
+                )
+                tracked_rows = cur.fetchall()
+
+        if tracked_rows:
             for (
                 log_index,
                 ts_tr,
@@ -971,9 +1001,7 @@ def token_overview_graph(
                 token_amount,
                 price_native,
                 txhash,
-            ) in recent_trades_raw:
-                if user_address.lower() not in tracked_addrs:
-                    continue
+            ) in tracked_rows:
 
                 is_buy_flag = bool(is_buy)
                 native_amount = int(native_amount or 0)
@@ -999,7 +1027,7 @@ def token_overview_graph(
                         }
                     }
                 )
-                if len(tracked_trades_out) >= 50:
+                if len(tracked_trades_out) >= TRACKED_HISTORY_LIMIT:
                     break
 
         if trade_rows:
