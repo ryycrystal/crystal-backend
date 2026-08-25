@@ -202,3 +202,22 @@ def mon_usd_series(
         "before": before or None,
         "points": [{"t": t, "rate": r} for t, r in points],
     }
+
+
+# one feed of everything a wallet did: launchpad buys and sells alongside vault
+# deposits and withdrawals, newest first. fee claims are not here because no
+# claim event is indexed yet, only the running claimable balance
+@router.get("/activity/{wallet}")
+def wallet_activity(
+    wallet: str, limit: int = 50, before_ts: int | None = None, addresses: str = ""
+) -> dict[str, Any]:
+    ws = _wallets(wallet, addresses)
+    lim = max(1, min(int(limit or 50), 200))
+    items = storage.wallet_activity(ws, limit=lim, before_ts=before_ts)
+    return {
+        "wallet": ws[0],
+        "wallets": ws,
+        "items": items,
+        "count": len(items),
+        "next_before_ts": items[-1]["timestamp"] if len(items) >= lim else None,
+    }

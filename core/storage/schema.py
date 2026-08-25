@@ -1211,54 +1211,14 @@ def backfill_cost_basis() -> None:
         print(f"[DB] cost basis backfill: {done} positions", flush=True)
 
 
-# realized pnl written before the cost basis model landed recorded net cash flow, so
-# a wallet that never sold still showed a loss equal to everything it had spent.
-# recompute it on the same average cost basis the column is maintained with now
-_REALIZED_EXPR = """
-    p.native_received
-    - CASE WHEN p.token_bought > 0
-           THEN ROUND(p.native_spent * LEAST(p.token_sold, p.token_bought) / p.token_bought)
-           ELSE 0 END
-"""
-
-_REALIZED_STALE = f"""
-    p.token_bought >= 0
-    AND p.realized_pnl_native IS DISTINCT FROM ({_REALIZED_EXPR})
-"""
-
-
-# rewrite realized and total pnl for positions still holding the old net cash flow
-def backfill_realized_pnl() -> None:
-    with db_cursor() as cur:
-        cur.execute(f"SELECT 1 FROM launchpad_positions p WHERE {_REALIZED_STALE} LIMIT 1;")
-        if cur.fetchone() is None:
-            return
-
-    total = 0
-    while True:
-        with db_cursor() as cur:
-            cur.execute(
-                f"""
-                WITH batch AS (
-                    SELECT user_address, token
-                    FROM launchpad_positions p
-                    WHERE {_REALIZED_STALE}
-                    LIMIT 5000
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE launchpad_positions p
-                SET realized_pnl_native = ({_REALIZED_EXPR}),
-                    total_pnl_native = ({_REALIZED_EXPR}) + COALESCE(p.unrealized_pnl_native, 0)
-                FROM batch b
-                WHERE p.user_address = b.user_address AND p.token = b.token;
-                """
-            )
-            done = cur.rowcount or 0
-        if done <= 0:
-            print(f"[DB] realized pnl backfill complete: {total} positions", flush=True)
-            return
-        total += done
-        print(f"[DB] realized pnl backfill: {total} positions", flush=True)
+# realized pnl used to be rewritten on every start from lifetime sums:
+#   received - spent * LEAST(sold, bought) / bought
+# that is a lifetime average cost, and it only equals the moving average the
+# indexer maintains per trade when every buy precedes every sell. any wallet
+# that bought again after selling had its correct realized pnl overwritten with
+# a wrong number on each restart, so the rewrite is gone. realized is now owned
+# by the live applier alone, and rebuild_positions_pnl.py repairs history by
+# replaying trades in order rather than re-deriving them from totals.
 
 
 # recompute stored trade-sync fees from the reserves ledger on the exact sqrt(k)

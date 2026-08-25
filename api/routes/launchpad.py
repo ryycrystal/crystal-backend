@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import traceback
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -1875,71 +1876,50 @@ def portfolio_history(
 # realized pnl and flow per utc day, on the same average cost basis the position
 # columns are maintained with: cumulative sums per token, realized read at each
 # day end, the day's pnl being the difference. observed data only, no baselines
+# an iana zone name the database will accept, falling back to utc rather than
+# letting a bad client string reach the query
+def _safe_timezone(tz: str) -> str:
+    name = (tz or "UTC").strip()
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return "UTC"
+    return name
+
+
 @router.get("/portfolio/{address}/daily")
 def portfolio_daily(
     address: str,
-    days: int = Query(90, ge=1, le=365, description="trailing utc days to return"),
+    days: int = Query(90, ge=1, le=365, description="trailing days to return"),
+    tz: str = "UTC",
 ) -> dict[str, Any]:
     user_addr = address.lower()
-    since_day = datetime.now(UTC).date() - timedelta(days=days - 1)
+    zone = _safe_timezone(tz)
+    since_day = datetime.now(ZoneInfo(zone)).date() - timedelta(days=days - 1)
 
+    # realized comes from the trade rows themselves, written by the applier on
+    # the same moving average basis as the position totals. deriving it here a
+    # second time from lifetime sums is what used to make the calendar and the
+    # position pnl disagree for anyone who bought again after selling
     with db_cursor() as cur:
         cur.execute(
             """
-            WITH tr AS (
-                SELECT (to_timestamp(timestamp) AT TIME ZONE 'UTC')::date AS day,
-                       token, is_buy, timestamp, log_index,
-                       native_amount::numeric AS na,
-                       token_amount::numeric AS ta,
-                       usd_amount
-                FROM launchpad_trades
-                WHERE user_address = %s
-            ),
-            cum AS (
-                SELECT day, token,
-                       SUM(CASE WHEN is_buy THEN na ELSE 0 END) OVER w AS spent_cum,
-                       SUM(CASE WHEN NOT is_buy THEN na ELSE 0 END) OVER w AS recv_cum,
-                       SUM(CASE WHEN is_buy THEN ta ELSE 0 END) OVER w AS bought_cum,
-                       SUM(CASE WHEN NOT is_buy THEN ta ELSE 0 END) OVER w AS sold_cum,
-                       ROW_NUMBER() OVER (PARTITION BY token, day ORDER BY timestamp DESC, log_index DESC) AS rn
-                FROM tr
-                WINDOW w AS (PARTITION BY token ORDER BY timestamp, log_index ROWS UNBOUNDED PRECEDING)
-            ),
-            eod AS (
-                SELECT day, token,
-                       recv_cum - CASE WHEN bought_cum > 0
-                                       THEN ROUND(spent_cum * LEAST(sold_cum, bought_cum) / bought_cum)
-                                       ELSE 0 END AS realized_cum
-                FROM cum WHERE rn = 1
-            ),
-            daily_tok AS (
-                SELECT day,
-                       realized_cum - COALESCE(LAG(realized_cum) OVER (PARTITION BY token ORDER BY day), 0)
-                       AS realized_day
-                FROM eod
-            ),
-            per_day_real AS (
-                SELECT day, SUM(realized_day) AS realized FROM daily_tok GROUP BY day
-            ),
-            per_day_flow AS (
-                SELECT day,
-                       SUM(na) AS volume_native,
-                       SUM(COALESCE(usd_amount, 0)) AS volume_usd,
-                       SUM(CASE WHEN is_buy THEN na ELSE 0 END) AS buy_native,
-                       SUM(CASE WHEN NOT is_buy THEN na ELSE 0 END) AS sell_native,
-                       COUNT(*) AS trade_count,
-                       COUNT(*) FILTER (WHERE is_buy) AS buy_count,
-                       COUNT(*) FILTER (WHERE NOT is_buy) AS sell_count
-                FROM tr GROUP BY day
-            )
-            SELECT f.day, COALESCE(r.realized, 0), f.volume_native, f.volume_usd,
-                   f.buy_native, f.sell_native, f.trade_count, f.buy_count, f.sell_count
-            FROM per_day_flow f
-            LEFT JOIN per_day_real r ON r.day = f.day
-            WHERE f.day >= %s
-            ORDER BY f.day
+            SELECT (to_timestamp(timestamp) AT TIME ZONE %s)::date AS day,
+                   SUM(realized_native) AS realized,
+                   SUM(native_amount::numeric) AS volume_native,
+                   SUM(COALESCE(usd_amount, 0)) AS volume_usd,
+                   SUM(CASE WHEN is_buy THEN native_amount::numeric ELSE 0 END) AS buy_native,
+                   SUM(CASE WHEN NOT is_buy THEN native_amount::numeric ELSE 0 END) AS sell_native,
+                   COUNT(*) AS trade_count,
+                   COUNT(*) FILTER (WHERE is_buy) AS buy_count,
+                   COUNT(*) FILTER (WHERE NOT is_buy) AS sell_count
+            FROM launchpad_trades
+            WHERE user_address = %s
+            GROUP BY 1
+            HAVING (to_timestamp(timestamp) AT TIME ZONE %s)::date >= %s
+            ORDER BY 1
             """,
-            (user_addr, since_day),
+            (zone, user_addr, zone, since_day),
         )
         rows = cur.fetchall()
 

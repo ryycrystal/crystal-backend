@@ -1085,6 +1085,7 @@ class State:
                     txhash=txh,
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
+                    realized_native=int(realized_delta),
                 )
                 batch.set_token_state(
                     token,
@@ -1140,6 +1141,7 @@ class State:
                     txhash=txh,
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
+                    realized_native=int(realized_delta),
                     cur=cur,
                 )
                 storage.update_token_after_trade(
@@ -1838,6 +1840,7 @@ class State:
                 usd_amount=usd_amount,
                 price_native=lp.last_price_native,
                 txhash=txh or "",
+                realized_native=int(realized_delta),
             )
             batch.set_token_state(lp_addr, token_state)
         else:
@@ -1854,6 +1857,7 @@ class State:
                     usd_amount=usd_amount,
                     price_native=lp.last_price_native,
                     txhash=txh or "",
+                    realized_native=int(realized_delta),
                     cur=cur,
                 )
                 # the batch path persists token_state; this one used to write the

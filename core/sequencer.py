@@ -39,6 +39,7 @@ class BatchAccumulator:
         txhash: str,
         native_reserve=0,
         token_reserve=0,
+        realized_native=0,
     ):
         self.trades.append(
             (
@@ -55,6 +56,7 @@ class BatchAccumulator:
                 txhash,
                 int(native_reserve or 0),
                 int(token_reserve or 0),
+                int(realized_native or 0),
             )
         )
 

@@ -84,6 +84,7 @@ def insert_trade(
     txhash: str,
     native_reserve=0,
     token_reserve=0,
+    realized_native=0,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     if cur is None:
@@ -103,9 +104,10 @@ def insert_trade(
                     price_native,
                     txhash,
                     native_reserve,
-                    token_reserve
+                    token_reserve,
+                    realized_native
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (txhash, log_index) DO NOTHING;
                 """,
                 (
@@ -122,6 +124,7 @@ def insert_trade(
                     txhash,
                     int(native_reserve or 0),
                     int(token_reserve or 0),
+                    int(realized_native or 0),
                 ),
             )
     else:
@@ -140,9 +143,10 @@ def insert_trade(
                 price_native,
                 txhash,
                 native_reserve,
-                token_reserve
+                token_reserve,
+                realized_native
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (txhash, log_index) DO NOTHING;
             """,
             (
@@ -159,6 +163,7 @@ def insert_trade(
                 txhash,
                 int(native_reserve or 0),
                 int(token_reserve or 0),
+                int(realized_native or 0),
             ),
         )
 
@@ -1688,7 +1693,7 @@ def insert_trades_batch(trades: list[tuple], cur) -> None:
         INSERT INTO launchpad_trades (
             block_number, log_index, timestamp, token, user_address,
             is_buy, native_amount, token_amount, usd_amount, price_native, txhash,
-            native_reserve, token_reserve
+            native_reserve, token_reserve, realized_native
         )
         VALUES %s
         ON CONFLICT (txhash, log_index) DO NOTHING
@@ -2384,3 +2389,66 @@ def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) ->
             (resolution, resolution, int(start_ts), int(end_ts), int(min_wei)),
         )
         return [(int(b), float(r)) for b, r in cur.fetchall() if r is not None]
+
+
+# everything a wallet has done, newest first, across the event types we index:
+# launchpad buys and sells plus vault deposits and withdrawals. one feed rather
+# than one tab per kind, so the page can answer "what did i just do"
+def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = None) -> list[dict]:
+    addrs = [str(u).lower() for u in (users or [])]
+    if not addrs:
+        return []
+    params: dict = {"u": addrs, "lim": int(limit)}
+    cutoff = ""
+    if before_ts is not None:
+        cutoff = " AND timestamp < %(cut)s"
+        params["cut"] = int(before_ts)
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT * FROM (
+                SELECT CASE WHEN t.is_buy THEN 'buy' ELSE 'sell' END AS kind,
+                       t.timestamp, t.block_number, t.txhash, t.log_index,
+                       t.token AS subject, k.symbol, k.name,
+                       t.native_amount AS amount_native, t.token_amount AS amount_token,
+                       t.price_native, t.usd_amount
+                FROM launchpad_trades t
+                JOIN launchpad_tokens k ON k.token = t.token
+                WHERE t.user_address = ANY(%(u)s){cutoff}
+                UNION ALL
+                SELECT 'vault_deposit', d.timestamp, d.block_number, d.txhash, d.log_index,
+                       d.vault, v.name, v.name, d.quote_amount, d.base_amount, 0, 0
+                FROM crystal_vault_deposits d
+                LEFT JOIN crystal_vaults v ON v.vault = d.vault
+                WHERE d.user_address = ANY(%(u)s){cutoff}
+                UNION ALL
+                SELECT 'vault_withdraw', w.timestamp, w.block_number, w.txhash, w.log_index,
+                       w.vault, v.name, v.name, w.quote_amount, w.base_amount, 0, 0
+                FROM crystal_vault_withdrawals w
+                LEFT JOIN crystal_vaults v ON v.vault = w.vault
+                WHERE w.user_address = ANY(%(u)s){cutoff}
+            ) a
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
+            LIMIT %(lim)s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    return [
+        {
+            "type": kind,
+            "timestamp": int(ts or 0),
+            "blockNumber": int(blk or 0),
+            "txhash": txh,
+            "subject": subject,
+            "symbol": symbol or "",
+            "name": name or "",
+            "amountNative": str(int(amt_native or 0)),
+            "amountToken": str(int(amt_token or 0)),
+            "priceNative": str(price or 0),
+            "usdAmount": str(usd or 0),
+        }
+        for kind, ts, blk, txh, _li, subject, symbol, name, amt_native, amt_token, price, usd in rows
+    ]

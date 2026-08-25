@@ -477,44 +477,43 @@ def test_token_channel_volume_and_tx_counts_are_24h(db):
     assert int(body["volumeNative"]) < int(body["volumeNativeLifetime"])
 
 
-# realized pnl written before the cost basis model recorded net cash flow, so a
-# wallet that never sold showed a loss equal to everything it had spent
-def test_realized_pnl_backfill_corrects_non_sellers(db):
-    import core.storage as st
+# realized pnl is path dependent: a sell releases the average cost of what is
+# open at that moment. deriving it from lifetime sums instead was wrong for any
+# wallet that bought again after selling, and a startup migration used to
+# overwrite the correct per trade figure with exactly that wrong number
+def test_realized_pnl_follows_the_moving_average_basis(db):
+    from rebuild_positions_pnl import _fold
 
-    _create(_new_state(), blk=100, ts=1000)
+    # buy 100 @1, sell all @2, then buy 100 @3 and sell all @4
+    trades = [
+        ("0xa", 0, True, 100, 100),
+        ("0xb", 0, False, 200, 100),
+        ("0xc", 0, True, 300, 100),
+        ("0xd", 0, False, 400, 100),
+    ]
+    per_trade, realized, basis = _fold(trades)
 
-    with st.db_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO launchpad_positions
-                (user_address, token, balance_token, token_bought, token_sold,
-                 native_spent, native_received, realized_pnl_native,
-                 unrealized_pnl_native, total_pnl_native, trade_count,
-                 buy_count, sell_count)
-            VALUES
-                -- never sold, yet carries a loss equal to its whole spend
-                (%s, %s, 100, 100, 0, 16265, 0, -16265, 500, -15765, 2, 2, 0),
-                -- sold half: released basis is half the spend, so realized is 600-400
-                (%s, %s, 50, 100, 50, 800, 600, -200, 250, 50, 3, 2, 1)
-            """,
-            ("0xaaa", TOKEN, "0xbbb", TOKEN),
-        )
+    assert realized == 200, "each round trip made 100: 200-100 then 400-300"
+    assert basis == 0, "nothing is still held"
+    assert [r for _, _, r in per_trade] == [0, 100, 0, 100], "a buy realizes nothing"
 
-    st.backfill_realized_pnl()
+    # the lifetime average the old migration used: received - spent * sold/bought
+    spent, received, bought, sold = 400, 600, 200, 200
+    lifetime = received - spent * min(sold, bought) // bought
+    assert lifetime == 200, "matches here only because the position ends flat"
 
-    with st.db_cursor() as cur:
-        cur.execute(
-            "SELECT user_address, realized_pnl_native, total_pnl_native "
-            "FROM launchpad_positions WHERE token = %s ORDER BY user_address",
-            (TOKEN,),
-        )
-        got = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
-
-    assert got["0xaaa"][0] == 0, "a wallet that never sold has realized nothing"
-    assert got["0xaaa"][1] == 500, "total is realized plus unrealized"
-    assert got["0xbbb"][0] == 200, "sold half of a 800 basis for 600 -> 600 - 400"
-    assert got["0xbbb"][1] == 450
+    # holding part of the second buy is where the two disagree
+    trades = [
+        ("0xa", 0, True, 100, 100),
+        ("0xb", 0, False, 200, 100),
+        ("0xc", 0, True, 300, 100),
+    ]
+    _, realized, basis = _fold(trades)
+    assert realized == 100, "only the first round trip is realized"
+    assert basis == 300, "the second buy is still open at its own cost"
+    lifetime = 200 - 400 * min(100, 200) // 200
+    assert lifetime == 0, "the lifetime formula averages the later buy into the earlier sale"
+    assert lifetime != realized, "which is the drift the migration used to write"
 
 
 # a client that switches wallets must stop receiving the old one. unioning the
