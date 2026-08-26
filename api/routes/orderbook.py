@@ -184,9 +184,14 @@ def mon_usd_series(
     now = int(time.time())
     end = int(to_ts) if to_ts else now
     start = int(from_ts) if from_ts else end - 86400
-    if end <= start:
-        raise HTTPException(status_code=400, detail="to_ts must be after from_ts")
     res = max(1, min(int(resolution or 60), 86400))
+    # a caller asking about a single instant is asking a real question: what was
+    # the rate then. widening to one bucket answers it instead of rejecting the
+    # request, which is what a chart with one candle in view ends up sending
+    if end < start:
+        start, end = end, start
+    if end == start:
+        end = start + res
     # a range cannot ask for an unbounded number of buckets
     if (end - start) // res > 5000:
         raise HTTPException(status_code=400, detail="range is too long for that resolution")
