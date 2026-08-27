@@ -337,10 +337,20 @@ def token_state(token: str) -> dict[str, Any]:
                 t.approaching_75, t.approaching_75_block, t.approaching_75_at,
                 COALESCE(t.ath_price_native, 0),
                 t.curve_native_reserve, t.curve_token_reserve,
-                (SELECT lp.reserve_native FROM launchpad_pools lp WHERE lp.token_addr = t.token
-                  ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
-                (SELECT lp.reserve_token FROM launchpad_pools lp WHERE lp.token_addr = t.token
-                  ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
+                -- a graduated token's liquidity sits in whichever venue it
+                -- migrated to: nadfun tokens land in an amm pair, crystal
+                -- launchpad tokens land in a crystal market. both are reserves
+                -- and the client should not have to know which one applies
+                COALESCE(
+                    (SELECT lp.reserve_native FROM launchpad_pools lp WHERE lp.token_addr = t.token
+                      ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
+                    (SELECT cp.reserve_quote FROM crystal_pools cp WHERE cp.market = t.market)
+                ),
+                COALESCE(
+                    (SELECT lp.reserve_token FROM launchpad_pools lp WHERE lp.token_addr = t.token
+                      ORDER BY lp.last_sync_at DESC NULLS LAST LIMIT 1),
+                    (SELECT cp.reserve_base FROM crystal_pools cp WHERE cp.market = t.market)
+                ),
                 (SELECT COUNT(*) FROM launchpad_positions p
                   WHERE p.token = t.token AND p.balance_token > 1
                     AND p.user_address <> ALL(%s) AND {not_internal}),
