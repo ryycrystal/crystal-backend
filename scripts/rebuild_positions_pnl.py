@@ -2,16 +2,13 @@ import argparse
 import io
 import time
 
+import psycopg2.errors
+
 import core.storage as storage
 
-# realized pnl is path dependent: selling releases the average cost of what is
-# open at that moment, so it cannot be recovered from lifetime sums. the only
-# exact repair is replaying every trade in the order it happened, which is what
-# the live applier does per block. this reproduces that over all history and
-# writes the result back to the trade rows and the position totals
+CHUNK_TRADES = 100_000
 
 
-# fold one position's trades, returning realized per trade and the final state
 def _fold(trades: list[tuple]) -> tuple[list[tuple[str, int, int]], int, int]:
     open_tokens = 0
     basis = 0
@@ -42,8 +39,6 @@ def _fold(trades: list[tuple]) -> tuple[list[tuple[str, int, int]], int, int]:
     return per_trade, realized_total, basis
 
 
-# stream every trade grouped by position, folding each one as its rows arrive so
-# the whole table never has to be resident
 def main() -> None:
     parser = argparse.ArgumentParser(description="recompute realized pnl and cost basis by replaying trades")
     parser.add_argument("--apply", action="store_true", help="write the results, otherwise report only")
@@ -56,7 +51,6 @@ def main() -> None:
     where = "WHERE user_address = %s" if args.user else ""
     params = ((args.user or "").lower(),) if args.user else ()
 
-    # a server side cursor so six million rows stream rather than materialise
     with storage.db_cursor() as anchor:
         read = anchor.connection.cursor(name="pnl_replay")
         read.itersize = 50_000
@@ -97,7 +91,7 @@ def main() -> None:
             pending.append((txhash, log_index, is_buy, na, ta))
             seen_trades += 1
 
-            if len(trade_rows) >= 500_000:
+            if len(trade_rows) >= CHUNK_TRADES:
                 changed_positions += _write(trade_rows, position_rows, args.apply)
                 trade_rows, position_rows = [], []
                 rate = seen_trades / max(time.monotonic() - started, 0.001)
@@ -117,10 +111,21 @@ def main() -> None:
         print("[PNL] dry run, pass --apply to write", flush=True)
 
 
-# land one chunk: trade rows by copy into a temp table, then two joined updates
 def _write(trade_rows: list[tuple[str, int, int]], position_rows: list[tuple], apply: bool) -> int:
     if not position_rows:
         return 0
+    for attempt in range(5):
+        try:
+            return _write_once(trade_rows, position_rows, apply)
+        except psycopg2.errors.DeadlockDetected:
+            if attempt == 4:
+                raise
+            print(f"[PNL] deadlock, retrying chunk ({attempt + 1}/5)", flush=True)
+            time.sleep(1.0 * (attempt + 1))
+    return 0
+
+
+def _write_once(trade_rows: list[tuple[str, int, int]], position_rows: list[tuple], apply: bool) -> int:
     with storage.db_cursor() as cur:
         cur.execute(
             """
@@ -141,8 +146,6 @@ def _write(trade_rows: list[tuple[str, int, int]], position_rows: list[tuple], a
         buf.seek(0)
         cur.copy_from(buf, "_pnl_pos", columns=("user_address", "token", "realized", "basis"))
 
-        # a dry run only needs the position comparison, so the per trade rows
-        # never get shipped
         if apply:
             buf = io.StringIO()
             for txhash, log_index, realized in trade_rows:
@@ -170,18 +173,15 @@ def _write(trade_rows: list[tuple[str, int, int]], position_rows: list[tuple], a
               AND t.realized_native IS DISTINCT FROM n.realized
             """
         )
-        # unrealized is market value minus what is still held at cost, so a
-        # repaired basis has to carry into the pnl the page shows
         cur.execute(
             """
             UPDATE launchpad_positions p
             SET realized_pnl_native = n.realized,
                 cost_basis_native = n.basis,
-                unrealized_pnl_native = GREATEST(p.balance_token, 0) * COALESCE(k.last_price_native, 0)
-                    - GREATEST(n.basis, 0),
-                total_pnl_native = n.realized
-                    + GREATEST(p.balance_token, 0) * COALESCE(k.last_price_native, 0)
-                    - GREATEST(n.basis, 0)
+                unrealized_pnl_native = crystal_unrealized_pnl(
+                    p.balance_token, p.token_bought, p.token_sold, n.basis, k.last_price_native),
+                total_pnl_native = n.realized + crystal_unrealized_pnl(
+                    p.balance_token, p.token_bought, p.token_sold, n.basis, k.last_price_native)
             FROM _pnl_pos n
             LEFT JOIN launchpad_tokens k ON k.token = n.token
             WHERE p.user_address = n.user_address AND p.token = n.token

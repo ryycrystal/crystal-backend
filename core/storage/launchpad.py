@@ -482,16 +482,20 @@ def upsert_position(
                     buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                     sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                     cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                    -- unrealized profit is what the position is worth now minus what
-                    -- it cost to hold. without the cost basis this stored the market
-                    -- value itself, so an untouched position reported its whole size
-                    -- as profit
-                    unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
-                        - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
+                    unrealized_pnl_native = crystal_unrealized_pnl(
+                        launchpad_positions.balance_token + EXCLUDED.balance_token,
+                        launchpad_positions.token_bought + EXCLUDED.token_bought,
+                        launchpad_positions.token_sold + EXCLUDED.token_sold,
+                        launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
+                        %s),
                     total_pnl_native = (
                         launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
-                    ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
-                        - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0);
+                    ) + crystal_unrealized_pnl(
+                        launchpad_positions.balance_token + EXCLUDED.balance_token,
+                        launchpad_positions.token_bought + EXCLUDED.token_bought,
+                        launchpad_positions.token_sold + EXCLUDED.token_sold,
+                        launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
+                        %s);
                 """,
                 (
                     addr,
@@ -544,13 +548,20 @@ def upsert_position(
                 buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                 sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                 cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                -- see above: market value minus cost basis, not market value
-                unrealized_pnl_native = GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
-                    - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
+                unrealized_pnl_native = crystal_unrealized_pnl(
+                    launchpad_positions.balance_token + EXCLUDED.balance_token,
+                    launchpad_positions.token_bought + EXCLUDED.token_bought,
+                    launchpad_positions.token_sold + EXCLUDED.token_sold,
+                    launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
+                    %s),
                 total_pnl_native = (
                     launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
-                ) + GREATEST(launchpad_positions.balance_token + EXCLUDED.balance_token, 0) * %s
-                    - GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0);
+                ) + crystal_unrealized_pnl(
+                    launchpad_positions.balance_token + EXCLUDED.balance_token,
+                    launchpad_positions.token_bought + EXCLUDED.token_bought,
+                    launchpad_positions.token_sold + EXCLUDED.token_sold,
+                    launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
+                    %s);
             """,
             (
                 addr,
@@ -1776,9 +1787,10 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         cur.execute(
             """
             UPDATE launchpad_positions SET
-                unrealized_pnl_native = GREATEST(balance_token, 0) * %s - GREATEST(cost_basis_native, 0),
-                total_pnl_native = realized_pnl_native
-                    + GREATEST(balance_token, 0) * %s - GREATEST(cost_basis_native, 0)
+                unrealized_pnl_native = crystal_unrealized_pnl(
+                    balance_token, token_bought, token_sold, cost_basis_native, %s),
+                total_pnl_native = realized_pnl_native + crystal_unrealized_pnl(
+                    balance_token, token_bought, token_sold, cost_basis_native, %s)
             WHERE user_address = %s AND token = %s
             """,
             (p["last_price_native"], p["last_price_native"], addr, tok),

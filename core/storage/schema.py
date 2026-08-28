@@ -260,6 +260,21 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE OR REPLACE FUNCTION crystal_unrealized_pnl(
+                hold NUMERIC, bought NUMERIC, sold NUMERIC, basis NUMERIC, price NUMERIC
+            ) RETURNS NUMERIC LANGUAGE sql IMMUTABLE AS $fn$
+                SELECT GREATEST(hold, 0) * COALESCE(price, 0)
+                     - CASE WHEN GREATEST(bought - sold, 0) > 0
+                            THEN ROUND(
+                                GREATEST(basis, 0)
+                                * LEAST(GREATEST(hold, 0), GREATEST(bought - sold, 0))
+                                / GREATEST(bought - sold, 0))
+                            ELSE 0 END
+            $fn$;
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS launchpad_positions
             (
                 user_address          TEXT NOT NULL,
