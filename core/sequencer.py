@@ -596,6 +596,18 @@ class Sequencer:
             elif tag == "REF":
                 self._state.apply_referral(blk, blk_ts, parsed, log_idx=lii, cur=cur)
 
+            elif tag == "REFCLAIM":
+                storage.write_referral_claims(
+                    blk,
+                    blk_ts,
+                    (txh or "").lower(),
+                    lii,
+                    parsed["user"],
+                    parsed["tokens"],
+                    parsed["amounts"],
+                    cur=cur,
+                )
+
             elif tag == "PSYNC":
                 sync_kind = self._classify_pool_sync_kind(logs, idx, txh, parsed)
                 self._state.apply_pool_sync(

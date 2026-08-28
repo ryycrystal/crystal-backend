@@ -1217,6 +1217,8 @@ def users_portfolio_batch(
     addresses: str = Query("", description="comma separated wallet addresses, max 25 (100 when merged)"),
     token: str = Query("", description="optional, restrict positions to one token"),
     merged: bool = False,
+    limit: int = 0,
+    offset: int = 0,
 ) -> dict[str, Any]:
     addrs: list[str] = []
     for a in (addresses or "").split(","):
@@ -1232,7 +1234,7 @@ def users_portfolio_batch(
 
     if merged:
         return {
-            "merged": _merged_portfolio(addrs, tok or None),
+            "merged": _merged_portfolio(addrs, tok or None, limit=max(0, min(limit, 1000)), offset=max(0, offset)),
             "addresses": addrs,
             "count": len(addrs),
             "token": tok or None,
@@ -1249,7 +1251,7 @@ def users_portfolio_batch(
     return {"users": out, "count": len(out), "token": tok or None}
 
 
-def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
+def _merged_portfolio(addrs: list[str], tok: str | None, limit: int = 0, offset: int = 0) -> dict[str, Any]:
     mon_price = _mon_price_usd()
 
     where = "p.user_address = ANY(%s)"
@@ -1385,7 +1387,11 @@ def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
         "tokens_traded": len(positions),
     }
 
-    return {"summary": summary, "positions": positions}
+    total = len(positions)
+    if limit > 0:
+        positions = positions[max(0, offset) : max(0, offset) + limit]
+
+    return {"summary": summary, "positions": positions, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/user/{user_addr}")

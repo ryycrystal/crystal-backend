@@ -918,6 +918,28 @@ def init_db() -> None:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_claims
+            (
+                txhash       TEXT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                claim_index  INTEGER NOT NULL,
+                block_number BIGINT NOT NULL,
+                timestamp    BIGINT NOT NULL,
+                user_address TEXT NOT NULL,
+                token        TEXT NOT NULL,
+                amount       NUMERIC(78, 0) NOT NULL,
+                PRIMARY KEY (txhash, log_index, claim_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_referral_claims_user_ts
+            ON referral_claims (user_address, timestamp DESC);
+            """
+        )
 
         cur.execute(
             """

@@ -142,3 +142,39 @@ def wallet_launchpad_volume_usd(address: str, since_ts: int = 0):
         )
         row = cur.fetchone()
     return (row[0] if row else 0), int(row[1] if row else 0)
+
+
+def write_referral_claims(
+    block_number: int,
+    timestamp: int,
+    txhash: str,
+    log_index: int,
+    user: str,
+    tokens: list[str],
+    amounts: list[int],
+    cur=None,
+) -> None:
+    rows = [
+        (txhash, int(log_index), i, int(block_number), int(timestamp), user.lower(), t.lower(), int(a))
+        for i, (t, a) in enumerate(zip(tokens, amounts))
+        if int(a) > 0
+    ]
+    if not rows:
+        return
+
+    def _run(c) -> None:
+        c.executemany(
+            """
+            INSERT INTO referral_claims
+                (txhash, log_index, claim_index, block_number, timestamp, user_address, token, amount)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (txhash, log_index, claim_index) DO NOTHING
+            """,
+            rows,
+        )
+
+    if cur is None:
+        with db_cursor() as c2:
+            _run(c2)
+    else:
+        _run(cur)

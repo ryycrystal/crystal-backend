@@ -2392,6 +2392,17 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
                 FROM crystal_vault_withdrawals w
                 LEFT JOIN crystal_vaults v ON v.vault = w.vault
                 WHERE w.user_address = ANY(%(u)s){cutoff}
+                UNION ALL
+                SELECT 'fee_claim', c.timestamp, c.block_number, c.txhash, c.log_index,
+                       c.token,
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 'WMON' ELSE COALESCE(k2.symbol, '') END,
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 'Wrapped MON' ELSE COALESCE(k2.name, '') END,
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN c.amount ELSE 0 END,
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 0 ELSE c.amount END,
+                       0, 0
+                FROM referral_claims c
+                LEFT JOIN launchpad_tokens k2 ON k2.token = c.token
+                WHERE c.user_address = ANY(%(u)s){cutoff}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s

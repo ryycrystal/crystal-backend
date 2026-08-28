@@ -137,6 +137,7 @@ EVENT_SIGS = {
     ob.FILL_TOPIC: "OBF",
     ob.USER_REGISTERED_TOPIC: "UR",
     ref.REFERRAL_TOPIC: "REF",
+    ref.CLAIM_TOPIC: "REFCLAIM",
 }
 TOPICS = list(EVENT_SIGS.keys())
 
@@ -173,10 +174,11 @@ PARSERS = {
     "OBF": ob.parse_fill,
     "UR": ob.parse_user_registered,
     "REF": ref.parse_referral,
+    "REFCLAIM": ref.parse_rewards_claimed,
 }
 
 ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG", "OBU", "OBF", "UR"}
-REFERRAL_EVENT_TAGS = {"REF"}
+REFERRAL_EVENT_TAGS = {"REF", "REFCLAIM"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 NADFUN_AUX_EVENT_TAGS = {"NFPEN"}
