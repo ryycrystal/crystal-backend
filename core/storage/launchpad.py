@@ -2020,7 +2020,14 @@ def set_token_uri(token: str, token_uri: str, cur=None) -> None:
 
 
 # tokens that still have no image or description but do have somewhere to fetch it
-# from. drives the sweep that makes metadata self healing across restarts
+# from. drives the sweep that makes metadata self healing across restarts.
+#
+# the order is random rather than newest first. newest first only ever showed the
+# sweep the same top slice, so once the backlog grew past one batch every token
+# older than that slice was never retried again — tokens whose host was briefly
+# down stayed blank permanently. new tokens do not depend on this ordering: they
+# are queued directly when they are discovered, and this sweep is only the
+# backstop for the ones that missed
 def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
     with db_cursor() as cur:
         cur.execute(
@@ -2029,7 +2036,7 @@ def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
             FROM launchpad_tokens
             WHERE COALESCE(metadata_cid, '') = ''
               AND COALESCE(token_uri, '') <> ''
-            ORDER BY created_at DESC NULLS LAST
+            ORDER BY random()
             LIMIT %s
             """,
             (int(limit),),

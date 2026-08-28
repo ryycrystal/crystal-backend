@@ -54,6 +54,18 @@ def _pop_metadata_batch(limit: int) -> list[tuple[str, str]]:
 
 
 # shared http client for metadata fetches
+# metadata key names were never standardised. nadfun writes image_uri, and every
+# other launchpad on the chain writes image, which is the erc-721 spelling. the
+# first non empty one wins so a token's art is not dropped over which word the
+# creator's launchpad happened to pick
+def _first(meta: dict, *keys: str) -> str:
+    for k in keys:
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 async def _get_metadata_client() -> httpx.AsyncClient:
     global _METADATA_CLIENT
     if _METADATA_CLIENT is None:
@@ -97,13 +109,18 @@ async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None
             resp = await client.get(token_uri)
             resp.raise_for_status()
             meta = resp.json()
+            # a document that is not an object has nothing to read, but it is
+            # not the host's fault either: returning empty leaves the token for
+            # the next sweep instead of blacklisting everything else on that host
+            if not isinstance(meta, dict):
+                meta = {}
             return (
                 {
                     "token": token,
                     "name": meta.get("name", ""),
                     "symbol": meta.get("symbol", ""),
                     "description": meta.get("description", ""),
-                    "image_uri": meta.get("image_uri", ""),
+                    "image_uri": _first(meta, "image_uri", "image", "imageUrl", "image_url"),
                     "website": meta.get("website", ""),
                     "twitter": meta.get("twitter", ""),
                     "telegram": meta.get("telegram", ""),
