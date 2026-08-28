@@ -2024,6 +2024,7 @@ def upsert_pair_fees(
     creator_fee_rate: int = 0,
     curve_protocol_fee_rate: int = 0,
     dex_protocol_fee_rate: int = 0,
+    pool_fee_ppm: int = 0,
     fetched_at: int = 0,
 ) -> None:
     with db_cursor() as cur:
@@ -2031,8 +2032,9 @@ def upsert_pair_fees(
             """
             INSERT INTO launchpad_pair_fees
                 (pair, ok, fee_collector, base_token, quote_token,
-                 creator_fee_rate, curve_protocol_fee_rate, dex_protocol_fee_rate, fetched_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 creator_fee_rate, curve_protocol_fee_rate, dex_protocol_fee_rate,
+                 pool_fee_ppm, fetched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (pair) DO UPDATE SET
                 ok = EXCLUDED.ok,
                 fee_collector = EXCLUDED.fee_collector,
@@ -2041,6 +2043,7 @@ def upsert_pair_fees(
                 creator_fee_rate = EXCLUDED.creator_fee_rate,
                 curve_protocol_fee_rate = EXCLUDED.curve_protocol_fee_rate,
                 dex_protocol_fee_rate = EXCLUDED.dex_protocol_fee_rate,
+                pool_fee_ppm = EXCLUDED.pool_fee_ppm,
                 fetched_at = EXCLUDED.fetched_at;
             """,
             (
@@ -2052,6 +2055,7 @@ def upsert_pair_fees(
                 int(creator_fee_rate),
                 int(curve_protocol_fee_rate),
                 int(dex_protocol_fee_rate),
+                int(pool_fee_ppm),
                 int(fetched_at),
             ),
         )
@@ -2089,7 +2093,10 @@ def pairs_missing_fees(limit: int = 100) -> list[str]:
             """
             SELECT t.market FROM launchpad_tokens t
             WHERE t.source <> 0 AND COALESCE(t.market, '') <> ''
-              AND NOT EXISTS (SELECT 1 FROM launchpad_pair_fees f WHERE f.pair = LOWER(t.market))
+              AND NOT EXISTS (
+                    SELECT 1 FROM launchpad_pair_fees f
+                    WHERE f.pair = LOWER(t.market) AND (f.ok OR f.pool_fee_ppm > 0)
+              )
             LIMIT %s
             """,
             (int(limit),),
@@ -2134,6 +2141,41 @@ def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
     with db_cursor() as cur:
         cur.execute("SELECT LOWER(market), taker_fee FROM crystal_markets WHERE LOWER(market) = ANY(%s)", (markets,))
         return {r[0]: str(int(r[1] or 0)) for r in cur.fetchall()}
+
+
+def get_pool_fee_rate(market: str, source: int, cur=None) -> Decimal | None:
+    market = (market or "").lower()
+    if not market:
+        return None
+    if int(source or 0) == 0:
+        sql = "SELECT taker_fee, 0, TRUE FROM crystal_markets WHERE LOWER(market) = %s"
+    else:
+        sql = """
+            SELECT creator_fee_rate + dex_protocol_fee_rate, pool_fee_ppm, ok
+            FROM launchpad_pair_fees WHERE pair = %s
+        """
+    if cur is not None:
+        cur.execute(sql, (market,))
+        row = cur.fetchone()
+    else:
+        with db_cursor() as c:
+            c.execute(sql, (market,))
+            row = c.fetchone()
+    if not row:
+        return None
+    if int(source or 0) == 0:
+        if row[0] is None:
+            return None
+        rate = (Decimal(100000) - Decimal(row[0])) / Decimal(100000)
+    elif row[2] and row[0]:
+        rate = Decimal(row[0]) / Decimal(10000)
+    elif row[1]:
+        rate = Decimal(row[1]) / Decimal(1000000)
+    else:
+        return None
+    if rate <= 0 or rate >= Decimal("0.05"):
+        return None
+    return rate
 
 
 def set_meta(key: str, value: str, cur=None) -> None:

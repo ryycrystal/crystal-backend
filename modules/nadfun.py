@@ -632,6 +632,7 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
 
 _FEE_COLLECTOR_SELECTOR = "0xc415b95c"
 _GET_FEE_CONFIG_SELECTOR = "0x1e442b55"
+_POOL_FEE_SELECTOR = "0xddca3f43"
 
 
 def _fee_rpc_call(to: str, data: str) -> str | None:
@@ -661,7 +662,16 @@ def fetch_pair_fee_config(pair: str) -> dict:
         "creator_fee_rate": 0,
         "curve_protocol_fee_rate": 0,
         "dex_protocol_fee_rate": 0,
+        "pool_fee_ppm": 0,
     }
+    tier = _fee_rpc_call(pair, _POOL_FEE_SELECTOR)
+    if tier:
+        try:
+            ppm = int(tier, 16)
+        except ValueError:
+            ppm = 0
+        if 0 < ppm < 1000000:
+            out["pool_fee_ppm"] = ppm
     fc = _fee_rpc_call(pair, _FEE_COLLECTOR_SELECTOR)
     if not fc or len(fc) < 42:
         return out
@@ -701,6 +711,7 @@ async def sweep_pair_fees(storage_module, limit: int = 50) -> int:
                 creator_fee_rate=cfg["creator_fee_rate"],
                 curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
                 dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                pool_fee_ppm=cfg["pool_fee_ppm"],
                 fetched_at=int(time.time()),
             )
             done += 1

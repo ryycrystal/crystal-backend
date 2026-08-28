@@ -551,6 +551,7 @@ def token_meta(token_addr: str) -> dict[str, Any]:
                 creator_fee_rate=cfg["creator_fee_rate"],
                 curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
                 dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                pool_fee_ppm=cfg["pool_fee_ppm"],
                 fetched_at=int(time.time()),
             )
             cached = storage.get_pair_fees(market)
@@ -611,6 +612,7 @@ def pair_fees(pair_addr: str) -> dict[str, Any]:
                 creator_fee_rate=cfg["creator_fee_rate"],
                 curve_protocol_fee_rate=cfg["curve_protocol_fee_rate"],
                 dex_protocol_fee_rate=cfg["dex_protocol_fee_rate"],
+                pool_fee_ppm=cfg["pool_fee_ppm"],
                 fetched_at=int(time.time()),
             )
         cached = storage.get_pair_fees(pair_addr)

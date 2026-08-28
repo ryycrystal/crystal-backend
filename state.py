@@ -27,6 +27,7 @@ WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
+POOL_FEE_RETRY_BLOCKS = 50_000
 _ERC20_NAME_SELECTOR = "0x06fdde03"
 _ERC20_SYMBOL_SELECTOR = "0x95d89b41"
 _TOKEN_URI_SELECTOR = "0x3c130d90"
@@ -210,6 +211,8 @@ class State:
         self.lvmon_rate = Decimal(1)
         self._basis_overlay: dict[tuple[str, str], list] = {}
         self._basis_block: int = -1
+        self._pool_fee_rates: dict[str, Decimal] = {}
+        self._pool_fee_miss_block: dict[str, int] = {}
         self._seed_aux_prices()
 
     def set_lvmon_rate(self, value) -> None:
@@ -1005,9 +1008,14 @@ class State:
             if quote_price > 0:
                 volume_usd_trade = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
                 lp.volume_usd += volume_usd_trade
-                fee_native = self._trade_fee_native(is_buy, prev_native_reserve, ev)
-                if fee_native > 0:
-                    lp.fees_usd += (Decimal(fee_native) / (Decimal(10) ** 18)) * quote_price
+                if is_pool_swap:
+                    pool_rate = self._launchpad_pool_fee_rate(lp, blk, cur=cur)
+                    if pool_rate is not None:
+                        lp.fees_usd += volume_usd_trade * pool_rate
+                else:
+                    fee_native = self._trade_fee_native(is_buy, prev_native_reserve, ev)
+                    if fee_native > 0:
+                        lp.fees_usd += (Decimal(fee_native) / (Decimal(10) ** 18)) * quote_price
 
             cost_basis_delta = 0
             if is_buy:
@@ -1301,6 +1309,27 @@ class State:
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
+
+    def _launchpad_pool_fee_rate(self, lp, blk: int, cur=None) -> Decimal | None:
+        market = (getattr(lp, "market", "") or "").lower()
+        if not market:
+            return None
+        cached = self._pool_fee_rates.get(market)
+        if cached is not None:
+            return cached
+        last_miss = self._pool_fee_miss_block.get(market)
+        if last_miss is not None and blk - last_miss < POOL_FEE_RETRY_BLOCKS:
+            return None
+        try:
+            rate = storage.get_pool_fee_rate(market, lp.source, cur=cur)
+        except Exception:
+            rate = None
+        if rate is None:
+            self._pool_fee_miss_block[market] = blk
+            return None
+        self._pool_fee_rates[market] = rate
+        self._pool_fee_miss_block.pop(market, None)
+        return rate
 
     def _trade_fee_native(self, is_buy: bool, prev_native_reserve: int, ev: dict) -> int:
         try:
