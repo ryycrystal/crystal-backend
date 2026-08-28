@@ -1173,5 +1173,7 @@ app.include_router(pools_router)
 app.include_router(orderbook_router)
 
 from api.ws import router as ws_router  # noqa: E402
+from api.x_track import router as x_track_router  # noqa: E402
 
 app.include_router(ws_router)
+app.include_router(x_track_router)

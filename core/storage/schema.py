@@ -1143,6 +1143,63 @@ def init_db() -> None:
 
         cur.execute(
             """
+            ALTER TABLE launchpad_pair_fees
+            ADD COLUMN IF NOT EXISTS pool_fee_ppm INTEGER NOT NULL DEFAULT 0;
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS x_tracked_users
+            (
+                username TEXT PRIMARY KEY,
+                added_at TIMESTAMPTZ NOT NULL DEFAULT Now()
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS x_tweets
+            (
+                id          BIGSERIAL PRIMARY KEY,
+                tweet_id    TEXT NOT NULL UNIQUE,
+                username    TEXT NOT NULL,
+                created_at  BIGINT NOT NULL DEFAULT 0,
+                payload     JSONB NOT NULL,
+                inserted_at TIMESTAMPTZ NOT NULL DEFAULT Now()
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_x_tweets_user_created
+            ON x_tweets (username, created_at DESC, id DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS x_poll_leader
+            (
+                id           INTEGER PRIMARY KEY,
+                holder       TEXT,
+                heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT Now()
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            INSERT INTO x_poll_leader (id, holder, heartbeat_at)
+            VALUES (1, NULL, Now() - INTERVAL '1 hour')
+            ON CONFLICT (id) DO NOTHING;
+            """
+        )
+
+        cur.execute(
+            """
             UPDATE launchpad_tokens t
             SET source = 2
             WHERE t.source = 1
