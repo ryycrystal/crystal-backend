@@ -2279,6 +2279,7 @@ def chart_only(
     chartres: int,
     before_ts: int = 0,
     limit: int = 0,
+    rates: int = 0,
 ) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
@@ -2297,12 +2298,33 @@ def chart_only(
         before_ts=int(before_ts) or None,
     )
 
+    # rates=1 rides the mon/usd series for exactly the buckets served, so a
+    # chart denominating in usd converts this page with zero extra requests and
+    # never discovers mid-scroll that its rate coverage has a hole
+    mon_usd = None
+    if rates and out:
+        from api.routes.orderbook import coarsened_resolution
+        from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
+
+        r_start = int(out[0]["time"])
+        r_end = int(out[-1]["time"]) + chartres
+        r_res = coarsened_resolution(r_end - r_start, max(60, chartres))
+        points = storage.mon_usd_series(r_start, r_end, r_res, _MIN_PRICE_TRADE_WEI)
+        mon_usd = {
+            "resolution": r_res,
+            "from": r_start,
+            "to": r_end,
+            "before": float(_mon_usd_at(r_start) or 0) or None,
+            "points": [{"t": t, "rate": r} for t, r in points],
+        }
+
     return {
         "token": token_addr,
         "resolution": chartres,
         "before_ts": int(before_ts) or None,
         # the oldest bucket served, so a client can ask for the next page back
         "next_before_ts": int(out[0]["time"]) if out else None,
+        "monUsd": mon_usd,
         "klines": out,
     }
 

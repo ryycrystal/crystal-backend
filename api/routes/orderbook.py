@@ -177,6 +177,22 @@ def write_wallet_prefs(key: str, body: dict[str, Any]) -> dict[str, Any]:
 # the rate from each candle's own moment rather than today's rate. `before` is
 # the last known rate at or before the range, so the first candles of a range
 # still convert when no trade landed inside their bucket
+# the widest resolution ladder charts already use. picking from it keeps rate
+# buckets aligned with candle buckets instead of landing on arbitrary strides
+_RES_LADDER = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
+_RES_BUCKET_CAP = 5000
+
+
+def coarsened_resolution(span_seconds: int, res: int) -> int:
+    if span_seconds // max(res, 1) <= _RES_BUCKET_CAP:
+        return res
+    needed = span_seconds // _RES_BUCKET_CAP + 1
+    for r in _RES_LADDER:
+        if r >= needed:
+            return r
+    return _RES_LADDER[-1]
+
+
 @router.get("/mon-usd/series")
 def mon_usd_series(
     from_ts: int = 0, to_ts: int = 0, resolution: int = 60
@@ -192,9 +208,12 @@ def mon_usd_series(
         start, end = end, start
     if end == start:
         end = start + res
-    # a range cannot ask for an unbounded number of buckets
-    if (end - start) // res > 5000:
-        raise HTTPException(status_code=400, detail="range is too long for that resolution")
+    # a range longer than the bucket cap is not rejected: the caller is a chart
+    # whose visible window simply grew past a few days, and a 400 there left it
+    # converting old bars on fallback rates. serve the same range coarser
+    # instead. mon moves under a percent an hour, so a coarse rate for a wide
+    # window is within a tick of the fine one
+    res = coarsened_resolution(end - start, res)
 
     from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
 
