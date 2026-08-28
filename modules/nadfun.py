@@ -672,11 +672,21 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
     pending |= {t for t, _, _, _ in _RETRY_QUEUE}
 
     queued = 0
+    attempted: list[str] = []
     for token, uri in rows:
         if token in pending or not uri:
             continue
         METADATA_QUEUE.append((token, uri))
+        attempted.append(token)
         queued += 1
+
+    # stamp the attempt now that they are queued. a token already in flight is
+    # skipped above and keeps its previous count, so it is not charged twice
+    if attempted:
+        try:
+            await asyncio.to_thread(storage_module.mark_metadata_attempted, attempted)
+        except Exception:
+            pass
 
     if queued:
         print(f"[Metadata] sweep re-queued {queued} tokens missing metadata", flush=True)

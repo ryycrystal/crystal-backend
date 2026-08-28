@@ -2022,12 +2022,16 @@ def set_token_uri(token: str, token_uri: str, cur=None) -> None:
 # tokens that still have no image or description but do have somewhere to fetch it
 # from. drives the sweep that makes metadata self healing across restarts.
 #
-# the order is random rather than newest first. newest first only ever showed the
-# sweep the same top slice, so once the backlog grew past one batch every token
-# older than that slice was never retried again — tokens whose host was briefly
-# down stayed blank permanently. new tokens do not depend on this ordering: they
-# are queued directly when they are discovered, and this sweep is only the
-# backstop for the ones that missed
+# least recently tried first, rather than newest first. newest first only ever
+# showed the sweep the same top slice, so once the backlog grew past one batch
+# every token older than that slice was never retried again — tokens whose host
+# was briefly down stayed blank permanently.
+#
+# each failed attempt also pushes the next one further out, doubling from an hour
+# up to a week. a host that is genuinely gone stops crowding out the tokens that
+# would resolve, but nothing is abandoned outright: a uri that comes back is
+# still picked up, just not on every pass. new tokens do not depend on any of
+# this, they are queued directly when discovered and this is only the backstop
 def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
     with db_cursor() as cur:
         cur.execute(
@@ -2036,12 +2040,39 @@ def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
             FROM launchpad_tokens
             WHERE COALESCE(metadata_cid, '') = ''
               AND COALESCE(token_uri, '') <> ''
-            ORDER BY random()
+              AND metadata_tried_at
+                  + LEAST(3600 * POWER(2, LEAST(metadata_attempts, 8)), 604800) <= %s
+            ORDER BY metadata_tried_at ASC, random()
             LIMIT %s
             """,
-            (int(limit),),
+            (int(time.time()), int(limit)),
         )
         return [((r[0] or "").lower(), r[1] or "") for r in cur.fetchall()]
+
+
+# record that the sweep has just tried these tokens. counting the attempt when it
+# is queued rather than when it answers means a uri that hangs or never returns
+# still backs off, instead of being picked again on every pass
+def mark_metadata_attempted(tokens: list[str], cur=None) -> None:
+    if not tokens:
+        return
+
+    def _run(c) -> None:
+        c.execute(
+            """
+            UPDATE launchpad_tokens
+            SET metadata_attempts = metadata_attempts + 1,
+                metadata_tried_at = %s
+            WHERE token = ANY(%s)
+            """,
+            (int(time.time()), [t.lower() for t in tokens]),
+        )
+
+    if cur is None:
+        with db_cursor() as c2:
+            _run(c2)
+    else:
+        _run(cur)
 
 
 # tokens with no metadata and no uri to fetch it from. these predate the uri being

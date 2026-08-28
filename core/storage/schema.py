@@ -305,10 +305,29 @@ def init_db() -> None:
             ADD COLUMN IF NOT EXISTS token_uri TEXT;
             """
         )
+        # how many times the sweep has tried this token's uri, and when it last
+        # did. a few hundred tokens point at hosts that are simply gone — dead
+        # dns, localhost, a raw ip that never answers — and without this they sit
+        # in the pool being retried forever, crowding out the ones that would
+        # actually resolve
+        cur.execute(
+            """
+            ALTER TABLE launchpad_tokens
+            ADD COLUMN IF NOT EXISTS metadata_attempts INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS metadata_tried_at BIGINT NOT NULL DEFAULT 0;
+            """
+        )
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_tokens_missing_metadata
             ON launchpad_tokens (token)
+            WHERE (metadata_cid IS NULL OR metadata_cid = '') AND token_uri IS NOT NULL;
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tokens_metadata_retry
+            ON launchpad_tokens (metadata_tried_at)
             WHERE (metadata_cid IS NULL OR metadata_cid = '') AND token_uri IS NOT NULL;
             """
         )
