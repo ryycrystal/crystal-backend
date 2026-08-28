@@ -40,6 +40,13 @@ Candles: `time` = bucket start, unix **seconds**, strings. Each candle's `open` 
 ### GET `/token/{addr}/meta`
 Everything stored for one token, unshaped: `raw` = every DB column verbatim, plus `source` (wire: 1 = any nad.fun), `sourceRaw` (0 native / 1 nadfun-v1 / 2 nadfun-v2), `nadfunVersion`, `phase`, `progressBps`, `fees`, `as_of_block`. 404 if unknown. Built for the terminal: one read, no chain calls before a swap.
 
+**Reserves.** `reserveQuote`/`reserveBase` (wei strings) are the reserves of the venue that actually holds the liquidity right now, plus `reservesFrom` naming it and `reservesSyncedAt`:
+- `curve` — still bonding, these are the curve reserves (`raw.curve_*`).
+- `pair` — graduated to a nad.fun AMM pair, streamed from its `Sync` log.
+- `crystal_pool` — a native graduate trading on a Crystal AMM market.
+
+Curve reserves **freeze at graduation**, so never read `raw.curve_native_reserve` directly for a migrated token — use these fields. The same four keys appear on `/token/{addr}/{res}` and on every list row (§5).
+
 ### Others
 - `/stats/{addr}` — windowed stats: `change_pct_5m/1h/6h/24h`, `price_ref_*`, per-window buy/sell counts + USD volumes. Windowed values live **only** here (and inside the overview's `stats`).
 - `/holders/{addr}` — holder list with PnL fields, USD values.

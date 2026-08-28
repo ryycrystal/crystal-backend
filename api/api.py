@@ -592,6 +592,55 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
     return out
 
 
+# a graduated token stops trading on its curve, so the frozen curve reserves are
+# replaced with the live reserves of the pool that now holds its liquidity: an amm
+# pair for nad.fun graduates, a crystal pool for native ones. tokens still on the
+# curve keep the curve numbers, which are the real reserves for them
+def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
+    migrated = [t for t, d in token_data.items() if d.get("migrated")]
+    if not migrated:
+        return
+
+    try:
+        pair_reserves = storage.pool_reserves_for_tokens(migrated)
+    except Exception as e:
+        log.warning("pool reserve lookup failed: %r", e)
+        pair_reserves = {}
+
+    for token, res in pair_reserves.items():
+        data = token_data.get(token)
+        if data is None:
+            continue
+        data["reserveQuote"] = res["reserveNative"]
+        data["reserveBase"] = res["reserveToken"]
+        data["reservesFrom"] = "pair"
+        data["reservesSyncedAt"] = res.get("syncedAt", 0)
+
+    # native graduates have no amm pair, their liquidity sits in a crystal pool
+    remaining = {
+        (token_data[t].get("market") or "").lower(): t
+        for t in migrated
+        if t not in pair_reserves and token_data[t].get("market")
+    }
+    if not remaining:
+        return
+    try:
+        market_reserves = storage.crystal_pool_reserves_for_markets(list(remaining))
+    except Exception as e:
+        log.warning("crystal pool reserve lookup failed: %r", e)
+        return
+
+    for market, res in market_reserves.items():
+        token = remaining.get(market)
+        if not token:
+            continue
+        data = token_data[token]
+        data["reserveQuote"] = res["reserveQuote"]
+        data["reserveBase"] = res["reserveBase"]
+        data["reservesFrom"] = "crystal_pool"
+        data["reservesSyncedAt"] = res.get("syncedAt", 0)
+
+
 # serialize many tokens for list endpoints in one round trip
 def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
     if not token_addrs:
@@ -665,9 +714,14 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
             "approaching_75_block": row[28],
             "approaching_75_at": row[29],
             # curve reserves, wei strings: quote = native side, base = token side.
-            # frozen at their final values once migrated, so gate on migrated
+            # these freeze at graduation, so a migrated token has them replaced
+            # below with the live reserves of whichever pool now holds its liquidity
             "reserveQuote": str(int(row[33] or 0)),
             "reserveBase": str(int(row[34] or 0)),
+            # overwritten by _apply_live_pool_reserves once the token has graduated,
+            # declared here so every row carries the key whatever the venue
+            "reservesFrom": "curve",
+            "reservesSyncedAt": 0,
             "social1": row[6],
             "social2": row[7],
             "social3": row[8],
@@ -683,6 +737,8 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
             "developer_tokens_created": int(row[30] or 0),
             "developer_tokens_graduated": int(row[31] or 0),
         }
+
+    _apply_live_pool_reserves(token_data)
 
     holder_stats = _batch_get_holder_stats(token_addrs, excluded=_static_internal_addrs())
 

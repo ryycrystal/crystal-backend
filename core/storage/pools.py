@@ -839,3 +839,27 @@ def get_pool_liquidity_amounts(txhash: str, market: str, kind: str, cur=None) ->
             c.execute(sql, params)
             row = c.fetchone()
     return (int(row[0] or 0), int(row[1] or 0)) if row else None
+
+
+# reserves for many crystal markets at once, for list serialisation. a native
+# token that graduated holds its liquidity in a crystal pool rather than an amm pair
+def crystal_pool_reserves_for_markets(markets: list[str], cur=None) -> dict[str, dict]:
+    if not markets:
+        return {}
+    sql = """
+        SELECT LOWER(market), reserve_quote, reserve_base, last_sync_at
+        FROM crystal_pools
+        WHERE LOWER(market) = ANY(%s) AND (reserve_quote > 0 OR reserve_base > 0)
+    """
+    args = ([m.lower() for m in markets if m],)
+    if cur is None:
+        with db_cursor() as c:
+            c.execute(sql, args)
+            rows = c.fetchall()
+    else:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+    return {
+        m: {"reserveQuote": str(int(rq or 0)), "reserveBase": str(int(rb or 0)), "syncedAt": int(ts or 0)}
+        for m, rq, rb, ts in rows
+    }

@@ -13,6 +13,7 @@ from api.api import (
     _PCT_OF_SUPPLY,
     _WEI,
     _api_source,
+    _apply_live_pool_reserves,
     _batch_serialize_tokens,
     _build_ohlcv_from_db,
     _encode_cursor,
@@ -403,7 +404,9 @@ def _get_token_core_stats(token_addr: str, day_ago: int) -> dict | None:
                 b.distinct_buyers, b.distinct_sellers,
                 COALESCE(c.tokens_created, 0), COALESCE(c.tokens_graduated, 0),
                 COALESCE(t.quote_token, '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'),
-                COALESCE(t.ath_price_native, 0)
+                COALESCE(t.ath_price_native, 0),
+                COALESCE(t.curve_native_reserve, 0),
+                COALESCE(t.curve_token_reserve, 0)
             FROM token_data t
             CROSS JOIN holder_stats h
             CROSS JOIN trade_stats_24h s
@@ -459,6 +462,8 @@ def _get_token_core_stats(token_addr: str, day_ago: int) -> dict | None:
         "dev_tokens_graduated": row[38],
         "quote_token": (row[39] or "0x3bd359c1119da7da1d913d1c4d2b7c461115433a").lower(),
         "ath_price_native": row[40] or Decimal(0),
+        "curve_native_reserve": row[41] or 0,
+        "curve_token_reserve": row[42] or 0,
     }
 
 
@@ -592,6 +597,17 @@ def token_meta(token_addr: str) -> dict[str, Any]:
         if r is not None:
             fees["crystalMarket"] = {"market": market, "takerFee": str(int(r[0] or 0))}
 
+    # the terminal prices a swap off these, so they have to be the reserves of
+    # whatever venue actually holds the liquidity: the curve while bonding, the
+    # amm pair or crystal market once the token has graduated
+    reserves = {
+        "migrated": bool(raw.get("migrated")),
+        "market": market,
+        "reserveQuote": str(int(Decimal(raw.get("curve_native_reserve") or 0))),
+        "reserveBase": str(int(Decimal(raw.get("curve_token_reserve") or 0))),
+    }
+    _apply_live_pool_reserves({token_addr: reserves})
+
     return {
         "token": token_addr,
         "raw": raw,
@@ -604,6 +620,10 @@ def token_meta(token_addr: str) -> dict[str, Any]:
             tx_count=raw.get("tx_count"),
             migrated=raw.get("migrated"),
         ),
+        "reserveQuote": reserves["reserveQuote"],
+        "reserveBase": reserves["reserveBase"],
+        "reservesFrom": reserves.get("reservesFrom", "curve"),
+        "reservesSyncedAt": reserves.get("reservesSyncedAt", 0),
         "fees": fees,
         "as_of_block": storage.get_last_processed_block() or 0,
     }
@@ -1002,7 +1022,6 @@ def token_overview_graph(
                 price_native,
                 txhash,
             ) in tracked_rows:
-
                 is_buy_flag = bool(is_buy)
                 native_amount = int(native_amount or 0)
                 token_amount = int(token_amount or 0)
@@ -1039,6 +1058,22 @@ def token_overview_graph(
         metadata_cid_val = metadata_cid or ""
 
         migrated_flag = bool(migrated)
+
+        # same venue rule as the list rows and /meta: curve while bonding, amm
+        # pair or crystal market once graduated
+        _res = {
+            "migrated": migrated_flag,
+            "market": (core.get("market") or "").lower(),
+            "reserveQuote": str(int(core.get("curve_native_reserve") or 0)),
+            "reserveBase": str(int(core.get("curve_token_reserve") or 0)),
+        }
+        _apply_live_pool_reserves({token_addr: _res})
+        overview_reserves = {
+            "reserveQuote": _res["reserveQuote"],
+            "reserveBase": _res["reserveBase"],
+            "reservesFrom": _res.get("reservesFrom", "curve"),
+            "reservesSyncedAt": _res.get("reservesSyncedAt", 0),
+        }
 
         dev_tokens_list: list[dict[str, Any]] = []
         dev_tokens_total = 0
@@ -1227,6 +1262,7 @@ def token_overview_graph(
             "nadfunVersion": _nadfun_version(token_addr, source),
             "quoteToken": quote_token,
             "quote_token": quote_token,
+            **overview_reserves,
         }
 
         return result

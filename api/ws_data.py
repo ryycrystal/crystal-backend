@@ -16,6 +16,7 @@ from api.api import (
     _fmt,
     _fmt_usd,
     _lifecycle_fields,
+    _nadfun_version,
     _quote_price_usd,
     _scaled_price,
     _sql_not_internal,
@@ -259,6 +260,9 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
                 "sell_count": int(sells or 0),
                 "market": market or None,
                 "source": _api_source(source),
+                # the wire source collapses both nad.fun generations to 1, so the
+                # generation has to ride along or a v2 token reads as v1
+                "nadfunVersion": _nadfun_version(token, source),
             }
         )
     return out
@@ -309,6 +313,7 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
                 # blanked out on the first update that replaced the array
                 "marketcap": _fmt(marketcap),
                 "source": _api_source(source),
+                "nadfunVersion": _nadfun_version(tok, source),
                 "volumeNative1h": str(int(vol_1h or 0)),
                 "timestamp": str(int(created or 0)),
                 "migrated": bool(migrated),
