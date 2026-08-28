@@ -5,7 +5,6 @@ import psycopg2
 from .base import db_cursor
 
 
-# record a referral binding, keeping only the newest event per referee
 def upsert_referral_binding(
     referee: str,
     referrer: str,
@@ -33,7 +32,6 @@ def upsert_referral_binding(
         c.execute(sql, params)
 
 
-# the binding row for one referee
 def get_referral_binding(referee: str):
     with db_cursor() as cur:
         cur.execute(
@@ -43,7 +41,6 @@ def get_referral_binding(referee: str):
         return cur.fetchone()
 
 
-# all referees currently bound to a referrer, newest first
 def list_referees(referrer: str, limit: int = 0):
     with db_cursor() as cur:
         if limit and limit > 0:
@@ -68,7 +65,6 @@ def list_referees(referrer: str, limit: int = 0):
         return cur.fetchall()
 
 
-# every distinct referrer with at least one bound referee, for the rewards poller
 def list_active_referrers() -> list[str]:
     with db_cursor() as cur:
         cur.execute(
@@ -80,10 +76,6 @@ def list_active_referrers() -> list[str]:
         return [str(r[0]) for r in cur.fetchall()]
 
 
-# journal one claimable observation: increases accrue into earned, decreases are claims.
-# earned is a lower bound: an accrual and a claim landing inside one poll window
-# cancel out and cannot be recovered without a chain event for the credit.
-# the updated_at guard rejects stale observations from concurrent or retried sweeps
 def record_referral_reward(referrer: str, token: str, claimable: int, ts: int) -> None:
     with db_cursor() as cur:
         cur.execute(
@@ -101,7 +93,6 @@ def record_referral_reward(referrer: str, token: str, claimable: int, ts: int) -
         )
 
 
-# reward rows for one referrer
 def get_referral_rewards(referrer: str):
     with db_cursor() as cur:
         cur.execute(
@@ -115,7 +106,6 @@ def get_referral_rewards(referrer: str):
         return cur.fetchall()
 
 
-# the configured tier ladder, lowest threshold first
 def list_volume_tiers():
     with db_cursor() as cur:
         cur.execute(
@@ -128,7 +118,6 @@ def list_volume_tiers():
         return cur.fetchall()
 
 
-# trailing window in days that tier volume is measured over, 0 meaning lifetime
 def tier_window_days(default: int = 30) -> int:
     with db_cursor() as cur:
         cur.execute("SELECT value FROM launchpad_kv WHERE key = 'tier_volume_window_days'")
@@ -141,7 +130,6 @@ def tier_window_days(default: int = 30) -> int:
         return default
 
 
-# launchpad and meme volume for one wallet, already priced in usd per trade
 def wallet_launchpad_volume_usd(address: str, since_ts: int = 0):
     with db_cursor() as cur:
         cur.execute(

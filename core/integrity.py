@@ -13,7 +13,6 @@ INTEGRITY_STALL_LIMIT = int(os.getenv("INTEGRITY_STALL_LIMIT", "60"))
 INTEGRITY_HEAD_LAG_LIMIT = int(os.getenv("INTEGRITY_HEAD_LAG_LIMIT", "100"))
 
 
-# oldest and newest processed block plus seconds since the newest write
 def _processed_state() -> tuple[int | None, int | None, float]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -25,7 +24,6 @@ def _processed_state() -> tuple[int | None, int | None, float]:
     return p_min, p_max, float(row[2] or 0.0)
 
 
-# processed rows and uncached processed rows inside one window
 def _window_counts(start: int, end: int) -> tuple[int, int]:
     with storage.db_cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM launchpad_blocks WHERE number BETWEEN %s AND %s", (start, end))
@@ -34,7 +32,6 @@ def _window_counts(start: int, end: int) -> tuple[int, int]:
     return processed, holes
 
 
-# turn one sweep's raw numbers into a verdict, pure so it is unit testable
 def evaluate(
     last_block: int,
     stall_secs: float,
@@ -70,7 +67,6 @@ def evaluate(
     }
 
 
-# one integrity sweep over the trailing window, published to launchpad_kv
 async def sweep() -> dict:
     p_min, p_max, stall = _processed_state()
     if p_max is None or p_min is None:
@@ -90,7 +86,6 @@ async def sweep() -> dict:
     return result
 
 
-# background loop that keeps sweeping and reports loudly on findings
 async def integrity_worker() -> None:
     while True:
         try:

@@ -8,8 +8,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import api.api  # noqa: F401,E402  (import order is load-bearing)
 
 
-# a graduated token's curve reserves freeze at graduation, so the serializer
-# swaps in the live reserves of whatever pool now holds its liquidity
 def test_live_pool_reserves_replace_frozen_curve_reserves(monkeypatch):
     import api.api as A
 
@@ -31,24 +29,20 @@ def test_live_pool_reserves_replace_frozen_curve_reserves(monkeypatch):
 
     A._apply_live_pool_reserves(token_data)
 
-    # nad.fun graduate takes its amm pair reserves
     assert token_data["0xaaa"]["reserveQuote"] == "111"
     assert token_data["0xaaa"]["reserveBase"] == "222"
     assert token_data["0xaaa"]["reservesFrom"] == "pair"
     assert token_data["0xaaa"]["reservesSyncedAt"] == 9
 
-    # a native graduate has no pair, so it falls through to its crystal pool
     assert token_data["0xbbb"]["reserveQuote"] == "333"
     assert token_data["0xbbb"]["reserveBase"] == "444"
     assert token_data["0xbbb"]["reservesFrom"] == "crystal_pool"
 
-    # a token still on its curve keeps the curve reserves untouched
     assert token_data["0xccc"]["reserveQuote"] == "5"
     assert token_data["0xccc"]["reserveBase"] == "6"
     assert "reservesFrom" not in token_data["0xccc"]
 
 
-# a pool lookup failure must leave the curve numbers in place, never blank them
 def test_live_pool_reserves_survive_lookup_failure(monkeypatch):
     import api.api as A
 
@@ -65,7 +59,6 @@ def test_live_pool_reserves_survive_lookup_failure(monkeypatch):
     assert token_data["0xaaa"]["reserveBase"] == "8"
 
 
-# nothing to look up when no token in the batch has graduated
 def test_live_pool_reserves_skips_when_none_migrated(monkeypatch):
     import api.api as A
 

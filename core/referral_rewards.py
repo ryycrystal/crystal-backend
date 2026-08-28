@@ -12,15 +12,12 @@ REWARDS_MULTICALL_CHUNK = 200
 CLAIMABLE_REWARDS_SELECTOR = bytes.fromhex("6be9dcce")
 
 
-# abi encode one claimable rewards read for a token and referrer pair
 def _claimable_calldata(token: str, referrer: str) -> bytes:
     t = bytes.fromhex(str(token or "").lower().replace("0x", "").rjust(64, "0"))
     r = bytes.fromhex(str(referrer or "").lower().replace("0x", "").rjust(64, "0"))
     return CLAIMABLE_REWARDS_SELECTOR + t + r
 
 
-# quote tokens whose fees can accrue to referrers, plus any token already holding
-# a reward row so a retired quote asset keeps updating instead of freezing stale
 def _reward_tokens() -> list[str]:
     tokens: set[str] = set()
     try:
@@ -34,7 +31,6 @@ def _reward_tokens() -> list[str]:
     return sorted(tokens)
 
 
-# one sweep: read claimable rewards for every referrer and token pair and journal deltas
 async def _sweep() -> None:
     referrers = storage.list_active_referrers()
     tokens = _reward_tokens()
@@ -58,7 +54,6 @@ async def _sweep() -> None:
             storage.record_referral_reward(ref, tok, claimable, now_ts)
 
 
-# background loop keeping referral reward balances and cumulative earnings fresh
 async def referral_rewards_worker() -> None:
     while True:
         try:

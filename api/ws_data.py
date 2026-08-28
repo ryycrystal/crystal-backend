@@ -1,9 +1,3 @@
-# data fetchers for the websocket channels
-#
-# kept separate from api/ws.py so the transport owns connections and fanout while
-# this module owns queries. every function here is synchronous and is called from
-# the hub via asyncio.to_thread, because psycopg2 is blocking
-
 from __future__ import annotations
 
 import time
@@ -24,14 +18,12 @@ from api.api import (
 )
 from core.storage import db_cursor
 
-# how many rows each list channel carries
 TRADES_LIMIT = 50
 HOLDERS_LIMIT = 50
 TOP_TRADERS_LIMIT = 50
 DEV_TOKENS_LIMIT = 50
 
 
-# highest block the indexer has committed, the watermark every frame is stamped with
 def indexer_watermark() -> int:
     with db_cursor() as cur:
         cur.execute("SELECT MAX(number) FROM launchpad_blocks;")
@@ -39,7 +31,6 @@ def indexer_watermark() -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-# most recent trades for a token, newest first
 def recent_trades(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
     with db_cursor() as cur:
@@ -60,9 +51,6 @@ def recent_trades(token: str) -> list[dict[str, Any]]:
     for txhash, log_index, ts, blk, caller, is_buy, native_amt, token_amt, usd_amt, price in rows:
         out.append(
             {
-                # decimal log index, matching the REST id format exactly. the client
-                # normalises hex ids from its chain socket against this, so a third
-                # format here would silently double count
                 "id": f"{txhash}-{int(log_index)}",
                 "time": int(ts or 0),
                 "blockNumber": int(blk or 0),
@@ -77,7 +65,6 @@ def recent_trades(token: str) -> list[dict[str, Any]]:
     return out
 
 
-# last traded price for a token, used to value positions
 def _last_price(token: str) -> Decimal:
     with db_cursor() as cur:
         cur.execute("SELECT last_price_native FROM launchpad_tokens WHERE token = %s", (token,))
@@ -85,7 +72,6 @@ def _last_price(token: str) -> Decimal:
     return (row[0] if row and row[0] is not None else Decimal(0)) or Decimal(0)
 
 
-# shared row shape for the position derived channels
 def _position_rows(
     token: str, where: str, params: tuple, limit: int, order_by: str = "balance_token DESC"
 ) -> list[dict[str, Any]]:
@@ -139,7 +125,6 @@ def _position_rows(
     return out
 
 
-# top holders by balance, excluding internal addresses
 def top_holders(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
     excluded = list(_static_internal_addrs())
@@ -151,9 +136,6 @@ def top_holders(token: str) -> list[dict[str, Any]]:
     )
 
 
-# everyone who has traded the token, ranked by pnl to match the rest endpoint.
-# ordering by balance truncated the list to the biggest current holders, so a trader
-# who sold out at a large profit ranked last and fell off the list entirely
 def top_traders(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
     excluded = list(_static_internal_addrs())
@@ -166,7 +148,6 @@ def top_traders(token: str) -> list[dict[str, Any]]:
     )
 
 
-# positions for a specific wallet set, since positions are per wallet not per token
 def positions_for(token: str, addresses: list[str]) -> list[dict[str, Any]]:
     token = (token or "").lower()
     addrs = [a.lower() for a in addresses if a]
@@ -181,17 +162,12 @@ def positions_for(token: str, addresses: list[str]) -> list[dict[str, Any]]:
     quote = _quote_price_usd(None)
     price = _last_price(token)
     for r in rows:
-        # balance in native terms, so the client does not need the price to render it.
-        # this used to report unrealized pnl, so a position showed its profit where
-        # its value belonged, and went negative for anyone underwater
         value_native = Decimal(r["balance_token"] or 0) * price
         r["balance_native"] = _fmt(value_native)
         r["balance_usd"] = _fmt_usd(value_native * quote / _WEI) if quote > 0 else "0"
     return rows
 
 
-# every position for a wallet set across all tokens, shaped like the rest rows so
-# the portfolio renders socket and rest data identically
 def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
     addrs = [a.lower() for a in addresses if a]
     if not addrs:
@@ -260,15 +236,12 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
                 "sell_count": int(sells or 0),
                 "market": market or None,
                 "source": _api_source(source),
-                # the wire source collapses both nad.fun generations to 1, so the
-                # generation has to ride along or a v2 token reads as v1
                 "nadfunVersion": _nadfun_version(token, source),
             }
         )
     return out
 
 
-# tokens launched by this token's creator
 def dev_tokens(token: str) -> list[dict[str, Any]]:
     token = (token or "").lower()
     with db_cursor() as cur:
@@ -309,8 +282,6 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
                 "metadataCID": cid or "",
                 "imageUrl": cid or "",
                 "lastPriceNativePerTokenWad": _scaled_price(price),
-                # marketcap and source were on the rest payload but not here, so both
-                # blanked out on the first update that replaced the array
                 "marketcap": _fmt(marketcap),
                 "source": _api_source(source),
                 "nadfunVersion": _nadfun_version(tok, source),
@@ -324,9 +295,6 @@ def dev_tokens(token: str) -> list[dict[str, Any]]:
     return out
 
 
-# everything on the token detail response that moves as trades land, so a client can
-# stop polling /token entirely after its first load. the static half of that response
-# (name, symbol, socials, creator, image) never changes and is deliberately omitted
 def token_state(token: str) -> dict[str, Any]:
     token = (token or "").lower()
     excluded = list(_static_internal_addrs())
@@ -427,23 +395,18 @@ def token_state(token: str) -> dict[str, Any]:
     ath_marketcap = ath_price * Decimal(10**9)
 
     body: dict[str, Any] = {
-        # price and valuation
         "lastPriceNativePerTokenWad": _scaled_price(last_price),
         "lastPriceQuotePerTokenWad": _scaled_price(last_price),
         "marketcap": _fmt(marketcap),
         "marketcap_quote": _fmt(marketcap),
         "marketcap_usd": _fmt_usd(marketcap * quote_usd) if quote_usd > 0 else "0",
-        # all time high, only moves on a new high
         "athPriceNative": _fmt(ath_price),
         "athMarketcap": _fmt(ath_marketcap),
         "athMarketcapUsd": _fmt_usd(ath_marketcap * quote_usd) if quote_usd > 0 else "0",
-        # 24h, matching what the rest endpoint returns under these same names. the
-        # names are historical and do say "volume" rather than "volume24h"
         "volumeNative": str(int(volume_native_24h or 0)),
         "volume_usd": _fmt_usd(volume_usd_24h or Decimal(0)),
         "buyTxs": int(buys_24h or 0),
         "sellTxs": int(sells_24h or 0),
-        # lifetime, under names that say so
         "volumeNativeLifetime": str(int(native_volume or 0)),
         "tokenVolume": str(int(token_volume or 0)),
         "volumeUsdLifetime": _fmt_usd(volume_usd or Decimal(0)),
@@ -451,32 +414,22 @@ def token_state(token: str) -> dict[str, Any]:
         "sellTxsLifetime": int(sells or 0),
         "fees_usd": _fmt_usd(fees_usd or Decimal(0)),
         "txCount": int(tx_count or 0),
-        # participants
         "totalHolders": int(holders or 0),
         "distinctBuyers": int(distinct_buyers or 0),
         "distinctSellers": int(distinct_sellers or 0),
-        # curve position, the progress bar
         "circulating_supply": str(int(circulating or 0)),
         "curveNativeReserve": str(int(curve_native or 0)),
         "curveTokenReserve": str(int(curve_token or 0)),
-        # after graduation the liquidity is the amm pair's reserves, not the
-        # curve's. both ride the same frame so a client can show liquidity on
-        # either side of migration without a second request
         "poolNativeReserve": str(int(pool_native or 0)),
         "poolTokenReserve": str(int(pool_token or 0)),
-        # the 75% threshold flag and when it fired
         "approaching_75": bool(approaching),
-        # null rather than 0 when the threshold was never crossed, matching rest. a
-        # zero here renders as january 1970 wherever the client formats it as a date
         "approaching_75_block": int(approaching_block) if approaching_block else None,
         "approaching_75_at": int(approaching_at) if approaching_at else None,
-        # graduation. these flip exactly once but the page must react immediately
         "migrated": bool(migrated),
         "market": market,
         "migratedAt": int(migrated_at) if migrated_at else None,
     }
 
-    # phase and progress are derived, never stored, so they cannot drift
     body.update(
         _lifecycle_fields(
             source=source,

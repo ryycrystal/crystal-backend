@@ -16,7 +16,6 @@ WINDOWS_PER_BATCH = 20
 DEFAULT_RPS = 8.0
 
 
-# minimal paced json rpc client with batch support
 class Rpc:
     def __init__(self, url: str, rps: float, timeout: float = 30.0) -> None:
         self.url = url
@@ -54,9 +53,6 @@ class Rpc:
         return [by_id.get(i) or {} for i in range(len(calls))]
 
 
-# the sweep floor: the earliest block the indexer has processed. orderbook logs
-# older than our indexed world have no market context to attach to, and getCode
-# style probing needs archive state most rpcs prune
 def default_start_block() -> int | None:
     with storage.db_cursor() as cur:
         cur.execute("SELECT MIN(number) FROM launchpad_blocks")
@@ -69,7 +65,6 @@ def _int_field(log: dict, key: str) -> int:
     return int(raw, 16) if isinstance(raw, str) else int(raw or 0)
 
 
-# decode a group's logs into event and fill insert rows, all client side
 def _parse_group(by_block: dict[int, list[dict]]) -> tuple[list[tuple], list[tuple]]:
     event_rows: list[tuple] = []
     fill_rows: list[tuple] = []
@@ -114,10 +109,6 @@ def _parse_group(by_block: dict[int, list[dict]]) -> tuple[list[tuple], list[tup
     return event_rows, fill_rows
 
 
-# apply one group in a handful of statements: batched cache merge plus batched
-# event and fill inserts. the sweep never touches the orders table, so it can
-# never contend with the live sequencer; rebuild_orderbook_orders.py folds the
-# accumulated history into current order state once the sweep completes
 def _apply_group(by_block: dict[int, list[dict]], event_rows: list[tuple], fill_rows: list[tuple]) -> dict[str, int]:
     with storage.db_cursor() as cur:
         blocks = sorted(by_block)
@@ -153,7 +144,6 @@ def _apply_group(by_block: dict[int, list[dict]], event_rows: list[tuple], fill_
     return {"OBU": len(fresh_events), "OBF": len(fresh_fills)}
 
 
-# entrypoint
 async def main() -> None:
     parser = argparse.ArgumentParser(description="sweep historical orderbook logs into the cache and the decoded plane")
     parser.add_argument("--rpc", default=RPC_HTTP)
@@ -212,9 +202,6 @@ async def main() -> None:
                 for f, t in group
             ]
 
-            # transient rpc failures are a certainty over thousands of windows, so
-            # a group retries with backoff and is skipped-and-reported only when
-            # it keeps failing, never allowed to kill the whole sweep
             results = None
             for attempt in range(6):
                 try:
@@ -239,9 +226,6 @@ async def main() -> None:
                     by_block.setdefault(blk, []).append(log)
 
             if by_block:
-                # the cache merge can race the refill on the same block rows, so
-                # a deadlock is possible and transient. everything in the group
-                # is replay safe, so rolling back and re-applying is always fine
                 event_rows, fill_rows = _parse_group(by_block)
                 for db_attempt in range(5):
                     try:
@@ -255,8 +239,6 @@ async def main() -> None:
                         print(f"[OB-SWEEP] deadlock at group {group[0][0]}, re-applying", flush=True)
                         await asyncio.sleep(0.5 * (db_attempt + 1))
 
-            # the checkpoint only advances past groups that succeeded, and never
-            # past a skipped range, so a rerun retries exactly what is missing
             if not skipped:
                 storage.set_meta("ob_sweep_progress", str(group[-1][1]))
 

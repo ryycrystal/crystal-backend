@@ -15,7 +15,6 @@ REFILL_CALLS_PER_BATCH = 10
 HEAD_LAG_LIMIT = 100
 
 
-# minimal rate limited json rpc client for checks and refills
 class Rpc:
     def __init__(self, url: str, rps: float, timeout: float = 30.0) -> None:
         self.url = url
@@ -53,19 +52,16 @@ class Rpc:
         return [by_id.get(i) or {} for i in range(len(calls))]
 
 
-# current chain head
 async def rpc_head(rpc: Rpc) -> int:
     data = await rpc.call("eth_blockNumber", [])
     return int(data["result"], 16)
 
 
-# logs for a block range filtered to the indexed topic set
 async def rpc_logs(rpc: Rpc, frm: int, to: int) -> list[dict]:
     data = await rpc.call("eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(to), "topics": [h.TOPICS]}])
     return data.get("result") or []
 
 
-# processed and cached table bounds and row counts
 def fetch_bounds() -> dict:
     with storage.db_cursor() as cur:
         cur.execute("SELECT MIN(number), MAX(number), COUNT(*) FROM launchpad_blocks")
@@ -75,7 +71,6 @@ def fetch_bounds() -> dict:
     return {"p_min": p_min, "p_max": p_max, "p_count": p_count, "c_min": c_min, "c_max": c_max, "c_count": c_count}
 
 
-# per bucket processed and cached counts
 def fetch_density() -> list[tuple[int, int, int]]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -91,7 +86,6 @@ def fetch_density() -> list[tuple[int, int, int]]:
         return [(int(b), int(p), int(c)) for b, p, c in cur.fetchall()]
 
 
-# contiguous gaps in the processed block sequence
 def fetch_processed_gaps() -> list[tuple[int, int]]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -105,7 +99,6 @@ def fetch_processed_gaps() -> list[tuple[int, int]]:
         return [(int(a), int(b)) for a, b in cur.fetchall()]
 
 
-# contiguous ranges of processed blocks that have no cached log row
 def fetch_cache_holes(start_block: int | None = None, end_block: int | None = None) -> list[tuple[int, int]]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -128,7 +121,6 @@ def fetch_cache_holes(start_block: int | None = None, end_block: int | None = No
         return [(int(a), int(b)) for a, b in cur.fetchall()]
 
 
-# tokens referenced by trades or positions that have no token row
 def fetch_orphans() -> tuple[int, int]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -152,7 +144,6 @@ def fetch_orphans() -> tuple[int, int]:
     return trade_orphans, pos_orphans
 
 
-# random cached block numbers per bucket for spot verification
 def sample_cached_blocks(per_bucket: int) -> list[int]:
     out: list[int] = []
     with storage.db_cursor() as cur:
@@ -167,7 +158,6 @@ def sample_cached_blocks(per_bucket: int) -> list[int]:
     return out
 
 
-# identity of one log for cache versus chain comparison
 def log_key(log: dict) -> tuple:
     idx_raw = log.get("logIndex")
     idx = int(idx_raw, 16) if isinstance(idx_raw, str) else int(idx_raw or 0)
@@ -175,7 +165,6 @@ def log_key(log: dict) -> tuple:
     return (str(log.get("transactionHash") or "").lower(), idx, topic0)
 
 
-# print the integrity report and count problems
 async def run_check(rpc: Rpc, verbose_ranges: int) -> int:
     problems = 0
     b = fetch_bounds()
@@ -239,9 +228,6 @@ async def run_check(rpc: Rpc, verbose_ranges: int) -> int:
     return problems
 
 
-# refill uncached processed ranges from rpc so a reindex stops losing data. the
-# chunks ride json-rpc batches, because one wide-topic getLogs takes seconds on
-# the public rpc and a chunk at a time makes big holes take days
 async def run_refill(rpc: Rpc, batch: int, start_block: int | None = None, end_block: int | None = None) -> None:
     holes = fetch_cache_holes(start_block, end_block)
     if not holes:
@@ -297,7 +283,6 @@ async def run_refill(rpc: Rpc, batch: int, start_block: int | None = None, end_b
     print(f"[DOCTOR] refill complete: {done:,} blocks", flush=True)
 
 
-# compare sampled cached blocks against fresh rpc logs
 async def run_verify(rpc: Rpc, per_bucket: int) -> int:
     blocks = sample_cached_blocks(per_bucket)
     mismatches = 0
@@ -311,7 +296,6 @@ async def run_verify(rpc: Rpc, per_bucket: int) -> int:
     return mismatches
 
 
-# entrypoint
 async def main() -> None:
     parser = argparse.ArgumentParser(description="detect missing indexer data and refill the raw log cache")
     parser.add_argument("--rpc", default=RPC_HTTP)

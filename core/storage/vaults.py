@@ -7,7 +7,6 @@ import psycopg2
 from .base import _clean_text, db_cursor
 
 
-# add vault metadata and current config/state fields
 def upsert_crystal_vault(
     *,
     vault: str,
@@ -95,7 +94,6 @@ def upsert_crystal_vault(
         cur.execute(sql, params)
 
 
-# update selected fields as necessary
 def update_crystal_vault_fields(
     *,
     vault: str,
@@ -148,7 +146,6 @@ def update_crystal_vault_fields(
         cur.execute(sql, params)
 
 
-# insert vault deposit event
 def insert_crystal_vault_deposit(
     *,
     block_number: int,
@@ -187,7 +184,6 @@ def insert_crystal_vault_deposit(
         cur.execute(sql, params)
 
 
-# insert a vault withdrawal event
 def insert_crystal_vault_withdrawal(
     *,
     block_number: int,
@@ -226,7 +222,6 @@ def insert_crystal_vault_withdrawal(
         cur.execute(sql, params)
 
 
-# update per-user vault balances and counters from deposit/withdraw deltas
 def upsert_crystal_vault_user_delta(
     *,
     vault: str,
@@ -273,7 +268,6 @@ def upsert_crystal_vault_user_delta(
         cur.execute(sql, params)
 
 
-# update vault balance snapshot for charts and tvl
 def upsert_crystal_vault_balance_sample(
     *,
     vault: str,
@@ -313,7 +307,6 @@ def upsert_crystal_vault_balance_sample(
         cur.execute(sql, params)
 
 
-# load all vault rows for in-memory state rebuild on indexer startup
 def load_crystal_vaults_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -328,7 +321,6 @@ def load_crystal_vaults_for_state():
         return cur.fetchall()
 
 
-# load all vault user aggregates for in-memory state rebuild
 def load_crystal_vault_users_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -340,7 +332,6 @@ def load_crystal_vault_users_for_state():
         return cur.fetchall()
 
 
-# fetch one vault's data by vault address
 def get_crystal_vault(vault: str):
     with db_cursor() as cur:
         cur.execute(
@@ -357,7 +348,6 @@ def get_crystal_vault(vault: str):
         return cur.fetchone()
 
 
-# fetch the latest balances for a vault
 def get_crystal_vault_latest_balance(vault: str):
     with db_cursor() as cur:
         cur.execute(
@@ -373,7 +363,6 @@ def get_crystal_vault_latest_balance(vault: str):
         return cur.fetchone()
 
 
-# fetch one vault-user row
 def get_crystal_vault_user(vault: str, user_address: str):
     with db_cursor() as cur:
         cur.execute(
@@ -387,7 +376,6 @@ def get_crystal_vault_user(vault: str, user_address: str):
         return cur.fetchone()
 
 
-# list paginated vault rows with optional search/filter/sort and user enrichment
 def list_crystal_vaults_page(
     *,
     user_address: str | None = None,
@@ -515,7 +503,6 @@ def list_crystal_vaults_page(
     return rows
 
 
-# list recent vault deposits
 def list_crystal_vault_deposits(vault: str, limit: int = 50):
     with db_cursor() as cur:
         cur.execute(
@@ -531,7 +518,6 @@ def list_crystal_vault_deposits(vault: str, limit: int = 50):
         return cur.fetchall()
 
 
-# list recent vault withdrawals
 def list_crystal_vault_withdrawals(vault: str, limit: int = 50):
     with db_cursor() as cur:
         cur.execute(
@@ -547,7 +533,6 @@ def list_crystal_vault_withdrawals(vault: str, limit: int = 50):
         return cur.fetchall()
 
 
-# list vault depositors ordered by recent activity
 def list_crystal_vault_users(vault: str):
     with db_cursor() as cur:
         cur.execute(
@@ -562,7 +547,6 @@ def list_crystal_vault_users(vault: str):
         return cur.fetchall()
 
 
-# one user's share flows for a vault in chain order, deposits positive and withdrawals negative
 def list_crystal_vault_user_flows(vault: str, user: str):
     with db_cursor() as cur:
         cur.execute(
@@ -579,7 +563,6 @@ def list_crystal_vault_user_flows(vault: str, user: str):
         return [(int(r[0] or 0), int(r[3] or 0)) for r in cur.fetchall()]
 
 
-# vault share mints and burns after a timestamp, inclusive when reconstructing pre flow supply
 def sum_vault_share_flows_after(vault: str, ts: int, inclusive: bool = False) -> tuple[int, int]:
     op = ">=" if inclusive else ">"
     with db_cursor() as cur:
@@ -596,7 +579,6 @@ def sum_vault_share_flows_after(vault: str, ts: int, inclusive: bool = False) ->
     return minted, burned
 
 
-# timestamp and usd of the last priced sample strictly before a timestamp
 def vault_sample_usd_before(vault: str, ts: int) -> tuple[int, float] | None:
     with db_cursor() as cur:
         cur.execute(
@@ -611,7 +593,6 @@ def vault_sample_usd_before(vault: str, ts: int) -> tuple[int, float] | None:
     return (int(row[0] or 0), float(row[1])) if row and row[1] is not None else None
 
 
-# timestamp and usd of the first priced sample at or after a timestamp
 def vault_sample_usd_at_or_after(vault: str, ts: int) -> tuple[int, float] | None:
     with db_cursor() as cur:
         cur.execute(
@@ -626,7 +607,6 @@ def vault_sample_usd_at_or_after(vault: str, ts: int) -> tuple[int, float] | Non
     return (int(row[0] or 0), float(row[1])) if row and row[1] is not None else None
 
 
-# list vault balance samples in ascending time order for charts
 def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, limit: int = 0):
     with db_cursor() as cur:
         if start_ts is None:
@@ -678,11 +658,6 @@ def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, 
     return rows
 
 
-# what a wallet's vault shares are currently worth, per vault and in total.
-# a vault's own balance sample carries both its usd value and the share count it
-# was taken against, so a user's slice is their shares over that supply. vault
-# deposits leave the wallet balance entirely, so without this they vanish from
-# an account total
 def vault_positions_usd(user) -> tuple[Decimal, list[dict]]:
     with db_cursor() as cur:
         cur.execute(
@@ -709,13 +684,9 @@ def vault_positions_usd(user) -> tuple[Decimal, list[dict]]:
     folded: dict[str, dict] = {}
     for vault, shares, name, circulating, usd_value, sample_shares in rows:
         supply = Decimal(sample_shares or 0) or Decimal(circulating or 0)
-        # no sample yet, or a vault whose supply is not known: report the
-        # position without a value rather than inventing one
         value = (Decimal(shares) / supply * Decimal(usd_value or 0)) if supply > 0 else None
         if value is not None:
             total += value
-        # the same vault can be held from several selected wallets, and the user
-        # wants one line per vault rather than one per wallet
         prev = folded.get(vault)
         if prev is None:
             folded[vault] = {

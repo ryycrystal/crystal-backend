@@ -22,7 +22,6 @@ def _sample_pool_chart_points(points: list[dict[str, Any]], max_points: int = 48
     return _sample_evenly_by_time(points, max_points, lambda p: int((p or {}).get("timestamp") or 0))
 
 
-# endpoint for pools list used by /earn/liquidity
 @router.get("/pools/list")
 def list_pools(
     search: str | None = Query(None, min_length=0, max_length=128),
@@ -80,7 +79,6 @@ def list_pools(
     }
 
 
-# endpoint for complete info for one pool
 @router.get("/pools/{address}")
 def get_pool(
     address: str,
@@ -114,7 +112,6 @@ def get_pool(
     return out
 
 
-# annualized apy at each tvl point from trailing 24h invariant growth per lp share, null when tvl is unknown
 def _apy_history(market: str, tvl_history: list[dict]) -> list[dict]:
     if not tvl_history:
         return []
@@ -141,8 +138,6 @@ def _apy_history(market: str, tvl_history: list[dict]) -> list[dict]:
     return out
 
 
-# lp positions for a wallet, served from indexed transfers so the client can stop
-# reading totalSupply/balanceOf off the chain per pool
 @router.get("/pools/positions/{user_addr}")
 def lp_positions(user_addr: str) -> dict[str, Any]:
     user_addr = (user_addr or "").lower()
@@ -165,8 +160,6 @@ def lp_positions(user_addr: str) -> dict[str, Any]:
                 "shares": str(shares),
                 "sharePct": share_pct,
                 "lastTransfer": last_transfer,
-                # redeemable now vs deposited. the difference bundles fee accrual and
-                # price drift, so it estimates outcome, not fees alone
                 "currentQuote": str(cur_q),
                 "currentBase": str(cur_b),
                 "costQuote": str(cost_q),
@@ -179,7 +172,6 @@ def lp_positions(user_addr: str) -> dict[str, Any]:
     return {"ok": True, "user": user_addr, "count": len(out), "positions": out}
 
 
-# lp deposit and withdrawal history for a pool, optionally scoped to one wallet
 @router.get("/pools/{pool_addr}/liquidity")
 def pool_liquidity_history(pool_addr: str, user: str = Query(""), limit: int = Query(100, le=500)) -> dict[str, Any]:
     pool_addr = (pool_addr or "").lower()
@@ -187,7 +179,6 @@ def pool_liquidity_history(pool_addr: str, user: str = Query(""), limit: int = Q
     return {"ok": True, "market": pool_addr, "count": len(events), "events": events}
 
 
-# add and remove previews from indexed reserves, so quoting a deposit needs no rpc
 @router.get("/pools/{pool_addr}/preview")
 def pool_preview(
     pool_addr: str,

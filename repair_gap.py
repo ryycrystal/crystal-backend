@@ -7,7 +7,6 @@ import core.storage as storage
 from core import chain as h
 from core.sequencer import SEQUENCER
 
-# tables a bounded replay can touch, checked before and after so a dry run can report the delta
 COUNTED_TABLES = (
     "launchpad_trades",
     "launchpad_ohlcv",
@@ -20,7 +19,6 @@ COUNTED_TABLES = (
 )
 
 
-# row counts for the tables a replay can write, read on the same cursor as the replay
 def _snapshot(cur) -> dict[str, int]:
     out: dict[str, int] = {}
     for t in COUNTED_TABLES:
@@ -29,7 +27,6 @@ def _snapshot(cur) -> dict[str, int]:
     return out
 
 
-# candles a replay would touch, so an out of order close price overwrite is visible before it happens
 def _affected_candles(cur, start_block: int, end_block: int) -> list[tuple]:
     cur.execute(
         """
@@ -48,7 +45,6 @@ def _affected_candles(cur, start_block: int, end_block: int) -> list[tuple]:
     return cur.fetchall()
 
 
-# replay one cached block range through the sequencer without clearing any derived state
 async def repair(start_block: int, end_block: int, batch: int, dry_run: bool) -> None:
     min_cached, max_cached = storage.get_cached_block_range()
     if min_cached is None or start_block < min_cached or end_block > max_cached:

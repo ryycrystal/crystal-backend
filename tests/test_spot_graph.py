@@ -65,7 +65,6 @@ def _setup(monkeypatch, balance_wei: int):
     return sg
 
 
-# a fill covers exactly the wanted grid and values buckets at that hour's price
 def test_fill_covers_grid_and_prices_at_bucket_time(db, monkeypatch):
     sg = _setup(monkeypatch, 5 * 10**18)
     sg._fill(WALLET)
@@ -83,7 +82,6 @@ def test_fill_covers_grid_and_prices_at_bucket_time(db, monkeypatch):
     assert body["points"][-1]["v"] == 15.0
 
 
-# a bucket written once is immutable, so a refill can never rewrite history
 def test_buckets_are_immutable(db, monkeypatch):
     sg = _setup(monkeypatch, 5 * 10**18)
     sg._fill(WALLET)
@@ -96,7 +94,6 @@ def test_buckets_are_immutable(db, monkeypatch):
     assert after == before, "a second fill must not change or duplicate rows"
 
 
-# buckets before the first indexed trade are unknowable and never fabricated
 def test_grid_floors_at_indexed_history(db, monkeypatch):
     sg = _setup(monkeypatch, 10**18)
     wanted = sg._wanted_buckets(NOW)

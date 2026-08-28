@@ -7,7 +7,6 @@ import psycopg2
 from .base import _clean_text, db_cursor
 
 
-# insert or update one crystal market and its asset metadata
 def upsert_crystal_market(
     *,
     market: str,
@@ -131,7 +130,6 @@ def upsert_crystal_market(
         cur.execute(sql, params)
 
 
-# write the latest traded price for a market
 def update_crystal_market_price(
     market: str,
     last_price,
@@ -159,7 +157,6 @@ def update_crystal_market_price(
         cur.execute(sql, params)
 
 
-# write changed fee and size params for a market
 def update_crystal_market_params(
     market: str,
     min_size: int,
@@ -196,7 +193,6 @@ def update_crystal_market_params(
         cur.execute(sql, params)
 
 
-# attach any vaults that trade on this market
 def link_crystal_vaults_for_market(
     *,
     quote: str,
@@ -254,7 +250,6 @@ def link_crystal_vaults_for_market(
         cur.execute(sql, params)
 
 
-# load every market into memory at indexer startup
 def load_crystal_markets_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -273,7 +268,6 @@ def load_crystal_markets_for_state():
         return cur.fetchall()
 
 
-# every market as plain rows for diagnostics
 def list_crystal_markets_dump():
     with db_cursor() as cur:
         cur.execute(
@@ -312,7 +306,6 @@ def list_crystal_markets_dump():
         return cur.fetchall()
 
 
-# markets that have an amm pool enabled
 def list_crystal_pool_markets():
     with db_cursor() as cur:
         cur.execute(
@@ -343,7 +336,6 @@ def list_crystal_pool_markets():
         return cur.fetchall()
 
 
-# one amm pool market by address
 def get_crystal_pool_market(market: str):
     with db_cursor() as cur:
         cur.execute(

@@ -122,7 +122,6 @@ async def asyncio_sleep(sec: float) -> None:
     await asyncio.sleep(sec)
 
 
-# Clear the X endpoint cache when called with the clear query flag
 @router.post("/x")
 async def x_post(req: Request):
     q = req.query_params.get("clear") or ""
@@ -132,7 +131,6 @@ async def x_post(req: Request):
     return _respond({"error": "Missing ?clear=1 param"}, 400)
 
 
-# Resolve X user, tweet, or community URLs through the upstream X API proxy
 @router.get("/x")
 async def x_get(req: Request):
     if not API_KEY:

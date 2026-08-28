@@ -33,12 +33,10 @@ _TOKEN_URI_SELECTOR = "0x3c130d90"
 _GET_QUOTE_TOKEN_SELECTOR = "0x3df8a468"
 
 
-# abi encode an address as a call argument
 def _abi_addr_arg(addr: str) -> str:
     return (addr or "").lower().removeprefix("0x").rjust(64, "0")
 
 
-# decode an abi encoded string return value
 def _decode_abi_string(result: str | None) -> str:
     if not result or not isinstance(result, str) or result == "0x":
         return ""
@@ -58,7 +56,6 @@ def _decode_abi_string(result: str | None) -> str:
         return ""
 
 
-# decode an abi encoded address return value
 def _decode_abi_address(result: str | None) -> str:
     if not result or not isinstance(result, str) or result == "0x":
         return ""
@@ -68,7 +65,6 @@ def _decode_abi_address(result: str | None) -> str:
     return ("0x" + data_hex[-40:]).lower()
 
 
-# one blocking eth_call against the http rpc
 def _eth_call(to: str, data: str) -> str:
     payload = {
         "jsonrpc": "2.0",
@@ -84,7 +80,6 @@ def _eth_call(to: str, data: str) -> str:
     return body.get("result") or "0x"
 
 
-# read a string getter such as name or symbol off a token
 def _fetch_token_string(token: str, selector: str) -> str:
     try:
         return _decode_abi_string(_eth_call(token, selector))
@@ -97,7 +92,6 @@ _LAUNCHPAD_PARAMS_TTL = 300
 _LAUNCHPAD_PARAMS_CACHE: dict[str, Any] = {}
 
 
-# read v0 from launchpadparams, cached with a ttl because it is governance settable and the setter emits no event
 def _fetch_launchpad_initial_native_supply() -> int:
     cached = _LAUNCHPAD_PARAMS_CACHE.get("initial_native_supply")
     fetched_at = _LAUNCHPAD_PARAMS_CACHE.get("fetched_at")
@@ -120,17 +114,12 @@ def _fetch_launchpad_initial_native_supply() -> int:
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
 NADFUN_ADAPTERS = nadfun_geo.build_all()
 
-# explicit, not a catch-all: every nad.fun generation is a different curve, so an
-# address we have no adapter for must be refused rather than assumed to be v1.
-# adding a new deployment to NADFUN_ADDRESSES without an adapter would otherwise
-# measure it with v1 geometry and report plausible, wrong numbers
 _SOURCE_BY_EMITTER = {
     h.NADFUN_ADDR: nadfun_geo.SOURCE_V1,
     h.NADFUN_V2_ADDR: nadfun_geo.SOURCE_V2,
 }
 
 
-# internal source for the contract that emitted an event, none when unknown
 def _source_for_emitter(log_addr: str) -> int | None:
     src = (log_addr or "").lower()
     if src == (h.CONTRACTS.get("ROUTER", "") or "").lower():
@@ -146,17 +135,12 @@ def _source_for_emitter(log_addr: str) -> int | None:
     return None
 
 
-# explicit, not a catch-all: every nad.fun generation is a different curve, so an
-# address we have no adapter for must be refused rather than assumed to be v1.
-# adding a new deployment to NADFUN_ADDRESSES without an adapter would otherwise
-# measure it with v1 geometry and report plausible, wrong numbers
 _SOURCE_BY_EMITTER = {
     h.NADFUN_ADDR: nadfun_geo.SOURCE_V1,
     h.NADFUN_V2_ADDR: nadfun_geo.SOURCE_V2,
 }
 
 
-# internal source for the contract that emitted an event, none when unknown
 def _source_for_emitter(log_addr: str) -> int | None:
     src = (log_addr or "").lower()
     if src == (h.CONTRACTS.get("ROUTER", "") or "").lower():
@@ -175,7 +159,6 @@ def _source_for_emitter(log_addr: str) -> int | None:
 _ERC20_DECIMALS_SELECTOR = "0x313ce567"
 
 
-# read decimals off a token, none when it does not answer
 def _fetch_token_decimals(token: str) -> int | None:
     try:
         res = _eth_call(token, _ERC20_DECIMALS_SELECTOR)
@@ -188,7 +171,6 @@ def _fetch_token_decimals(token: str) -> int | None:
     return None
 
 
-# the quote token a v2 pair trades against
 def _fetch_v2_quote_token(token: str) -> str:
     try:
         data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
@@ -197,9 +179,7 @@ def _fetch_v2_quote_token(token: str) -> str:
         return WMON
 
 
-# all in memory indexer state and the handlers that mutate it
 class State:
-    # start with empty state and default prices
     def __init__(self) -> None:
         self._lock = threading.RLock()
 
@@ -227,14 +207,11 @@ class State:
         self._last_head_ts: int | None = None
 
         self.mon_price_usd = Decimal("0.03")
-        # lvmon per mon, parity until its pool is observed or the stored rate loads
         self.lvmon_rate = Decimal(1)
         self._basis_overlay: dict[tuple[str, str], list] = {}
         self._basis_block: int = -1
         self._seed_aux_prices()
 
-    # update the lvmon/mon rate and persist it. lvmon is not a wrapper, so its usd
-    # price is mon's scaled by whatever its own pool says it is worth right now
     def set_lvmon_rate(self, value) -> None:
         try:
             rate = Decimal(value)
@@ -254,7 +231,6 @@ class State:
         except Exception as e:
             print(f"[State] Failed to persist LVMON rate: {e!r}", flush=True)
 
-    # update the mon usd price and persist it
     def set_mon_price_usd(self, value) -> None:
         try:
             px = Decimal(value)
@@ -274,7 +250,6 @@ class State:
         except Exception as e:
             print(f"[State] failed to persist mon_price_usd: {e!r}")
 
-    # reload every token pool market and vault from storage on startup
     def rebuild_from_db(self) -> None:
         with self._lock:
             self.launchpad_tokens.clear()
@@ -550,7 +525,6 @@ class State:
                     lastWithdraw=int(last_withdraw or 0),
                 )
 
-    # clear state so a range can be reindexed from scratch
     def reset_for_reindex(self) -> None:
         with self._lock:
             self.launchpad_tokens.clear()
@@ -560,7 +534,6 @@ class State:
             self._reset_aux_locked()
             print("[State] Reset for reindex: cleared all in-memory state")
 
-    # create or complete a nadfun token row, fetching metadata when needed
     def ensure_v2_launchpad_token(
         self,
         token: str,
@@ -599,9 +572,6 @@ class State:
             )
             lp.created_block = int(blk)
             lp.created_at = int(ts or 0)
-            # this is by definition a v2 token, and writing 1 here left the row
-            # wrong until the next restart repaired it: the api reported v1 and the
-            # in memory curve ran v1 geometry for the whole interim
             lp.source = nadfun_geo.SOURCE_V2
             lp.quote_token = quote_token
             self.launchpad_tokens[token] = lp
@@ -628,8 +598,6 @@ class State:
             storage.mark_nadfun_v2(token, cur=cur)
 
             if token_uri:
-                # persist the uri before queuing: the queue is in memory, so a restart
-                # while a fetch is pending would otherwise lose it permanently
                 try:
                     storage.set_token_uri(token, token_uri, cur=cur)
                 except Exception:
@@ -647,7 +615,6 @@ class State:
             )
             return True
 
-    # handle tokencreated, seeding the token and its initial price
     def apply_token_created(
         self, blk: int, ev: dict, ts: int, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> None:
@@ -672,8 +639,6 @@ class State:
             source = int(ev.get("source", 0))
             quote_token = (ev.get("quote_token") or WMON).lower()
 
-            # each nad.fun generation is a different curve, so it gets its own
-            # internal source, the api still reports source 1 for both
             resolved = _source_for_emitter(src)
             if resolved is None:
                 return
@@ -683,9 +648,6 @@ class State:
 
             lp = self.launchpad_tokens.get(token)
             if lp is not None:
-                # the emitter is the ground truth for the generation. a row created
-                # by the preload or recovery path can carry a stale source, and
-                # keeping it wrong here measured the curve with the wrong geometry
                 if lp.source != source:
                     lp.source = source
                     storage.set_token_source(token, source, cur=cur)
@@ -763,9 +725,6 @@ class State:
                 cur=cur,
             )
 
-            # persist the uri so the metadata sweep can retry this token later. the
-            # fetch queue lives in memory, so without this a restart or a host that
-            # is down through every retry leaves the token blank permanently
             token_uri = (ev.get("token_uri") or "").strip()
             if token_uri:
                 try:
@@ -776,8 +735,6 @@ class State:
             if creator:
                 storage.increment_user_tokens_created(creator, cur=cur)
 
-            # only sources that hand liquidity to an external venue carry a pool
-            # on creation, so the presence of one is the condition, not the source
             pool = (ev.get("pool") or "").lower()
             if pool and quote_token and token != quote_token:
                 lp.market = pool
@@ -800,15 +757,11 @@ class State:
                     cur=cur,
                 )
 
-    # drop orphaned trades and recompute every affected token from what survives
-    # stub a native token whose tokencreated was never seen
     def _ensure_launchpad_token_locked(self, token: str, blk: int, ts: int, log_addr: str = "", cur=None):
         tok = (token or "").lower()
         if not tok:
             return None
 
-        # the emitting contract decides the source, assuming native would measure
-        # a nad.fun curve against native geometry and understate supply silently
         source = _source_for_emitter(log_addr)
         if source is None:
             return None
@@ -865,7 +818,6 @@ class State:
         )
         return lp
 
-    # handle a bonding curve trade, updating price curve volume and positions
     def apply_launchpad_trade(
         self,
         ev: dict,
@@ -878,11 +830,6 @@ class State:
         batch=None,
     ) -> None:
         with self._lock:
-            # deliberately not guarded: if this check cannot run we must not carry
-            # on as though the trade were new. the row would dedupe on the unique
-            # constraint but every aggregate above has already been mutated, so a
-            # redelivery during a database blip would double count volume, fees
-            # and positions. letting it raise fails the block so it is retried
             if txh and storage.trade_exists(txh, log_idx, cur=cur):
                 return
 
@@ -973,8 +920,6 @@ class State:
                 else:
                     pair_token_res, pair_native_res = sync_r1, sync_r0
 
-                # swap amounts are gross of the pair fee on buys and net on sells, which
-                # splits the chart into two bands, so the post swap reserve ratio wins
                 if pair_native_res > 0 and pair_token_res > 0:
                     price_native = Decimal(pair_native_res) / Decimal(pair_token_res)
                 else:
@@ -1042,17 +987,10 @@ class State:
                         lp.approaching_75_block = 0
                         lp.approaching_75_at = 0
                 elif adapter is None:
-                    # only sources without an adapter still accumulate, a running
-                    # sum desyncs permanently on one missed event and cannot
-                    # self correct, so it is a last resort not a fallback
                     if is_buy:
                         lp.circulating_supply += token_amt / 1e18
                     else:
                         lp.circulating_supply -= token_amt / 1e18
-                # adapter present but the event carried no curve state: the
-                # CurveSync was missed, reordered or lost across a restart, so
-                # supply and the threshold keep their last derived values and
-                # self correct on the next trade that does carry reserves
 
             lp.native_volume += native_amt
             lp.token_volume += token_amt
@@ -1227,7 +1165,6 @@ class State:
                         cur=cur,
                     )
 
-    # handle migrated, marking the token graduated
     def apply_migrated(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> str | None:
@@ -1291,7 +1228,6 @@ class State:
 
         return pool or None
 
-    # track holder balances from erc20 transfers
     def apply_token_transfer(
         self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
     ) -> None:
@@ -1314,7 +1250,6 @@ class State:
             zero = "0x" + "0" * 40
             internal = {a.lower() for a in getattr(h, "ADDRS", [])}
 
-            # apply one holder balance delta skipping internal addresses
             def adjust(user: str, delta: int) -> None:
                 addr = (user or "").lower()
                 if not addr or addr == zero or delta == 0:
@@ -1357,24 +1292,16 @@ class State:
             adjust(from_addr, -amount)
             adjust(to_addr, amount)
 
-    # seed stablecoin prices under the lock
     def _seed_aux_prices(self) -> None:
         with self._lock:
             self._seed_aux_prices_locked()
 
-    # set known stablecoins to one dollar
     def _seed_aux_prices_locked(self) -> None:
         self.tokenToPrice.clear()
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
 
-    # fee actually taken on one curve trade, derived from the native reserve delta
-    # rather than assumed, so a governance fee change is picked up immediately
-    # fee is the gap between what the user moved and what the curve moved, taken
-    # from the event rather than the caller's native_amt: that value is rewritten
-    # to the reserve delta for sells so volume is gross, which made this return
-    # debited - debited = 0 and silently dropped every sell side fee
     def _trade_fee_native(self, is_buy: bool, prev_native_reserve: int, ev: dict) -> int:
         try:
             new_reserve = int(ev.get("native_reserve") or 0)
@@ -1394,8 +1321,6 @@ class State:
             return 0
         return debited - payout
 
-    # open tokens and cost basis for a position, cached per block so several
-    # trades by the same user in one block stay consistent before the batch flush
     def _basis_for(self, user: str, token: str, cur=None) -> list:
         key = ((user or "").lower(), (token or "").lower())
         entry = self._basis_overlay.get(key)
@@ -1408,19 +1333,16 @@ class State:
             self._basis_overlay[key] = entry
         return entry
 
-    # drop the per block basis cache when the block advances
     def _basis_reset_if_new_block(self, blk: int) -> None:
         if blk != self._basis_block:
             self._basis_block = blk
             self._basis_overlay.clear()
 
-    # a buy adds its full cost to the basis
     def _basis_apply_buy(self, user: str, token: str, token_amt: int, native_amt: int, cur=None) -> None:
         entry = self._basis_for(user, token, cur=cur)
         entry[0] += int(token_amt)
         entry[1] += int(native_amt)
 
-    # a sell releases the basis share of the tokens leaving the position
     def _basis_apply_sell(self, user: str, token: str, token_amt: int, cur=None) -> int:
         entry = self._basis_for(user, token, cur=cur)
         open_tokens, cost_basis = entry[0], entry[1]
@@ -1437,14 +1359,12 @@ class State:
         entry[1] = cost_basis - released
         return released
 
-    # usd price for a quote token, mon for native equivalents
     def _quote_price_usd(self, quote_token: str) -> Decimal:
         quote = (quote_token or WMON).lower()
         if quote in NATIVE_EQUIV_QUOTES:
             return self.mon_price_usd if self.mon_price_usd > 0 else Decimal(0)
         return self.tokenToPrice.get(quote, Decimal(0))
 
-    # clear pools markets vaults and the price graph
     def _reset_aux_locked(self) -> None:
         self.addressToMarket.clear()
         self.tokenGraph.clear()
@@ -1462,7 +1382,6 @@ class State:
         self._last_head_ts = None
         self._seed_aux_prices_locked()
 
-    # record the newest seen block and its timestamp
     def note_head(self, blk: int, ts: int | None) -> None:
         with self._lock:
             self._last_head_block = int(blk)
@@ -1470,14 +1389,12 @@ class State:
                 self._last_head_ts = int(ts)
                 self._block_timestamps[int(blk)] = int(ts)
 
-    # remember one blocks timestamp
     def note_block_timestamp(self, blk: int, ts: int | None) -> None:
         if ts is None:
             return
         with self._lock:
             self._block_timestamps[int(blk)] = int(ts)
 
-    # best known timestamp for a block
     def block_ts(self, block: int) -> int:
         with self._lock:
             t = self._block_timestamps.get(int(block))
@@ -1485,18 +1402,15 @@ class State:
                 return int(t)
             return int(self._last_head_ts or 0)
 
-    # the newest block and timestamp seen
     def head_block_and_ts(self) -> tuple[int | None, int | None]:
         with self._lock:
             return self._last_head_block, self._last_head_ts
 
-    # log index of a raw log as an int
     @staticmethod
     def _raw_log_index(raw_log: dict) -> int:
         li = raw_log.get("logIndex")
         return int(li, 16) if isinstance(li, str) else int(li or 0)
 
-    # price a token at one dollar when it looks like a stablecoin
     def _maybe_seed_stable_price_locked(self, token: str, ticker: str, name: str) -> None:
         token_l = (token or "").lower()
         if not token_l:
@@ -1506,7 +1420,6 @@ class State:
         if t in _STABLE_TICKERS or n in _STABLE_TICKERS or " usd" in n or n.startswith("usd"):
             self.tokenToPrice[token_l] = Decimal(1)
 
-    # true when two markets trade the same asset pair either way round
     @staticmethod
     def _same_pair_unordered(a_quote: str, a_base: str, b_quote: str, b_base: str) -> bool:
         aq = (a_quote or "").lower()
@@ -1517,7 +1430,6 @@ class State:
             return False
         return (aq == bq and ab == bb) or (aq == bb and ab == bq)
 
-    # unlink a market from the price graph
     def _remove_market_from_token_graph_locked(self, market_addr: str) -> None:
         maddr = (market_addr or "").lower()
         if not maddr:
@@ -1530,7 +1442,6 @@ class State:
             else:
                 self.tokenGraph.pop(tok, None)
 
-    # link a market into the price graph for both assets
     def _add_market_to_token_graph_locked(self, mi: models.MarketInfo) -> None:
         if mi is None:
             return
@@ -1548,7 +1459,6 @@ class State:
                 continue
             items.append(mi)
 
-    # swap in a new canonical market for a pair
     def _replace_canonical_pair_market_locked(self, mi: models.MarketInfo) -> None:
         if mi is None or not bool(getattr(mi, "isCanonical", False)):
             return
@@ -1574,7 +1484,6 @@ class State:
         self._remove_market_from_token_graph_locked(maddr)
         self._add_market_to_token_graph_locked(mi)
 
-    # handle marketcreated, linking a graduated launchpad token to its market
     def apply_market_created(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -1687,7 +1596,6 @@ class State:
                     cur=cur,
                 )
 
-    # handle marketparamschanged, updating fees and sizes
     def apply_market_params_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -1718,7 +1626,6 @@ class State:
                 cur=cur,
             )
 
-    # keep a graduated tokens price volume positions and bars moving on its market
     def _record_graduated_launchpad_trade_locked(
         self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
     ) -> None:
@@ -1755,9 +1662,6 @@ class State:
         if quote_price > 0:
             usd_amount = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price
             lp.volume_usd += usd_amount
-            # a graduated token keeps earning, at the market's taker fee rather
-            # than the launchpad's. leaving this out meant a native token accrued
-            # no fees at all once it graduated, which is most of its lifetime
             fee_rate = self._pool_fee_rate(mi)
             if fee_rate > 0:
                 lp.fees_usd += usd_amount * fee_rate
@@ -1889,9 +1793,6 @@ class State:
                     realized_native=int(realized_delta),
                     cur=cur,
                 )
-                # the batch path persists token_state; this one used to write the
-                # trade row and drop it, so post-graduation volume, tx counts and
-                # fees lived only in memory and vanished on the next restart
                 storage.update_token_after_trade(
                     token=lp_addr,
                     last_price_native=lp.last_price_native,
@@ -1914,7 +1815,6 @@ class State:
             except Exception:
                 pass
 
-    # handle a market trade, routing graduated launchpad tokens back to their row
     def apply_market_trade(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0
     ) -> None:
@@ -1929,8 +1829,6 @@ class State:
             if mi is None:
                 return
 
-            # every exchange trade persists as a row: the taker half of the
-            # history ordercenter serves, maker fills live in the fills table
             storage.insert_market_trade(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
 
             try:
@@ -1969,10 +1867,6 @@ class State:
         if changed_tokens:
             self._refresh_pools_for_price_tokens(changed_tokens, blk=blk, ts=ts, cur=cur)
 
-    # strict univ2: k grows only through the in-price fee spread, so sqrt(k) growth
-    # over a trade IS the lp accrual, spread and compounding included, exact at any
-    # trade size. no percentage constant: takerFee is feeRecipient revenue and the
-    # 25bps factor is pricing, not a collectable cut
     def _pool_fees_from_k_growth_locked(
         self, mi: models.MarketInfo, prev_rq: int, prev_rb: int, new_rq: int, new_rb: int
     ) -> Decimal:
@@ -1988,7 +1882,6 @@ class State:
         except Exception:
             return Decimal(0)
 
-    # taker fee of a pool as a decimal rate
     @staticmethod
     def _pool_fee_rate(mi: models.MarketInfo) -> Decimal:
         try:
@@ -2000,7 +1893,6 @@ class State:
         except Exception:
             return Decimal(0)
 
-    # usd prices for both pool assets, decimal adjusted
     def _pool_effective_usd_prices_locked(
         self,
         mi: models.MarketInfo,
@@ -2009,8 +1901,6 @@ class State:
     ) -> tuple[Decimal, Decimal]:
         qd = int(getattr(mi, "quoteDecimals", 0) or 0)
         bd = int(getattr(mi, "baseDecimals", 0) or 0)
-        # zero decimals means discovery failed, and raw / 10**0 prices wei as whole
-        # tokens: a 1e18x inflation. an unpriced side is honest, an inflated one lies
         pq = Decimal(self.tokenToPrice.get((getattr(mi, "quoteAddress", "") or "").lower(), Decimal(0)) or 0)
         pb = Decimal(self.tokenToPrice.get((getattr(mi, "baseAddress", "") or "").lower(), Decimal(0)) or 0)
         if qd <= 0:
@@ -2026,7 +1916,6 @@ class State:
                 pq = (b_units * pb) / q_units
         return pq, pb
 
-    # usd value of both pool reserves
     def _pool_tvl_usd_locked(self, mi: models.MarketInfo, reserve_quote: int, reserve_base: int) -> Decimal:
         try:
             qd = int(getattr(mi, "quoteDecimals", 0) or 0)
@@ -2039,7 +1928,6 @@ class State:
         except Exception:
             return Decimal(0)
 
-    # usd notional of one pool trade
     def _pool_trade_volume_usd_locked(
         self,
         mi: models.MarketInfo,
@@ -2072,7 +1960,6 @@ class State:
         except Exception:
             return Decimal(0)
 
-    # recompute tvl and yields for pools holding a repriced token
     def _refresh_pools_for_price_tokens(self, tokens, *, blk: int, ts: int, cur=None) -> None:
         token_set = {str(t or "").lower() for t in (tokens or set()) if str(t or "").strip()}
         if not token_set:
@@ -2160,7 +2047,6 @@ class State:
                     cur=cur,
                 )
 
-    # handle a pool sync, updating reserves tvl and volume
     def apply_pool_sync(
         self,
         blk: int,
@@ -2246,9 +2132,6 @@ class State:
             mi.tvlUsd = tvl_usd
             mi.volume24hUsd = vol_24h
             mi.fees24hUsd = fees_24h
-            # yield is invariant growth per share over the window, not fee x volume:
-            # the fee is a spread, so a round trip nets less than 2x the rate and
-            # price impact reverses to zero. fee x volume let wash flow inflate apy
             mi.dailyYield24h = storage.pool_invariant_growth_since(market, max(0, int(ts or 0) - 24 * 3600), cur=cur)
             mi.apy24h = mi.dailyYield24h * Decimal(365)
 
@@ -2281,9 +2164,6 @@ class State:
                 cur=cur,
             )
 
-    # track lp share balances from pool token transfers
-    # persist one lp deposit or withdrawal. amounts come from the mint/burn event,
-    # the receiving user and share count attach from the paired lp token transfer
     def apply_pool_liquidity(self, kind, blk, ts, ev, log_addr, txh, log_idx, cur=None):
         if not ev:
             return
@@ -2306,19 +2186,16 @@ class State:
                 cur=cur,
             )
 
-    # persist a decoded orders-updated batch, replay safety lives in storage
     def apply_orderbook_orders(self, blk, ts, ev, log_addr, txh, log_idx, cur=None):
         if not ev or not ev.get("orders"):
             return
         storage.apply_orderbook_updates(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
 
-    # persist one maker fill, replay safety lives in storage
     def apply_orderbook_fill(self, blk, ts, ev, log_addr, txh, log_idx, cur=None):
         if not ev:
             return
         storage.apply_orderbook_fill(ev, int(blk or 0), int(ts or 0), txh or "", int(log_idx or 0), cur=cur)
 
-    # persist one user registration, replay safety lives in storage
     def apply_user_registered(self, blk, ts, ev, log_addr, cur=None):
         if not ev:
             return
@@ -2349,8 +2226,6 @@ class State:
                     total = 0
             mi.totalShares = total
 
-            # lp mint and burn transfers attribute the same-tx liquidity event and
-            # move cost basis: mint adds the deposit amounts, burn releases pro rata
             txh_attr = (ev.get("txhash") or "").lower()
             if txh_attr:
                 if from_addr == zero and to_addr and to_addr != zero:
@@ -2370,8 +2245,6 @@ class State:
                         txhash=txh_attr, market=token, kind="burn", shares=amount, cur=cur
                     )
                 elif to_addr == token and from_addr and from_addr != zero:
-                    # user sends lp tokens to the pair ahead of burn: release the
-                    # user's cost basis in proportion to the shares leaving
                     prior = int(storage.get_lp_user_shares(token, from_addr, cur=cur) or 0)
                     if prior > 0:
                         storage.apply_lp_cost_delta(
@@ -2419,7 +2292,6 @@ class State:
                 cur=cur,
             )
 
-    # propagate usd prices outward from known ones across the market graph
     def sweep(self) -> set[str]:
         with self._lock:
             changed: set[str] = set()
@@ -2460,13 +2332,11 @@ class State:
                         q.append(ba)
             return changed
 
-    # usd price for a token as a float
     def token_price(self, token: str) -> float:
         with self._lock:
             v = self.tokenToPrice.get((token or "").lower())
             return float(v) if v is not None else 0.0
 
-    # handle a new vault deployment
     def apply_vault_deployed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         if not ev:
             return
@@ -2567,7 +2437,6 @@ class State:
                 cur=cur,
             )
 
-    # handle a vault deposit and its share issuance
     def apply_vault_deposit(
         self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
     ) -> None:
@@ -2655,7 +2524,6 @@ class State:
                 except Exception:
                     pass
 
-    # handle a vault withdrawal and its share burn
     def apply_vault_withdraw(
         self, blk: int, ts: int, txh: str, ev: dict, log_addr: str, cur=None, batch=None, log_idx: int = 0
     ) -> None:
@@ -2738,7 +2606,6 @@ class State:
                 cur=cur,
             )
 
-    # mark a vault locked
     def apply_vault_locked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2749,7 +2616,6 @@ class State:
                 vobj.locked = True
                 storage.update_crystal_vault_fields(vault=vaddr, locked=True, updated_block=blk, updated_at=ts, cur=cur)
 
-    # mark a vault unlocked
     def apply_vault_unlocked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2762,7 +2628,6 @@ class State:
                     vault=vaddr, locked=False, updated_block=blk, updated_at=ts, cur=cur
                 )
 
-    # mark a vault closed
     def apply_vault_closed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2773,7 +2638,6 @@ class State:
                 vobj.closed = True
                 storage.update_crystal_vault_fields(vault=vaddr, closed=True, updated_block=blk, updated_at=ts, cur=cur)
 
-    # update a vaults share cap
     def apply_vault_max_shares_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2789,7 +2653,6 @@ class State:
                     cur=cur,
                 )
 
-    # update a vaults lockup period
     def apply_vault_lockup_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
             if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
@@ -2805,7 +2668,6 @@ class State:
                     cur=cur,
                 )
 
-    # update whether a vault decreases on withdraw
     def apply_vault_decrease_on_withdraw_changed(
         self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None
     ) -> None:
@@ -2823,17 +2685,12 @@ class State:
                     cur=cur,
                 )
 
-    # drop history entries older than the horizon
     @staticmethod
     def _prune_history(dq: deque, now_ts: int, horizon: int) -> None:
         cutoff = max(0, int(now_ts) - int(horizon))
         while dq and int(dq[0].get("timestamp", 0)) < cutoff:
             dq.popleft()
 
-    # the share counter is replayed from events, and any missed or double applied
-    # event mis-prices every depositor from then on. the chain total supply is the
-    # truth, so the sampler hands it here and a divergence is corrected and logged
-    # record a referral binding from the manager's event
     def apply_referral(self, blk: int, ts: int, ev: dict, log_idx: int = 0, cur=None) -> None:
         if not ev or not ev.get("referee") or ev.get("referee") == "0x" + "0" * 40:
             return
@@ -2866,7 +2723,6 @@ class State:
             except Exception:
                 pass
 
-    # store one sampled vault balance and its usd value
     def record_vault_balance_sample(
         self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int, shares: int | None = None
     ) -> None:
@@ -2886,9 +2742,6 @@ class State:
             pq = Decimal(self.tokenToPrice.get(qaddr, Decimal(0)) or 0)
             pb = Decimal(self.tokenToPrice.get(baddr, Decimal(0)) or 0)
 
-            # unknown decimals must not price raw wei as whole tokens. the raw
-            # balances are still recorded so the series has the point, but its usd
-            # value stays zero rather than inflated by up to 1e18
             if qd <= 0:
                 pq = Decimal(0)
             if bd <= 0:
@@ -2930,7 +2783,6 @@ class State:
                 shares=shares_val,
             )
 
-    # replay cached logs to rebuild pool market and vault state
     def rebuild_aux_from_cached_logs(
         self,
         batch_size: int = 2000,

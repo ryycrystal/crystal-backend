@@ -1,14 +1,11 @@
-# last 20 bytes of a log topic as a hex address
 def to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
 
-# split a hex payload into n char words
 def chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
 
-# decode a launchpadtrade log into direction amounts and both reserves
 def parse_launchpad_trade(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     user = to_addr(tops[2]).lower()
@@ -32,14 +29,12 @@ def parse_launchpad_trade(_addr, tops, data):
     }
 
 
-# decode a tokencreated log including its abi encoded string tail
 def parse_token_created(_addr, tops, data):
     token = to_addr(tops[1]).lower()
     creator = to_addr(tops[2]).lower()
 
     words = list(chunks(data, 64))
 
-    # follow one abi string offset and decode it
     def read_string(head_index: int) -> str:
         if head_index >= len(words):
             return ""
@@ -90,7 +85,6 @@ def parse_token_created(_addr, tops, data):
     }
 
 
-# decode a migrated log, it carries only the token
 def parse_migrated(_addr, tops, _data):
     token = to_addr(tops[1]).lower()
     return {"token": token}

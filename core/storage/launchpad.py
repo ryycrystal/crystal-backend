@@ -12,7 +12,6 @@ from .base import db_cursor
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
 
-# mark one block as indexed
 def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -37,7 +36,6 @@ def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | 
         )
 
 
-# mark many blocks as indexed in one statement
 def record_blocks_processed_batch(block_numbers: list[int], cur: psycopg2.extensions.cursor | None = None) -> None:
     if not block_numbers:
         return
@@ -55,7 +53,6 @@ def record_blocks_processed_batch(block_numbers: list[int], cur: psycopg2.extens
         execute_values(cur, query, rows, page_size=10000)
 
 
-# highest block the indexer has committed
 def get_last_processed_block() -> str | None:
     with db_cursor() as cur:
         cur.execute("SELECT MAX(number) FROM launchpad_blocks;")
@@ -68,7 +65,6 @@ def get_last_processed_block() -> str | None:
     return int(last) if last is not None else None
 
 
-# write one trade row, ignoring a duplicate txhash and log index
 def insert_trade(
     *,
     block_number: int,
@@ -171,7 +167,6 @@ def insert_trade(
 def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | None = None) -> dict:
     tok = (token or "").lower()
 
-    # run the aggregate query on a cursor
     def _run(c):
         c.execute(
             """
@@ -215,7 +210,6 @@ def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | No
     return _run(cur)
 
 
-# true when a trade with this txhash and log index is already stored
 def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | None = None) -> bool:
     tx = (txhash or "").lower()
     if not tx:
@@ -229,7 +223,6 @@ def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | 
     return cur.fetchone() is not None
 
 
-# write a tokens aggregate state after a trade, raising its ath
 def update_token_after_trade(
     *,
     token: str,
@@ -339,7 +332,6 @@ def update_token_after_trade(
         )
 
 
-# accumulate one users volume trade count and realized pnl
 def update_user_on_trade(
     *, address: str, native_amount: int, realized_delta, cur: psycopg2.extensions.cursor | None = None
 ) -> None:
@@ -394,7 +386,6 @@ def update_user_on_trade(
         )
 
 
-# open token count and cost basis for one position, zeros when it does not exist
 def get_position_basis(user_address: str, token: str, cur=None) -> tuple[int, int]:
     addr = (user_address or "").lower()
     tok = (token or "").lower()
@@ -422,7 +413,6 @@ def get_position_basis(user_address: str, token: str, cur=None) -> tuple[int, in
     return _run(cur)
 
 
-# apply one position delta for a user and token
 def upsert_position(
     *,
     user_address: str,
@@ -583,7 +573,6 @@ def upsert_position(
         )
 
 
-# open high low close and volume for one bucket
 def upsert_ohlcv(
     *,
     token: str,
@@ -660,7 +649,6 @@ def upsert_ohlcv(
         )
 
 
-# record a sniper, returning whether the row was new
 def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.cursor | None = None) -> bool:
     tok = token.lower()
     addr = user_address.lower()
@@ -710,7 +698,6 @@ def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.c
     return inserted
 
 
-# insert or update a token row from a tokencreated event
 def upsert_token_created(
     *,
     token: str,
@@ -851,7 +838,6 @@ def upsert_token_created(
         )
 
 
-# bump a creators launched token count
 def increment_user_tokens_created(address: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     addr = address.lower()
     if not addr:
@@ -880,7 +866,6 @@ def increment_user_tokens_created(address: str, cur: psycopg2.extensions.cursor 
         )
 
 
-# flag a token as migrated, keeping any market already linked
 def mark_token_migrated(
     *,
     token: str,
@@ -921,7 +906,6 @@ def mark_token_migrated(
         )
 
 
-# link a graduated token to its market
 def update_launchpad_token_market(
     *,
     token: str,
@@ -944,7 +928,6 @@ def update_launchpad_token_market(
         cur.execute(sql, (mkt, tok))
 
 
-# write the latest price for a token
 def update_launchpad_token_price(
     *,
     token: str,
@@ -966,7 +949,6 @@ def update_launchpad_token_price(
         cur.execute(sql, (last_price_native, tok))
 
 
-# apply fetched metadata to many tokens at once
 def update_token_metadata_batch(metadata_list: list[dict]) -> None:
     if not metadata_list:
         return
@@ -997,7 +979,6 @@ def update_token_metadata_batch(metadata_list: list[dict]) -> None:
             )
 
 
-# bump a creators graduated token count
 def increment_user_tokens_graduated(address: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     addr = address.lower()
     if not addr:
@@ -1026,7 +1007,6 @@ def increment_user_tokens_graduated(address: str, cur: psycopg2.extensions.curso
         )
 
 
-# insert or update one v2 or v3 pool
 def upsert_pool(
     *,
     pool: str,
@@ -1084,7 +1064,6 @@ def upsert_pool(
         )
 
 
-# every known pool for state rebuild
 def load_all_pools():
     with db_cursor() as cur:
         cur.execute("""
@@ -1094,7 +1073,6 @@ def load_all_pools():
         return cur.fetchall()
 
 
-# every launchpad token for state rebuild
 def load_tokens_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -1139,7 +1117,6 @@ def load_tokens_for_state():
         return cur.fetchall()
 
 
-# name and symbol search over launchpad tokens
 def search_tokens(query: str, limit: int = 20):
     q = (query or "").strip().lower()
     if not q:
@@ -1207,8 +1184,6 @@ def search_tokens(query: str, limit: int = 20):
         return cur.fetchall()
 
 
-# a social slot reduced to a bare hostname: scheme and a leading www. removed, path
-# and query dropped. matches the normalisation the client applies to a blacklist entry
 def _host_expr(col: str) -> str:
     return (
         "regexp_replace("
@@ -1217,8 +1192,6 @@ def _host_expr(col: str) -> str:
     )
 
 
-# a social slot reduced to a bare twitter handle, or null when the slot is not twitter.
-# returning null rather than the raw value keeps a website from matching a handle
 def _handle_expr(col: str) -> str:
     tw = r"'^(https?://)?(www\.)?(x|twitter)\.com/'"
     return (
@@ -1230,8 +1203,6 @@ def _handle_expr(col: str) -> str:
     )
 
 
-# blacklist exclusions as a sql fragment plus params, shared by every list endpoint.
-# built once so /tokens and /search/query cannot drift into normalising differently
 def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], list]:
     ex = ex or {}
     a = f"{alias}." if alias else ""
@@ -1241,9 +1212,6 @@ def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], lis
     def norm(key):
         return [str(v).strip().lower() for v in (ex.get(key) or []) if str(v).strip()]
 
-    # the column expressions produce a bare host and a bare handle, so the incoming
-    # values have to be reduced the same way. the client already sends them bare, but
-    # a full url arriving here would otherwise silently match nothing
     def norm_host(key):
         out = []
         for v in norm(key):
@@ -1277,9 +1245,6 @@ def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], lis
         vals = prep(key)
         if not vals:
             continue
-        # coalesce is load bearing: the handle expression is null for a slot that is
-        # not twitter, and NOT (null OR false) is null, which drops the row. without
-        # it a single twitter entry emptied the whole feed
         clauses = [f"COALESCE({build(f'{a}social{i}')}, '')" for i in range(1, 5)]
         where.append("NOT (" + " OR ".join(f"({c}) = ANY(%s)" for c in clauses) + ")")
         params.extend([vals] * len(clauses))
@@ -1287,9 +1252,6 @@ def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], lis
     return where, params
 
 
-# filtered token search. every filter is applied in SQL rather than to an already
-# truncated page, because filtering the top 50 silently hides a token that matches
-# but ranks 51st -- results that are wrong rather than merely incomplete
 def search_tokens_filtered(
     *,
     query: str = "",
@@ -1311,7 +1273,6 @@ def search_tokens_filtered(
         where.append("(LOWER(t.symbol) LIKE %s OR LOWER(t.name) LIKE %s OR LOWER(t.token) LIKE %s)")
         params += [like, like, like]
 
-    # phase is derived from migration plus the curve flag, not a stored column
     phase = (f.get("phase") or "").strip().lower()
     if phase == "graduated":
         where.append("t.migrated = TRUE")
@@ -1329,7 +1290,6 @@ def search_tokens_filtered(
             where.append(f"{col} <= %s")
             params.append(Decimal(str(hi)))
 
-    # age arrives in minutes: a larger age_min means an older token, so a smaller ts
     now = int(time.time())
     if f.get("age_min") is not None:
         where.append("t.created_at <= %s")
@@ -1338,8 +1298,6 @@ def search_tokens_filtered(
         where.append("t.created_at >= %s")
         params.append(now - int(float(f["age_max"]) * 60))
 
-    # nad.fun v1 and v2 are both reported as source 1 on the wire, so a request for
-    # nad.fun has to match either generation
     src = f.get("source")
     if src is not None and str(src).strip() != "":
         if int(src) == 0:
@@ -1347,9 +1305,6 @@ def search_tokens_filtered(
         else:
             where.append("t.source <> 0")
 
-    # blacklist exclusions run in sql for the same reason the filters do: applied to
-    # the current page they hide what happens to be on screen and miss every other
-    # match, which is a promise the feature cannot keep
     bl_where, bl_params = blacklist_clauses(f, "t")
     where.extend(bl_where)
     params.extend(bl_params)
@@ -1360,7 +1315,6 @@ def search_tokens_filtered(
     rng("t.sell_count", "sell_tx_min", "sell_tx_max")
     rng("t.last_price_native", "price_min", "price_max")
 
-    # marketcap is price x total supply x the live mon price
     if mon > 0:
         for key, op in (("marketcap_min", ">="), ("marketcap_max", "<=")):
             v = f.get(key)
@@ -1377,8 +1331,6 @@ def search_tokens_filtered(
         for term in terms:
             params += [f"%{term}%", f"%{term}%"]
 
-    # socials are matched by host across all four slots, because slot order is not
-    # guaranteed -- social1 is not reliably twitter
     cols = ("t.social1", "t.social2", "t.social3", "t.social4")
     for key, hosts in (
         ("has_twitter", ("%x.com/%", "%twitter.com/%")),
@@ -1401,8 +1353,6 @@ def search_tokens_filtered(
 
     where_sql = " AND ".join(where) if where else "TRUE"
 
-    # holder derived metrics need launchpad_positions, so they are computed per
-    # candidate row and filtered in the outer query
     derived: list[str] = []
     dparams: list = []
 
@@ -1431,10 +1381,6 @@ def search_tokens_filtered(
         "recent": "b.created_at DESC",
     }.get((sort or "").lower(), "b.created_at DESC")
 
-    # percentages are of the 1e27 total supply, so raw balance / 1e25. the holder
-    # derived numbers come from ONE pass over launchpad_positions grouped by token,
-    # joined onto the candidates: the per row correlated subqueries ran six index
-    # probes per candidate, which at 31k candidates was a seven second query
     base = f"""
         WITH agg AS (
             SELECT token,
@@ -1506,7 +1452,6 @@ def search_tokens_filtered(
     return tokens, circ, total
 
 
-# persist the latest mon usd price
 def set_mon_price_usd(value) -> None:
     val = Decimal(value)
     with db_cursor() as cur:
@@ -1521,7 +1466,6 @@ def set_mon_price_usd(value) -> None:
         )
 
 
-# last persisted mon usd price
 def get_mon_price_usd():
     with db_cursor() as cur:
         cur.execute(
@@ -1535,7 +1479,6 @@ def get_mon_price_usd():
     return row[0] if row else None
 
 
-# addresses excluded from holder counts
 def load_holder_denylist() -> list[str]:
     try:
         with db_cursor() as cur:
@@ -1545,7 +1488,6 @@ def load_holder_denylist() -> list[str]:
         return []
 
 
-# flag a nadfun token as being on the v2 curve
 def mark_nadfun_v2(token: str, cur: psycopg2.extensions.cursor | None = None) -> None:
     tok = (token or "").lower()
     if not tok:
@@ -1558,7 +1500,6 @@ def mark_nadfun_v2(token: str, cur: psycopg2.extensions.cursor | None = None) ->
         cur.execute(sql, (tok,))
 
 
-# every nadfun token known to be on v2
 def load_nadfun_v2_tokens() -> list[str]:
     try:
         with db_cursor() as cur:
@@ -1568,7 +1509,6 @@ def load_nadfun_v2_tokens() -> list[str]:
         return []
 
 
-# zero one users position in a token
 def clear_position(
     *,
     user_address: str,
@@ -1599,7 +1539,6 @@ def clear_position(
         )
 
 
-# cache one blocks raw logs for replay
 def write_block_logs(block_number: int, logs: list[dict], cur: psycopg2.extensions.cursor | None = None) -> None:
     if not logs:
         logs = []
@@ -1624,8 +1563,6 @@ def write_block_logs(block_number: int, logs: list[dict], cur: psycopg2.extensio
         )
 
 
-# cache raw logs for many blocks at once, one statement so a remote database
-# costs one round trip instead of one per block
 def write_block_logs_batch(blocks: dict[int, list[dict]], cur) -> None:
     if not blocks:
         return
@@ -1637,7 +1574,6 @@ def write_block_logs_batch(blocks: dict[int, list[dict]], cur) -> None:
     )
 
 
-# cached raw logs for one block
 def get_block_logs(block_number: int) -> list[dict] | None:
     with db_cursor() as cur:
         cur.execute(
@@ -1654,7 +1590,6 @@ def get_block_logs(block_number: int) -> list[dict] | None:
     return row[0] or []
 
 
-# cached raw logs for a block range
 def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int, list[dict]]:
     result: dict[int, list[dict]] = {}
     if cur is None:
@@ -1683,7 +1618,6 @@ def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int
     return result
 
 
-# write many trade rows in one statement
 def insert_trades_batch(trades: list[tuple], cur) -> None:
     if not trades:
         return
@@ -1703,7 +1637,6 @@ def insert_trades_batch(trades: list[tuple], cur) -> None:
     )
 
 
-# write many token aggregate updates in one statement
 def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
     if not token_updates:
         return
@@ -1764,7 +1697,6 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
     )
 
 
-# write many user aggregate updates in one statement
 def update_users_batch(user_updates: dict[str, dict], cur) -> None:
     if not user_updates:
         return
@@ -1787,7 +1719,6 @@ def update_users_batch(user_updates: dict[str, dict], cur) -> None:
     )
 
 
-# apply many position deltas in one statement
 def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -> None:
     if not position_updates:
         return
@@ -1854,7 +1785,6 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         )
 
 
-# merge and write many ohlcv bar updates in one statement
 def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
     if not ohlcv_data:
         return
@@ -1895,7 +1825,6 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
     )
 
 
-# insert many snipers and return which rows were new
 def add_snipers_batch(snipers: list[tuple[str, str]], cur) -> set[tuple[str, str]]:
     if not snipers:
         return set()
@@ -1913,7 +1842,6 @@ def add_snipers_batch(snipers: list[tuple[str, str]], cur) -> set[tuple[str, str
     return set(snipers)
 
 
-# wipe derived pool and vault tables before a rebuild
 def clear_derived_state_from_block(start_block: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -1922,19 +1850,11 @@ def clear_derived_state_from_block(start_block: int, cur=None) -> None:
         _clear_derived_state_impl(start_block, cur)
 
 
-# the deletes behind clear derived state
-# referral_bindings, referral_rewards and the referral_seed kv markers are
-# deliberately NOT cleared here: pre deploy cached logs contain no referral
-# events, so a reindex cannot re-derive them and clearing loses them forever.
-# if they are ever cleared, the referral_seeded marker must be cleared with them
 def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM crystal_pool_tvl_samples")
     cur.execute("DELETE FROM crystal_pool_sync_events")
     cur.execute("DELETE FROM crystal_pool_lp_users")
     cur.execute("DELETE FROM crystal_pools")
-    # crystal_vault_balance_samples is sampler observed over rpc, not log derived:
-    # a replay cannot rebuild it, so wiping it permanently destroys the per share
-    # nav history behind vault pnl and apy. it must survive every reindex
     cur.execute("DELETE FROM crystal_vault_deposits")
     cur.execute("DELETE FROM crystal_vault_withdrawals")
     cur.execute("DELETE FROM crystal_vault_users")
@@ -1955,7 +1875,6 @@ def _clear_derived_state_impl(start_block: int, cur) -> None:
     cur.execute("DELETE FROM launchpad_blocks")
 
 
-# lowest and highest block held in the raw log cache
 def get_cached_block_range(cur=None) -> tuple[int | None, int | None]:
     if cur is None:
         with db_cursor() as cur2:
@@ -1998,8 +1917,6 @@ def tokens_changed_since(tokens: list[str], *, since_block: int = 0, since_ts: i
         return {(r[0] or "").lower() for r in cur.fetchall()}
 
 
-# remember where a token's metadata came from, so a failed fetch can be retried
-# after a restart. the in memory queue does not survive one
 def set_token_uri(token: str, token_uri: str, cur=None) -> None:
     tok = (token or "").lower()
     uri = (token_uri or "").strip()
@@ -2019,19 +1936,6 @@ def set_token_uri(token: str, token_uri: str, cur=None) -> None:
         _run(cur)
 
 
-# tokens that still have no image or description but do have somewhere to fetch it
-# from. drives the sweep that makes metadata self healing across restarts.
-#
-# least recently tried first, rather than newest first. newest first only ever
-# showed the sweep the same top slice, so once the backlog grew past one batch
-# every token older than that slice was never retried again — tokens whose host
-# was briefly down stayed blank permanently.
-#
-# each failed attempt also pushes the next one further out, doubling from an hour
-# up to a week. a host that is genuinely gone stops crowding out the tokens that
-# would resolve, but nothing is abandoned outright: a uri that comes back is
-# still picked up, just not on every pass. new tokens do not depend on any of
-# this, they are queued directly when discovered and this is only the backstop
 def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
     with db_cursor() as cur:
         cur.execute(
@@ -2050,9 +1954,6 @@ def tokens_missing_metadata(limit: int = 500) -> list[tuple[str, str]]:
         return [((r[0] or "").lower(), r[1] or "") for r in cur.fetchall()]
 
 
-# record that the sweep has just tried these tokens. counting the attempt when it
-# is queued rather than when it answers means a uri that hangs or never returns
-# still backs off, instead of being picked again on every pass
 def mark_metadata_attempted(tokens: list[str], cur=None) -> None:
     if not tokens:
         return
@@ -2075,8 +1976,6 @@ def mark_metadata_attempted(tokens: list[str], cur=None) -> None:
         _run(cur)
 
 
-# tokens with no metadata and no uri to fetch it from. these predate the uri being
-# persisted, so the sweep has to recover the uri from the token contract first
 def tokens_missing_uri(limit: int = 200) -> list[str]:
     with db_cursor() as cur:
         cur.execute(
@@ -2093,7 +1992,6 @@ def tokens_missing_uri(limit: int = 200) -> list[str]:
         return [(r[0] or "").lower() for r in cur.fetchall()]
 
 
-# repair the stored generation for a token whose emitter proved the row wrong
 def set_token_source(token: str, source: int, cur=None) -> None:
     sql = "UPDATE launchpad_tokens SET source = %s WHERE token = %s"
     params = (int(source), (token or "").lower())
@@ -2104,9 +2002,6 @@ def set_token_source(token: str, source: int, cur=None) -> None:
         c.execute(sql, params)
 
 
-# cached fee config for a dex pair, fetched from the pair's fee collector on chain.
-# ok=false records a revert, meaning a plain pair with no collector, so the client
-# can classify it as general without a chain read of its own
 def upsert_pair_fees(
     pair: str,
     *,
@@ -2150,7 +2045,6 @@ def upsert_pair_fees(
         )
 
 
-# cached row for a pair, none when never fetched
 def get_pair_fees(pair: str) -> dict | None:
     with db_cursor() as cur:
         cur.execute(
@@ -2177,7 +2071,6 @@ def get_pair_fees(pair: str) -> dict | None:
     }
 
 
-# migrated nadfun pairs the sweep has not fetched fees for yet
 def pairs_missing_fees(limit: int = 100) -> list[str]:
     with db_cursor() as cur:
         cur.execute(
@@ -2192,7 +2085,6 @@ def pairs_missing_fees(limit: int = 100) -> list[str]:
         return [(r[0] or "").lower() for r in cur.fetchall()]
 
 
-# cached fee rows for many pairs in one round trip, keyed by pair
 def get_pair_fees_batch(pairs: list[str]) -> dict[str, dict]:
     pairs = [(p or "").lower() for p in pairs if p]
     if not pairs:
@@ -2223,7 +2115,6 @@ def get_pair_fees_batch(pairs: list[str]) -> dict[str, dict]:
     return out
 
 
-# taker fee per crystal market for many markets in one round trip
 def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
     markets = [(m or "").lower() for m in markets if m]
     if not markets:
@@ -2233,7 +2124,6 @@ def get_taker_fees_batch(markets: list[str]) -> dict[str, str]:
         return {r[0]: str(int(r[1] or 0)) for r in cur.fetchall()}
 
 
-# small key value store for indexer level facts, currently the chain tip identity
 def set_meta(key: str, value: str, cur=None) -> None:
     sql = """
         INSERT INTO launchpad_kv (key, value) VALUES (%s, %s)
@@ -2253,17 +2143,11 @@ def get_meta(key: str) -> str | None:
     return row[0] if row else None
 
 
-# remember the newest block whose hash we know, so a restart can prove the chain
-# we resume on is the chain we left. a rollback style hard fork rewrites history
-# under our feet and this is the only trace that catches it
 def record_chain_tip(number: int, block_hash: str, cur=None) -> None:
     set_meta("tip_block", str(int(number)), cur=cur)
     set_meta("tip_hash", (block_hash or "").lower(), cur=cur)
 
 
-# true when a wallet has ever touched crystal: traded any indexed launchpad token,
-# placed an orderbook order, held lp shares, or deposited into a vault. wallets
-# outside this set get no server side rpc spend, they are not our users
 def wallet_has_crystal_activity(wallet: str) -> bool:
     addr = (wallet or "").lower()
     if not addr:
@@ -2282,7 +2166,6 @@ def wallet_has_crystal_activity(wallet: str) -> bool:
     return bool(row and row[0])
 
 
-# one immutable spot graph bucket, first write wins because history cannot change
 def write_spot_graph_bucket(
     wallet: str,
     bucket_ts: int,
@@ -2305,7 +2188,6 @@ def write_spot_graph_bucket(
         c.execute(sql, params)
 
 
-# cached spot graph buckets for one wallet, oldest first
 def get_spot_graph_buckets(wallet: str, since_ts: int) -> list[tuple[int, Decimal, Decimal]]:
     with db_cursor() as cur:
         cur.execute(
@@ -2320,7 +2202,6 @@ def get_spot_graph_buckets(wallet: str, since_ts: int) -> list[tuple[int, Decima
         return [(int(t), v or Decimal(0), n or Decimal(0)) for t, v, n in cur.fetchall()]
 
 
-# bucket timestamps already computed for one wallet
 def get_spot_graph_bucket_set(wallet: str, since_ts: int) -> set[int]:
     with db_cursor() as cur:
         cur.execute(
@@ -2330,7 +2211,6 @@ def get_spot_graph_bucket_set(wallet: str, since_ts: int) -> set[int]:
         return {int(r[0]) for r in cur.fetchall()}
 
 
-# processed blocks in a window with no cached log row, which a clean reindex would silently drop
 def count_uncached_processed_blocks(start_block: int, end_block: int, cur=None) -> int:
     sql = """
         SELECT COUNT(*)
@@ -2346,8 +2226,6 @@ def count_uncached_processed_blocks(start_block: int, end_block: int, cur=None) 
         return int(c.fetchone()[0])
 
 
-# the newest indexed trade's chain timestamp: trades flow every block on this
-# chain, so an old value means the indexer is replaying history, not at head
 def latest_trade_timestamp() -> int:
     with db_cursor() as cur:
         cur.execute("SELECT MAX(timestamp) FROM launchpad_trades")
@@ -2355,8 +2233,6 @@ def latest_trade_timestamp() -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-# a graduated pair's reserves, straight off its sync log. reserve0/reserve1 are
-# positional on the pair, so token_is_0 decides which side is the token
 def update_pool_reserves(pool: str, reserve0: int, reserve1: int, blk: int, blk_ts: int, cur=None) -> None:
     sql = """
         UPDATE launchpad_pools
@@ -2383,7 +2259,6 @@ def update_pool_reserves(pool: str, reserve0: int, reserve1: int, blk: int, blk_
         cur.execute(sql, args)
 
 
-# reserves for the pools of many tokens at once, for list serialisation
 def pool_reserves_for_tokens(tokens: list[str], cur=None) -> dict[str, dict]:
     if not tokens:
         return {}
@@ -2406,11 +2281,6 @@ def pool_reserves_for_tokens(tokens: list[str], cur=None) -> dict[str, dict]:
     }
 
 
-# mon priced in usd per time bucket, taken from indexed trades. every launchpad
-# trade records both its native amount and its usd value, so their ratio is an
-# observation of mon/usd at that moment. a chart denominated in usd has to
-# convert each candle with the rate from that candle's own time, otherwise the
-# whole history silently rewrites itself whenever mon moves
 def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) -> list[tuple[int, float]]:
     resolution = max(int(resolution), 1)
     with db_cursor() as cur:
@@ -2434,9 +2304,6 @@ def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) ->
         return [(int(b), float(r)) for b, r in cur.fetchall() if r is not None]
 
 
-# everything a wallet has done, newest first, across the event types we index:
-# launchpad buys and sells plus vault deposits and withdrawals. one feed rather
-# than one tab per kind, so the page can answer "what did i just do"
 def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = None) -> list[dict]:
     addrs = [str(u).lower() for u in (users or [])]
     if not addrs:
@@ -2497,8 +2364,6 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
     ]
 
 
-# lvmon priced in mon, persisted so a restart keeps the last observed rate instead
-# of falling back to parity and overstating every token quoted in lvmon
 def set_lvmon_rate(value) -> None:
     val = Decimal(value)
     with db_cursor() as cur:
@@ -2513,7 +2378,6 @@ def set_lvmon_rate(value) -> None:
         )
 
 
-# last persisted lvmon/mon rate, none when never observed
 def get_lvmon_rate():
     with db_cursor() as cur:
         cur.execute("SELECT value FROM launchpad_meta WHERE key = 'lvmon_mon_rate';")

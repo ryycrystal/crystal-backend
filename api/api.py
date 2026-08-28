@@ -22,20 +22,16 @@ from core.storage import db_cursor
 getcontext().prec = 100
 
 
-# the generation each nad.fun curve belongs to, kept off the wire because the
-# frontend maps source === 1 onto "nadfun"
 def _api_source(source) -> int:
     return 1 if _nadfun_geo.is_nadfun_source(source) else int(source or 0)
 
 
-# curve supply for a source, each nad.fun generation sells a different amount
 def _curve_supply_for(source) -> int:
     if _nadfun_geo.is_nadfun_source(source):
         return _nadfun_geo.curve_supply_for(source)
     return _NATIVE_CURVE_SUPPLY
 
 
-# derive phase and progress from stored fields so they cannot drift from the data
 def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict[str, Any]:
     src = int(source or 0)
     curve_supply = _curve_supply_for(src)
@@ -51,9 +47,6 @@ def _lifecycle_fields(*, source, circulating_supply, tx_count, migrated) -> dict
         migrated=done and src != 0,
     )
     bps = curve.progress_bps
-    # circulating_supply is stored floored to whole tokens while the v2 curve supply
-    # is fractional, so a fully sold v2 curve lands one unit short and reads 99.99%
-    # next to a native token's 100%. a token that has left the curve is done
     if done:
         bps = 10000
     return {"phase": phase.value, "progressBps": bps}
@@ -75,7 +68,6 @@ LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 
 
-# format a decimal as a trimmed plain string, 0 when empty or invalid
 def _fmt(value) -> str:
     if value is None:
         return "0"
@@ -94,7 +86,6 @@ def _fmt(value) -> str:
     return s if s else "0"
 
 
-# format a usd decimal to 8dp as a trimmed plain string
 def _fmt_usd(value) -> str:
     if value is None:
         return "0"
@@ -113,7 +104,6 @@ def _fmt_usd(value) -> str:
     return s if s else "0"
 
 
-# shape one crystal pool row for the api
 def _crystal_pool_row_to_api(row) -> dict[str, Any]:
     (
         market,
@@ -165,8 +155,6 @@ def _crystal_pool_row_to_api(row) -> dict[str, Any]:
             "name": base_name or "",
         },
         "marketType": int(market_type or 0),
-        # the list query gates on is_canonical, so every served pool is verified.
-        # served explicitly so the frontend filter reads data, not an absence
         "verified": True,
         "isAmmEnabled": bool(is_amm_enabled),
         "lastPrice": _fmt(last_price or Decimal(0)),
@@ -194,7 +182,6 @@ _internal_addrs_cache: set[str] | None = None
 _internal_addrs_ts: float = 0
 
 
-# cached set of addresses excluded from holder counts
 def _internal_addrs() -> set[str]:
     global _internal_addrs_cache, _internal_addrs_ts
     now = time.time()
@@ -217,15 +204,12 @@ def _internal_addrs() -> set[str]:
     return base
 
 
-# the small static half of the internal set for sql params. pools and the denylist
-# are excluded in sql as anti joins so the 30k address array never ships per query
 def _static_internal_addrs() -> set[str]:
     base: set[str] = {AGGREGATOR_ADDR}
     base.update(a.lower() for a in getattr(h, "ADDRS", []))
     return base
 
 
-# sql fragment excluding pool and denylisted addresses for a position column
 def _sql_not_internal(col: str) -> str:
     return (
         f"NOT EXISTS (SELECT 1 FROM launchpad_pools _ex_p WHERE _ex_p.pool = {col})"
@@ -237,7 +221,6 @@ _nadfun_v2_cache: set[str] | None = None
 _nadfun_v2_ts: float = 0
 
 
-# cached set of nadfun tokens on the v2 curve
 def _nadfun_v2_set() -> set[str]:
     global _nadfun_v2_cache, _nadfun_v2_ts
     now = time.time()
@@ -249,13 +232,8 @@ def _nadfun_v2_set() -> set[str]:
     return s
 
 
-# 1 or 2 for a nadfun token, 0 for any other source
 def _nadfun_version(token: str, source) -> int:
     src = int(source or 0)
-    # source 1 can be a stale row written by the preload path before its repair
-    # lands, so the marker table gets the final word rather than the column. the
-    # short circuit through version_of() made that fallback unreachable and a fresh
-    # v2 token reported v1 until the next restart
     if src == 1:
         return 2 if (token or "").lower() in _nadfun_v2_set() else 1
     if _nadfun_geo.is_nadfun_source(src):
@@ -268,14 +246,11 @@ from collections import OrderedDict
 from functools import wraps
 
 
-# small in process lru cache with per entry expiry
 class TTLCache:
-    # start empty with a max entry count
     def __init__(self, max_size: int = 1000):
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
 
-    # value and hit flag, missing once expired
     def get(self, key: str) -> tuple[Any, bool]:
         if key not in self._cache:
             return None, False
@@ -286,7 +261,6 @@ class TTLCache:
         self._cache.move_to_end(key)
         return value, True
 
-    # value, freshness and expiry without evicting stale entries
     def get_stale(self, key: str) -> tuple[Any, bool, float]:
         if key not in self._cache:
             return None, False, 0.0
@@ -294,7 +268,6 @@ class TTLCache:
         self._cache.move_to_end(key)
         return value, time.time() <= expires, expires
 
-    # store a value with a ttl, evicting the oldest when full
     def set(self, key: str, value: Any, ttl_seconds: float) -> None:
         if key in self._cache:
             del self._cache[key]
@@ -302,11 +275,9 @@ class TTLCache:
             self._cache.popitem(last=False)
         self._cache[key] = (value, time.time() + ttl_seconds)
 
-    # drop one key
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)
 
-    # drop every entry
     def clear(self) -> None:
         self._cache.clear()
 
@@ -318,14 +289,12 @@ _refresh_inflight: set[str] = set()
 _refresh_guard = threading.Lock()
 
 
-# recompute one cache key in a daemon thread unless a refresh is already running
 def _spawn_refresh(cache_key, func, args, kwargs, ttl_seconds: float) -> None:
     with _refresh_guard:
         if cache_key in _refresh_inflight:
             return
         _refresh_inflight.add(cache_key)
 
-    # compute the fresh value off the request path and release the in flight flag
     def run():
         try:
             _cache.set(cache_key, func(*args, **kwargs), ttl_seconds)
@@ -338,14 +307,9 @@ def _spawn_refresh(cache_key, func, args, kwargs, ttl_seconds: float) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
-# decorator caching an endpoint result under a prefixed key. with serve_stale_seconds
-# an expired value is returned immediately while one background thread recomputes, so
-# no request ever pays the recompute latency while the entry stays warm
 def ttl_cache(prefix: str, ttl_seconds: float = 60, serve_stale_seconds: float = 0):
-    # wrap the endpoint with a cache lookup and store
     def decorator(func):
         @wraps(func)
-        # look the key up, calling through and storing on a miss
         def wrapper(*args, **kwargs):
             key_parts = [str(a) for a in args]
             if kwargs:
@@ -372,13 +336,11 @@ def ttl_cache(prefix: str, ttl_seconds: float = 60, serve_stale_seconds: float =
     return decorator
 
 
-# encode a pagination cursor as base64 json
 def _encode_cursor(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-# decode a base64 json pagination cursor
 def _decode_cursor(cursor: str) -> dict[str, Any]:
     if cursor is None:
         raise HTTPException(400, "invalid cursor")
@@ -398,7 +360,6 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
         raise HTTPException(400, "invalid cursor")
 
 
-# read the sort key and token out of a positions cursor
 def _parse_positions_cursor(cursor: str):
     obj = _decode_cursor(cursor)
     try:
@@ -413,7 +374,6 @@ def _parse_positions_cursor(cursor: str):
         raise HTTPException(400, "invalid positions cursor")
 
 
-# read the block and log index out of a history cursor
 def _parse_history_cursor(cursor: str):
     obj = _decode_cursor(cursor)
     try:
@@ -429,7 +389,6 @@ def _parse_history_cursor(cursor: str):
         raise HTTPException(400, "invalid history cursor")
 
 
-# holder counts and dev holdings for many tokens in one query
 def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = None) -> dict[str, dict]:
     if not token_addrs:
         return {}
@@ -541,9 +500,6 @@ def _batch_get_holder_stats(token_addrs: list[str], excluded: set[str] | None = 
     return result
 
 
-# price as of 24h ago per token, for the change the list cards render. the reference
-# is the last trade at or before the boundary, matching how /stats picks price_ref_*,
-# so the list and the detail page cannot disagree about the same window
 def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]]:
     if not token_addrs:
         return {}
@@ -577,7 +533,6 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
 
     def pct(last_d: Decimal, ref) -> str | None:
         ref_d = Decimal(ref or 0)
-        # no baseline means no honest comparison, so null, which renders as a dash
         if ref_d <= 0 or last_d <= 0:
             return None
         return _fmt((last_d - ref_d) / ref_d * Decimal(100))
@@ -592,10 +547,6 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
     return out
 
 
-# a graduated token stops trading on its curve, so the frozen curve reserves are
-# replaced with the live reserves of the pool that now holds its liquidity: an amm
-# pair for nad.fun graduates, a crystal pool for native ones. tokens still on the
-# curve keep the curve numbers, which are the real reserves for them
 def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
     migrated = [t for t, d in token_data.items() if d.get("migrated")]
     if not migrated:
@@ -616,7 +567,6 @@ def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
         data["reservesFrom"] = "pair"
         data["reservesSyncedAt"] = res.get("syncedAt", 0)
 
-    # native graduates have no amm pair, their liquidity sits in a crystal pool
     remaining = {
         (token_data[t].get("market") or "").lower(): t
         for t in migrated
@@ -641,7 +591,6 @@ def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
         data["reservesSyncedAt"] = res.get("syncedAt", 0)
 
 
-# serialize many tokens for list endpoints in one round trip
 def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
     if not token_addrs:
         return {}
@@ -710,13 +659,8 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
             "approaching_75": bool(row[27]),
             "approaching_75_block": row[28],
             "approaching_75_at": row[29],
-            # curve reserves, wei strings: quote = native side, base = token side.
-            # these freeze at graduation, so a migrated token has them replaced
-            # below with the live reserves of whichever pool now holds its liquidity
             "reserveQuote": str(int(row[33] or 0)),
             "reserveBase": str(int(row[34] or 0)),
-            # overwritten by _apply_live_pool_reserves once the token has graduated,
-            # declared here so every row carries the key whatever the venue
             "reservesFrom": "curve",
             "reservesSyncedAt": 0,
             "social1": row[6],
@@ -747,8 +691,6 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
         data["top10_addresses"] = stats.get("top10_addresses", [])
 
     changes = _batch_get_price_changes(list(token_data.keys()))
-    # the wire source collapses both nadfun generations to 1, and v1 and v2 charge
-    # different curve fees, so the fee lookup needs the raw generation
     raw_sources = {t: d.get("sourceRaw") for t, d in token_data.items()}
     _markets = [(d.get("market") or "").lower() for d in token_data.values() if d.get("market")]
     pair_fee_map = storage.get_pair_fees_batch(_markets)
@@ -760,9 +702,6 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
         data["snipers"] = {
             "count": int(stats.get("sniper_count", 0)),
             "addresses": stats.get("sniper_addresses", []),
-            # percent of the 1e27 supply, the same basis the search filter uses. this
-            # was a hardcoded zero, so a row could match sniper_holding_min and still
-            # render 0.00% for the field the user filtered on
             "holdingShare": float(Decimal(sniper_bal) / _PCT_OF_SUPPLY) if sniper_bal > 0 else 0.0,
         }
         data["insider_holding"] = str(int(stats.get("insider_holding", 0)))
@@ -770,9 +709,6 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
         ch = changes.get(token) or {}
         data["change_pct_24h"] = ch.get("change_pct_24h")
         data["change_pct_since_launch"] = ch.get("change_pct_since_launch")
-        # the same fee block the meta endpoint carries, so a page load is one call.
-        # cache only here: the sweep and the per token endpoints keep it warm, and a
-        # list of 90 rows must never fan out into 90 chain reads
         market = (data.get("market") or "").lower()
         src = int(raw_sources.get(token) or 0)
         data["fees"] = {
@@ -786,7 +722,6 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
     return token_data
 
 
-# holder count, dev holding, top10 share and top10 addresses
 def _holders_for_token(token_addr: str, creator: str | None) -> tuple[int, int, int, list[str]]:
     token_addr = token_addr.lower()
     creator_addr = (creator or "").lower()
@@ -825,7 +760,6 @@ def _holders_for_token(token_addr: str, creator: str | None) -> tuple[int, int, 
     return holder_count, dev_holding, top10_holding, top10_addresses
 
 
-# full api record for a single token
 def _serialize_token(token_addr: str) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
@@ -1034,21 +968,16 @@ def _serialize_token(token_addr: str) -> dict[str, Any]:
 _PRICE_SCALE = Decimal(10**9)
 _PRICE_QUANTUM = Decimal(1).scaleb(-9)
 
-# token balances are raw wei while prices are per whole token, so their product is
-# wei denominated and has to come back down before it means dollars
 _WEI = Decimal(10) ** 18
 
-# raw balance divided by this is a percent of the 1e27 total supply
 _PCT_OF_SUPPLY = Decimal(10) ** 25
 
 
-# price scaled to marketcap units as a string, keeping 9 decimals
 def _scaled_price(p: Any) -> str:
     scaled = (p or Decimal(0)) * _PRICE_SCALE
     return format(scaled.quantize(_PRICE_QUANTUM).normalize(), "f")
 
 
-# read stored ohlcv bars for a token at one resolution
 def _build_ohlcv_from_db(
     token_addr: str,
     bucket_seconds: int,
@@ -1063,17 +992,11 @@ def _build_ohlcv_from_db(
     where = "token = %s AND resolution_sec = %s"
     params: list[Any] = [token_addr, bucket_seconds]
 
-    # paging backwards through history. a chart that has scrolled past the newest
-    # window asks for what came before the oldest bar it holds, so without this
-    # the series simply stops at whatever the first page happened to cover
     if before_ts is not None and before_ts > 0:
         where += " AND bucket_start < %s"
         params.append(int(before_ts))
 
     limit = max_buckets if (max_buckets is not None and max_buckets > 0) else 1000
-    # one extra row to seed the stitch. the open of the first returned bar has to
-    # match the close of the bar before it, which lives on the previous page, so
-    # without the seed every page boundary would show a gap
     params.append(int(limit) + 1)
 
     with db_cursor() as cur:
@@ -1090,14 +1013,9 @@ def _build_ohlcv_from_db(
 
     rows.reverse()
     seeded = len(rows) > limit
-    # the seed is consumed for its close and dropped from the output below
     seed_rows = rows[:1] if seeded else []
     rows = rows[1:] if seeded else rows
 
-    # candles are stored with open = the first trade's post-trade price, so a bucket
-    # with one trade was a zero range doji and consecutive candles never shared an
-    # edge: a 50 percent move rendered as a flat bar next to a gap. stitching each
-    # open to the previous close at serve time makes the move the candle body
     out: list[dict[str, Any]] = []
     prev_close: Decimal | None = None
     if seed_rows:
@@ -1144,8 +1062,6 @@ _mon_price_cache: tuple[float, Decimal] | None = None
 _lvmon_rate_cache: tuple[float, Decimal] | None = None
 
 
-# lvmon priced in mon, as last observed from its pool by the indexer. parity is the
-# fallback only until the first observation lands, and it errs high by design
 def _lvmon_rate() -> Decimal:
     global _lvmon_rate_cache
     now = time.time()
@@ -1162,7 +1078,6 @@ def _lvmon_rate() -> Decimal:
     return rate
 
 
-# latest mon usd price from storage
 def _mon_price_usd() -> Decimal:
     global _mon_price_cache
     now = time.time()
@@ -1181,19 +1096,15 @@ def _mon_price_usd() -> Decimal:
         return Decimal("0.03")
 
 
-# usd price for a quote token, mon for native equivalents
 def _quote_price_usd(quote_token: str | None) -> Decimal:
     quote = (quote_token or WMON).lower()
     if quote == LVMON:
-        # lvmon is a claim on leverup's vault, not a wrapper, and trades under
-        # parity. pricing it as mon overstates every token quoted in it
         return _mon_price_usd() * _lvmon_rate()
     if quote in NATIVE_EQUIV_QUOTES:
         return _mon_price_usd()
     return Decimal(0)
 
 
-# thin a series down to at most n points spread over time
 def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
     pts = [it for it in (items or []) if it is not None]
     if max_points <= 0 or len(pts) <= max_points:

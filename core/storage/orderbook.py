@@ -1,10 +1,3 @@
-# writes and reads for the decoded orderbook plane. every applier is replay safe:
-# the events and fills primary keys are the guard, and a row that fails to insert
-# has already been applied, so its state mutation is skipped. state mutations are
-# also monotonic in block number, because the history sweep replays old blocks
-# while the live indexer is already ahead: a historical event must land in the
-# events table without dragging the order row back to a stale price or size
-
 from __future__ import annotations
 
 import json
@@ -15,15 +8,12 @@ from psycopg2.extras import execute_values
 from .base import db_cursor
 
 
-# a reader takes either one wallet or the set a user has selected, so every
-# query filters with ANY over a list and the callers stay identical
 def _addr_list(user) -> list[str]:
     if isinstance(user, str):
         return [user.lower()]
     return [str(u).lower() for u in (user or [])]
 
 
-# apply one orders-updated log: record each entry and evolve the order it touches
 def apply_orderbook_updates(parsed: dict, blk: int, blk_ts: int, txhash: str, log_index: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as c:
@@ -65,8 +55,6 @@ def apply_orderbook_updates(parsed: dict, blk: int, blk_ts: int, txhash: str, lo
         _apply_order_entry(o, market, user, blk, blk_ts, cur)
 
 
-# the state mutation for one fresh event entry, shared by the live applier and
-# the batched sweep path so there is exactly one book-evolution implementation
 def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, cur) -> None:
     if o["action"] == "add":
         cur.execute(
@@ -101,8 +89,6 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
             ),
         )
     elif o["action"] == "remove":
-        # taker sweeps emit removes alongside their fills, so a fill-closed order
-        # keeps reading 'filled'; a remove landing on a live order is a cancel
         cur.execute(
             """
             INSERT INTO crystal_orderbook_orders
@@ -122,9 +108,6 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
             (market, int(o["price"]), int(o["order_id"]), user, bool(o["is_buy"]), blk, blk_ts, blk, blk_ts),
         )
     elif o["action"] == "decrease":
-        # a decrease shrinks the order itself, so the original shrinks with it.
-        # otherwise the order keeps reporting the size it was placed at and its
-        # fill ratio is measured against an amount that is no longer on offer
         cur.execute(
             """
             UPDATE crystal_orderbook_orders
@@ -146,7 +129,6 @@ def _apply_order_entry(o: dict, market: str, user: str, blk: int, blk_ts: int, c
         )
 
 
-# apply one maker fill: record it and move the touched order to its remaining size
 def apply_orderbook_fill(parsed: dict, blk: int, blk_ts: int, txhash: str, log_index: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as c:
@@ -186,11 +168,7 @@ def apply_orderbook_fill(parsed: dict, blk: int, blk_ts: int, txhash: str, log_i
     _apply_fill_mutation(parsed, market, blk, blk_ts, cur)
 
 
-# the order-row consequence of one fresh fill, shared with the batched sweep path
 def _apply_fill_mutation(parsed: dict, market: str, blk: int, blk_ts: int, cur) -> None:
-    # a fill is the only thing that moves filled_size: the executed amount is
-    # whatever the resting size dropped by, and the assignment reads the row's
-    # pre-update size, so repeated partial fills accumulate exactly
     remaining = int(parsed["remaining"])
     cur.execute(
         """
@@ -215,8 +193,6 @@ def _apply_fill_mutation(parsed: dict, market: str, blk: int, blk_ts: int, cur) 
     )
 
 
-# current updated_block per order key, the sweep's client-side prefilter: a row
-# the live indexer already moved past this whole range needs no mutation calls
 def get_order_updated_blocks(keys: list[tuple[str, int, int]], cur) -> dict[tuple[str, int, int], int]:
     if not keys:
         return {}
@@ -230,9 +206,6 @@ def get_order_updated_blocks(keys: list[tuple[str, int, int]], cur) -> dict[tupl
     return {(m, int(p), int(oid)): int(ub) for m, p, oid, ub in cur.fetchall()}
 
 
-# insert many event entries in one statement, returning the keys that were new.
-# rows: (txhash, log_index, entry_index, block_number, timestamp, market,
-#        user_address, flag, is_buy, action, price, order_id, size)
 def batch_insert_orderbook_events(rows: list[tuple], cur) -> set[tuple[str, int, int]]:
     if not rows:
         return set()
@@ -252,9 +225,6 @@ def batch_insert_orderbook_events(rows: list[tuple], cur) -> set[tuple[str, int,
     return {(tx, int(li), int(ei)) for tx, li, ei in fresh}
 
 
-# insert many fills in one statement, returning the keys that were new.
-# rows: (txhash, log_index, block_number, timestamp, market, maker,
-#        maker_is_buy, price, order_id, remaining, amount_high, amount_out)
 def batch_insert_orderbook_fills(rows: list[tuple], cur) -> set[tuple[str, int]]:
     if not rows:
         return set()
@@ -274,7 +244,6 @@ def batch_insert_orderbook_fills(rows: list[tuple], cur) -> set[tuple[str, int]]
     return {(tx, int(li)) for tx, li in fresh}
 
 
-# record one on-chain user registration, replay safe on the id
 def insert_crystal_user(parsed: dict, blk: int, blk_ts: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as c:
@@ -286,18 +255,24 @@ def insert_crystal_user(parsed: dict, blk: int, blk_ts: int, cur=None) -> None:
         VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (user_id) DO NOTHING
         """,
-        (int(parsed["user_id"]), (parsed.get("user") or "").lower(), bool(parsed.get("is_margin")), int(blk), int(blk_ts)),
+        (
+            int(parsed["user_id"]),
+            (parsed.get("user") or "").lower(),
+            bool(parsed.get("is_margin")),
+            int(blk),
+            int(blk_ts),
+        ),
     )
 
 
-# the registered user ids for one wallet
 def list_user_ids(user: str) -> list[int]:
     with db_cursor() as cur:
-        cur.execute("SELECT user_id FROM crystal_users WHERE user_address = %s ORDER BY user_id", ((user or "").lower(),))
+        cur.execute(
+            "SELECT user_id FROM crystal_users WHERE user_address = %s ORDER BY user_id", ((user or "").lower(),)
+        )
         return [int(r[0]) for r in cur.fetchall()]
 
 
-# open orders for one wallet, newest activity first
 def list_open_orders(user, market: str | None = None) -> list[dict[str, Any]]:
     where = "o.user_address = ANY(%s) AND o.status = 'open' AND o.size > 0"
     params: tuple = (_addr_list(user),)
@@ -320,15 +295,9 @@ def list_open_orders(user, market: str | None = None) -> list[dict[str, Any]]:
     return [_order_row(r) for r in rows]
 
 
-# a fully unique sort key. the same order id recurs at every price level, so
-# ties on (updated_ts, order_id) are common: the market maker cancels and
-# requotes a slot in one block. without the rest of the primary key postgres is
-# free to return equal rows in any order, and the list visibly reshuffles on
-# every push. price leads the tiebreak so a ladder still reads in price order
 _ORDER_SORT = "o.updated_ts DESC, o.price DESC, o.order_id DESC, o.market DESC"
 
 
-# the transaction that placed an order's current incarnation, for the tx link
 _ADD_TX_JOIN = """
             LEFT JOIN LATERAL (
                 SELECT txhash FROM crystal_orderbook_events e
@@ -340,14 +309,11 @@ _ADD_TX_JOIN = """
 """
 
 
-# one order row in the served shape
 def _order_row(r: tuple) -> dict[str, Any]:
     m, oid, b, p, s, orig, fil, st, cb, cts, ub, uts, txh = r
     return {
         "market": m,
         "order_id": int(oid),
-        # client ids arrive on chain as (cloid << 41 | user_id), native
-        # per-level ids stay below that range
         "cloid": int(oid) >> 41 if int(oid) >> 41 else None,
         "is_buy": bool(b),
         "price": str(int(p)),
@@ -363,7 +329,6 @@ def _order_row(r: tuple) -> dict[str, Any]:
     }
 
 
-# every order a wallet has ever owned, any status, newest activity first
 def list_wallet_orders(
     user, market: str | None = None, limit: int = 200, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
@@ -392,7 +357,6 @@ def list_wallet_orders(
     return [_order_row(r) for r in rows]
 
 
-# decoded order events for one wallet, newest first
 def list_orderbook_events(user: str, limit: int = 100) -> list[dict[str, Any]]:
     with db_cursor() as cur:
         cur.execute(
@@ -426,7 +390,6 @@ def list_orderbook_events(user: str, limit: int = 100) -> list[dict[str, Any]]:
     ]
 
 
-# one taker trade row, the primary key making replays a no-op
 def insert_market_trade(parsed: dict, blk: int, blk_ts: int, txhash: str, log_index: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as c:
@@ -456,9 +419,6 @@ def insert_market_trade(parsed: dict, blk: int, blk_ts: int, txhash: str, log_in
     )
 
 
-# insert many taker trades in one statement, primary key deduping replays.
-# rows: (txhash, log_index, block_number, timestamp, market, user_address,
-#        is_buy, amount_in, amount_out, start_price, end_price)
 def batch_insert_market_trades(rows: list[tuple], cur) -> None:
     if not rows:
         return
@@ -475,8 +435,6 @@ def batch_insert_market_trades(rows: list[tuple], cur) -> None:
     )
 
 
-# the full exchange trade history for one wallet: taker trades and maker fills
-# merged newest first, so ordercenter shows both sides of every execution
 def list_exchange_trades(
     user, market: str | None = None, limit: int = 100, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
@@ -496,10 +454,6 @@ def list_exchange_trades(
         maker_where += " AND timestamp < %(cut)s"
         params["cut"] = cutoff
 
-    # one row per execution: a batch order lands as several on-chain trade or
-    # fill logs in one transaction, and the served history folds them into one
-    # row per (tx, market, side) with exact summed amounts. the maker rows use
-    # the maker's perspective: in = what the taker paid out, out = the proceeds
     with db_cursor() as cur:
         cur.execute(
             f"""
@@ -549,8 +503,6 @@ def list_exchange_trades(
     ]
 
 
-# order lifecycle history for one wallet: places, cancels, decreases and the
-# fills that consumed them, newest first
 def list_order_history(
     user, market: str | None = None, limit: int = 100, before_ts: int | None = None
 ) -> list[dict[str, Any]]:
@@ -607,10 +559,6 @@ def list_order_history(
     ]
 
 
-# the collateral a wallet has resting on the book, keyed by the token that is
-# actually locked. a buy locks the quote asset it would spend, a sell locks the
-# base asset it is offering, which is the unit each order's size is denominated
-# in. these funds have left the wallet balance but still belong to the user
 def open_order_locked_by_token(user) -> dict[str, int]:
     with db_cursor() as cur:
         cur.execute(
@@ -627,9 +575,6 @@ def open_order_locked_by_token(user) -> dict[str, int]:
         return {t: int(v) for t, v in cur.fetchall() if t}
 
 
-# derived wallet preferences, stored under a client supplied opaque key. the
-# server never learns which eoa a key belongs to, and the payload is indices
-# rather than addresses, so nothing here identifies a user or their wallets
 def get_wallet_prefs(key: str) -> dict[str, Any] | None:
     with db_cursor() as cur:
         cur.execute("SELECT wallet_count, selected, updated_at FROM crystal_wallet_prefs WHERE key = %s", (key,))

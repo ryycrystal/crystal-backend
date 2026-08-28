@@ -31,7 +31,6 @@ query ($id: ID!) {
 """
 
 
-# one graphql roundtrip, raising on transport or query errors
 def _graphql(url: str, query: str, variables: dict) -> dict:
     resp = httpx.post(url, json={"query": query, "variables": variables}, timeout=30.0)
     resp.raise_for_status()
@@ -41,7 +40,6 @@ def _graphql(url: str, query: str, variables: dict) -> dict:
     return out.get("data") or {}
 
 
-# the subgraph shards its per-account maps, this folds them back flat
 def _flatten(mp: dict | None, key: str) -> list[dict]:
     rows = []
     for shard in (mp or {}).get("shards") or []:
@@ -50,7 +48,6 @@ def _flatten(mp: dict | None, key: str) -> list[dict]:
     return rows
 
 
-# the account entity keyed however the subgraph stored the address
 def fetch_goldsky_account(url: str, wallet: str) -> dict | None:
     for candidate in (wallet.lower(), wallet):
         data = _graphql(url, ACCOUNT_QUERY, {"id": candidate})
@@ -59,8 +56,6 @@ def fetch_goldsky_account(url: str, wallet: str) -> dict | None:
     return None
 
 
-# the per-level sequence, the last segment of the subgraph's composite id
-# (shaped native:{market}:{price}:{seq})
 def _order_tail(oid: str) -> int:
     try:
         return int((oid or "").split(":")[-1])
@@ -68,8 +63,6 @@ def _order_tail(oid: str) -> int:
         return 0
 
 
-# goldsky orders keyed the way the chain keys them: (market, price, per-level
-# id). status is an opaque enum, so liveness comes from openOrderMap membership
 def _goldsky_orders(raw: list[dict]) -> dict[tuple[str, int, int], dict]:
     out = {}
     for o in raw:
@@ -87,13 +80,10 @@ def _goldsky_orders(raw: list[dict]) -> dict[tuple[str, int, int], dict]:
     return out
 
 
-# client-id orders never appear in the subgraph's account maps, so they diff as
-# a known goldsky gap instead of a backend mismatch
 def _is_cloid(order_id: int) -> bool:
     return order_id >> 41 > 0
 
 
-# goldsky taker trades as an order-insensitive multiset
 def _goldsky_trades(raw: list[dict]) -> Counter:
     return Counter(
         (
@@ -110,7 +100,6 @@ def _goldsky_trades(raw: list[dict]) -> Counter:
     )
 
 
-# backend order state straight from the decoded plane
 def _backend_orders(wallet: str) -> dict[tuple[str, int, int], dict]:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -127,10 +116,6 @@ def _backend_orders(wallet: str) -> dict[tuple[str, int, int], dict]:
     }
 
 
-# backend trades as the same multiset shape goldsky serves: the taker rows plus
-# a mirrored maker row per fill (goldsky synthesizes both sides — the maker's
-# amountIn is the taker's output and its amountOut is the taker's input net of
-# the taker fee, which is exactly our fill's amount_out / amount_high pair)
 def _backend_trades(wallet: str) -> Counter:
     with storage.db_cursor() as cur:
         cur.execute(
@@ -147,7 +132,6 @@ def _backend_trades(wallet: str) -> Counter:
     return Counter((tx, m, bool(b), int(ai), int(ao), int(sp), int(ep), int(ts)) for tx, m, b, ai, ao, sp, ep, ts in rows)
 
 
-# backend rows through the deployed rest surface instead of the db
 def _rest(base: str, path: str) -> dict:
     resp = httpx.get(base.rstrip("/") + path, timeout=30.0)
     resp.raise_for_status()
@@ -194,7 +178,6 @@ def _backend_trades_rest(base: str, wallet: str) -> Counter:
     )
 
 
-# compare one wallet and return the number of hard mismatches
 def compare_wallet(wallet: str, graph_url: str, backend: str | None) -> int:
     print(f"\n=== {wallet} ===")
     acct = fetch_goldsky_account(graph_url, wallet)
@@ -217,8 +200,6 @@ def compare_wallet(wallet: str, graph_url: str, backend: str | None) -> int:
 
     mismatches = 0
 
-    # open orders: goldsky's live set must match the backend's open set exactly,
-    # except client-id orders, which goldsky does not index at all
     gk_open_live = {k: v for k, v in gk_open.items() if v["remaining"] > 0}
     be_open = {k: v for k, v in be_orders.items() if v["status"] == "open" and v["remaining"] > 0}
     goldsky_gaps = 0
@@ -238,8 +219,6 @@ def compare_wallet(wallet: str, graph_url: str, backend: str | None) -> int:
             mismatches += 1
     print(f"  open orders: goldsky={len(gk_open_live)} backend={len(be_open)} (cloid, goldsky-invisible: {goldsky_gaps})")
 
-    # order universe: every order goldsky ever saw must exist in the backend
-    # plane with matching side, and agree on whether it is still live
     missing = sorted(set(gk_all) - set(be_orders))
     for k in missing:
         print(f"  ORDER missing in backend: {k} {gk_all[k]}")
@@ -256,7 +235,6 @@ def compare_wallet(wallet: str, graph_url: str, backend: str | None) -> int:
             agree += 1
     print(f"  order history: goldsky={len(gk_all)} backend={len(be_orders)} agreeing={agree}")
 
-    # taker trades: exact multiset equality on every decoded field
     for row, n in (gk_trades - be_trades).items():
         print(f"  TRADE only in goldsky x{n}: {row}")
         mismatches += 1

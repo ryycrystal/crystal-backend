@@ -8,7 +8,6 @@ import psycopg2
 from .base import db_cursor
 
 
-# load persisted lp pool state rows into in-memory state on startup
 def load_crystal_pool_states_for_state():
     with db_cursor() as cur:
         cur.execute(
@@ -31,7 +30,6 @@ def load_crystal_pool_states_for_state():
         return cur.fetchall()
 
 
-# fetch one lp pool state row by market address
 def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None = None):
     sql = """
         SELECT
@@ -58,7 +56,6 @@ def get_crystal_pool_state(market: str, cur: psycopg2.extensions.cursor | None =
     return cur.fetchone()
 
 
-# upsert current lp pool reserves and rolling metrics
 def upsert_crystal_pool_state(
     *,
     market: str,
@@ -135,7 +132,6 @@ def upsert_crystal_pool_state(
         cur.execute(sql, params)
 
 
-# update only the lp token total supply for a pool
 def update_crystal_pool_total_shares(
     market: str,
     total_shares: int,
@@ -164,7 +160,6 @@ def update_crystal_pool_total_shares(
         cur.execute(sql, params)
 
 
-# insert a sync event with volume and fees
 def insert_crystal_pool_sync_event(
     *,
     block_number: int,
@@ -220,7 +215,6 @@ def insert_crystal_pool_sync_event(
         cur.execute(sql, params)
 
 
-# sum trade-only sync volume and fees since a timestamp
 def sum_crystal_pool_trade_metrics_since(
     market: str,
     since_ts: int,
@@ -244,7 +238,6 @@ def sum_crystal_pool_trade_metrics_since(
     return cur.fetchone()
 
 
-# compute a time-weighted average tvl over a window using pool tvl samples
 def time_weighted_avg_crystal_pool_tvl_since(
     market: str,
     since_ts: int,
@@ -322,7 +315,6 @@ def time_weighted_avg_crystal_pool_tvl_since(
     return row[0] if row else 0
 
 
-# insert a pool tvl sample point for charting and averaging
 def insert_crystal_pool_tvl_sample(
     *,
     market: str,
@@ -371,7 +363,6 @@ def insert_crystal_pool_tvl_sample(
         cur.execute(sql, params)
 
 
-# list recent pool tvl samples ordered oldest to newest for api charts
 def list_crystal_pool_tvl_samples(
     market: str,
     *,
@@ -401,7 +392,6 @@ def list_crystal_pool_tvl_samples(
         return cur.fetchall()
 
 
-# apply an lp transfer delta to a user's lp share balance for a pool
 def upsert_crystal_pool_lp_user_delta(
     *,
     market: str,
@@ -445,7 +435,6 @@ def upsert_crystal_pool_lp_user_delta(
         cur.execute(sql, params)
 
 
-# list amm-enabled pools joined with current indexed state and metrics
 def list_crystal_pools_with_state(
     *,
     search: str = "",
@@ -549,7 +538,6 @@ def list_crystal_pools_with_state(
         return cur.fetchall()
 
 
-# fetch one amm-enabled pool joined with current indexed state and metrics
 def get_crystal_pool_with_state(market: str):
     with db_cursor() as cur:
         cur.execute(
@@ -593,10 +581,6 @@ def get_crystal_pool_with_state(market: str):
         return cur.fetchone()
 
 
-# true lp yield for a window: the invariant sqrt(rq*rb) only grows on a swap by the
-# fee actually kept, and swaps do not move shares, so compounding the per swap
-# growth is per share yield by construction. fee x volume overstates it: a round
-# trip pays the spread on a shrinking notional and price impact reverses to zero
 def pool_invariant_growth_since(market: str, since_ts: int, cur=None) -> Decimal:
     sql = """
         SELECT prev_reserve_quote, prev_reserve_base, reserve_quote, reserve_base
@@ -623,7 +607,6 @@ def pool_invariant_growth_since(market: str, since_ts: int, cur=None) -> Decimal
     return growth - Decimal(1)
 
 
-# per trade invariant log growth events for the historical apy series
 def list_pool_growth_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[int, float]]:
     with db_cursor() as cur:
         cur.execute(
@@ -647,8 +630,6 @@ def list_pool_growth_events(market: str, lo_ts: int, hi_ts: int) -> list[tuple[i
         return out
 
 
-# lp share positions for one wallet across pools, the first reader of the table the
-# transfer handler has been writing all along
 def list_lp_positions(user: str) -> list[tuple[str, int, int]]:
     from .base import db_cursor
 
@@ -668,8 +649,6 @@ def list_lp_positions(user: str) -> list[tuple[str, int, int]]:
         ]
 
 
-# one lp deposit or withdrawal, amounts from the mint/burn event. user and shares
-# arrive from the paired lp token transfer and may attach afterwards
 def insert_pool_liquidity_event(
     *,
     txhash: str,
@@ -709,7 +688,6 @@ def insert_pool_liquidity_event(
         c.execute(sql, params)
 
 
-# attach the user and share count learned from the lp token transfer in the same tx
 def attach_pool_liquidity_shares(
     *, txhash: str, market: str, kind: str, shares: int, user_address: str = "", cur=None
 ) -> None:
@@ -729,7 +707,6 @@ def attach_pool_liquidity_shares(
         c.execute(sql, params)
 
 
-# lp deposit and withdrawal history for a pool, optionally one wallet
 def list_pool_liquidity_events(market: str, user: str = "", limit: int = 100) -> list[dict]:
     from .base import db_cursor
 
@@ -768,7 +745,6 @@ def list_pool_liquidity_events(market: str, user: str = "", limit: int = 100) ->
     ]
 
 
-# move a wallet's lp cost basis on mint and burn, proportional release on burn
 def apply_lp_cost_delta(
     *, market: str, user: str, dq: int, db_: int, burn_fraction_num: int = 0, burn_fraction_den: int = 0, cur=None
 ) -> None:
@@ -805,7 +781,6 @@ def apply_lp_cost_delta(
         c.execute(sql, params)
 
 
-# current lp share balance for one wallet in one pool
 def get_lp_user_shares(market: str, user: str, cur=None) -> int:
     from .base import db_cursor
 
@@ -821,7 +796,6 @@ def get_lp_user_shares(market: str, user: str, cur=None) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-# deposit amounts of the mint event in a tx, for cost basis attribution
 def get_pool_liquidity_amounts(txhash: str, market: str, kind: str, cur=None) -> tuple[int, int] | None:
     from .base import db_cursor
 
@@ -841,8 +815,6 @@ def get_pool_liquidity_amounts(txhash: str, market: str, kind: str, cur=None) ->
     return (int(row[0] or 0), int(row[1] or 0)) if row else None
 
 
-# reserves for many crystal markets at once, for list serialisation. a native
-# token that graduated holds its liquidity in a crystal pool rather than an amm pair
 def crystal_pool_reserves_for_markets(markets: list[str], cur=None) -> dict[str, dict]:
     if not markets:
         return {}

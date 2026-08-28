@@ -28,8 +28,6 @@ _RETRY_QUEUE: deque[tuple[str, str, int, float]] = deque()
 _MAX_RETRY_QUEUE_SIZE = 10000
 _MAX_RETRIES = 5
 
-# tokens per pass whose uri is read back off chain, bounded so the recovery of a
-# large historical backlog is spread out instead of hammering the rpc at once
 _URI_RECOVERY_BATCH = int(os.getenv("URI_RECOVERY_BATCH", "100"))
 _BACKOFF_SCHEDULE = [30, 60, 120, 240, 480]
 
@@ -43,7 +41,6 @@ V2_PAIR_SYNC_TOPIC = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9
 _PENDING_PAIR_SYNC: dict[str, tuple[int, int]] = {}
 
 
-# take up to limit tokens off the pending metadata queue
 def _pop_metadata_batch(limit: int) -> list[tuple[str, str]]:
     if not METADATA_QUEUE:
         return []
@@ -53,11 +50,6 @@ def _pop_metadata_batch(limit: int) -> list[tuple[str, str]]:
     return batch
 
 
-# shared http client for metadata fetches
-# metadata key names were never standardised. nadfun writes image_uri, and every
-# other launchpad on the chain writes image, which is the erc-721 spelling. the
-# first non empty one wins so a token's art is not dropped over which word the
-# creator's launchpad happened to pick
 def _first(meta: dict, *keys: str) -> str:
     for k in keys:
         v = meta.get(k)
@@ -81,7 +73,6 @@ async def _get_metadata_client() -> httpx.AsyncClient:
     return _METADATA_CLIENT
 
 
-# shared concurrency limiter for metadata fetches
 def _get_semaphore() -> asyncio.Semaphore:
     global _SEMAPHORE
     if _SEMAPHORE is None:
@@ -89,7 +80,6 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _SEMAPHORE
 
 
-# fetch and parse one tokens metadata json
 async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None, str, str]:
     try:
         host = urlparse(token_uri).netloc
@@ -109,9 +99,6 @@ async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None
             resp = await client.get(token_uri)
             resp.raise_for_status()
             meta = resp.json()
-            # a document that is not an object has nothing to read, but it is
-            # not the host's fault either: returning empty leaves the token for
-            # the next sweep instead of blacklisting everything else on that host
             if not isinstance(meta, dict):
                 meta = {}
             return (
@@ -134,7 +121,6 @@ async def fetch_metadata_single(token: str, token_uri: str) -> tuple[dict | None
             return (None, token, token_uri)
 
 
-# drain a batch of queued metadata fetches concurrently
 async def process_metadata_queue() -> list[dict]:
     if not METADATA_QUEUE:
         return []
@@ -157,7 +143,6 @@ _METADATA_WORKER_RUNNING = False
 _STORAGE_MODULE = None
 
 
-# background loop draining the metadata queue forever
 async def start_metadata_worker(storage_module) -> None:
     global _METADATA_WORKER_RUNNING, _STORAGE_MODULE
     if _METADATA_WORKER_RUNNING:
@@ -165,7 +150,6 @@ async def start_metadata_worker(storage_module) -> None:
     _METADATA_WORKER_RUNNING = True
     _STORAGE_MODULE = storage_module
 
-    # loop forever draining the metadata queue
     _SWEEP_EVERY_SECONDS = 300
     last_sweep = 0.0
 
@@ -174,12 +158,9 @@ async def start_metadata_worker(storage_module) -> None:
         while True:
             try:
                 now = time.monotonic()
-                # periodically recover tokens stranded by a restart or exhausted retries
                 if now - last_sweep > _SWEEP_EVERY_SECONDS:
                     last_sweep = now
                     mod = _STORAGE_MODULE or storage_module
-                    # recover uris first so tokens that never had one stored become
-                    # visible to the sweep on this same pass
                     await recover_missing_uris(mod)
                     await sweep_missing_metadata(mod)
                     await sweep_pair_fees(mod)
@@ -228,7 +209,6 @@ async def start_metadata_worker(storage_module) -> None:
     print("[Metadata] Background worker started")
 
 
-# drain the metadata queue once and persist the results
 async def process_metadata_queue_immediate(storage_module=None) -> int:
     if not METADATA_QUEUE:
         return 0
@@ -256,12 +236,10 @@ async def process_metadata_queue_immediate(storage_module=None) -> int:
     return len(valid_results)
 
 
-# last 20 bytes of a topic as a hex address
 def _to_addr(w) -> str:
     return "0x" + (w.hex() if isinstance(w, bytes) else w)[-40:]
 
 
-# read word n of a hex payload as an int
 def _word(data_hex: str, index: int) -> int:
     if not data_hex:
         return 0
@@ -272,12 +250,10 @@ def _word(data_hex: str, index: int) -> int:
     return int(data_hex[start:end], 16)
 
 
-# split a hex payload into n char words
 def _chunks(s: str, n: int):
     return (s[i : i + n] for i in range(0, len(s), n))
 
 
-# follow an abi string offset and decode it
 def _decode_string(data_hex: str, word_index: int) -> str:
     if not data_hex:
         return ""
@@ -309,7 +285,6 @@ def _decode_string(data_hex: str, word_index: int) -> str:
         return ""
 
 
-# read a hex word as a signed int256
 def _int256_from_hex(x: str) -> int:
     if x.startswith("0x"):
         x = x[2:]
@@ -321,7 +296,6 @@ def _int256_from_hex(x: str) -> int:
     return n
 
 
-# decode a nadfun tokencreated log into token creator and metadata uri
 def parse_nadfun_token_created(
     _addr: str,
     topics: list[str],
@@ -352,8 +326,6 @@ def parse_nadfun_token_created(
 
     metadata_cid = ""
 
-    # the creation price is v1 specific and each generation starts on a different
-    # curve, so the adapter for the token's source owns it now
     last_price_native = Decimal(0)
 
     return {
@@ -363,9 +335,6 @@ def parse_nadfun_token_created(
         "quote_token": quote_token,
         "name": name,
         "symbol": symbol,
-        # carried so state can persist it. the queue above is in memory, so a
-        # restart with a fetch still pending otherwise loses the uri for good and
-        # the self healing sweep can never reach the token
         "token_uri": token_uri,
         "metadata_cid": metadata_cid,
         "description": description,
@@ -378,7 +347,6 @@ def parse_nadfun_token_created(
     }
 
 
-# decode a nadfun sync log and stash its reserves for the next trade
 def parse_nadfun_sync(
     _addr: str,
     topics: list[str],
@@ -405,7 +373,6 @@ def parse_nadfun_sync(
     return None
 
 
-# take the stashed reserves for a token, zeros when none are pending
 def _consume_sync_for_token(token: str) -> dict:
     sync = _PENDING_SYNC.pop(token.lower(), None)
     if not sync:
@@ -424,7 +391,6 @@ def _consume_sync_for_token(token: str) -> dict:
     }
 
 
-# shared decode for nadfun buy and sell logs
 def _parse_nadfun_trade(
     _addr: str,
     topics: list[str],
@@ -458,7 +424,6 @@ def _parse_nadfun_trade(
     }
 
 
-# decode a nadfun buy log
 def parse_nadfun_buy(
     _addr: str,
     topics: list[str],
@@ -467,7 +432,6 @@ def parse_nadfun_buy(
     return _parse_nadfun_trade(_addr, topics, data_no0x, True)
 
 
-# decode a nadfun sell log
 def parse_nadfun_sell(
     _addr: str,
     topics: list[str],
@@ -476,7 +440,6 @@ def parse_nadfun_sell(
     return _parse_nadfun_trade(_addr, topics, data_no0x, False)
 
 
-# decode a nadfun graduated log into token and its new pool
 def parse_nadfun_graduated(
     _addr: str,
     topics: list[str],
@@ -487,17 +450,6 @@ def parse_nadfun_graduated(
     return {"token": token, "pool": pool}
 
 
-# decode a nadfun sniping penalty log
-# v2 only anti sniping penalty, parsed and counted but deliberately not dispatched
-#
-# it is absent from the v1 abi nad.fun publishes so there is no authoritative
-# definition to implement against, and it fired zero times in 20,000 blocks
-#
-# it cannot corrupt what matters: supply derives from CurveSync reserves and
-# balances from erc20 transfers, both authoritative, so a penalty that moves
-# tokens or mon shows up in the next sync and transfer anyway. the only thing it
-# could skew is fee accounting, where a fee taken outside the reserve delta would
-# not be captured
 def parse_nadfun_sniping_penalty(
     _addr: str,
     topics: list[str],
@@ -513,7 +465,6 @@ def parse_nadfun_sniping_penalty(
     }
 
 
-# decode a uniswap v3 swap log into both signed amounts
 def parse_v3_trade(addr, tops, data):
     pool = addr.lower()
     sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""
@@ -554,7 +505,6 @@ def parse_v3_trade(addr, tops, data):
     }
 
 
-# decode a v2 pair swap log into in and out amounts
 def parse_v2_pair_swap(addr, tops, data):
     pool = addr.lower()
     sender = _to_addr(tops[1]).lower() if len(tops) > 1 else ""
@@ -594,8 +544,6 @@ def parse_v2_pair_swap(addr, tops, data):
     }
 
 
-# decode a univ2 pair sync log and stash its post swap reserves for the next swap,
-# whose raw amounts are gross of the pair fee and cannot price the trade honestly
 def parse_v2_pair_sync(addr, _tops, data):
     pool = (addr or "").lower()
 
@@ -618,23 +566,14 @@ def parse_v2_pair_sync(addr, _tops, data):
     return None
 
 
-# take the stashed post swap reserves for a pair, zeros when none are pending
 def consume_pair_sync(pool: str) -> tuple[int, int]:
     return _PENDING_PAIR_SYNC.pop((pool or "").lower(), (0, 0))
 
 
-# read the stashed reserves without taking them, so reserve tracking can persist
-# a sync that no swap will consume, which is exactly what a liquidity add or
-# remove looks like on a pair
 def peek_pair_sync(pool: str) -> tuple[int, int]:
     return _PENDING_PAIR_SYNC.get((pool or "").lower(), (0, 0))
 
 
-# re-queue tokens that still have no metadata but do have a uri to fetch from.
-# the queue is in memory, so a restart mid fetch strands a token forever otherwise,
-# and retries are exhausted after about fifteen minutes with no path back
-# tokens created before the uri was persisted have nothing for the sweep to fetch,
-# so recover it from the token contract. bounded per pass to stay polite to the rpc
 async def recover_missing_uris(storage_module, limit: int = _URI_RECOVERY_BATCH) -> int:
     from state import _TOKEN_URI_SELECTOR, _fetch_token_string
 
@@ -680,8 +619,6 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
         attempted.append(token)
         queued += 1
 
-    # stamp the attempt now that they are queued. a token already in flight is
-    # skipped above and keeps its previous count, so it is not charged twice
     if attempted:
         try:
             await asyncio.to_thread(storage_module.mark_metadata_attempted, attempted)
@@ -693,13 +630,10 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
     return queued
 
 
-# selectors derived from keccak256 of the signatures and verified against live pairs:
-# a nad.fun pair exposes feeCollector(), a plain pair reverts, which classifies it
 _FEE_COLLECTOR_SELECTOR = "0xc415b95c"
 _GET_FEE_CONFIG_SELECTOR = "0x1e442b55"
 
 
-# one raw eth_call, none on revert or transport failure
 def _fee_rpc_call(to: str, data: str) -> str | None:
     import urllib.request
 
@@ -716,8 +650,6 @@ def _fee_rpc_call(to: str, data: str) -> str | None:
     return res if isinstance(res, str) and res != "0x" else None
 
 
-# fee config for a pair straight off chain. ok=false means the pair has no fee
-# collector, which is how a general dex pair is told apart from a nad.fun one
 def fetch_pair_fee_config(pair: str) -> dict:
     pair = (pair or "").lower()
     out = {
@@ -750,7 +682,6 @@ def fetch_pair_fee_config(pair: str) -> dict:
     return out
 
 
-# fetch fee config for migrated pairs the cache does not cover yet
 async def sweep_pair_fees(storage_module, limit: int = 50) -> int:
     try:
         pairs = await asyncio.to_thread(storage_module.pairs_missing_fees, limit)

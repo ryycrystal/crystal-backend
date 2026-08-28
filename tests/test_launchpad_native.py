@@ -5,8 +5,6 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# api.api and api.routes.launchpad are mutually importing; api.api must be
-# initialized first or importing the route module standalone raises ImportError.
 import api.api  # noqa: F401
 import state
 from core import chain as h
@@ -62,11 +60,8 @@ def _reserves_after(native_reserve: int):
 
 def _fresh_state(monkeypatch):
     stub = MagicMock()
-    # a bare MagicMock is truthy, which would make every log look like a
-    # duplicate and short-circuit the trade handler
     stub.trade_exists.return_value = False
     monkeypatch.setattr(state, "storage", stub)
-    # keep tests off the network: pin the deployed launchpadInitialNativeSupply
     state._LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = V0
     st = state.State()
     st.tokenToPrice[WMON] = Decimal("0.02")
@@ -93,9 +88,6 @@ def _buy(st, native_reserve, blk, ts, amount_in=10**18, amount_out=10**20):
     )
     st.apply_launchpad_trade(parsed, blk, ts, "0xdead", 0, ROUTER)
     return parsed, token_reserve
-
-
-# --- decoding matches the deployed contract ABI -------------------------------
 
 
 def test_token_created_decodes_topics_and_strings():
@@ -135,9 +127,6 @@ def test_migrated_decodes_token_only():
     assert parsed["token"] == TOKEN
 
 
-# --- curve state --------------------------------------------------------------
-
-
 def test_trade_sets_price_from_reserves(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
@@ -151,14 +140,12 @@ def test_final_stretch_fires_at_75pct_of_tokens_sold(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    # 333M sold -> below the 600M threshold
     _buy(st, 1500 * 10**18, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
     sold_below = INITIAL_TOKEN_SUPPLY - _reserves_after(1500 * 10**18)
     assert sold_below < (CURVE_SUPPLY * 3) // 4
     assert lp.approaching_75 is False
 
-    # 600M sold -> exactly at the threshold
     _, tr = _buy(st, 2500 * 10**18, blk=102, ts=1002)
     assert INITIAL_TOKEN_SUPPLY - tr == (CURVE_SUPPLY * 3) // 4 == 600_000_000 * 10**18
     assert lp.approaching_75 is True
@@ -182,14 +169,10 @@ def test_final_stretch_threshold_is_independent_of_initial_native_supply(monkeyp
         assert st.launchpad_tokens[TOKEN].approaching_75 is True, v0_mon
 
 
-# --- graduation ---------------------------------------------------------------
-
-
 def test_trade_for_unknown_token_is_recovered_not_dropped(monkeypatch):
     st = _fresh_state(monkeypatch)
     monkeypatch.setattr(state, "_fetch_token_string", lambda tok, sel: "RECOVERED")
 
-    # no TokenCreated was ever applied for TOKEN
     assert TOKEN not in st.launchpad_tokens
 
     nr = 2500 * 10**18
@@ -241,11 +224,9 @@ def test_circulating_supply_is_exact_and_matches_progress_bar(monkeypatch):
     _, tr = _buy(st, nr, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
 
-    # exact integer, derived from the authoritative reserve
     assert lp.circulating_supply == 600_000_000
     assert isinstance(lp.circulating_supply, int)
 
-    # the progress bar and the final-stretch flag agree at exactly 75%
     from api.routes.launchpad import _graduation_pct
 
     assert _graduation_pct(lp.circulating_supply, 0) == 0.75
@@ -256,7 +237,6 @@ def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    # a trade is missed entirely, then the next one arrives
     _buy(st, 2500 * 10**18, blk=102, ts=1002)
     assert st.launchpad_tokens[TOKEN].circulating_supply == 600_000_000
 
@@ -264,13 +244,11 @@ def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
 def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
     for v0_mon in (1_000, 49_300, 141_600):
         st = _fresh_state(monkeypatch)
-        # the adapter takes V0 by injection; that is the seam to patch
         monkeypatch.setattr(state.NATIVE_ADAPTER, "_initial_native_supply_fn", lambda v=v0_mon: v * 10**18)
         _create_token(st)
         lp = st.launchpad_tokens[TOKEN]
         expected = Decimal(v0_mon * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY)
         assert lp.last_price_native == expected, v0_mon
-    # the old hardcoded default is only right by coincidence at the test V0
     assert Decimal(1_000 * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY) == Decimal("0.000001")
 
 
@@ -285,7 +263,6 @@ def test_curve_reserves_are_recorded_for_fee_derivation(monkeypatch):
     assert lp.curve_native_reserve == nr
     assert lp.curve_token_reserve == tr
 
-    # a later trade overwrites them, so the delta is always vs the prior trade
     nr2 = 3000 * 10**18
     _, tr2 = _buy(st, nr2, blk=102, ts=1002)
     assert lp.curve_native_reserve == nr2
@@ -299,7 +276,7 @@ def test_fee_rate_is_derivable_from_the_native_reserve_delta(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    keep_factor = 99_000  # launchpadFee: 1% fee
+    keep_factor = 99_000
     v0 = V0
     k = v0 * INITIAL_TOKEN_SUPPLY
 
@@ -309,7 +286,7 @@ def test_fee_rate_is_derivable_from_the_native_reserve_delta(monkeypatch):
     new_native = prev_native + net_in
     new_token = (k + new_native - 1) // new_native
 
-    _buy(st, prev_native, blk=101, ts=1001)  # establishes the previous reserve
+    _buy(st, prev_native, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
     assert lp.curve_native_reserve == prev_native
 
@@ -321,7 +298,7 @@ def test_fee_rate_is_derivable_from_the_native_reserve_delta(monkeypatch):
     delta_native = int(parsed["native_reserve"]) - lp.curve_native_reserve
     implied_keep_factor = (delta_native * 100_000) // gross_in
     assert implied_keep_factor == keep_factor
-    assert gross_in - delta_native == gross_in - net_in  # the fee actually taken
+    assert gross_in - delta_native == gross_in - net_in
 
     st.apply_launchpad_trade(parsed, 102, 1002, "0xdead", 0, ROUTER)
     assert lp.curve_native_reserve == new_native
@@ -390,7 +367,6 @@ def test_pnl_unit_semantics_are_coherent():
     native_spent, native_received = 10 * 10**18, 4 * 10**18
     realized = Decimal(native_received - native_spent)
     total = realized + unrealized_wei
-    # total PnL == (what you took out + what you still hold) - what you put in
     assert total == (Decimal(native_received) + unrealized_wei) - Decimal(native_spent)
 
 
@@ -451,7 +427,6 @@ def test_buy_transfer_credits_user_and_skips_contract_side(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    # a curve buy transfers tokens out of the Crystal core contract to the buyer
     _transfer(st, ROUTER, USER, 500 * 10**18)
 
     deltas = _balance_deltas(st)
@@ -517,7 +492,6 @@ def test_post_graduation_trades_keep_volume_flowing(monkeypatch):
     assert lp.tx_count == tx_before + 1
     assert lp.buy_count >= 1
 
-    # and the trade is persisted as a launchpad trade, so windowed volume sees it
     tokens = [c.kwargs["token"] for c in state.storage.insert_trade.call_args_list]
     assert TOKEN in tokens
 
@@ -527,7 +501,6 @@ def test_post_graduation_sell_uses_correct_leg(monkeypatch):
     lp = _graduate(st)
     vol_before = lp.native_volume
 
-    # sell: base in, quote (native) out
     tokens_in, native_out = 150 * 10**18, 3 * 10**18
     _market_trade(st, MARKET, False, tokens_in, native_out)
 
@@ -539,7 +512,6 @@ def test_non_launchpad_market_trades_do_not_touch_launchpad_aggregates(monkeypat
     st = _fresh_state(monkeypatch)
     lp = _graduate(st)
 
-    # an ordinary Crystal market, unrelated to any launchpad token
     other = dict(_market_created_ev())
     other.update(
         market=OTHER_MARKET,
@@ -573,7 +545,6 @@ def test_post_graduation_market_trade_updates_token_price(monkeypatch):
     lp = st.launchpad_tokens[TOKEN]
     frozen = lp.last_price_native
 
-    # scaleFactor 9 -> price = end_price / 1e9
     end_price = 20_000
     st.apply_market_trade(
         103,
@@ -745,11 +716,9 @@ def test_missing_curve_sync_leaves_nadfun_supply_untouched(monkeypatch):
     derived = lp.circulating_supply
     assert derived > 0
 
-    # next trade arrives with no sync behind it
     _nadfun_trade(st, tok, nf.SOURCE_V2, 0, 0, 102, 1002, "0xn2")
     assert lp.circulating_supply == derived, "a missing sync must not move supply"
 
-    # and it self-corrects on the next trade that does carry reserves
     half = geo["virtual_token_0"] - (geo["curve_supply"] // 2)
     _nadfun_trade(st, tok, nf.SOURCE_V2, half, 10**18, 103, 1003, "0xn3")
     assert lp.circulating_supply == (geo["curve_supply"] // 2) // 10**18
@@ -785,13 +754,11 @@ def test_nadfun_sell_volume_is_gross(monkeypatch):
     lp = _seed_nadfun_token(st, tok, nf.SOURCE_V2)
     geo = nf.geometry_for(nf.SOURCE_V2)
 
-    # establish a reserve
     quarter = geo["virtual_token_0"] - (geo["curve_supply"] // 4)
     _nadfun_trade(st, tok, nf.SOURCE_V2, quarter, 10_000 * 10**18, 101, 1001, "0xg1")
     assert lp.curve_native_reserve == 10_000 * 10**18
     vol_after_buy = lp.native_volume
 
-    # sell: virtual native falls by 100, user is paid 99 net
     gross, net = 100 * 10**18, 99 * 10**18
     ev = {
         "token": tok,
@@ -808,8 +775,6 @@ def test_nadfun_sell_volume_is_gross(monkeypatch):
     assert lp.native_volume != vol_after_buy + net
 
 
-# a pool swap must not crash the block: prev_native_reserve is only assigned on the
-# curve path, so reading it unconditionally for the fee took the indexer down in prod
 def test_pool_swap_trade_does_not_crash_on_missing_curve_reserve(monkeypatch):
     import models
 
@@ -830,14 +795,11 @@ def test_pool_swap_trade_does_not_crash_on_missing_curve_reserve(monkeypatch):
         "sqrt_price_x96": 0,
     }
 
-    # before the fix this raised UnboundLocalError and killed the whole block
     st.apply_launchpad_trade(ev, 200, 2000, "0xpoolswap", 0, pool)
 
     assert lp.tx_count >= 1, "the pool swap should have been recorded"
 
 
-# swap amounts are gross of the pair fee on buys and net on sells, so the price must
-# come from the post swap reserves the sync stashed, not the raw amount ratio
 def test_pool_swap_prices_from_synced_reserves_not_amounts(monkeypatch):
     import models
     from modules import nadfun as nf_events
@@ -901,7 +863,7 @@ def test_recovered_nadfun_token_measures_against_its_own_geometry(monkeypatch):
     st = _fresh_state(monkeypatch)
     tok = "0xbbbb000000000000000000000000000000009999"
 
-    token_reserve = 739_907_148_069_805_834_792_342_062  # real MONISTABLE reserve
+    token_reserve = 739_907_148_069_805_834_792_342_062
     ev = {
         "token": tok,
         "user": USER,
@@ -917,8 +879,6 @@ def test_recovered_nadfun_token_measures_against_its_own_geometry(monkeypatch):
     assert lp.source == nf.SOURCE_V2
     expected = (nf.V2_VIRTUAL_TOKEN_0 - token_reserve) // 10**18
     assert lp.circulating_supply == expected == 320_661_851
-    # prod still carries 320,661,852 here: the accumulated value, one token off
-    # what the reserve actually says, which is the drift derivation removes
     assert lp.circulating_supply != (10**27 - token_reserve) // 10**18 == 260_092_851
 
 
@@ -930,17 +890,15 @@ def test_sell_side_fee_survives_the_gross_volume_override(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    keep = 99_000  # 1% launchpad fee
+    keep = 99_000
     v0 = V0
 
-    # first buy establishes the reserve; no prior reserve means no derivable fee
     first_in = 10**18
     nr0 = v0 + (first_in * keep) // 100_000
     _buy(st, nr0, blk=101, ts=1001, amount_in=first_in, amount_out=10**20)
     lp = st.launchpad_tokens[TOKEN]
     assert lp.fees_usd == 0, "the first trade has no previous reserve to derive from"
 
-    # second buy: 1 MON gross, 0.99 reaches the curve
     gross_in = 10**18
     net_in = (gross_in * keep) // 100_000
     nr1 = nr0 + net_in
@@ -949,7 +907,6 @@ def test_sell_side_fee_survives_the_gross_volume_override(monkeypatch):
     expected_buy_fee = Decimal(gross_in - net_in) / Decimal(10**18) * st.mon_price_usd
     assert abs(fees_after_buy - expected_buy_fee) < Decimal("1e-24"), "buy side fee must accrue"
 
-    # sell: curve releases 0.5 gross, user is paid 0.495 net
     gross_out = 5 * 10**17
     net_out = (gross_out * keep) // 100_000
     parsed = lp_mod.parse_launchpad_trade(
@@ -977,7 +934,6 @@ def test_unmapped_nadfun_contract_is_refused_not_assumed_v1(monkeypatch):
     assert state._source_for_emitter(chain_mod.NADFUN_ADDR) == nf.SOURCE_V1
     assert state._source_for_emitter(chain_mod.NADFUN_V2_ADDR) == nf.SOURCE_V2
 
-    # a nad.fun contract we have no adapter for must resolve to nothing
     unmapped = "0x00000000000000000000000000000000000000v3".replace("v3", "99")
     monkeypatch.setattr(chain_mod, "is_nadfun_address", lambda a: a == unmapped)
     assert state._source_for_emitter(unmapped) is None

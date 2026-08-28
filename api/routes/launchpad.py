@@ -39,8 +39,6 @@ from api.api import (
 router = APIRouter()
 
 
-# a comma separated blacklist param split into normalised entries. empty means no
-# constraint rather than an empty exclusion, which would match nothing
 def _csv(raw: str) -> list[str]:
     return [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
 
@@ -48,15 +46,11 @@ def _csv(raw: str) -> list[str]:
 from api.api import _curve_supply_for
 
 
-# recover the true internal source from a serialized token, the wire reports
-# source 1 for every nad.fun generation so nadfunVersion carries the generation
 def _true_source(data) -> int:
     v = int(data.get("nadfunVersion") or 0)
     return v if v in (1, 2) else int(data.get("source") or 0)
 
 
-# fraction of the curve sold, each source and nad.fun generation sells a
-# different amount so the denominator comes from that source geometry
 def _graduation_pct(circulating, source) -> float:
     try:
         denom = _curve_supply_for(source) // 10**18
@@ -67,7 +61,6 @@ def _graduation_pct(circulating, source) -> float:
         return 0.0
 
 
-# paginated holders for one token, searchable by address across the whole set
 @router.get("/holders/{token_addr}")
 def token_holders(
     token_addr: str,
@@ -173,9 +166,6 @@ def token_holders(
     }
 
 
-# grouped token lists for recently created approaching and graduated tokens
-# the cached variant, for the common case of no blacklist. a 1000 entry list would
-# otherwise become part of the cache key and mint a private entry per user
 @ttl_cache("tokens:list", ttl_seconds=3, serve_stale_seconds=30)
 def _list_tokens_cached(since_block: int, since: int) -> dict[str, Any]:
     return _list_tokens_impl(since_block, since, {})
@@ -197,9 +187,6 @@ def list_tokens(
         "exclude_website": _csv(exclude_website),
         "exclude_twitter": _csv(exclude_twitter),
     }
-    # one call, three independently filtered columns: filters is url encoded json
-    # keyed by bucket, each value the same filter names /search/query takes, e.g.
-    # {"graduated":{"marketcap_min":200},"new":{"marketcap_min":20}}
     if filters:
         try:
             per_bucket = json.loads(filters)
@@ -228,8 +215,6 @@ def list_tokens(
     return _list_tokens_impl(since_block, since, ex)
 
 
-# buckets are excluded in sql rather than trimmed afterwards, so a blacklisted token
-# is replaced by the next candidate instead of leaving a short column
 def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     t0 = time.time()
     bl_where, bl_params = storage.blacklist_clauses(ex, "")
@@ -307,7 +292,6 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     circ_map = {t: c for t, c in grad_rows + appr_rows + created_rows}
     token_data = _batch_serialize_tokens(all_token_addrs)
 
-    # attach graduation progress to a serialized token
     def with_graduation_pct(token_addr):
         data = token_data.get(token_addr, {})
         if data:
@@ -326,9 +310,6 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
 
     if since_block or since:
         changed = storage.tokens_changed_since(all_token_addrs, since_block=since_block, since_ts=since)
-        # membership is returned in full so the client can drop what left the set.
-        # the server is stateless and cannot know what the client already holds, so
-        # sending ids is both cheaper and more correct than guessing a removed list
         result["ids"] = {
             "recent_created": [t for t, _ in created_rows],
             "recent_approaching": [t for t, _ in appr_rows],
@@ -339,9 +320,6 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
         result["since_block"] = since_block
         result["since"] = since
 
-    # on the full response too, not just the delta. without it the client had to seed
-    # its watermark from the chain head minus a guess, and a token created during the
-    # first paint fell into that gap
     result["as_of_block"] = storage.get_last_processed_block() or 0
 
     dt = (time.time() - t0) * 1000
@@ -350,7 +328,6 @@ def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     return result
 
 
-# one query for a token core row, holders, 24h stats and creator counts
 def _get_token_core_stats(token_addr: str, day_ago: int) -> dict | None:
     excluded_list = list(_static_internal_addrs())
     not_internal = _sql_not_internal("user_address")
@@ -467,9 +444,6 @@ def _get_token_core_stats(token_addr: str, day_ago: int) -> dict | None:
     }
 
 
-# trades in a time range, for chart marks that span more history than the fixed
-# window returns, must stay registered above the chartres route because that route
-# parses its second segment as an int and would claim trades and 422
 @router.get("/token/{token_addr}/trades")
 def token_trades_range(
     token_addr: str,
@@ -536,12 +510,6 @@ def token_trades_range(
     }
 
 
-# token overview, holders, recent trades and chart data in one payload
-# every column the backend holds for a token, unshaped. the terminal reads this once
-# instead of issuing chain reads before a swap, so the fee block matters most: curve
-# fee for the bonding phase, pair fee config once a dex pair exists, and the crystal
-# market taker fee for native tokens. declared before the chartres route or that
-# catch all would shadow it
 @router.get("/token/{token_addr}/meta")
 def token_meta(token_addr: str) -> dict[str, Any]:
     from core.adapters import nadfun as _nadfun_geo
@@ -555,7 +523,6 @@ def token_meta(token_addr: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="token not found")
         cols = [d[0] for d in cur.description]
     raw = dict(zip(cols, row))
-    # decimals and datetimes serialize as strings so nothing is lost to float
     for k, v in list(raw.items()):
         if isinstance(v, Decimal):
             raw[k] = _fmt(v)
@@ -567,8 +534,6 @@ def token_meta(token_addr: str) -> dict[str, Any]:
     market = (raw.get("market") or "").lower()
 
     fees: dict[str, Any] = {
-        # fraction of each curve trade taken as fee while the token is bonding.
-        # null for native, whose curve fee comes from launchpad params instead
         "curveFeeRate": _fmt(_nadfun_geo.fee_rate_for(source)) if _nadfun_geo.is_nadfun_source(source) else None,
         "pair": None,
         "crystalMarket": None,
@@ -597,9 +562,6 @@ def token_meta(token_addr: str) -> dict[str, Any]:
         if r is not None:
             fees["crystalMarket"] = {"market": market, "takerFee": str(int(r[0] or 0))}
 
-    # the terminal prices a swap off these, so they have to be the reserves of
-    # whatever venue actually holds the liquidity: the curve while bonding, the
-    # amm pair or crystal market once the token has graduated
     reserves = {
         "migrated": bool(raw.get("migrated")),
         "market": market,
@@ -629,8 +591,6 @@ def token_meta(token_addr: str) -> dict[str, Any]:
     }
 
 
-# fee config for any dex pair, cached server side so the terminal can price a swap
-# without a chain read. ok=false marks a plain pair with no fee collector
 @router.get("/pair/{pair_addr}/fees")
 def pair_fees(pair_addr: str) -> dict[str, Any]:
     from modules.nadfun import fetch_pair_fee_config
@@ -641,8 +601,6 @@ def pair_fees(pair_addr: str) -> dict[str, Any]:
     cached = storage.get_pair_fees(pair_addr)
     if cached is None or (int(time.time()) - cached.get("fetchedAt", 0)) > 3600:
         cfg = fetch_pair_fee_config(pair_addr)
-        # a transport failure must not overwrite a good cached row with a false
-        # "general pair" verdict, so only a definitive answer or an empty cache writes
         if cfg["ok"] or cached is None:
             storage.upsert_pair_fees(
                 pair_addr,
@@ -736,8 +694,6 @@ def token_overview_graph(
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
-        # the full chart history is roughly half this payload and the client keeps its
-        # own bars after first load, so let it opt out on every subsequent poll
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
 
         holders_list: list[dict[str, Any]] = []
@@ -981,13 +937,7 @@ def token_overview_graph(
                     tracked_addrs.add(a)
 
         tracked_trades_out: list[dict[str, Any]] = []
-        # how much of a tracked wallet's past to import. it renders as chart
-        # marks, so this is a display budget rather than a data limit
         TRACKED_HISTORY_LIMIT = 500
-        # a tracked wallet's history is its own query, not a filter over the
-        # token's newest fifty trades. on a busy token that window is minutes
-        # wide, so importing a wallet used to show none of what it had already
-        # done here
         tracked_rows: list = []
         if tracked_addrs:
             with db_cursor() as cur:
@@ -1059,8 +1009,6 @@ def token_overview_graph(
 
         migrated_flag = bool(migrated)
 
-        # same venue rule as the list rows and /meta: curve while bonding, amm
-        # pair or crystal market once graduated
         _res = {
             "migrated": migrated_flag,
             "market": (core.get("market") or "").lower(),
@@ -1160,7 +1108,6 @@ def token_overview_graph(
                 sb_row = cur.fetchone()
             sniper_balance = int(sb_row[0] or 0)
 
-        # percent of the 1e27 supply. 1e9 was neither a fraction nor a percent
         sniper_share = float(Decimal(sniper_balance) / _PCT_OF_SUPPLY) if sniper_balance > 0 else 0.0
 
         snipers_view = {
@@ -1208,8 +1155,6 @@ def token_overview_graph(
                 "klines": series_klines,
             },
             "snipers": snipers_view,
-            # the full stats windows and the fee block ride along so /board is one
-            # query: no separate /stats, /meta or /pair call on page load
             "stats": token_stats(token_addr),
             "fees": {
                 "curveFeeRate": _fmt(_nadfun_geo.fee_rate_for(source))
@@ -1235,10 +1180,6 @@ def token_overview_graph(
             "top10Addresses": top10_addresses,
             "trackedtrades": tracked_trades_out,
             "trades": trades_out,
-            # volumeNative/volumeQuote/volumeUsd are 24h despite the names, while
-            # the list endpoint serves lifetime under native_volume/volume_usd.
-            # the explicit keys below say which is which, the originals stay for
-            # compatibility -- renaming them is a breaking change
             "volumeNative": str(volume_native_24h),
             "volumeUsd": _fmt_usd(volume_usd_24h),
             "volume24hUsd": _fmt_usd(volume_usd_24h),
@@ -1269,8 +1210,6 @@ def token_overview_graph(
         log.info("token_overview_graph token=%s chartres=%s dt_ms=%.1f", token_addr, chartres, dt)
 
 
-# many wallets in one round trip, so a multi wallet view stops fanning out N requests
-# MUST stay registered above /user/{user_addr} or that route claims the bare path
 @router.get("/user")
 def users_portfolio_batch(
     addresses: str = Query("", description="comma separated wallet addresses, max 25 (100 when merged)"),
@@ -1308,8 +1247,6 @@ def users_portfolio_batch(
     return {"users": out, "count": len(out), "token": tok or None}
 
 
-# one combined position list across a wallet set, summed per token in a single
-# query so the multi wallet portfolio stops merging n responses in the browser
 def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
     mon_price = _mon_price_usd()
 
@@ -1449,7 +1386,6 @@ def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
     return {"summary": summary, "positions": positions}
 
 
-# legacy user portfolio summary and positions
 @router.get("/user/{user_addr}")
 def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, Any]:
     user_addr = user_addr.lower()
@@ -1573,7 +1509,6 @@ def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, An
     )
 
     if mon_price > 0:
-        # these totals accumulate wei denominated values, same as the per row ones
         total_value_usd = total_value_native * mon_price / _WEI
         total_pnl_native_val = total_realized_pnl + total_unrealized_pnl
         total_pnl_usd = total_pnl_native_val * mon_price / _WEI
@@ -1605,7 +1540,6 @@ def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, An
     if include_native:
         from api.spot_data import fetch_native_balance
 
-        # a transport failure sends null rather than a zero that reads as broke
         try:
             native_block, native_raw, native_stale = fetch_native_balance(user_addr)
             out["native_balance"] = str(native_raw)
@@ -1619,7 +1553,6 @@ def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, An
     return out
 
 
-# aggregated portfolio metrics for one user
 @router.get("/portfolio/{address}")
 def portfolio_summary(address: str) -> dict[str, Any]:
     user_addr = address.lower()
@@ -1657,7 +1590,6 @@ def portfolio_summary(address: str) -> dict[str, Any]:
 
     total_pnl = realized_pnl + unrealized_pnl
 
-    # balance_token is wei, so the summed value is wei denominated too
     portfolio_value_usd = portfolio_value * mon_price / _WEI if mon_price > 0 else Decimal(0)
     total_pnl_usd = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
 
@@ -1679,7 +1611,6 @@ def portfolio_summary(address: str) -> dict[str, Any]:
     }
 
 
-# paginated portfolio positions with sorting and cursor support
 @router.get("/portfolio/{address}/positions")
 def portfolio_positions(
     address: str,
@@ -1821,7 +1752,6 @@ def portfolio_positions(
     }
 
 
-# paginated trade history for one user
 @router.get("/portfolio/{address}/history")
 def portfolio_history(
     address: str,
@@ -1931,11 +1861,6 @@ def portfolio_history(
     }
 
 
-# realized pnl and flow per utc day, on the same average cost basis the position
-# columns are maintained with: cumulative sums per token, realized read at each
-# day end, the day's pnl being the difference. observed data only, no baselines
-# an iana zone name the database will accept, falling back to utc rather than
-# letting a bad client string reach the query
 def _safe_timezone(tz: str) -> str:
     name = (tz or "UTC").strip()
     try:
@@ -1955,10 +1880,6 @@ def portfolio_daily(
     zone = _safe_timezone(tz)
     since_day = datetime.now(ZoneInfo(zone)).date() - timedelta(days=days - 1)
 
-    # realized comes from the trade rows themselves, written by the applier on
-    # the same moving average basis as the position totals. deriving it here a
-    # second time from lifetime sums is what used to make the calendar and the
-    # position pnl disagree for anyone who bought again after selling
     with db_cursor() as cur:
         cur.execute(
             """
@@ -2005,7 +1926,6 @@ def portfolio_daily(
     }
 
 
-# ranked users by pnl volume or winrate
 @router.get("/leaderboard")
 def leaderboard(
     search: str = Query(None, description="Filter by address prefix"),
@@ -2077,7 +1997,6 @@ def leaderboard(
     return {"users": users}
 
 
-# windowed volume counts and change percentages for one token
 @router.get("/stats/{token_addr}")
 @ttl_cache("stats:token", ttl_seconds=0.5)
 def token_stats(token_addr: str) -> dict[str, Any]:
@@ -2097,8 +2016,6 @@ def token_stats(token_addr: str) -> dict[str, Any]:
         "token": token_addr,
     }
 
-    # one scan of the 24h window covers every shorter window via FILTER, instead
-    # of a separate aggregate query per window
     agg_sql = (
         """
         SELECT
@@ -2119,8 +2036,6 @@ def token_stats(token_addr: str) -> dict[str, Any]:
     """
     )
 
-    # the reference price for every window, plus the newest and oldest trade, in a
-    # single round trip. each subquery is a one row index seek on (token, timestamp)
     price_sql = """
         SELECT
             (SELECT price_native FROM launchpad_trades
@@ -2164,8 +2079,6 @@ def token_stats(token_addr: str) -> dict[str, Any]:
 
     latest_price = prices[0] or None
     first_price = prices[1] or None
-    # watermarks: how far the numbers below actually reach, so a client holding live
-    # trades knows which of them are already counted here
     out["as_of_ts"] = int(prices[2] or 0)
     out["as_of_block"] = int(prices[3] or 0)
     refs = {
@@ -2183,8 +2096,6 @@ def token_stats(token_addr: str) -> dict[str, Any]:
         buy_tx_count = agg[base + 3] or 0
         sell_tx_count = agg[base + 4] or 0
 
-        # last_eff collapses to the newest trade overall: if one landed inside the
-        # window it is the newest, and if not the one before the window is
         base_price = refs[suffix] or first_price
         last_eff = latest_price or first_price
 
@@ -2199,14 +2110,11 @@ def token_stats(token_addr: str) -> dict[str, Any]:
         out[f"buy_tx_count_{suffix}"] = int(buy_tx_count)
         out[f"sell_tx_count_{suffix}"] = int(sell_tx_count)
         out[f"change_pct_{suffix}"] = change_pct
-        # same scale as `marketcap` and the chart's open/close, so the client can
-        # recompute the delta against a live price without a unit conversion
         out[f"price_ref_{suffix}"] = _scaled_price(base_price) if base_price else "0"
 
     return out
 
 
-# recent trades for one or more user addresses
 @router.get("/trades/{addresses}")
 def trades_for_addresses(addresses: str) -> dict[str, Any]:
     addrs = {a.strip().lower() for a in addresses.split(",") if a.strip()}
@@ -2272,7 +2180,6 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
     }
 
 
-# ohlcv bars for one token at the requested resolution
 @router.get("/chart/{token_addr}/{chartres}")
 def chart_only(
     token_addr: str,
@@ -2288,9 +2195,6 @@ def chart_only(
 
     lim = max(1, min(int(limit or 1000), 5000))
 
-    # same stitched builder the token page uses, so the two charts cannot diverge.
-    # before_ts pages backwards: a chart scrolled past its first window asks for
-    # the bars older than the oldest one it holds
     out = _build_ohlcv_from_db(
         token_addr,
         bucket_seconds=chartres,
@@ -2298,9 +2202,6 @@ def chart_only(
         before_ts=int(before_ts) or None,
     )
 
-    # rates=1 rides the mon/usd series for exactly the buckets served, so a
-    # chart denominating in usd converts this page with zero extra requests and
-    # never discovers mid-scroll that its rate coverage has a hole
     mon_usd = None
     if rates and out:
         from api.routes.orderbook import coarsened_resolution
@@ -2322,23 +2223,16 @@ def chart_only(
         "token": token_addr,
         "resolution": chartres,
         "before_ts": int(before_ts) or None,
-        # the oldest bucket served, so a client can ask for the next page back
         "next_before_ts": int(out[0]["time"]) if out else None,
         "monUsd": mon_usd,
         "klines": out,
     }
 
 
-# total traded volume and trade count for one user
-# the whole spot portfolio tab in one call: rows, totals and the envelope. fields
-# whose source is not indexed yet (exchange trade history, open orders) are null
-# rather than zero, so the ui shows a dash instead of a number that lies
 @router.get("/spot/{wallet}")
 def spot_portfolio(
     wallet: str,
     all: bool = Query(False, description="include zero balances"),
-    # a plain default, not Query(): these handlers are called directly in tests
-    # and a Query object is not a string
     addresses: str = "",
 ) -> dict[str, Any]:
     from api.spot_data import spot_body
@@ -2348,8 +2242,6 @@ def spot_portfolio(
     if not wallet.startswith("0x") or len(wallet) != 42:
         raise HTTPException(status_code=400, detail="invalid wallet address")
 
-    # a selected set of derived wallets reads as one account. the path wallet
-    # stays the graph subject, since the graph is filled per wallet
     selected = []
     for a in (addresses or "").split(","):
         a = a.strip().lower()
@@ -2364,8 +2256,6 @@ def spot_portfolio(
         raise HTTPException(status_code=503, detail="balance read failed and no cached snapshot exists")
 
     if body["supported"]:
-        # the bucket series is cached forever; a request for an unfilled wallet
-        # kicks a background fill and the client re-polls until complete
         ensure_fill(wallet)
         graph = graph_for(wallet)
     else:
@@ -2408,8 +2298,6 @@ def user_volume(user_addr: str) -> dict[str, Any]:
         if trade_count > 0:
             seen_tokens.add(token)
 
-    # usd summed at each trade's own price, so the figure is what actually traded
-    # rather than today's price applied to history
     with db_cursor() as cur:
         cur.execute(
             "SELECT COALESCE(SUM(usd_amount), 0) FROM launchpad_trades WHERE user_address = %s",
@@ -2428,7 +2316,6 @@ def user_volume(user_addr: str) -> dict[str, Any]:
     }
 
 
-# search tokens by name or symbol with optional ranked sorting
 @router.get("/search/query")
 @ttl_cache("tokens:search", ttl_seconds=3)
 def search_tokens_api(
@@ -2519,9 +2406,6 @@ def search_tokens_api(
     return _search_impl(query, sort, limit, offset, filters)
 
 
-# a blacklist at the documented 1000 entry cap is roughly 43kb of query string, and
-# the ingress rejects anything past about 17kb, so the same search is also reachable
-# by post. both transports run this identical body
 @router.post("/search/query")
 def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
     b = body or {}
@@ -2545,7 +2429,6 @@ def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-# shared body behind the get and post forms of the search
 def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict) -> dict[str, Any]:
     token_addrs, circ_map, total = storage.search_tokens_filtered(
         query=query,
@@ -2562,14 +2445,6 @@ def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict) 
         "limit": limit,
         "offset": offset,
         "total": total,
-        # exactly which filters were understood and applied. an unknown or misspelled
-        # param is otherwise ignored in silence, and the client cannot tell a filtered
-        # result from an unfiltered one -- the same trap as filtering a page client side
-        # `is not False` and `!= ""` rather than truthiness, so a real numeric bound of
-        # 0 still counts as applied while the unset string and bool defaults do not
-        # query is echoed too. it travels outside the filters dict, so a client that
-        # asserts every param it sent came back applied would discard the response and
-        # fall back to a client side pass on every search
         "applied_filters": sorted(
             ([k for k, v in filters.items() if v is not None and v is not False and v != "" and v != []])
             + (["query"] if (query or "").strip() else [])

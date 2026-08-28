@@ -18,8 +18,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RAW_URL = os.environ.get("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not RAW_URL, reason="set TEST_DATABASE_URL")
 
-# api.api must load before any api.routes import, the route registration order is
-# load bearing and importing a route module first trips the circular import
 import api.api  # noqa: E402, F401
 from tests.test_launchpad_integration import (  # noqa: E402
     TOKEN,
@@ -56,8 +54,6 @@ def _today_ts(hour_offset_secs: int) -> int:
     return midnight + hour_offset_secs
 
 
-# rest rows must carry the pnl and price fields the socket already sends, or the
-# client keeps re-deriving them four different ways
 def test_user_rows_carry_pnl_and_last_price(db):
     from api.routes.launchpad import user_portfolio
 
@@ -84,8 +80,6 @@ def test_user_rows_carry_pnl_and_last_price(db):
     assert "total_pnl_native" in summary and "portfolio_value_native" in summary
 
 
-# the merged batch must equal the sum of the individual wallets, computed in one
-# query rather than n responses stitched together in the browser
 def test_merged_batch_sums_across_wallets(db):
     from api.routes.launchpad import user_portfolio, users_portfolio_batch
 
@@ -113,7 +107,6 @@ def test_merged_batch_sums_across_wallets(db):
     assert summary["tokens_traded"] == 1
 
 
-# an unmerged batch keeps its old shape so existing clients are untouched
 def test_unmerged_batch_shape_unchanged(db):
     from api.routes.launchpad import users_portfolio_batch
 
@@ -126,8 +119,6 @@ def test_unmerged_batch_shape_unchanged(db):
     assert "merged" not in body
 
 
-# a full same day round trip's daily realized pnl must equal the realized pnl the
-# position columns hold, because both are the same average cost formula
 def test_daily_pnl_matches_position_realized(db):
     from api.routes.launchpad import portfolio_daily, user_portfolio
     from modules import launchpad as lp_mod
@@ -160,7 +151,6 @@ def test_daily_pnl_matches_position_realized(db):
     assert int(day["sell_volume_native"]) == 5 * 10**17
 
 
-# usd volume comes from what each trade actually printed, never today's price
 def test_volume_reports_usd(db):
     from api.routes.launchpad import user_volume
 
@@ -174,7 +164,6 @@ def test_volume_reports_usd(db):
     assert int(Decimal(body["volume_native"])) > 0
 
 
-# the shared spot body serves rest and the ws balances channel identically
 def test_spot_body_shared_serializer(db, monkeypatch):
     import api.spot_data as spot_data
 
@@ -193,7 +182,6 @@ def test_spot_body_shared_serializer(db, monkeypatch):
     assert empty["supported"] is False and empty["rows"] == []
 
 
-# a wallet that never touched crystal is refused before any rpc spend
 def test_spot_unsupported_wallet_is_flagged_and_costs_nothing(db, monkeypatch):
     import api.spot_data as spot_data
     import api.spot_graph as spot_graph
@@ -215,7 +203,6 @@ def test_spot_unsupported_wallet_is_flagged_and_costs_nothing(db, monkeypatch):
     assert body["summary"]["totalAccountValue"] is None
 
 
-# one indexed trade makes the wallet supported and the endpoint serves normally
 def test_spot_supported_after_first_trade(db, monkeypatch):
     import api.spot_data as spot_data
     import api.spot_graph as spot_graph
@@ -236,7 +223,6 @@ def test_spot_supported_after_first_trade(db, monkeypatch):
     assert body["balance_block"] == 12345
 
 
-# include_native adds the wallet's mon balance without a client side rpc read
 def test_user_include_native_balance(db, monkeypatch):
     import api.spot_data as spot_data
     from api.routes.launchpad import user_portfolio
@@ -255,15 +241,11 @@ def test_user_include_native_balance(db, monkeypatch):
     assert "native_balance" not in plain, "the flag must stay opt in"
 
 
-# unrealized profit is what a position is worth now minus what it cost. storing
-# the market value instead made every untouched position report its whole size
-# as profit, so a break even bag showed as a near total gain
 def test_unrealized_pnl_subtracts_cost_basis(db):
     import core.storage as storage
 
     wallet = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
     token = "0x350035555e10d9afaf1566aaebfced5ba6c27777"
-    # bought 4210.75 tokens for 290.59 native, nothing sold, price barely moved
     tokens_held = 4210753505605066288927
     spent = 290589750000000000000
     price = Decimal("0.068578")
@@ -302,9 +284,6 @@ def test_unrealized_pnl_subtracts_cost_basis(db):
     assert cost_basis == Decimal(spent)
 
 
-
-# a pair reports reserve0/reserve1 positionally, so which side is the token
-# depends on the address ordering recorded when the pool was discovered
 def test_pool_reserves_follow_token_ordering(db):
     import core.storage as storage
 
@@ -321,18 +300,17 @@ def test_pool_reserves_follow_token_ordering(db):
             ("0xpool1", token, native),
         )
 
-    # reserve0=1000 tokens, reserve1=7 native
     storage.update_pool_reserves("0xpool0", 1000, 7, 100, 1000)
     storage.update_pool_reserves("0xpool1", 1000, 7, 100, 1000)
 
     with storage.db_cursor() as cur:
-        cur.execute("SELECT pool, reserve_token, reserve_native FROM launchpad_pools WHERE pool LIKE '0xpool%' ORDER BY pool")
+        cur.execute(
+            "SELECT pool, reserve_token, reserve_native FROM launchpad_pools WHERE pool LIKE '0xpool%' ORDER BY pool"
+        )
         got = {p: (int(rt), int(rn)) for p, rt, rn in cur.fetchall()}
     assert got["0xpool0"] == (1000, 7), "token is reserve0 here"
     assert got["0xpool1"] == (7, 1000), "token is reserve1 here, so the sides swap"
 
-    # an older sync must not overwrite a newer one, the same monotonic rule the
-    # orderbook appliers use
     storage.update_pool_reserves("0xpool0", 1, 1, 50, 500)
     with storage.db_cursor() as cur:
         cur.execute("SELECT reserve_token FROM launchpad_pools WHERE pool = '0xpool0'")

@@ -12,12 +12,7 @@ from core.multicall import (
     u256_at,
 )
 
-# these pools are not uniswap v2 pairs: getReserves() reverts on them. what a
-# pool holds is simply its balance of each side, which every erc20 answers, so
-# the sweep reads balanceOf for the token and the native asset instead
 BALANCE_OF = bytes.fromhex("70a08231")
-# two calls per pool, so the batch is expressed in pools to keep the stride
-# and the slice from drifting apart
 POOLS_PER_BATCH = 150
 
 
@@ -25,9 +20,6 @@ def _balance_of(holder: str) -> bytes:
     return BALANCE_OF + bytes.fromhex(holder[2:].rjust(64, "0"))
 
 
-# graduated pools only learn their reserves when they next trade, so a quiet
-# pool shows no liquidity until someone touches it. one multicall per batch
-# reads them all straight from chain state instead of waiting for a sync log
 def main() -> None:
     parser = argparse.ArgumentParser(description="read graduated pool reserves from chain state")
     parser.add_argument("--rpc", default=os.environ.get("RESERVES_RPC", "https://rpc.monad.xyz"))
@@ -106,8 +98,6 @@ def main() -> None:
                 if token_bal == 0 and native_bal == 0:
                     empty += 1
                     continue
-                # the writer takes positional reserves and orients them itself,
-                # so hand it the pair in the order that row records
                 r0, r1 = (token_bal, native_bal) if token_is_0 else (native_bal, token_bal)
                 storage.update_pool_reserves(pool, r0, r1, head, now, cur=cur)
                 written += 1

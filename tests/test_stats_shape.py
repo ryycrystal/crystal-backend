@@ -31,8 +31,6 @@ from tests.test_launchpad_integration import (  # noqa: E402
 )
 
 
-# the endpoint caches for 500ms, so tests hitting the same token in quick
-# succession would otherwise read each other's responses
 @pytest.fixture(autouse=True)
 def _clear_api_cache():
     import api.api as api_mod
@@ -54,7 +52,6 @@ BASES = (
 )
 
 
-# every key the frontend templates must exist with the right type
 def test_stats_exposes_every_windowed_key(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -76,12 +73,10 @@ def test_stats_exposes_every_windowed_key(db):
         assert isinstance(body[f"price_ref_{w}"], str)
 
 
-# windowed aggregates must actually respect their boundaries
 def test_stats_windows_are_bounded_correctly(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
     now = int(time.time())
-    # one trade inside 5m, one only inside 6h
     _trade(st, native_reserve=1100 * 10**18, blk=101, ts=now - 60, txh="0xw1", log_idx=0)
     _trade(st, native_reserve=1200 * 10**18, blk=102, ts=now - 3 * 3600, txh="0xw2", log_idx=0)
 
@@ -94,7 +89,6 @@ def test_stats_windows_are_bounded_correctly(db):
     assert body["volume_usd_6h"] >= body["volume_usd_5m"], "wider window cannot hold less"
 
 
-# change_pct and price_ref must stay self consistent after the rewrite
 def test_stats_change_pct_matches_its_reference_price(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -112,7 +106,6 @@ def test_stats_change_pct_matches_its_reference_price(db):
     assert abs(implied - body["change_pct_24h"]) < 0.01, (implied, body["change_pct_24h"])
 
 
-# a token with no trades must not error or fabricate numbers
 def test_stats_on_an_untraded_token_is_all_zero(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -125,7 +118,6 @@ def test_stats_on_an_untraded_token_is_all_zero(db):
         assert body[f"price_ref_{w}"] == "0"
 
 
-# the watermark tells a client which live trades are already counted here
 def test_stats_watermarks_track_indexed_data(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -133,7 +125,6 @@ def test_stats_watermarks_track_indexed_data(db):
 
     c = _api_client()
 
-    # no trades: watermark is zero, not a fabricated "now"
     body = c.get(f"/stats/{TOKEN}").json()
     assert body["as_of_ts"] == 0
     assert "as_of_block" in body
@@ -146,7 +137,6 @@ def test_stats_watermarks_track_indexed_data(db):
     body = c.get(f"/stats/{TOKEN}").json()
     assert body["as_of_ts"] == now - 300, "watermark must equal the newest indexed trade"
 
-    # a newer trade advances it
     _trade(st, native_reserve=1200 * 10**18, blk=102, ts=now - 10, txh="0xwm2", log_idx=0)
     storage.record_block_processed(102)
     api_mod._cache.clear()
@@ -155,13 +145,11 @@ def test_stats_watermarks_track_indexed_data(db):
     assert body["as_of_block"] >= 102, "block watermark must reach the processed block"
 
 
-# same-second trades are why as_of_block exists: as_of_ts alone cannot separate them
 def test_as_of_block_disambiguates_same_second_trades(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
     now = int(time.time())
 
-    # two trades sharing a timestamp, in different blocks
     _trade(st, native_reserve=1100 * 10**18, blk=101, ts=now - 5, txh="0xss1", log_idx=0)
     storage.record_block_processed(101)
     c = _api_client()
@@ -176,14 +164,11 @@ def test_as_of_block_disambiguates_same_second_trades(db):
     api_mod._cache.clear()
     body = c.get(f"/stats/{TOKEN}").json()
 
-    # the timestamp cannot tell the two apart...
     assert body["as_of_ts"] == ts_after_first
-    # ...but the block watermark advanced, so a client keying on block stays exact
     assert body["as_of_block"] > block_after_first
     assert body["buy_tx_count_5m"] == 2, "both trades are counted"
 
 
-# series is roughly half the token payload and the client discards it after first load
 def test_series_can_be_omitted(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -199,15 +184,12 @@ def test_series_can_be_omitted(db):
 
     assert len(full["series"]["klines"]) > 0, "default must still include the chart"
     assert slim["series"]["klines"] == [], "series=false must drop the bars"
-    # the key stays present so the client shape never changes
     assert "series" in slim and "klines" in slim["series"]
-    # everything else survives
     assert slim["marketcap"] == full["marketcap"]
     assert len(slim["trades"]) == len(full["trades"])
     assert len(json.dumps(slim)) < len(json.dumps(full)), "slim payload must be smaller"
 
 
-# one request for many wallets instead of N
 def test_batch_user_endpoint(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)
@@ -223,18 +205,13 @@ def test_batch_user_endpoint(db):
     assert "summary" in body["users"][USER]
     assert "positions" in body["users"][USER]
 
-    # token filter narrows the positions
     scoped = c.get("/user", params={"addresses": USER, "token": TOKEN}).json()
     assert all((p.get("token") or "").lower() == TOKEN for p in scoped["users"][USER]["positions"])
 
-    # empty input is not an error
     assert c.get("/user", params={"addresses": ""}).json()["count"] == 0
-    # and the per-wallet route still works
     assert c.get(f"/user/{USER}").status_code == 200
 
 
-# the two filters the panel could not use, and the echo that makes a misspelled
-# param visible instead of silently returning an unfiltered page
 def test_search_supports_pro_traders_and_insider_filters(db, clean):
     from fastapi.testclient import TestClient
 
@@ -250,15 +227,11 @@ def test_search_supports_pro_traders_and_insider_filters(db, clean):
     assert r.status_code == 200
     assert "insider_holding_min" in r.json()["applied_filters"]
 
-    # a param the server does not know must not look like it was applied
     r = client.get("/search/query", params={"limit": 1, "volumeMin": 5})
     assert r.status_code == 200
     assert r.json()["applied_filters"] == [], "an unknown param must not report as applied"
 
 
-# a row that matched a holder-derived filter must not render zero for the field the
-# user filtered on. the batch serializer hardcoded snipers, so a search could return
-# 25 rows above 5% that every one of them displayed as 0.00%
 def test_list_rows_carry_the_fields_the_search_can_filter_on(db, clean):
     from api.api import _batch_get_holder_stats, _batch_serialize_tokens
 
@@ -269,7 +242,6 @@ def test_list_rows_carry_the_fields_the_search_can_filter_on(db, clean):
 
     stats = _batch_get_holder_stats([TOKEN], set())
     assert TOKEN in stats
-    # the three that used to be absent from the batch path entirely
     for key in ("sniper_count", "sniper_addresses", "sniper_holding", "insider_holding", "pro_traders"):
         assert key in stats[TOKEN], f"batch holder stats missing {key}"
 
@@ -280,20 +252,15 @@ def test_list_rows_carry_the_fields_the_search_can_filter_on(db, clean):
     assert "pro_traders" in row, "pro_traders must be on the row"
 
 
-# holdingShare is a percent of the 1e27 supply, matching the filter's basis. it was
-# divided by 1e9, which is neither a fraction nor a percent
 def test_sniper_holding_share_is_a_percent_of_supply(db, clean):
     from decimal import Decimal as D
 
     from api.api import _PCT_OF_SUPPLY
 
     assert _PCT_OF_SUPPLY == D(10) ** 25
-    # a wallet holding a tenth of the 1e27 supply is 10 percent
     assert float(D(10) ** 26 / _PCT_OF_SUPPLY) == 10.0
 
 
-# a blacklist that only hides what is on the current page is not a blacklist. these
-# have to exclude in sql, and the client's normalisation has to match the server's
 def test_blacklist_exclusions_run_in_sql(db, clean):
     import core.storage as st
 
@@ -311,19 +278,14 @@ def test_blacklist_exclusions_run_in_sql(db, clean):
     assert total({}) >= 1
     assert total({"exclude_dev": ["0xDEAD"]}) == 0, "creator match is case insensitive"
     assert total({"exclude_ca": [TOKEN.upper()]}) == 0, "token match is case insensitive"
-    # bare host, and a full url reduced to the same host
     assert total({"exclude_website": ["evil.com"]}) == 0
     assert total({"exclude_website": ["https://www.evil.com/other"]}) == 0
-    # bare handle, @handle and a full url all reduce to the same thing
     for form in ("badguy", "@BadGuy", "https://x.com/BadGuy/status/9"):
         assert total({"exclude_twitter": [form]}) == 0, f"handle form {form!r} did not match"
-    # a value that matches nothing must not exclude anything
     assert total({"exclude_website": ["notevil.com"]}) >= 1
     assert total({"exclude_twitter": ["someoneelse"]}) >= 1
 
 
-# source 1 has to mean nad.fun regardless of generation, since v1 and v2 are both
-# reported as 1 on the wire
 def test_source_filter_covers_both_nadfun_generations(db, clean):
     import core.storage as st
 
@@ -344,8 +306,6 @@ def test_source_filter_covers_both_nadfun_generations(db, clean):
     assert total(1) == 0
 
 
-# the documented 1000 entry blacklist is far past what a query string carries, so the
-# post form has to accept the same filters and return the same shape
 def test_search_post_matches_the_get_form(db, clean):
     from fastapi.testclient import TestClient
 
@@ -360,19 +320,15 @@ def test_search_post_matches_the_get_form(db, clean):
     assert post.json()["total"] == got.json()["total"]
     assert set(post.json()) == set(got.json())
 
-    # a list the query string could not carry
     big = ["0x" + f"{i:040x}" for i in range(1000)]
     r = client.post("/search/query", json={"limit": 1, "exclude_ca": big})
     assert r.status_code == 200
     assert "exclude_ca" in r.json()["applied_filters"]
 
-    # and excluding a real token by post actually removes it
     r = client.post("/search/query", json={"limit": 5, "exclude_ca": [TOKEN]})
     assert all(row.get("token") != TOKEN for row in r.json()["results"])
 
 
-# query travels outside the filters dict, so it has to be echoed explicitly. a client
-# that asserts every param it sent came back would otherwise fall back on every search
 def test_query_is_echoed_in_applied_filters(db, clean):
     from fastapi.testclient import TestClient
 
@@ -390,32 +346,24 @@ def test_query_is_echoed_in_applied_filters(db, clean):
     assert "query" in r.json()["applied_filters"], "post form must echo it too"
 
 
-# change since launch is measured from the first recorded trade, always available for a
-# token that has traded, and never dependent on v0 which is settable
 def test_change_pct_since_launch(db, clean):
     from api.api import _batch_get_price_changes
 
     st = _new_state()
     _create(st, blk=100, ts=1000)
-    # three trades: launch price rises, so a positive change since launch. reserves
-    # climb, which raises last_price_native
     _trade(st, native_reserve=1000 * 10**18, blk=101, ts=1001, txh="0xa", log_idx=0)
     _trade(st, native_reserve=1500 * 10**18, blk=102, ts=1002, txh="0xb", log_idx=0)
     _trade(st, native_reserve=2000 * 10**18, blk=103, ts=1003, txh="0xc", log_idx=0)
 
     ch = _batch_get_price_changes([TOKEN])[TOKEN]
     assert ch["change_pct_since_launch"] is not None
-    # last price is above the first, so the change is positive
     assert Decimal(ch["change_pct_since_launch"]) > 0
 
-    # a token that has never traded has no baseline -> null, which the card dashes
     _create(st, token="0x00000000000000000000000000000000000000ff", blk=100, ts=1000)
     ch2 = _batch_get_price_changes(["0x00000000000000000000000000000000000000ff"])
     assert ch2.get("0x00000000000000000000000000000000000000ff", {}).get("change_pct_since_launch") is None
 
 
-# the launch reference is the EARLIEST trade, not the latest. an ascending vs
-# descending mix-up would silently make every token read ~0% since launch
 def test_launch_reference_is_the_first_trade(db, clean):
     from api.api import _batch_get_price_changes
 
@@ -423,17 +371,13 @@ def test_launch_reference_is_the_first_trade(db, clean):
     _create(st, blk=100, ts=1000)
     _trade(st, native_reserve=1000 * 10**18, blk=101, ts=1001, txh="0xf1", log_idx=0)
     early = _batch_get_price_changes([TOKEN])[TOKEN]["change_pct_since_launch"]
-    # first trade == current, so change is 0 (or None if the single price is falsy)
     assert early in ("0", None)
 
     _trade(st, native_reserve=3000 * 10**18, blk=110, ts=1100, txh="0xf2", log_idx=0)
     later = _batch_get_price_changes([TOKEN])[TOKEN]["change_pct_since_launch"]
-    # now the baseline is still the first trade, so a large positive change, not ~0
     assert Decimal(later) > 50, f"expected a big change from the first price, got {later}"
 
 
-# the meta endpoint dumps every stored column plus the fee block, and must not be
-# shadowed by the chartres catch all route declared after it
 def test_token_meta_dumps_everything(db, clean, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -463,7 +407,6 @@ def test_token_meta_dumps_everything(db, clean, monkeypatch):
     r = client.get(f"/token/{TOKEN}/meta")
     assert r.status_code == 200, r.text
     d = r.json()
-    # the raw block carries actual db columns, not a shaped subset
     for col in ("token", "creator", "source", "circulating_supply", "native_volume", "tx_count"):
         assert col in d["raw"], f"raw dump missing column {col}"
     assert d["sourceRaw"] == 0 and d["source"] == 0
@@ -475,8 +418,6 @@ def test_token_meta_dumps_everything(db, clean, monkeypatch):
     assert r404.status_code == 404
 
 
-# pair fee config is cached in the db after the first fetch, and a revert result is
-# a cacheable verdict meaning general pair, not an error
 def test_pair_fees_cached_and_served(db, clean, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -514,8 +455,6 @@ def test_pair_fees_cached_and_served(db, clean, monkeypatch):
     assert client.get("/pair/notanaddress/fees").status_code == 400
 
 
-# the preload path is by definition creating a v2 token, and writing source 1 left
-# the row wrong until the next restart repaired it
 def test_preload_v2_token_persists_source_2(db, clean):
     import core.storage as st
 
@@ -528,22 +467,18 @@ def test_preload_v2_token_persists_source_2(db, clean):
     assert row and int(row[0]) == 2, f"preload wrote source={row and row[0]}, expected 2"
 
 
-# a stale source=1 row still reports v2 through the marker table. the short circuit
-# through version_of() made that fallback unreachable
 def test_nadfun_version_marker_fallback(db, clean):
     import api.api as a
     import core.storage as st
 
     tok = "0x00000000000000000000000000000000000000cd"
     st.mark_nadfun_v2(tok)
-    a._nadfun_v2_cache = None  # defeat the 60s cache for the assertion
+    a._nadfun_v2_cache = None
     assert a._nadfun_version(tok, 1) == 2, "marked token with stale source=1 must read v2"
     assert a._nadfun_version("0x00000000000000000000000000000000000000ce", 1) == 1
     assert a._nadfun_version(tok, 2) == 2
 
 
-# a bucket with a single trade must not be a zero range doji: its open stitches to
-# the previous close so the move renders as the candle body, and high/low envelope it
 def test_klines_stitch_open_to_previous_close(db, clean):
     from decimal import Decimal as D
 
@@ -551,11 +486,8 @@ def test_klines_stitch_open_to_previous_close(db, clean):
 
     st = _new_state()
     _create(st, blk=100, ts=1000)
-    # earlier tests in this module leave bars for the same token, and the clean
-    # fixture does not cover the ohlcv table, so this test owns its slate
     with storage.db_cursor() as cur:
         cur.execute("DELETE FROM launchpad_ohlcv WHERE token = %s", (TOKEN,))
-    # two trades in different 60s buckets, each alone in its bucket
     _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1000, txh="0xk1", log_idx=0)
     _trade(st, native_reserve=2000 * 10**18, blk=102, ts=1060, txh="0xk2", log_idx=0)
 
@@ -568,8 +500,6 @@ def test_klines_stitch_open_to_previous_close(db, clean):
     assert D(second["close"]) != D(second["open"]), "a real move is no longer a flat doji"
 
 
-# the spot tab is one call: rows from the markets-derived token list, balances from
-# one batched rpc read, prices from our own markets. unknowns are null, not zero
 def test_spot_portfolio_one_call(db, clean, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -594,8 +524,6 @@ def test_spot_portfolio_one_call(db, clean, monkeypatch):
         return 12345, {"0x00000000000000000000000000000000000000b1": 4 * 10**18, sd.WMON: 0}, 2 * 10**18, False
 
     monkeypatch.setattr(sd, "fetch_balances", fake_balances)
-    # the endpoint now refuses wallets with no crystal activity; this test's
-    # subject is the row math, so the gate is stubbed open
     monkeypatch.setattr(sd, "wallet_is_supported", lambda w: True)
     monkeypatch.setattr(api.api, "_mon_price_usd", lambda: Decimal(3))
     import api.routes.launchpad as rl
@@ -607,21 +535,15 @@ def test_spot_portfolio_one_call(db, clean, monkeypatch):
     assert r.status_code == 200, r.text
     d = r.json()
     rows = {row["address"]: row for row in d["rows"]}
-    # ABC: 4 tokens at 2.5 WMON x 3 usd = 30 usd; native MON: 2 x 3 = 6
     assert rows["0x00000000000000000000000000000000000000b1"]["valueUsd"] == "30"
     assert rows["native"]["valueUsd"] == "6"
     assert d["summary"]["totalAccountValue"] == "36"
-    # wmon balance is zero so the row is filtered
     assert sd.WMON not in rows
-    # unindexed stats are null, never fake zeros
     assert d["summary"]["activeOrders"] is None and d["summary"]["totalVolume"] is None
     assert d["balance_block"] == 12345 and d["stale"] is False
     assert client.get("/spot/nope").status_code == 400
 
 
-# the golden vector is a real mainnet OrdersUpdated log (tx 0x74ee7c90..., block
-# 97754330): a market maker requote that removes three bids and three asks then
-# re-adds the same order ids on fresh prices. the decode must reproduce it exactly
 _OB_MARKET = "0x000000000000000000000000c8045b5dde24e625932df738e7ec4127c04008d3"
 _OB_USER = "0x000000000000000000000000581172970bda012d71a9aea34a9f219da117891b"
 
@@ -663,7 +585,6 @@ def test_orderbook_orders_updated_decodes_real_mainnet_log(db):
     assert o4["action"] == "decrease" and o4["is_buy"] is True and o4["size"] == 1000
 
 
-# fill packing shares the entry layout; synthetic until the first real fill prints
 def test_orderbook_fill_decoder_layout(db):
     from modules.orderbook import FILL_TOPIC, parse_fill
 
@@ -680,8 +601,6 @@ def test_orderbook_fill_decoder_layout(db):
     assert f["amount_high"] == 1000 and f["amount_out"] == 990
 
 
-# the fork guards: wrong chain, rolled back head, rewritten history. each must halt
-# loudly rather than let the indexer follow a chain that is not ours anymore
 def test_fork_guards_halt_on_divergence(db, clean, monkeypatch):
     import asyncio
 
@@ -707,26 +626,22 @@ def test_fork_guards_halt_on_divergence(db, clean, monkeypatch):
         monkeypatch.setattr(backfill, "get_head_http", fake_head)
         await backfill.verify_chain_continuity(st)
 
-    # clean pass: right chain, sane head, matching tip
     st.record_block_processed(900)
     st.record_chain_tip(900, "0xabc")
     asyncio.run(run())
 
-    # wrong chain id halts
     try:
         asyncio.run(run(chain_id_hex="0x1"))
         raise AssertionError("wrong chain id must halt")
     except RuntimeError as e:
         assert "chain id" in str(e)
 
-    # head far behind our watermark halts
     try:
         asyncio.run(run(head=100))
         raise AssertionError("rolled back head must halt")
     except RuntimeError as e:
         assert "rolled back" in str(e)
 
-    # rewritten history halts
     try:
         asyncio.run(run(tip_hash="0xdifferent"))
         raise AssertionError("tip hash mismatch must halt")

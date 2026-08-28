@@ -26,7 +26,6 @@ async def _process_metadata_batch_for_resync() -> int:
         return 0
 
 
-# cap on processed blocks missing from the log cache before a clean reindex refuses to run
 REINDEX_MAX_CACHE_HOLES = int(os.getenv("REINDEX_MAX_CACHE_HOLES", "0"))
 
 
@@ -38,9 +37,6 @@ async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
     if start_block < min_cached:
         start_block = min_cached
 
-    # a full replay takes long enough that an unrelated container restart must not
-    # throw it away, so pick up from the last block already written unless a clean
-    # rebuild was asked for
     last_db = int(storage.get_last_processed_block() or 0)
     resuming = resume and last_db >= start_block
 
@@ -136,7 +132,6 @@ async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
 
     print(f"[Reindex] Complete, last processed = {last_processed}, total metadata fetched = {total_metadata_fetched}")
     return last_processed
-
 
 
 def parse_args():
@@ -240,8 +235,6 @@ async def ensure_block_timestamps(logs_by_block: dict[int, list[dict]]) -> None:
     if not missing:
         return
 
-    # one rpc round trip per block, so fetch them concurrently; awaiting each in
-    # turn caps replay at 1/latency blocks per second regardless of the rps budget
     sem = asyncio.Semaphore(TIMESTAMP_CONCURRENCY)
 
     async def _fetch(blk: int) -> tuple[int, str]:
@@ -280,9 +273,6 @@ async def fetch_logs_http(frm: int, to: int) -> list[dict]:
         }],
     )
     return data["result"]
-
-
-
 
 
 async def backfill(start_block: int, batch: int) -> int:
@@ -408,10 +398,6 @@ async def backfill(start_block: int, batch: int) -> int:
             await asyncio.sleep(5.0)
 
 
-# one shot historical fetch of referral binding events, marked done in kv so it
-# never reruns. resumable via a progress marker, chunk size shrinks on any
-# fetch failure, and repeated failures at the floor skip forward rather than
-# aborting the whole seed
 async def seed_referral_bindings(start_block: int) -> None:
     if storage.get_meta("referral_seeded"):
         return
@@ -521,11 +507,6 @@ async def seed_referral_bindings(start_block: int) -> None:
     print(f"[REF] Referral seed complete: {total} events through block {head}", flush=True)
 
 
-# hard fork guards, run before the indexer starts following the chain.
-# monad cannot reorg under normal consensus, so anything these catch is a chain
-# level event where continuing would silently index garbage forever: a wrong or
-# split chain behind the rpc, or a rollback fork that rewrote history under us.
-# the correct response is a loud halt, and recovery is the reindex machinery
 EXPECTED_CHAIN_ID = int(os.getenv("EXPECTED_CHAIN_ID", "143"))
 FORK_HEAD_TOLERANCE = int(os.getenv("FORK_HEAD_TOLERANCE", "64"))
 
@@ -564,9 +545,6 @@ async def verify_chain_continuity(storage_module) -> None:
     print("[FORK GUARD] chain id, head continuity and tip hash all verified", flush=True)
 
 
-# read the lvmon pool's price once at startup so a fresh database does not price
-# lvmon at parity until the pool happens to trade. slot0's first word is the
-# sqrt price, the same value a swap log carries
 async def seed_lvmon_rate() -> None:
     from core import oracle
 

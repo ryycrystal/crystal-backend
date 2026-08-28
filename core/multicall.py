@@ -4,37 +4,31 @@ MULTICALL3_GET_ETH_BALANCE_SELECTOR = bytes.fromhex("4d2301cc")
 ERC20_BALANCE_OF_SELECTOR = bytes.fromhex("70a08231")
 
 
-# read one uint256 at a byte offset
 def u256_at(buf: bytes, off: int) -> int:
     if off < 0 or (off + 32) > len(buf):
         return 0
     return int.from_bytes(buf[off : off + 32], "big")
 
 
-# abi encode a uint256
 def abi_u256(n: int) -> bytes:
     return int(n).to_bytes(32, "big")
 
 
-# abi encode an address
 def abi_addr(addr: str) -> bytes:
     h = str(addr or "").lower().replace("0x", "")[-40:].rjust(40, "0")
     return (b"\x00" * 12) + bytes.fromhex(h)
 
 
-# abi encode a bool
 def abi_bool(v: bool) -> bytes:
     return abi_u256(1 if v else 0)
 
 
-# abi encode a dynamic bytes argument
 def abi_bytes(data: bytes) -> bytes:
     d = data or b""
     pad = (-len(d)) % 32
     return abi_u256(len(d)) + d + (b"\x00" * pad)
 
 
-# build multicall3 aggregate3 calldata for a batch of calls
 def encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
     elems = []
     for target, calldata in calls:
@@ -52,7 +46,6 @@ def encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
     return "0x" + payload.hex()
 
 
-# decode multicall3 aggregate3 output into success and return bytes
 def decode_multicall3_aggregate3_result(data_hex: str) -> list[tuple[bool, bytes]]:
     if not isinstance(data_hex, str) or not data_hex.startswith("0x"):
         return []

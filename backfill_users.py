@@ -8,8 +8,6 @@ from core import chain as h
 from modules.orderbook import USER_REGISTERED_TOPIC, parse_user_registered
 
 
-# the user registry is tiny (one log per wallet ever), so one wide getLogs from
-# an archive rpc replays the whole thing. re-runs converge on the primary key
 def main() -> None:
     parser = argparse.ArgumentParser(description="backfill the on-chain user registry")
     parser.add_argument("--rpc", default=os.environ.get("USERS_RPC", "https://rpc.monad.xyz"))

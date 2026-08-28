@@ -25,8 +25,6 @@ MARKET = "0xc8045b5dde24e625932df738e7ec4127c04008d3"
 USER = "0x581172970bda012d71a9aea34a9f219da117891b"
 
 
-# the shared clean fixture only covers the launchpad tables, so the orderbook
-# plane resets here to keep each test's book independent
 @pytest.fixture(autouse=True)
 def _clean_orderbook(db):
     with storage.db_cursor() as cur:
@@ -57,7 +55,6 @@ def _apply(orders, txh, li=0, blk=100, ts=1000):
     storage.apply_orderbook_updates({"market": MARKET, "user": USER, "orders": orders}, blk, ts, txh, li)
 
 
-# add then decrease then remove walks the order through its lifecycle
 def test_order_lifecycle(db):
     _apply([_entry(2, 500, 7, 12345)], "0xob1", blk=100, ts=1000)
     open_orders = storage.list_open_orders(USER)
@@ -76,7 +73,6 @@ def test_order_lifecycle(db):
     assert [e["action"] for e in events] == ["remove", "decrease", "add"]
 
 
-# replaying the same log must not double-apply the decrease
 def test_replay_is_idempotent(db):
     _apply([_entry(2, 500, 9, 1000)], "0xob4", blk=100, ts=1000)
     _apply([_entry(4, 500, 9, 100)], "0xob5", blk=101, ts=1001)
@@ -86,7 +82,6 @@ def test_replay_is_idempotent(db):
     assert open_orders[0]["size"] == "900", "the replayed decrease must be a no-op"
 
 
-# a fill records the maker row and moves the order to its remaining size
 def test_fill_updates_order_remaining(db):
     _apply([_entry(3, 700, 11, 5000)], "0xob6", blk=100, ts=1000)
 
@@ -115,8 +110,6 @@ def test_fill_updates_order_remaining(db):
         assert cur.fetchone()[0] == 2, "a replayed fill inserts nothing"
 
 
-# the history sweep replays old blocks after the live indexer is ahead, so a
-# historical event must record itself without dragging state backwards
 def test_out_of_order_replay_never_regresses_state(db):
     _apply([_entry(2, 900, 5, 4000)], "0xlive1", blk=200, ts=2000)
 
@@ -152,8 +145,6 @@ def test_out_of_order_replay_never_regresses_state(db):
         assert cur.fetchone()[0] == 1, "the stale fill still lands in the fills table"
 
 
-# the sweep's batched inserts report exactly the rows that were new, and the
-# prefilter read reflects where the live indexer has moved each order
 def test_batch_inserts_report_fresh_rows_once(db):
     ev_row = ("0xbatch1", 0, 0, 100, 1000, MARKET, USER, 2, True, "add", 500, 21, 7777)
     fill_row = ("0xbatch2", 1, 101, 1001, MARKET, USER, True, 500, 21, 0, 10, 9)
@@ -170,8 +161,6 @@ def test_batch_inserts_report_fresh_rows_once(db):
     assert latest == {(MARKET, 500, 21): 200}, "only rows that exist come back, at their live block"
 
 
-# a decrease shrinks the order, so the size on offer and the amount the fill
-# ratio is measured against both shrink with it
 def test_decrease_shrinks_the_order_not_just_the_remainder(db):
     _apply([_entry(2, 500, 61, 1000)], "0xdec1", blk=100, ts=1000)
     _apply([_entry(4, 500, 61, 300)], "0xdec2", blk=101, ts=1001)
@@ -181,16 +170,23 @@ def test_decrease_shrinks_the_order_not_just_the_remainder(db):
     assert row["original_size"] == "700", "the order is now a 700 order, not a 1000 order"
     assert row["filled_size"] == "0", "a decrease executes nothing"
 
-    # a decrease after a partial fill can never push the original below what
-    # already executed, which would report more than 100% filled
     _apply([_entry(3, 900, 62, 1000)], "0xdec3", blk=102, ts=1002)
     storage.apply_orderbook_fill(
         {
-            "market": MARKET, "maker": USER, "flag": 1, "maker_is_buy": True,
-            "price": 900, "order_id": 62, "remaining": 400,
-            "amount_high": 600, "amount_out": 599,
+            "market": MARKET,
+            "maker": USER,
+            "flag": 1,
+            "maker_is_buy": True,
+            "price": 900,
+            "order_id": 62,
+            "remaining": 400,
+            "amount_high": 600,
+            "amount_out": 599,
         },
-        103, 1003, "0xdec4", 0,
+        103,
+        1003,
+        "0xdec4",
+        0,
     )
     _apply([_entry(5, 900, 62, 900)], "0xdec5", blk=104, ts=1004)
     row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 62)
@@ -198,8 +194,6 @@ def test_decrease_shrinks_the_order_not_just_the_remainder(db):
     assert int(row["original_size"]) >= int(row["filled_size"]), "filled can never exceed the original"
 
 
-# a cancel returns the unfilled remainder, so it must never read as executed.
-# size alone cannot say: a cancel zeroes it exactly like a full fill does
 def test_canceled_order_is_not_reported_as_filled(db):
     _apply([_entry(2, 500, 41, 1000)], "0xcan1", blk=100, ts=1000)
     _apply([_entry(0, 500, 41, 1000)], "0xcan2", blk=101, ts=1001)
@@ -209,7 +203,6 @@ def test_canceled_order_is_not_reported_as_filled(db):
     assert row["filled_size"] == "0", "a cancelled order executed nothing"
     assert row["original_size"] == "1000"
 
-    # partially filled, then cancelled: only the executed part counts as filled
     _apply([_entry(3, 700, 42, 1000)], "0xcan3", blk=102, ts=1002)
     fill = {
         "market": MARKET,
@@ -230,18 +223,12 @@ def test_canceled_order_is_not_reported_as_filled(db):
         "a partial fill then cancel reports only the executed amount"
     )
 
-    # fully filled: filled_size reaches the original and the status says so
     _apply([_entry(3, 900, 43, 1000)], "0xcan6", blk=105, ts=1005)
-    storage.apply_orderbook_fill(
-        {**fill, "price": 900, "order_id": 43, "remaining": 0}, 106, 1006, "0xcan7", 0
-    )
+    storage.apply_orderbook_fill({**fill, "price": 900, "order_id": 43, "remaining": 0}, 106, 1006, "0xcan7", 0)
     row = next(r for r in storage.list_wallet_orders(USER) if r["order_id"] == 43)
     assert row["status"] == "filled" and row["filled_size"] == "1000"
 
 
-# the same order id recurs at every price level, so rows tie on (timestamp,
-# order_id) whenever a slot is requoted in one block. the served order must be
-# fully determined anyway, or the list reshuffles on every push
 def test_same_timestamp_rows_have_a_stable_order(db):
     for price in (500, 900, 700, 300, 1100):
         _apply([_entry(2, price, 1, 1000)], f"0xtie{price}", li=price, blk=100, ts=1000)
@@ -263,8 +250,6 @@ def test_same_timestamp_rows_have_a_stable_order(db):
         assert snapshot() == first, "repeated reads must not reshuffle tied rows"
 
 
-# native order ids are per-price-level counters, so the same small id at two
-# prices is two independent orders and must never collapse into one row
 def test_same_native_id_at_two_price_levels(db):
     _apply([_entry(2, 500, 1, 1000)], "0xlvl1", blk=100, ts=1000)
     _apply([_entry(3, 700, 1, 2000)], "0xlvl2", blk=101, ts=1001)
@@ -292,7 +277,6 @@ def _trade(txh, ts, is_buy=True, market=MARKET, li=0):
     storage.insert_market_trade(parsed, 100, ts, txh, li)
 
 
-# the merged trade history interleaves taker trades and maker fills newest first
 def test_exchange_trades_merges_taker_and_maker(db):
     _trade("0xtr1", 1000)
     _trade("0xtr2", 3000, is_buy=False)
@@ -324,8 +308,6 @@ def test_exchange_trades_merges_taker_and_maker(db):
     assert only == [], "a market filter excludes other markets"
 
 
-# a batch order lands as several trade logs in one transaction, and the served
-# history folds them into one row with exact summed amounts
 def test_batch_tx_trades_merge_into_one_row(db):
     _trade("0xbatchtx", 5000, li=3)
     _trade("0xbatchtx", 5000, li=7)
@@ -355,7 +337,6 @@ def test_batch_tx_trades_merge_into_one_row(db):
     assert top["order_id"] is None, "a merged row spans orders, so no single order id"
 
 
-# order history folds lifecycle events and fills into one newest-first stream
 def test_order_history_includes_fills(db):
     _apply([_entry(3, 700, 11, 5000)], "0xob7", blk=100, ts=1000)
     fill = {
@@ -376,8 +357,6 @@ def test_order_history_includes_fills(db):
     assert rows[0]["size"] == "2990", "a fill row carries the executed amount"
 
 
-# while a reindex replays history the routes must refuse rather than serve an
-# empty book that would stop the client falling back
 def test_stale_indexer_refuses_orderbook_reads(db, monkeypatch):
     import pytest as _pytest
     from fastapi import HTTPException
@@ -393,7 +372,6 @@ def test_stale_indexer_refuses_orderbook_reads(db, monkeypatch):
     assert ob_routes.open_orders(USER)["orders"] == [], "a disabled gate serves normally"
 
 
-# the rest endpoints are direct-callable and wrap the readers verbatim
 def test_orderbook_routes_serve_the_readers(db):
     from api.routes import orderbook as ob_routes
 
@@ -417,7 +395,6 @@ def test_orderbook_routes_serve_the_readers(db):
         ob_routes.open_orders("not-an-address")
 
 
-# a selected set of wallets reads as one account across every orderbook surface
 def test_reads_span_several_wallets(db):
     other = "0x082345baa3bdf6029f27603ddeac103db0114c85"
     _apply([_entry(2, 500, 71, 1000)], "0xmw1", blk=100, ts=1000)
@@ -431,8 +408,6 @@ def test_reads_span_several_wallets(db):
     assert len(both) == 2, "the selected set sees the union"
     assert {r["order_id"] for r in both} == {71, 72}
 
-    # locked collateral is attributed to the token each side actually locks, so
-    # the market's assets have to exist for the join to resolve
     with storage.db_cursor() as cur:
         cur.execute(
             """
@@ -448,14 +423,12 @@ def test_reads_span_several_wallets(db):
     one = storage.open_order_locked_by_token(USER)
     union = storage.open_order_locked_by_token([USER, other])
     assert sum(union.values()) > sum(one.values()), "the union locks more than one wallet alone"
-    # the buy locks quote, the sell locks base, so the union spans both tokens
     assert set(union) == {"0x" + "1" * 40, "0x" + "2" * 40}
 
     assert len(storage.list_wallet_orders([USER, other])) == 2
     assert len(storage.list_order_history([USER, other])) == 2
 
 
-# the prefs record is opaque: indices only, and address shaped keys are refused
 def test_wallet_prefs_store_indices_under_an_opaque_key(db):
     import pytest as _pytest
     from fastapi import HTTPException

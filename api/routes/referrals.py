@@ -13,7 +13,6 @@ ZERO_ADDR = "0x" + "0" * 40
 MAX_REFEREES = 500
 
 
-# reject anything that is not a plain lowercase-able 20 byte address
 def _require_address(address: str) -> str:
     addr = (address or "").lower()
     if not addr.startswith("0x") or len(addr) != 42 or addr == ZERO_ADDR:
@@ -25,7 +24,6 @@ def _require_address(address: str) -> str:
     return addr
 
 
-# usd decimals for every quote asset that can hold referral rewards
 def _quote_decimals() -> dict[str, int]:
     try:
         with storage.db_cursor() as cur:
@@ -35,15 +33,12 @@ def _quote_decimals() -> dict[str, int]:
         return {}
 
 
-# resolve the cached state lazily so this module never participates in the
-# route import cycle at collection time
 def _price_state():
     from api.routes.vaults import _cached_state
 
     return _cached_state()
 
 
-# one call for the referrals page: who referred you, who you referred, what you earned
 @router.get("/referral/{address}")
 @ttl_cache("referral:summary", ttl_seconds=5)
 def referral_summary(address: str) -> dict[str, Any]:
@@ -105,7 +100,6 @@ def referral_summary(address: str) -> dict[str, Any]:
     }
 
 
-# shape one configured tier row for the wire
 def _tier_row(r) -> dict[str, Any]:
     return {
         "tier": int(r[0]),
@@ -117,7 +111,6 @@ def _tier_row(r) -> dict[str, Any]:
     }
 
 
-# the highest tier a volume clears, plus the one above it
 def _resolve_tier(volume_usd: float, tiers: list[dict]) -> tuple[dict | None, dict | None]:
     current = None
     nxt = None
@@ -129,7 +122,6 @@ def _resolve_tier(volume_usd: float, tiers: list[dict]) -> tuple[dict | None, di
     return current, nxt
 
 
-# the configured tier ladder on its own, for pages with no wallet connected
 @router.get("/tiers")
 @ttl_cache("tiers:ladder", ttl_seconds=60)
 def volume_tier_ladder() -> dict[str, Any]:
@@ -137,7 +129,6 @@ def volume_tier_ladder() -> dict[str, Any]:
     return {"ok": True, "windowDays": storage.tier_window_days(), "tiers": tiers}
 
 
-# one wallet's trailing volume, the tier it earns and how far the next one is
 @router.get("/tiers/{address}")
 @ttl_cache("tiers:wallet", ttl_seconds=15)
 def volume_tier_for_wallet(address: str) -> dict[str, Any]:
@@ -146,7 +137,6 @@ def volume_tier_for_wallet(address: str) -> dict[str, Any]:
     window_days = storage.tier_window_days()
     since_ts = int(time.time()) - (window_days * 86400) if window_days > 0 else 0
 
-    # launchpad and meme trading only, spot volume is deliberately not counted
     volume_raw, trade_count = storage.wallet_launchpad_volume_usd(addr, since_ts)
     volume_usd = float(volume_raw or 0)
 

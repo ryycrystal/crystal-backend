@@ -15,7 +15,6 @@ from env_loader import load_env
 load_env()
 
 
-# assemble the connection url from DATABASE_URL or the PG parts
 def _build_database_url() -> str | None:
     url = os.getenv("DATABASE_URL")
     if url:
@@ -46,7 +45,6 @@ _POOL_LOCK = threading.Lock()
 _ADVISORY_LOCK_KEY: int = 18910274772340076
 
 
-# strip nulls and whitespace so text is safe to store
 def _clean_text(value) -> str:
     if value is None:
         return ""
@@ -54,7 +52,6 @@ def _clean_text(value) -> str:
     return s.replace("\x00", "")
 
 
-# create the shared threaded connection pool
 def init_pool() -> None:
     global _POOL
 
@@ -72,7 +69,6 @@ def init_pool() -> None:
         )
 
 
-# close every pooled connection and drop the pool
 def close_pool() -> None:
     global _POOL
 
@@ -82,8 +78,6 @@ def close_pool() -> None:
         _POOL = None
 
 
-# one standalone autocommit connection outside the pool, for LISTEN/NOTIFY where
-# a pooled connection must not be parked on a blocking select
 def listen_connection() -> psycopg2.extensions.connection:
     if _DATABASE_URL is None:
         raise RuntimeError("[DB] Missing DB URL")
@@ -92,7 +86,6 @@ def listen_connection() -> psycopg2.extensions.connection:
     return conn
 
 
-# return the pool creating it on first use
 def _get_pool() -> ThreadedConnectionPool:
     global _POOL
 
@@ -102,7 +95,6 @@ def _get_pool() -> ThreadedConnectionPool:
     return _POOL
 
 
-# take the postgres advisory lock so only one indexer runs at a time
 def acquire_indexer_lock(wait_seconds: float = 90.0) -> psycopg2.extensions.connection:
     pool = _get_pool()
     deadline = time.monotonic() + max(wait_seconds, 0.0)
@@ -139,7 +131,6 @@ def acquire_indexer_lock(wait_seconds: float = 90.0) -> psycopg2.extensions.conn
         time.sleep(min(3.0, max(remaining, 0.1)))
 
 
-# release the advisory lock and return its connection to the pool
 def release_indexer_lock(conn: psycopg2.extensions.connection | None) -> None:
     if conn is None:
         return
@@ -158,7 +149,6 @@ def release_indexer_lock(conn: psycopg2.extensions.connection | None) -> None:
 
 
 @contextmanager
-# pooled cursor that commits on success and rolls back on error
 def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
     pool = _get_pool()
     conn = pool.getconn()

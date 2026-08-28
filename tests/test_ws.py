@@ -19,9 +19,6 @@ TOKEN_A = "0x1f5bb433d52b9e9219a4decb4e9abc87541c7777"
 TOKEN_B = "0x2c6dd544e63cae0330b5edc5f0bcd108652c8888"
 
 
-# the hub starts a background fanout task on first connect. left running it keeps a
-# pooled connection and its 250ms tick alive, which stops the module fixture from
-# dropping the scratch database and breaks every test that follows
 @pytest.fixture(autouse=True)
 def _stop_hub():
     yield
@@ -43,7 +40,6 @@ def client():
     return TestClient(api.api.app)
 
 
-# subscribe now emits baseline frames, so pull past them to reach the next op reply
 def _next_op(ws):
     for _ in range(20):
         msg = ws.receive_json()
@@ -52,7 +48,6 @@ def _next_op(ws):
     raise AssertionError("no op frame received")
 
 
-# a fresh socket is greeted with what it can actually subscribe to
 def test_welcome_declares_capabilities(client):
     with client.websocket_connect("/ws") as ws:
         msg = ws.receive_json()
@@ -61,7 +56,6 @@ def test_welcome_declares_capabilities(client):
         assert set(msg["implemented"]) == set(IMPLEMENTED_CHANNELS)
 
 
-# every declared channel is now implemented, so nothing lands in pending
 def test_subscribe_accepts_all_declared_channels(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -73,7 +67,6 @@ def test_subscribe_accepts_all_declared_channels(client):
         assert reply["not_yet_implemented"] == []
 
 
-# positions are per wallet, so the subscribe frame carries the wallet set
 def test_positions_subscription_carries_addresses(client):
     wallet = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
     with client.websocket_connect("/ws") as ws:
@@ -93,7 +86,6 @@ def test_positions_subscription_carries_addresses(client):
         assert "warning" not in reply
 
 
-# subscribing to positions without wallets is useless, so say so rather than go quiet
 def test_positions_without_addresses_warns(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -103,7 +95,6 @@ def test_positions_without_addresses_warns(client):
         assert "warning" in reply
 
 
-# a bad address must be refused rather than silently accepted
 def test_subscribe_rejects_a_malformed_token(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -113,7 +104,6 @@ def test_subscribe_rejects_a_malformed_token(client):
         assert "invalid token" in reply["error"]
 
 
-# an unknown channel names itself rather than failing opaquely
 def test_subscribe_rejects_unknown_channels(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -124,7 +114,6 @@ def test_subscribe_rejects_unknown_channels(client):
         assert set(reply["known"]) == set(KNOWN_CHANNELS)
 
 
-# unsubscribing one channel keeps the rest, unsubscribing all drops the token
 def test_unsubscribe_is_granular(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -136,7 +125,6 @@ def test_unsubscribe_is_granular(client):
         assert reply["channels"] == "all"
 
 
-# malformed input must not drop the connection
 def test_malformed_frame_does_not_kill_the_socket(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -146,7 +134,6 @@ def test_malformed_frame_does_not_kill_the_socket(client):
         assert ws.receive_json()["op"] == "pong"
 
 
-# one client's subscriptions must never leak into another's
 def test_subscriptions_are_isolated_between_clients(client):
     with client.websocket_connect("/ws") as a, client.websocket_connect("/ws") as b:
         a.receive_json()
@@ -161,7 +148,6 @@ def test_subscriptions_are_isolated_between_clients(client):
         assert frozenset({TOKEN_B}) in subs
 
 
-# disconnecting must not leave the hub holding the socket
 def test_hub_releases_disconnected_sockets(client):
     before = len(HUB.subscribers)
     with client.websocket_connect("/ws") as ws:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from .base import db_cursor
 
 
-# create every table index and column migration, safe to run repeatedly
 def init_db() -> None:
     with db_cursor() as cur:
         cur.execute(
@@ -144,11 +143,6 @@ def init_db() -> None:
             ADD COLUMN IF NOT EXISTS token_reserve NUMERIC(78, 0) NOT NULL DEFAULT 0;
             """
         )
-        # realized pnl for the sell that produced this row, on the same moving
-        # average cost basis the position column uses. storing it per trade is
-        # what keeps the daily calendar and the position totals the same number:
-        # any second formula that re-derives realized from lifetime sums drifts
-        # the moment a wallet buys again after selling
         cur.execute(
             """
             ALTER TABLE launchpad_trades
@@ -297,19 +291,12 @@ def init_db() -> None:
             ADD COLUMN IF NOT EXISTS cost_basis_native NUMERIC(78, 0) NOT NULL DEFAULT 0;
             """
         )
-        # the uri metadata is fetched from. without it a token whose fetch failed can
-        # never be retried, because the queue is in memory and the uri is lost on restart
         cur.execute(
             """
             ALTER TABLE launchpad_tokens
             ADD COLUMN IF NOT EXISTS token_uri TEXT;
             """
         )
-        # how many times the sweep has tried this token's uri, and when it last
-        # did. a few hundred tokens point at hosts that are simply gone — dead
-        # dns, localhost, a raw ip that never answers — and without this they sit
-        # in the pool being retried forever, crowding out the ones that would
-        # actually resolve
         cur.execute(
             """
             ALTER TABLE launchpad_tokens
@@ -395,9 +382,6 @@ def init_db() -> None:
             ON launchpad_pools (token_addr);
             """
         )
-        # a graduated token's liquidity lives in its amm pair, so the pair's
-        # reserves are what the frontend needs to show liquidity after migration.
-        # the sync log carries them on every trade
         for _col in (
             "reserve_token NUMERIC(78, 0) NOT NULL DEFAULT 0",
             "reserve_native NUMERIC(78, 0) NOT NULL DEFAULT 0",
@@ -902,8 +886,6 @@ def init_db() -> None:
             """
         )
 
-        # volume tier ladder, seeded once then owned by whoever edits the rows.
-        # thresholds and benefits are data so they change with an UPDATE, never a deploy
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS volume_tiers
@@ -916,7 +898,6 @@ def init_db() -> None:
             );
             """
         )
-        # do nothing on conflict, so an edited threshold survives every restart
         cur.execute(
             """
             INSERT INTO volume_tiers (tier, name, min_volume_usd, cashback_multiplier, referral_commission_bps)
@@ -929,8 +910,6 @@ def init_db() -> None:
             """
         )
 
-        # every decoded orders-updated entry, one row per packed entry. the primary
-        # key doubles as the replay guard for the order-state mutations
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_orderbook_events
@@ -965,12 +944,6 @@ def init_db() -> None:
             """
         )
 
-        # current view of every resting order ever seen, evolved from the events.
-        # order identity on this book is (market, price, id): native ids are
-        # per-price-level counters, so the same small id recurs at every level,
-        # while client ids arrive pre-encoded as (cloid << 41 | user_id). an old
-        # deploy keyed this by (market, order_id) which collapses price levels,
-        # so a two-column primary key drops the table for a rebuild from events
         cur.execute(
             """
             SELECT COUNT(*) FROM information_schema.key_column_usage
@@ -1007,9 +980,6 @@ def init_db() -> None:
             ADD COLUMN IF NOT EXISTS original_size NUMERIC(40, 0) NOT NULL DEFAULT 0;
             """
         )
-        # how much of the order actually executed. size alone cannot answer this:
-        # a cancel zeroes the resting size too, so original minus size reads a
-        # fully cancelled order as fully filled. only fills move this column
         cur.execute(
             """
             ALTER TABLE crystal_orderbook_orders
@@ -1028,9 +998,6 @@ def init_db() -> None:
             ON crystal_orderbook_orders (user_address, status);
             """
         )
-        # order history sorts by recency within a wallet and takes a page. without
-        # a matching index that is a full scan plus a disk sort on every call,
-        # which grows with the whole order table rather than the page size
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ob_orders_user_updated
@@ -1038,13 +1005,6 @@ def init_db() -> None:
             """
         )
 
-        # the on-chain user registry: every wallet that registered gets a numeric
-        # user id, and client order ids embed it as the low 41 bits
-        # cross device sync for derived trading wallets. the key is an opaque
-        # value the client computes from its own session signature, so the server
-        # cannot map it to an eoa. wallets derive from that signature by index,
-        # so only the count and which indices are selected need to travel: no
-        # addresses, no keys, nothing that identifies anyone
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_wallet_prefs
@@ -1075,8 +1035,6 @@ def init_db() -> None:
             """
         )
 
-        # maker side fills. decode is unverified until the first real fill prints,
-        # so nothing here is served yet
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_orderbook_fills
@@ -1104,8 +1062,6 @@ def init_db() -> None:
             """
         )
 
-        # taker side exchange trades, one row per Trade event. the maker side
-        # lives in crystal_orderbook_fills; together they are the full history
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS crystal_market_trades
@@ -1138,8 +1094,6 @@ def init_db() -> None:
             """
         )
 
-        # spot portfolio value per wallet per time bucket. history is immutable, so
-        # each row is computed from one archive read ever and then served forever
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS spot_graph_buckets
@@ -1155,8 +1109,6 @@ def init_db() -> None:
             """
         )
 
-        # fee config per dex pair, read once from the pair's fee collector and cached
-        # so the terminal never needs an on chain read before a swap
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS launchpad_pair_fees
@@ -1174,8 +1126,6 @@ def init_db() -> None:
             """
         )
 
-        # each nad.fun generation is its own curve, so v2 tokens move to source 2,
-        # must run after nadfun_v2_tokens exists
         cur.execute(
             """
             UPDATE launchpad_tokens t
@@ -1186,8 +1136,6 @@ def init_db() -> None:
         )
 
 
-# one time cost basis backfill, kept out of init_db so a table wide UPDATE never
-# runs inside the DDL sequence where it can deadlock against a concurrent reader
 def backfill_cost_basis() -> None:
     with db_cursor() as cur:
         cur.execute(
@@ -1230,18 +1178,6 @@ def backfill_cost_basis() -> None:
         print(f"[DB] cost basis backfill: {done} positions", flush=True)
 
 
-# realized pnl used to be rewritten on every start from lifetime sums:
-#   received - spent * LEAST(sold, bought) / bought
-# that is a lifetime average cost, and it only equals the moving average the
-# indexer maintains per trade when every buy precedes every sell. any wallet
-# that bought again after selling had its correct realized pnl overwritten with
-# a wrong number on each restart, so the rewrite is gone. realized is now owned
-# by the live applier alone, and rebuild_positions_pnl.py repairs history by
-# replaying trades in order rather than re-deriving them from totals.
-
-
-# recompute stored trade-sync fees from the reserves ledger on the exact sqrt(k)
-# growth basis. idempotent: the formula is a pure function of stored columns
 def _migrate_lp_user_cost_columns(cur) -> None:
     cur.execute(
         "ALTER TABLE crystal_pool_lp_users ADD COLUMN IF NOT EXISTS cost_quote NUMERIC(78,0) NOT NULL DEFAULT 0;"

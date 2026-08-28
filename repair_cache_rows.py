@@ -14,11 +14,6 @@ CALLS_PER_BATCH = 10
 GAP_TOLERANCE = 20
 
 
-# cache rows created by the orderbook sweep hold only orderbook logs, and the
-# hole-based refill skipped them because the row existed. this repair refetches
-# every block whose cache row holds an orderbook log with the full topic set and
-# dedup-merges, so poisoned rows regain their missing logs and complete rows
-# are untouched
 def main() -> None:
     parser = argparse.ArgumentParser(description="re-complete cache rows the sweep created before the refill")
     parser.add_argument("--rpc", default=os.environ.get("REPAIR_RPC", "https://rpc.monad.xyz"))

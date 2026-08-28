@@ -24,9 +24,6 @@ def _curve(sold, supply=CURVE_SUPPLY):
     return CurveState(tokens_sold=sold, curve_supply=supply)
 
 
-# --- lifecycle rules ----------------------------------------------------------
-
-
 def test_phase_progression_created_active_graduating():
     assert resolve_phase(curve=None, has_trades=False) is TokenPhase.CREATED
     assert resolve_phase(curve=_curve(0), has_trades=True) is TokenPhase.ACTIVE
@@ -40,9 +37,7 @@ def test_terminal_states_win_over_curve_progress():
     mid = _curve(CURVE_SUPPLY // 2)
     assert resolve_phase(curve=mid, has_trades=True, graduated=True) is TokenPhase.GRADUATED
     assert resolve_phase(curve=mid, has_trades=True, migrated=True) is TokenPhase.MIGRATED
-    # migrated outranks graduated
     assert resolve_phase(curve=mid, has_trades=True, graduated=True, migrated=True) is TokenPhase.MIGRATED
-    # a full curve alone is still only "graduating"
     assert resolve_phase(curve=_curve(CURVE_SUPPLY), has_trades=True) is TokenPhase.GRADUATING
 
 
@@ -51,9 +46,7 @@ def test_progress_bps_math_and_clamping():
     assert _curve(CURVE_SUPPLY // 2).progress_bps == 5_000
     assert _curve(CURVE_SUPPLY * 3 // 4).progress_bps == GRADUATING_THRESHOLD_BPS
     assert _curve(CURVE_SUPPLY).progress_bps == BPS_DENOMINATOR
-    # overshoot clamps instead of exceeding 100%
     assert _curve(CURVE_SUPPLY * 2).progress_bps == BPS_DENOMINATOR
-    # degenerate supply does not divide by zero
     assert CurveState(tokens_sold=5, curve_supply=0).progress_bps == 0
 
 
@@ -74,9 +67,6 @@ def test_snapshot_reports_full_progress_once_off_curve():
     assert live.progress_ratio == Decimal("0.25")
 
 
-# --- native adapter -----------------------------------------------------------
-
-
 def test_native_geometry_matches_the_contract():
     assert INITIAL_TOKEN_SUPPLY == 10**27
     assert GRADUATED_TOKEN_SUPPLY == 2 * 10**26
@@ -89,18 +79,15 @@ def test_native_adapter_normalizes_reserves():
     v0 = 1000 * 10**18
     k = v0 * INITIAL_TOKEN_SUPPLY
 
-    # at creation: nothing sold
     st = a.curve_state({"native_reserve": v0, "token_reserve": INITIAL_TOKEN_SUPPLY})
     assert st.tokens_sold == 0
     assert st.progress_bps == 0
 
-    # at the graduation reserve: fully sold
     st = a.curve_state({"native_reserve": 5 * v0, "token_reserve": GRADUATED_TOKEN_SUPPLY})
     assert st.tokens_sold == CURVE_SUPPLY
     assert st.is_complete is True
     assert st.progress_bps == BPS_DENOMINATOR
 
-    # 75% of tokens sold
     tr = INITIAL_TOKEN_SUPPLY - (CURVE_SUPPLY * 3 // 4)
     st = a.curve_state({"native_reserve": k // tr, "token_reserve": tr})
     assert st.tokens_sold == 600_000_000 * 10**18
@@ -120,7 +107,6 @@ def test_native_adapter_initial_price_and_routing():
     assert a.initial_price_native() == Decimal(141_600 * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY)
     assert a.graduates_to_market() is True
 
-    # unknown V0 must not fabricate a price
     assert NativeLaunchpadAdapter(lambda: 0).initial_price_native() is None
     assert NativeLaunchpadAdapter().initial_price_native() is None
 
@@ -132,9 +118,6 @@ def test_native_geometry_helpers_recover_v0_and_threshold():
     assert NativeLaunchpadAdapter.graduation_native_reserve(k) == 5 * v0
 
 
-# --- the model must not assume native geometry --------------------------------
-
-
 def test_api_lifecycle_fields_map_each_phase():
     """The API exposes phase derived from stored fields, so it cannot drift."""
     import api.api as api_mod
@@ -142,15 +125,12 @@ def test_api_lifecycle_fields_map_each_phase():
     def phase_of(**kw):
         return api_mod._lifecycle_fields(**kw)["phase"]
 
-    # native, on the curve
     assert phase_of(source=0, circulating_supply=0, tx_count=0, migrated=False) == "created"
     assert phase_of(source=0, circulating_supply=100_000_000, tx_count=3, migrated=False) == "active"
     assert phase_of(source=0, circulating_supply=600_000_000, tx_count=9, migrated=False) == "graduating"
-    # native terminal is graduated; nad.fun hands off to an external venue
     assert phase_of(source=0, circulating_supply=800_000_000, tx_count=9, migrated=True) == "graduated"
     assert phase_of(source=1, circulating_supply=793_100_000, tx_count=9, migrated=True) == "migrated"
 
-    # progress uses each source's own curve supply
     assert (
         api_mod._lifecycle_fields(source=0, circulating_supply=600_000_000, tx_count=1, migrated=False)["progressBps"]
         == 7_500
@@ -164,7 +144,7 @@ def test_api_lifecycle_fields_map_each_phase():
 def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     """A source with a different supply split must get identical phase/progress
     semantics. If native constants ever leak into core.lifecycle, this fails."""
-    foreign_curve_supply = 793_100_000 * 10**18  # nad.fun-shaped, deliberately not ours
+    foreign_curve_supply = 793_100_000 * 10**18
     assert foreign_curve_supply != CURVE_SUPPLY
 
     quarter = _curve(foreign_curve_supply // 4, supply=foreign_curve_supply)
@@ -175,7 +155,6 @@ def test_lifecycle_rules_hold_for_a_foreign_curve_geometry():
     assert three_quarters.progress_bps == GRADUATING_THRESHOLD_BPS
     assert resolve_phase(curve=three_quarters, has_trades=True) is TokenPhase.GRADUATING
 
-    # and such a source can terminate in MIGRATED rather than GRADUATED
     assert resolve_phase(curve=three_quarters, has_trades=True, migrated=True) is TokenPhase.MIGRATED
 
 
@@ -220,11 +199,8 @@ def test_nadfun_geometry_matches_chain_verified_constants():
     assert nf.V2_VIRTUAL_TOKEN_0 == 1_060_569_000 * 10**18
     assert nf.V2_GRADUATION_VIRTUAL_NATIVE == 295_000 * 10**18
 
-    # v2 k must equal what the chain reported for TAD and BTS
     assert (nf.V2_VIRTUAL_NATIVE_0 // 10**18) * (nf.V2_VIRTUAL_TOKEN_0 // 10**18) == 74_239_830_000_000
 
-    # TAD's exact reserve at graduation, to the wei -- the curve ceils the token
-    # reserve, and flooring here left a completed v2 curve reading 9999
     assert nf.V2_GRADUATION_VIRTUAL_TOKEN == 251_660_440_677_966_101_694_915_255
     assert nf.V2_VIRTUAL_TOKEN_0 - nf.V2_GRADUATION_VIRTUAL_TOKEN == nf.V2_CURVE_SUPPLY
 
@@ -233,10 +209,8 @@ def test_nadfun_geometry_matches_chain_verified_constants():
     )
     assert at_graduation.progress_bps == 10_000, "a fully sold v2 curve must read 100%"
     assert at_graduation.is_complete is True
-    # and the accumulated supply every graduated v2 token converged on
     assert abs(nf.V2_CURVE_SUPPLY / 1e18 - 808_908_559.32) < 0.01
 
-    # the generations genuinely differ, which is the whole reason for two sources
     assert nf.V1_CURVE_SUPPLY != nf.V2_CURVE_SUPPLY
 
 
@@ -246,8 +220,6 @@ def test_each_generation_gets_its_own_progress_denominator():
     import api.api as api_mod
     from core.adapters import nadfun as nf
 
-    # v2's curve supply is not a whole number of tokens, so 75% of it rounds
-    # down to just under the threshold -- one more whole token crosses it
     v2_three_quarters = -(-(nf.V2_CURVE_SUPPLY * 3 // 4) // 10**18)
     assert (
         api_mod._lifecycle_fields(
@@ -264,7 +236,6 @@ def test_each_generation_gets_its_own_progress_denominator():
         == 7_500
     )
 
-    # the old shared denominator is what the bug looked like
     stale = api_mod._lifecycle_fields(
         source=nf.SOURCE_V1, circulating_supply=v2_three_quarters, tx_count=1, migrated=False
     )["progressBps"]
@@ -281,7 +252,6 @@ def test_api_reports_source_1_for_every_nadfun_generation():
     assert api_mod._api_source(nf.SOURCE_V2) == 1
     assert api_mod._api_source(0) == 0
 
-    # the generation still reaches the client, just via nadfunVersion
     assert api_mod._nadfun_version("0xabc", nf.SOURCE_V2) == 2
     assert api_mod._nadfun_version("0xabc", nf.SOURCE_V1) == 1
     assert api_mod._nadfun_version("0xabc", 0) == 0
@@ -321,14 +291,11 @@ def test_nadfun_adapter_derives_supply_from_reserves():
         assert at_graduation.progress_bps == 10_000
         assert at_graduation.is_complete is True
 
-        # v2's curve supply is not a whole number of wei, so floor(75%) can land
-        # a hair under -- check either side of the boundary rather than on it
         just_under = geo["virtual_token_0"] - (geo["curve_supply"] * 74 // 100)
         assert a.curve_state({"token_reserve": just_under, "native_reserve": 1}).is_graduating is False
         just_over = geo["virtual_token_0"] - (geo["curve_supply"] * 76 // 100)
         assert a.curve_state({"token_reserve": just_over, "native_reserve": 1}).is_graduating is True
 
-        # nad.fun hands liquidity to an external venue
         assert a.graduates_to_market() is False
 
 
@@ -342,7 +309,6 @@ def test_nadfun_adapter_refuses_to_invent_a_curve_without_reserves():
     assert a.curve_state({"token_reserve": 0, "native_reserve": 0}) is None
     assert a.curve_state({"token_reserve": None}) is None
     assert a.curve_state({"token_reserve": "junk"}) is None
-    # above the starting reserve is impossible on this curve
     assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 + 1}) is None
 
 
@@ -356,7 +322,6 @@ def test_v1_adapter_reproduces_the_old_hardcoded_initial_price():
     price = nf.NadfunLaunchpadAdapter(nf.SOURCE_V1).initial_price_native()
     assert abs(price - Decimal("0.00008387696")) < Decimal("1e-11")
 
-    # v2 starts on a different curve, so it must not share that price
     assert nf.NadfunLaunchpadAdapter(nf.SOURCE_V2).initial_price_native() != price
 
 
@@ -373,8 +338,6 @@ def test_fee_rates_match_what_the_chain_charges():
     assert nf.fee_rate_for(nf.SOURCE_V2) == Decimal("0.02")
     assert nf.fee_rate_for(nf.SOURCE_V1) != nf.fee_rate_for(nf.SOURCE_V2)
 
-    # the exact v1 arithmetic that established the rate
     gross = Decimal("0.98950500")
     assert gross * (1 - nf.fee_rate_for(nf.SOURCE_V1)) == Decimal("0.97960995")
-    # and the v2 arithmetic
     assert Decimal(4000) * (1 - nf.fee_rate_for(nf.SOURCE_V2)) == Decimal(3920)

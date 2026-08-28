@@ -9,9 +9,6 @@ TRADE_TOPIC = "0x9adcf0ad0cda63c4d50f26a48925cf6405df27d422a39c456b5f03f661c8298
 RANGE = 50_000
 
 
-# replay every cached Trade log into crystal_market_trades. the cache already
-# holds the full history, so this touches no rpc and re-runs converge on the
-# primary key like every other applier
 def main() -> None:
     parser = argparse.ArgumentParser(description="backfill taker trades from the raw log cache")
     parser.add_argument("--start-block", type=lambda x: int(x, 0), default=None)

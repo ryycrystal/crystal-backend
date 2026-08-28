@@ -121,9 +121,6 @@ def _vault_user_lockup_fields(
     }
 
 
-# pnl from value per share: pct against the first priced sample, dollars as cumulative
-# value creation sum(shares * dvps), so flows scale neither series retroactively.
-# unpriceable points carry the previous values forward instead of faking a drop
 def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
     out = []
     base_vps = None
@@ -145,11 +142,9 @@ def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
     return out
 
 
-# annualizing anything shorter than this window is noise, not yield
 VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
 
 
-# annualized per-share return and the window it was measured over, null when unknowable
 def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | None:
     now_ts = int(time.time())
     try:
@@ -177,14 +172,11 @@ def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | Non
     return (pct * (365.0 * 86400.0 / window), window)
 
 
-# annualized per-share return alone, kept for callers that only want the number
 def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
     out = _vault_apy(vault_addr, window_days)
     return out[0] if out else None
 
 
-# average cost basis over signed share flows priced at nav, pure for unit tests.
-# position stays integral so a full exit lands on exactly zero shares
 def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[int, float, float]:
     pos = 0
     cost = 0.0
@@ -203,9 +195,6 @@ def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[int, float, fl
     return pos, entry, realized
 
 
-# nav at one flow with the sample timestamp it was priced from: pre flow tvl over
-# pre flow supply when history reaches back that far, else the first later sample,
-# which measures from tracking start rather than the user's true entry
 def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> tuple[float, int, bool] | None:
     minted_incl, burned_incl = storage.sum_vault_share_flows_after(vault_addr, ts, inclusive=True)
     supply_before = circ_now - minted_incl + burned_incl
@@ -220,7 +209,6 @@ def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> tuple[float, int, b
     return None
 
 
-# user pnl from the flow ledger, nav at each flow reconstructed from samples and supply
 def _vault_user_pnl(
     vault_addr: str, user_addr: str, circ_now: int, tvl_usd_now: float, nav_now: float | None = None
 ) -> dict | None:
@@ -265,7 +253,6 @@ def _vault_user_pnl(
     }
 
 
-# percent change of value per share across a sample window, zero when no priced samples exist
 def _per_share_pct_change(pts: list[dict]) -> float:
     shared = [p for p in pts if int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0]
     if not shared:
@@ -321,7 +308,6 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
     }
 
 
-# endpoint for vault list used by /earn/vaults
 @router.get("/vaults/list")
 @ttl_cache("vaults:list", ttl_seconds=3)
 def list_vaults(
@@ -478,7 +464,6 @@ def list_vaults(
     }
 
 
-# endpoint for forcing an immediate rpc balance read for a vault
 @router.post("/vaults/{address}/refresh-balance")
 def vault_refresh_balance(
     address: str,
@@ -590,7 +575,6 @@ def vault_refresh_balance(
     }
 
 
-# endpoint for complete vaults/{address} page
 @router.get("/vaults/{address}/{user}")
 def vault_user_summary(
     address: str,
@@ -638,7 +622,6 @@ def vault_user_summary(
         latest = {"quoteBalance": 0, "baseBalance": 0, "timestamp": 0, "usdValue": 0.0, "block": 0}
         latest_shares = 0
 
-    # nav from one sample's own usd and shares pair, never a stale tvl over a live count
     nav_now = (latest["usdValue"] / latest_shares) if latest_shares > 0 and latest["usdValue"] > 0 else None
 
     circ = int(circulating_shares or 0)
@@ -774,7 +757,6 @@ def vault_user_summary(
     }
 
 
-# endpoint for vault history charts (used when timeframe is changed while staying on the same vault)
 @router.get("/vaults/{address}/history/{timeframe}")
 def vault_history(
     address: str,
@@ -831,8 +813,6 @@ def vault_history(
     ]
     raw_count = len(pts)
 
-    # both series are built at full resolution and downsampled afterwards, so the
-    # pnl base point and the cumulative dollar sum cannot shift with the sampling
     tvl_full = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
     pnl_full = _per_share_pnl_series(pts)
     tvl_series = _sample_evenly_by_time(tvl_full, 48, lambda p: int(p.get("timestamp") or 0))

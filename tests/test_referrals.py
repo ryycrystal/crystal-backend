@@ -10,7 +10,6 @@ from core import chain as h
 from modules.referrals import REFERRAL_TOPIC, parse_referral
 
 
-# the binding event decodes indexed referrer and unindexed referee
 def test_parse_referral_decodes_both_addresses():
     referrer = "a" * 40
     referee = "b" * 40
@@ -20,7 +19,6 @@ def test_parse_referral_decodes_both_addresses():
     assert out == {"referrer": "0x" + referrer, "referee": "0x" + referee}
 
 
-# a cleared binding decodes the zero referrer
 def test_parse_referral_zero_referrer():
     tops = [REFERRAL_TOPIC, "0x" + "0" * 64]
     data = "0" * 24 + "c" * 40
@@ -28,20 +26,17 @@ def test_parse_referral_zero_referrer():
     assert out["referrer"] == "0x" + "0" * 40
 
 
-# referral logs are only accepted from the manager address
 def test_accepts_referral_log_only_from_manager():
     assert h.accepts_log_for_indexing("REF", h.CONTRACTS["REFERRALS"]) is True
     assert h.accepts_log_for_indexing("REF", "0x" + "1" * 40) is False
 
 
-# the full wiring: topic subscribed, tagged, and parser registered
 def test_referral_wiring_is_complete():
     assert REFERRAL_TOPIC in h.TOPICS
     assert h.EVENT_SIGS[REFERRAL_TOPIC] == "REF"
     assert h.PARSERS["REF"] is parse_referral
 
 
-# malformed logs decode to zero addresses instead of raising
 def test_parse_referral_malformed_inputs():
     out = parse_referral("0xmanager", [REFERRAL_TOPIC], "")
     assert out == {"referrer": "0x" + "0" * 40, "referee": "0x" + "0" * 40}
@@ -49,7 +44,6 @@ def test_parse_referral_malformed_inputs():
     assert out["referee"] == "0x" + "0" * 40
 
 
-# a zero referee from a malformed log must not create a binding row
 def test_apply_referral_skips_zero_referee():
     from state import State
 
@@ -64,7 +58,6 @@ def test_apply_referral_skips_zero_referee():
         )
 
 
-# the binding upsert refuses to overwrite a newer event with an older one
 def test_upsert_binding_sql_guards_ordering():
     cur = MagicMock()
     ref_storage.upsert_referral_binding("0xB", "0xA", 100, 2, 123, cur=cur)
@@ -75,7 +68,6 @@ def test_upsert_binding_sql_guards_ordering():
     assert params == ("0xb", "0xa", 100, 2, 123)
 
 
-# the reward journal accrues increases into earned and rejects stale observations
 def test_record_reward_sql_journals_deltas():
     cur = MagicMock()
     with patch.object(ref_storage, "db_cursor") as dbc:
@@ -87,7 +79,6 @@ def test_record_reward_sql_journals_deltas():
     assert cur.execute.call_args[0][1] == ("0xa", "0xt", 500, 500, 999)
 
 
-# the summary endpoint shapes bindings and rewards and rejects bad addresses
 def test_referral_summary_shape():
     class _FakeState:
         tokenToPrice = {"0xt": 2.0}
@@ -127,7 +118,6 @@ def test_referral_summary_shape():
             assert getattr(e, "status_code", None) == 400
 
 
-# a user with no binding and no rewards gets nulls and empty lists
 def test_referral_summary_empty_user():
     with patch.object(ref_api.storage, "get_referral_binding", return_value=None):
         with patch.object(ref_api.storage, "list_referees", return_value=[]):
@@ -148,7 +138,6 @@ LADDER = [
 ]
 
 
-# the ladder is served as configured, thresholds and benefits included
 def test_tier_ladder_shape():
     with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
         with patch.object(ref_api.storage, "tier_window_days", return_value=30):
@@ -160,7 +149,6 @@ def test_tier_ladder_shape():
     assert out["tiers"][2]["referralCommissionPercent"] == 20.0
 
 
-# volume below the first paid threshold stays on the basic tier
 def test_wallet_below_first_threshold_is_basic():
     with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
         with patch.object(ref_api.storage, "tier_window_days", return_value=30):
@@ -174,7 +162,6 @@ def test_wallet_below_first_threshold_is_basic():
     assert out["progressBps"] == 2500
 
 
-# a wallet between two thresholds earns the lower one and progresses toward the next
 def test_wallet_between_thresholds():
     with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
         with patch.object(ref_api.storage, "tier_window_days", return_value=30):
@@ -186,7 +173,6 @@ def test_wallet_between_thresholds():
     assert out["progressBps"] == 5000
 
 
-# the top tier has nothing above it and reads as complete
 def test_wallet_at_top_tier_has_no_next():
     with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
         with patch.object(ref_api.storage, "tier_window_days", return_value=30):
@@ -198,7 +184,6 @@ def test_wallet_at_top_tier_has_no_next():
     assert out["progressBps"] == 10000
 
 
-# thresholds are data, so an edited ladder moves wallets without a code change
 def test_edited_thresholds_change_the_answer():
     edited = [
         (0, "Basic", 0, 1, 1000),
@@ -213,7 +198,6 @@ def test_edited_thresholds_change_the_answer():
     assert out["nextTier"]["name"] == "Silver"
 
 
-# a zero volume wallet still resolves rather than returning a null tier
 def test_zero_volume_wallet_resolves():
     with patch.object(ref_api.storage, "list_volume_tiers", return_value=LADDER):
         with patch.object(ref_api.storage, "tier_window_days", return_value=30):
@@ -224,7 +208,6 @@ def test_zero_volume_wallet_resolves():
     assert out["progressBps"] == 0
 
 
-# a bad address is rejected before any query runs
 def test_tier_endpoint_rejects_bad_address():
     for bad in ("nothex", "0x" + "z" * 40, "0x" + "0" * 40):
         try:

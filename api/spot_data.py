@@ -1,10 +1,3 @@
-# data assembly for the spot portfolio: one call returns everything the tab renders.
-#
-# balances are read server side as a single json-rpc batch and cached briefly, so a
-# wallet with many viewers costs one rpc read per cache window instead of one
-# multicall per browser per 300ms. prices come from our own markets table crossed
-# through the mon/usd oracle, which removes the subgraph dependency entirely
-
 from __future__ import annotations
 
 import json
@@ -20,19 +13,14 @@ from core.storage import db_cursor
 _BALANCE_TTL_SECONDS = 3.0
 _BALANCEOF_SELECTOR = "0x70a08231"
 
-# wallet -> (fetched_at, block, {token -> raw balance}, native raw)
 _balance_cache: dict[str, tuple[float, int, dict[str, int], int]] = {}
 
-# wallet -> (fetched_at, block, native raw), separate from the full cache so a
-# native-only read never poisons the token map for a spot call in the same window
 _native_cache: dict[str, tuple[float, int, int]] = {}
 
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 NATIVE = "native"
 
 
-# every asset listed on the exchange, derived from the markets table so listing a
-# market automatically adds its tokens to the portfolio
 def spot_token_list() -> list[dict[str, Any]]:
     with db_cursor() as cur:
         cur.execute(
@@ -54,8 +42,6 @@ def spot_token_list() -> list[dict[str, Any]]:
     return out
 
 
-# usd price per whole token for every listed asset, from our own market prices
-# crossed through the mon/usd oracle. null when no market path to usd exists
 def spot_prices(mon_usd: Decimal) -> dict[str, Decimal | None]:
     with db_cursor() as cur:
         cur.execute(
@@ -73,27 +59,21 @@ def spot_prices(mon_usd: Decimal) -> dict[str, Decimal | None]:
         WMON: mon_usd if mon_usd > 0 else None,
         NATIVE: mon_usd if mon_usd > 0 else None,
     }
-    # direct: BASE/WMON markets price the base in native terms
     for base, quote, lp in rows:
         if quote in native_equiv:
             prices.setdefault(base, (Decimal(lp) * mon_usd) if mon_usd > 0 else None)
             if mon_usd > 0:
                 prices[base] = Decimal(lp) * mon_usd
         elif base in native_equiv and Decimal(lp) > 0 and mon_usd > 0:
-            # WMON/QUOTE market: the quote is priced by inversion
             prices.setdefault(quote, mon_usd / Decimal(lp))
     return prices
 
 
-# wallets confirmed to have crystal activity never lose that status, unknown
-# wallets are re-checked on a short ttl so a first trade flips them quickly
 _known_wallets: set[str] = set()
 _unknown_checked: dict[str, float] = {}
 _UNKNOWN_TTL_SECONDS = 30.0
 
 
-# true when the wallet has ever interacted with crystal, cached so the hot spot
-# endpoint does not re-run the existence probes on every poll tick
 def wallet_is_supported(wallet: str) -> bool:
     from core.storage import wallet_has_crystal_activity
 
@@ -112,14 +92,9 @@ def wallet_is_supported(wallet: str) -> bool:
     return False
 
 
-# the whole spot body minus the graph, shared by the rest endpoint and the ws
-# balances channel so the two can never disagree. raises only when the balance
-# read fails cold with no cached snapshot to fall back on
 def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
     from api.api import _fmt, _fmt_usd, _mon_price_usd
 
-    # a session can have several derived wallets selected at once, and the user
-    # wants one account view across them rather than one page per wallet
     wallets = [(wallet or "").lower()] if isinstance(wallet, str) else [str(w).lower() for w in (wallet or [])]
     wallets = [w for w in dict.fromkeys(wallets) if w]
     wallet = wallets[0] if wallets else ""
@@ -149,8 +124,6 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
 
     tokens = spot_token_list()
     token_addrs = [t["address"] for t in tokens]
-    # one balance read per selected wallet, summed per token. each read has its
-    # own short lived cache, so a repeat view costs nothing extra
     balances: dict[str, int] = {}
     native_raw = 0
     balance_block = 0
@@ -163,9 +136,6 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
         balance_block = max(balance_block, int(blk or 0))
         stale = stale or bool(w_stale)
 
-    # funds resting on the book and funds deposited into vaults have left the
-    # wallet balance but still belong to the user, so an account total built from
-    # wallet balances alone understates it by exactly those two amounts
     locked = storage.open_order_locked_by_token(supported)
     vaults_total, vault_rows = storage.vault_positions_usd(supported)
 
@@ -202,12 +172,8 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
                 "locked": _fmt(locked_bal),
                 "lockedValueUsd": _fmt_usd(locked_value) if locked_value is not None else None,
                 "priceUsd": _fmt_usd(price) if price is not None else None,
-                # exchange trade history is not indexed until the orderbook decode
-                # lands, so a 24h change would be a guess. null renders as a dash
                 "priceChange24h": None,
                 "valueUsd": _fmt_usd(value) if value is not None else None,
-                # wallet plus what this token has locked on the book, which is
-                # what the row is really worth to the holder
                 "totalValueUsd": _fmt_usd(combined) if combined is not None else None,
             }
         )
@@ -220,17 +186,13 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
         "supported": True,
         "rows": rows,
         "vaults": [
-            {**v, "valueUsd": _fmt_usd(v["valueUsd"]) if v["valueUsd"] is not None else None}
-            for v in vault_rows
+            {**v, "valueUsd": _fmt_usd(v["valueUsd"]) if v["valueUsd"] is not None else None} for v in vault_rows
         ],
         "summary": {
-            # the total is wallet plus book plus vaults; the parts are broken out
-            # so the ui can show where the money actually sits
             "totalAccountValue": _fmt_usd(total),
             "walletValue": _fmt_usd(wallet_total),
             "ordersValue": _fmt_usd(orders_total),
             "vaultsValue": _fmt_usd(vaults_total),
-            # these four light up with the orderbook serving layer; see DESIGN.md
             "totalVolume": None,
             "buySellRatio": None,
             "activeOrders": None,
@@ -243,8 +205,6 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
     }
 
 
-# native mon balance for one wallet over one cached rpc read, for callers that do
-# not need the full spot balance map
 def fetch_native_balance(wallet: str) -> tuple[int, int, bool]:
     wallet = wallet.lower()
     now = time.monotonic()
@@ -271,8 +231,6 @@ def fetch_native_balance(wallet: str) -> tuple[int, int, bool]:
         raise
 
 
-# one json-rpc batch: block number, native balance and every erc20 balance. cached
-# per wallet so concurrent viewers share a read, stale served when the rpc fails
 def fetch_balances(wallet: str, tokens: list[str]) -> tuple[int, dict[str, int], int, bool]:
     wallet = wallet.lower()
     now = time.monotonic()
@@ -310,7 +268,5 @@ def fetch_balances(wallet: str, tokens: list[str]) -> tuple[int, dict[str, int],
         return block, balances, native, False
     except Exception:
         if cached:
-            # a transport failure serves the last snapshot and says so, rather than
-            # rendering a portfolio of zeros that reads as real
             return cached[1], cached[2], cached[3], True
         raise

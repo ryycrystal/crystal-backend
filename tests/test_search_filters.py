@@ -41,7 +41,6 @@ def _mk(st, addr, name, symbol, blk, ts):
     _create(st, token=addr, blk=blk, ts=ts, name=name, symbol=symbol)
 
 
-# query is optional so the explorer can browse by filter with no search term
 def test_query_is_optional(db):
     st = _new_state()
     _mk(st, TOKEN, "Alpha", "ALP", 100, 1000)
@@ -51,7 +50,6 @@ def test_query_is_optional(db):
     assert body["count"] >= 1
 
 
-# total reflects every match, not the returned page
 def test_total_counts_all_matches_not_the_page(db):
     st = _new_state()
     now = int(time.time())
@@ -64,28 +62,23 @@ def test_total_counts_all_matches_not_the_page(db):
     assert body["total"] >= 12, "total must count beyond the page"
 
 
-# a filter must reach tokens outside the first page, which is the whole point
 def test_filters_run_in_sql_not_on_the_page(db):
     st = _new_state()
     now = int(time.time())
-    # 12 tokens, only the last one carries a distinctive name
     for i in range(11):
         _mk(st, "0x" + f"{i:040x}", f"Common{i}", f"C{i}", 100 + i, now - 100 + i)
     needle = "0x" + f"{99:040x}"
     _mk(st, needle, "Zebra", "ZBR", 90, now - 500)
 
     c = _api_client()
-    # with a small page and default recency order, Zebra is not on page one
     page = c.get("/search/query", params={"limit": 3}).json()
     assert needle not in [r["token"] for r in page["results"]]
 
-    # but a keyword filter still finds it
     hit = c.get("/search/query", params={"keywords": "zebra", "limit": 3}).json()
     assert hit["total"] == 1
     assert hit["results"][0]["token"] == needle
 
 
-# numeric ranges narrow the set
 def test_numeric_range_filters(db):
     st = _new_state()
     now = int(time.time())
@@ -97,8 +90,6 @@ def test_numeric_range_filters(db):
     assert c.get("/search/query", params={"buy_tx_min": 1}).json()["total"] >= 1
     assert c.get("/search/query", params={"buy_tx_min": 999}).json()["total"] == 0
 
-    # balances come from Transfer events, which the synthetic trade path does not
-    # emit, so seed one directly to exercise the holder derived filters
     _x(db, "UPDATE launchpad_positions SET balance_token = %s WHERE token = %s", (5 * 10**25, TOKEN))
     import api.api as api_mod
 
@@ -106,14 +97,12 @@ def test_numeric_range_filters(db):
     assert c.get("/search/query", params={"holders_min": 1}).json()["total"] >= 1
     api_mod._cache.clear()
     assert c.get("/search/query", params={"holders_max": 0}).json()["total"] == 0
-    # 5e25 of a 1e27 supply is 5 percent
     api_mod._cache.clear()
     assert c.get("/search/query", params={"top10_min": 4, "top10_max": 6}).json()["total"] >= 1
     api_mod._cache.clear()
     assert c.get("/search/query", params={"top10_min": 50}).json()["total"] == 0
 
 
-# exclude_keywords removes matches rather than filtering to them
 def test_exclude_keywords(db):
     st = _new_state()
     now = int(time.time())
@@ -127,7 +116,6 @@ def test_exclude_keywords(db):
     assert "DROP" not in names
 
 
-# phase maps onto stored columns since it is derived, not a column
 def test_phase_filter(db):
     st = _new_state()
     now = int(time.time())
@@ -138,8 +126,6 @@ def test_phase_filter(db):
     assert c.get("/search/query", params={"phase": "graduated"}).json()["total"] == 0
 
 
-# /tokens?since_block returns only what moved, plus full membership so the client
-# can drop what left
 def test_tokens_since_returns_only_changed(db):
     st = _new_state()
     now = int(time.time())

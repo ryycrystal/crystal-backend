@@ -518,8 +518,6 @@ def test_pools_route_get_pool_success_and_history_building():
     helper.assert_called_once_with(row)
     list_hist.assert_called_once_with("0xpool", since_ts=4100, limit=7)
     assert out["tvlHistory"] == [{"timestamp": 4000, "tvl": 10.5}, {"timestamp": 5000, "tvl": 11.0}]
-    # share based series: the point before the trade has no trailing growth, the one
-    # after annualizes the 1% invariant growth per share from the trade in its window
     assert out["apyHistory"][0] == {"timestamp": 4000, "apy": 0.0}
     assert out["apyHistory"][1]["timestamp"] == 5000
     assert abs(out["apyHistory"][1]["apy"] - 0.01 * 365.0 * 100.0) < 1e-6
@@ -562,8 +560,6 @@ if __name__ == "__main__":
     print("Pool tests passed")
 
 
-# phase 1 invariants: the amm fee comes from the market's taker fee, never an
-# invented constant, and unknown decimals price as nothing instead of 1e18x
 def test_pool_fee_rate_uses_taker_fee_not_a_constant():
     from decimal import Decimal
 
@@ -590,14 +586,13 @@ def test_unknown_decimals_price_as_nothing():
     st.tokenToPrice = {"0xq": Decimal("2"), "0xb": Decimal("3")}
     mi = models.MarketInfo.__new__(models.MarketInfo)
     mi.quoteAddress, mi.baseAddress = "0xq", "0xb"
-    mi.quoteDecimals, mi.baseDecimals = 18, 0  # base decimals unknown
+    mi.quoteDecimals, mi.baseDecimals = 18, 0
     tvl = st._pool_tvl_usd_locked(mi, 5 * 10**18, 7 * 10**18)
     assert tvl == Decimal(10), f"only the priced side counts, got {tvl}"
     mi.quoteDecimals = 0
     assert st._pool_tvl_usd_locked(mi, 5 * 10**18, 7 * 10**18) == 0
 
 
-# strict univ2: lp accrual is sqrt(k) growth, no percentage constant anywhere
 def test_pool_fees_from_k_growth():
     from decimal import Decimal
 
@@ -611,19 +606,16 @@ def test_pool_fees_from_k_growth():
     mi.quoteDecimals, mi.baseDecimals = 18, 18
 
     prev_q, prev_b = 100 * 10**18, 100 * 10**18
-    # a trade that grows k by 0.1 percent: sqrt growth ~0.049994 percent of tvl 200
     new_q, new_b = 110 * 10**18, 91 * 10**18
     fees = st._pool_fees_from_k_growth_locked(mi, prev_q, prev_b, new_q, new_b)
     expected = Decimal(200) * ((Decimal(new_q * new_b) / Decimal(prev_q * prev_b)).sqrt() - 1)
     assert abs(fees - expected) < Decimal("0.000001")
     assert Decimal("0.09") < fees < Decimal("0.11")
 
-    # k unchanged or shrunk means no fee accrual, never negative
     assert st._pool_fees_from_k_growth_locked(mi, prev_q, prev_b, 110 * 10**18, int(90.909090e18)) == 0
     assert st._pool_fees_from_k_growth_locked(mi, 0, 0, new_q, new_b) == 0
 
 
-# preview math is univ2: ratio-rebalanced deposit, min() mint, pro-rata withdraw
 def test_pool_preview_math():
     row = _pool_row_25()
     api_row = {

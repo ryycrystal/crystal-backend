@@ -10,12 +10,7 @@ import core.storage as storage
 
 router = APIRouter()
 
-# refuse to serve orderbook state while the indexer is replaying history: an
-# empty-but-200 answer would read as "no orders" and stop the client falling
-# back, while a 503 sends it to the fallback until the replay reaches head
 STALE_SECONDS = float(os.getenv("ORDERBOOK_STALE_SECONDS", "300"))
-# derived wallets are capped at ten per session, so a unified view never
-# needs more than that plus the parent account
 MAX_WALLETS = 16
 
 
@@ -25,7 +20,6 @@ def orderbook_data_is_stale() -> bool:
     return time.time() - storage.latest_trade_timestamp() > STALE_SECONDS
 
 
-# a wallet path parameter, normalised or refused
 def _wallet(addr: str) -> str:
     w = (addr or "").lower()
     if not w.startswith("0x") or len(w) != 42:
@@ -33,9 +27,6 @@ def _wallet(addr: str) -> str:
     return w
 
 
-# the set of wallets a request covers. a user trades from several derived
-# wallets at once and wants one view across the ones they have selected, so
-# every read accepts an optional list and falls back to the path wallet
 def _wallets(wallet: str, addresses: str) -> list[str]:
     out: list[str] = []
     for a in (addresses or "").split(","):
@@ -54,13 +45,10 @@ def _ensure_fresh() -> None:
         raise HTTPException(status_code=503, detail="indexer is catching up, serve from fallback")
 
 
-# a page size clamped to something the db is happy to serve
 def _limit(n: int) -> int:
     return max(1, min(int(n or 100), 500))
 
 
-# open resting orders for one wallet, served from the decoded order state so the
-# client stops reading order slots off the chain
 @router.get("/orderbook/open/{wallet}")
 def open_orders(wallet: str, market: str = "", addresses: str = "") -> dict[str, Any]:
     ws = _wallets(wallet, addresses)
@@ -75,8 +63,6 @@ def open_orders(wallet: str, market: str = "", addresses: str = "") -> dict[str,
     }
 
 
-# every order a wallet has ever owned with its current status, the order
-# history surface: places still live, cancels and fills already resolved
 @router.get("/orderbook/orders/{wallet}")
 def wallet_orders(
     wallet: str, market: str = "", limit: int = 200, before_ts: int | None = None, addresses: str = ""
@@ -95,8 +81,6 @@ def wallet_orders(
     }
 
 
-# exchange trade history for one wallet: taker trades and maker fills merged,
-# newest first. before_ts pages backwards through time
 @router.get("/orderbook/trades/{wallet}")
 def exchange_trades(
     wallet: str, market: str = "", limit: int = 100, before_ts: int | None = None, addresses: str = ""
@@ -115,7 +99,6 @@ def exchange_trades(
     }
 
 
-# order lifecycle history for one wallet: places, cancels, decreases and fills
 @router.get("/orderbook/history/{wallet}")
 def order_history(
     wallet: str, market: str = "", limit: int = 100, before_ts: int | None = None, addresses: str = ""
@@ -134,17 +117,11 @@ def order_history(
     }
 
 
-# derived wallet preferences, so a session that adds or selects wallets on one
-# device finds the same set on another. the key is opaque and client derived:
-# the server stores a count and which indices are selected, never an address,
-# never a key, and has no way to tell whose record it is
 _HEX = set("0123456789abcdef")
 
 
 def _prefs_key(key: str) -> str:
     k = (key or "").strip().lower()
-    # a 64 char hash, never an address: refusing address shaped keys keeps a
-    # caller from accidentally storing this under something identifying
     if len(k) != 64 or any(c not in _HEX for c in k):
         raise HTTPException(status_code=400, detail="key must be 64 hex characters")
     return k
@@ -173,12 +150,6 @@ def write_wallet_prefs(key: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"count": count, "selected": sorted(set(selected)), "updatedAt": updated_at}
 
 
-# mon priced in usd over time, so a client can denominate a chart in usd using
-# the rate from each candle's own moment rather than today's rate. `before` is
-# the last known rate at or before the range, so the first candles of a range
-# still convert when no trade landed inside their bucket
-# the widest resolution ladder charts already use. picking from it keeps rate
-# buckets aligned with candle buckets instead of landing on arbitrary strides
 _RES_LADDER = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
 _RES_BUCKET_CAP = 5000
 
@@ -194,25 +165,15 @@ def coarsened_resolution(span_seconds: int, res: int) -> int:
 
 
 @router.get("/mon-usd/series")
-def mon_usd_series(
-    from_ts: int = 0, to_ts: int = 0, resolution: int = 60
-) -> dict[str, Any]:
+def mon_usd_series(from_ts: int = 0, to_ts: int = 0, resolution: int = 60) -> dict[str, Any]:
     now = int(time.time())
     end = int(to_ts) if to_ts else now
     start = int(from_ts) if from_ts else end - 86400
     res = max(1, min(int(resolution or 60), 86400))
-    # a caller asking about a single instant is asking a real question: what was
-    # the rate then. widening to one bucket answers it instead of rejecting the
-    # request, which is what a chart with one candle in view ends up sending
     if end < start:
         start, end = end, start
     if end == start:
         end = start + res
-    # a range longer than the bucket cap is not rejected: the caller is a chart
-    # whose visible window simply grew past a few days, and a 400 there left it
-    # converting old bars on fallback rates. serve the same range coarser
-    # instead. mon moves under a percent an hour, so a coarse rate for a wide
-    # window is within a tick of the fine one
     res = coarsened_resolution(end - start, res)
 
     from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
@@ -228,13 +189,8 @@ def mon_usd_series(
     }
 
 
-# one feed of everything a wallet did: launchpad buys and sells alongside vault
-# deposits and withdrawals, newest first. fee claims are not here because no
-# claim event is indexed yet, only the running claimable balance
 @router.get("/activity/{wallet}")
-def wallet_activity(
-    wallet: str, limit: int = 50, before_ts: int | None = None, addresses: str = ""
-) -> dict[str, Any]:
+def wallet_activity(wallet: str, limit: int = 50, before_ts: int | None = None, addresses: str = "") -> dict[str, Any]:
     ws = _wallets(wallet, addresses)
     lim = max(1, min(int(limit or 50), 200))
     items = storage.wallet_activity(ws, limit=lim, before_ts=before_ts)

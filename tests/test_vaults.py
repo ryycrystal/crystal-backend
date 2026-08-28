@@ -871,7 +871,6 @@ def test_vault_refresh_balance_success_and_user_projection():
     assert out["userBalance"]["withdrawUnlockAt"] == 500
     assert out["userBalance"]["withdrawLockupRemaining"] == 44
     assert out["status"] == {"locked": True, "closed": False}
-    # refresh-balance no longer writes samples; the indexer's sampler owns the series
     assert out["samplePersisted"] is False
     assert out["source"] == "rpc"
     assert post.call_count == 3
@@ -1454,7 +1453,6 @@ def test_vault_storage_list_balance_samples_query_variants_and_ordering():
     assert out_d == list(reversed(rows_d))
 
 
-# average cost basis: deposits accumulate, withdrawals realize at avg entry
 def test_avg_cost_from_flows_math():
     pos, entry, realized = vault_api._avg_cost_from_flows([(100, 1.0)])
     assert (pos, entry, realized) == (100.0, 1.0, 0.0)
@@ -1473,7 +1471,6 @@ def test_avg_cost_from_flows_math():
     assert (pos, entry, realized) == (0.0, 0.0, 0.0)
 
 
-# annualized vault apy comes from per-share growth over the sample window
 def test_vault_apy_pct_from_samples():
     day = 86400
     now = 2_100_000_000
@@ -1491,7 +1488,6 @@ def test_vault_apy_pct_from_samples():
         assert vault_api._vault_apy_pct("0xv") is None
 
 
-# deposits that mint shares at nav must not read as vault pnl
 def test_vault_history_per_share_pnl_ignores_flows():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
@@ -1510,7 +1506,6 @@ def test_vault_history_per_share_pnl_ignores_flows():
     assert [p["tvlUsd"] for p in out["series"]["tvl"]] == [100.0, 200.0, 220.0]
 
 
-# samples without shares are unpriceable and must report flat zero, never tvl deltas
 def test_vault_history_legacy_rows_report_flat_pnl():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
@@ -1525,7 +1520,6 @@ def test_vault_history_legacy_rows_report_flat_pnl():
     assert [p["pnlPct"] for p in pnl] == [0.0, 0.0]
 
 
-# a whale deposit at flat value per share must not move the dollar pnl series
 def test_vault_history_dollar_series_is_flow_invariant():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
@@ -1542,7 +1536,6 @@ def test_vault_history_dollar_series_is_flow_invariant():
     assert abs(pnl[2]["pnlPct"] - 10.0) < 1e-9
 
 
-# a zero usd sample carries the previous pnl forward instead of printing minus one hundred
 def test_vault_history_zero_usd_sample_carries_forward():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
@@ -1559,7 +1552,6 @@ def test_vault_history_zero_usd_sample_carries_forward():
     assert abs(pnl[2]["pnlPct"] - 10.0) < 1e-9
 
 
-# an exact full exit with 1e18 scale share counts leaves no float residue
 def test_avg_cost_full_exit_is_exact():
     a = 4539448776366754703
     b = 1190396360377453094
@@ -1569,7 +1561,6 @@ def test_avg_cost_full_exit_is_exact():
     assert realized > 0.0
 
 
-# snapshot pct change also normalizes by shares when they exist
 def test_vault_snapshot_pct_change_is_per_share():
     rows = [
         (1, 1000, 0, 0, 100.0, 1000),

@@ -5,9 +5,6 @@ from psycopg2.extras import execute_values
 import core.storage as storage
 
 
-# rebuild the current-order plane from the immutable events and fills tables:
-# read both, fold in chain order in memory, and land the result in one guarded
-# bulk upsert so rows the live indexer has already moved past stay untouched
 def main() -> None:
     storage.init_pool()
     started = time.monotonic()
@@ -59,12 +56,8 @@ def main() -> None:
         if action == "add":
             row.update(user=user or row["user"], is_buy=is_buy, size=size, original=size, filled=0, status="open")
         elif action == "remove":
-            # a cancel returns the unfilled remainder to the owner: it closes the
-            # order without executing anything, so filled stays where it is
             row.update(size=0, status="filled" if row["status"] == "filled" else "canceled")
         elif action == "decrease":
-            # the order itself shrinks, so the original shrinks with it, never
-            # below what already executed
             row["size"] = max(row["size"] - size, 0)
             row["original"] = max(row["original"] - size, row["filled"])
         elif action == "fill":

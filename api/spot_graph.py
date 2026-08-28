@@ -1,12 +1,3 @@
-# spot portfolio value history as server computed hourly buckets.
-#
-# the frontend used to rebuild this series itself: up to ~721 archive reads per
-# page load at guessed block numbers, truncated to 13 tokens to survive. a past
-# bucket can never change, so the server computes each one once from a single
-# archive multicall, stores it forever, and every later view by anyone is a pure
-# db read. timestamps map to blocks and mon/usd through the already indexed
-# trades table, so only the balance read itself ever touches rpc
-
 from __future__ import annotations
 
 import json
@@ -40,7 +31,6 @@ _inflight: set[str] = set()
 _inflight_lock = threading.Lock()
 
 
-# newest indexed block at or before a timestamp, from the dense trade history
 def _block_at_ts(ts: int) -> int | None:
     with db_cursor() as cur:
         cur.execute(
@@ -51,7 +41,6 @@ def _block_at_ts(ts: int) -> int | None:
     return int(row[0]) if row else None
 
 
-# earliest indexed trade timestamp, the floor below which no bucket is knowable
 def _earliest_trade_ts() -> int | None:
     with db_cursor() as cur:
         cur.execute("SELECT MIN(timestamp) FROM launchpad_trades")
@@ -59,7 +48,6 @@ def _earliest_trade_ts() -> int | None:
     return int(row[0]) if row and row[0] is not None else None
 
 
-# mon/usd at a timestamp, implied by the nearest sizeable trade's stored usd value
 def _mon_usd_at(ts: int) -> Decimal:
     with db_cursor() as cur:
         cur.execute(
@@ -79,9 +67,6 @@ def _mon_usd_at(ts: int) -> Decimal:
     return usd / (native / _WEI)
 
 
-# usd price per whole token at a timestamp. usdc is a dollar, native and wmon are
-# the oracle, amm backed tokens come from their reserve ratio at that time, and
-# anything unpriceable is null so it is excluded rather than valued with a guess
 def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str) -> Decimal | None:
     addr = token["address"]
     ticker = (token.get("ticker") or "").upper()
@@ -110,13 +95,9 @@ def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str)
     return price_native * mon_usd
 
 
-# archive balances for several buckets in one json-rpc http batch: per bucket one
-# multicall3 aggregate carrying the native read plus every erc20 balanceOf
 def _balances_at_many(
     wallet: str, pairs: list[tuple[int, int]], tokens: list[dict[str, Any]]
 ) -> dict[int, dict[str, int] | None]:
-    # historical eth_call needs archive state; the general rpc's depth varies by
-    # which node the load balancer serves, so the filler gets its own endpoint
     rpc = os.getenv("SPOT_GRAPH_RPC") or os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
     erc20 = [t["address"] for t in tokens if t["address"] != "native"]
 
@@ -155,7 +136,6 @@ def _balances_at_many(
     return out
 
 
-# value one bucket's balances and persist it
 def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], tokens: list[dict[str, Any]]) -> None:
     mon_usd = _mon_usd_at(ts)
     wmon = next((t["address"] for t in tokens if (t.get("ticker") or "").upper() == "WMON"), "")
@@ -176,7 +156,6 @@ def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], to
     )
 
 
-# the bucket grid this wallet should have, newest first, open bucket excluded
 def _wanted_buckets(now: int) -> list[int]:
     now_bucket = (now // RESOLUTION) * RESOLUTION
     since = now_bucket - LOOKBACK_BUCKETS * RESOLUTION
@@ -187,8 +166,6 @@ def _wanted_buckets(now: int) -> list[int]:
     return [t for t in range(now_bucket - RESOLUTION, since - 1, -RESOLUTION)]
 
 
-# fill every missing bucket for one wallet, newest first so the chart's right
-# edge appears immediately. rows are immutable so re-runs converge to complete
 def _fill(wallet: str) -> None:
     try:
         from api.spot_data import spot_token_list
@@ -230,10 +207,6 @@ def _fill(wallet: str) -> None:
                 if balances is not None:
                     _write_bucket(wallet, ts, block, balances, tokens)
                     wrote += 1
-            # the fill runs newest first, so two straight batches of per-call
-            # misses means the rpc's archive depth is behind us: everything
-            # older will miss too, and future hours land inside the window. the
-            # floor is recorded so completeness stops chasing unreachable history
             if wrote == 0:
                 if empty_batches == 0:
                     empty_streak_top = max(ts for ts, _b in group)
@@ -253,7 +226,6 @@ def _fill(wallet: str) -> None:
             _inflight.discard(wallet)
 
 
-# kick a background fill unless one is already running for this wallet
 def ensure_fill(wallet: str) -> None:
     wallet = (wallet or "").lower()
     with _inflight_lock:
@@ -263,9 +235,6 @@ def ensure_fill(wallet: str) -> None:
     threading.Thread(target=_fill, args=(wallet,), daemon=True).start()
 
 
-# the cached series plus a completeness flag the client can re-poll on.
-# complete means "filled down to what the archive can answer": buckets below the
-# recorded archive floor are unreachable and must not keep the client polling
 def graph_for(wallet: str) -> dict[str, Any]:
     wallet = (wallet or "").lower()
     wanted = _wanted_buckets(int(time.time()))

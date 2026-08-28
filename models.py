@@ -6,7 +6,6 @@ from decimal import Decimal
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
 
-# in memory row for one launchpad token, mirrors launchpad_tokens
 @dataclass(slots=True)
 class LaunchpadToken:
     token: str
@@ -44,7 +43,6 @@ class LaunchpadToken:
     curve_token_reserve: int = 0
 
 
-# a v3 pool and which side of it holds the native asset
 @dataclass(slots=True)
 class PoolInfo:
     pool: str
@@ -53,7 +51,6 @@ class PoolInfo:
     token_is_0: bool
 
 
-# a crystal market, its assets, fees and amm reserves
 @dataclass(slots=True)
 class MarketInfo:
     isCanonical: bool
@@ -90,7 +87,6 @@ class MarketInfo:
     lastSyncAt: int = 0
 
 
-# a vault and its configuration
 @dataclass(slots=True)
 class Vault:
     vault: str
@@ -113,7 +109,6 @@ class Vault:
     decreaseOnWithdraw: bool = False
 
 
-# one sampled vault balance and its usd value at a block
 @dataclass(slots=True)
 class VaultBalance:
     quoteBalance: int
@@ -123,7 +118,6 @@ class VaultBalance:
     block: int = 0
 
 
-# a single deposit into a vault
 @dataclass(slots=True)
 class VaultDeposit:
     user: str
@@ -134,7 +128,6 @@ class VaultDeposit:
     hash: str
 
 
-# a single withdrawal from a vault
 @dataclass(slots=True)
 class VaultWithdraw:
     user: str
@@ -145,7 +138,6 @@ class VaultWithdraw:
     hash: str
 
 
-# one user's position and activity in a vault
 @dataclass(slots=True)
 class VaultUser:
     address: str

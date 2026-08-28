@@ -17,21 +17,16 @@ from core.multicall import u256_at as _u256_at
 from core.sequencer import SEQUENCER
 
 HEAD_TIMEOUT = 60.0
-# replay is latency bound rather than cpu bound, so the chunk size mostly decides
-# how much fixed per chunk round trip cost gets amortised
 BACKFILL_BATCH = int(os.getenv("BACKFILL_BATCH", "100"))
 VAULT_SAMPLER_INTERVAL = 30
 VAULT_SAMPLER_MULTICALL_CHUNK = 200
 GET_BALANCES_CALLDATA = bytes.fromhex("00113e08")
-# erc20 totalSupply(), piggybacked on the same multicall so the event-replay share
-# counter is reconciled against the chain on every sweep instead of drifting silently
 TOTAL_SUPPLY_CALLDATA = bytes.fromhex("18160ddd")
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
 
 
-# decode a vault getbalances return into quote and base
 def _decode_vault_get_balances_return(ret: bytes) -> tuple[int, int] | None:
     if not isinstance(ret, (bytes, bytearray)):
         return None
@@ -40,7 +35,6 @@ def _decode_vault_get_balances_return(ret: bytes) -> tuple[int, int] | None:
     return (quote_bal, base_bal)
 
 
-# sample vault balances one rpc call at a time
 async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
     for vaddr in vaults:
         try:
@@ -61,7 +55,6 @@ async def _sample_vaults_serial(state, vaults: list[str], blk_hex: str, blk_num:
             continue
 
 
-# sample every vault balance in one multicall, falling back to serial
 async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_num: int, ts: int):
     for i in range(0, len(vaults), VAULT_SAMPLER_MULTICALL_CHUNK):
         chunk = vaults[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
@@ -96,14 +89,12 @@ async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_n
             await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)
 
 
-# record a block whose logs still need fetching
 def _add_missing(blk: int):
     if blk not in missing_set:
         missing_blocks.append(blk)
         missing_set.add(blk)
 
 
-# drop missing block entries that are older than the retention window
 def _clear_stale_blocks(current_head: int):
     global missing_blocks, missing_set
     seq_next = SEQUENCER._next_block
@@ -122,7 +113,6 @@ def _clear_stale_blocks(current_head: int):
     missing_set = new_set
 
 
-# fetch and queue every indexed log for one block
 async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) -> bool:
     try:
         logs = await backfill.fetch_logs_http(blk, blk)
@@ -168,7 +158,6 @@ async def _fetch_and_add_indexed_logs_for_block(blk: int, event_counts: dict) ->
     return True
 
 
-# background loop that backfills blocks the stream missed
 async def _gap_worker(event_counts, should_exit_flag: list):
     while not should_exit_flag[0]:
         if not missing_blocks:
@@ -301,7 +290,6 @@ async def _gap_worker(event_counts, should_exit_flag: list):
             await asyncio.sleep(5.0)
 
 
-# one websocket session, subscribing to heads and draining logs until it drops
 async def _stream_once(prev_last_head: int | None) -> int | None:
     connect_kwargs = dict(
         ping_interval=20,
@@ -341,7 +329,6 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         last_head_block_ts: int | None = None
         first_head_seen = False
 
-        # force a reconnect when no new head arrives within the timeout
         async def watchdog():
             nonlocal last_head_ts, last_head_num
             while not should_exit[0]:
@@ -468,7 +455,6 @@ async def _stream_once(prev_last_head: int | None) -> int | None:
         return last_head_num
 
 
-# follow the chain forever, reconnecting whenever the socket drops
 async def stream_logs(start_block: int | None = None):
     last_seen = None
     delay = 0.5
@@ -492,7 +478,6 @@ async def stream_logs(start_block: int | None = None):
         delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
 
 
-# periodically snapshot vault balances so account value has history
 async def vault_sampler(state):
     while True:
         try:
@@ -530,6 +515,3 @@ async def vault_sampler(state):
             print(f"[SAMPLER] {e!r}", flush=True)
 
         await asyncio.sleep(VAULT_SAMPLER_INTERVAL)
-
-
-# rebuild state for a block range after a rollback
