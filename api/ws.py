@@ -157,9 +157,12 @@ class Subscriber:
         return channel in self.subscriptions.get(token, ())
 
     async def send(self, payload: dict[str, Any]) -> bool:
+        return await self.send_text(json.dumps(payload))
+
+    async def send_text(self, text: str) -> bool:
         async with self.send_lock:
             try:
-                await self.socket.send_text(json.dumps(payload))
+                await self.socket.send_text(text)
                 return True
             except Exception:
                 return False
@@ -175,6 +178,19 @@ class Hub:
         self._push_sem = asyncio.Semaphore(MAX_CONCURRENT_TOKEN_PUSHES)
         self._balances_checked: dict[str, float] = {}
         self._vaults_checked = 0.0
+        self._tick_calls: dict[tuple, asyncio.Future] = {}
+        self._tick_loop: asyncio.AbstractEventLoop | None = None
+
+    async def _tick_call(self, key: tuple, fn, *args):
+        loop = asyncio.get_running_loop()
+        if self._tick_loop is not loop:
+            self._tick_loop = loop
+            self._tick_calls = {}
+        pending = self._tick_calls.get(key)
+        if pending is None:
+            pending = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+            self._tick_calls[key] = pending
+        return await pending
 
     async def add(self, sub: Subscriber) -> None:
         async with self.lock:
@@ -214,10 +230,14 @@ class Hub:
     async def broadcast(self, token: str, channel: str, payload: dict[str, Any]) -> None:
         async with self.lock:
             targets = [s for s in self.subscribers if s.wants(token, channel) and (token, channel) in s.primed]
+        if not targets:
+            return
+        inner = json.dumps(payload)[1:-1]
         dead = []
         for s in targets:
-            framed = {**payload, "seq": s.next_seq(token, channel)}
-            if not await s.send(framed):
+            seq = s.next_seq(token, channel)
+            text = f'{{"seq":{seq},{inner}}}' if inner else f'{{"seq":{seq}}}'
+            if not await s.send_text(text):
                 dead.append(s)
         for s in dead:
             await self.remove(s)
@@ -309,8 +329,10 @@ class Hub:
                     tokens = await self.active_tokens()
                     if not tokens:
                         continue
+                    self._tick_calls = {}
+                    watermark = await asyncio.to_thread(_watermark)
                     await asyncio.gather(
-                        *(self._push_token_guarded(t) for t in tokens),
+                        *(self._push_token_guarded(t, watermark) for t in tokens),
                         return_exceptions=True,
                     )
                 except asyncio.CancelledError:
@@ -320,14 +342,11 @@ class Hub:
         finally:
             stop.set()
 
-    async def _push_token_guarded(self, token: str) -> None:
+    async def _push_token_guarded(self, token: str, watermark: int) -> None:
         async with self._push_sem:
-            await self._push_token(token)
+            await self._push_token(token, watermark)
 
-    async def _push_token(self, token: str) -> None:
-        from api.ws_data import indexer_watermark
-
-        watermark = await asyncio.to_thread(indexer_watermark)
+    async def _push_token(self, token: str, watermark: int) -> None:
         async with self.lock:
             wanted: set[str] = set()
             for sub in self.subscribers:
@@ -598,7 +617,7 @@ class Hub:
     async def _push_orderbook_channel(self, token: str, watermark: int, channel: str) -> None:
         from api.routes.orderbook import orderbook_data_is_stale
 
-        if await asyncio.to_thread(orderbook_data_is_stale):
+        if await self._tick_call(("orderbook_stale",), orderbook_data_is_stale):
             return
         async with self.lock:
             targets = [
@@ -611,7 +630,7 @@ class Hub:
         changed: dict[str, dict] = {}
         for a in union:
             try:
-                body = await asyncio.to_thread(_orderbook_wallet_body, channel, a)
+                body = await self._tick_call(("orderbook_body", channel, a), _orderbook_wallet_body, channel, a)
             except Exception:
                 continue
             key = (token, f"{channel}:{a}")
