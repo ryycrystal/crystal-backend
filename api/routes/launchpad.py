@@ -1188,11 +1188,9 @@ def token_overview_graph(
             "id": token_addr,
             "initialSupply": str(10**18),
             "lastPriceNativePerTokenWad": _scaled_price(last_price_native),
-            "lastPriceQuotePerTokenWad": _scaled_price(last_price_native),
             "lastUpdatedAt": str(last_timestamp),
             "market": market,
             "marketcap": _fmt(marketcap_native_raw),
-            "marketcap_quote": _fmt(marketcap_native_raw),
             "marketcap_usd": _fmt_usd(marketcap_usd),
             "athPriceNative": _fmt(ath_price_native),
             "athMarketcap": _fmt(ath_marketcap),
@@ -1201,7 +1199,6 @@ def token_overview_graph(
             "imageUrl": metadata_cid_val,
             "migrated": migrated_flag,
             "migratedAt": migrated_at,
-            "migratedMarket": market,
             "mini": {
                 "klines": mini_klines,
             },
@@ -1243,9 +1240,7 @@ def token_overview_graph(
             # the explicit keys below say which is which, the originals stay for
             # compatibility -- renaming them is a breaking change
             "volumeNative": str(volume_native_24h),
-            "volumeQuote": str(volume_native_24h),
             "volumeUsd": _fmt_usd(volume_usd_24h),
-            "volume24hNative": str(volume_native_24h),
             "volume24hUsd": _fmt_usd(volume_usd_24h),
             "volumeLifetimeNative": str(volume_native_lifetime),
             "volumeLifetimeUsd": _fmt_usd(volume_usd_lifetime),
@@ -1261,7 +1256,6 @@ def token_overview_graph(
             "source": _api_source(source),
             "nadfunVersion": _nadfun_version(token_addr, source),
             "quoteToken": quote_token,
-            "quote_token": quote_token,
             **overview_reserves,
         }
 
