@@ -1141,6 +1141,27 @@ app.include_router(x_router)
 _mon_price_cache: tuple[float, Decimal] | None = None
 
 
+_lvmon_rate_cache: tuple[float, Decimal] | None = None
+
+
+# lvmon priced in mon, as last observed from its pool by the indexer. parity is the
+# fallback only until the first observation lands, and it errs high by design
+def _lvmon_rate() -> Decimal:
+    global _lvmon_rate_cache
+    now = time.time()
+    if _lvmon_rate_cache and (now - _lvmon_rate_cache[0]) < 30:
+        return _lvmon_rate_cache[1]
+    try:
+        stored = storage.get_lvmon_rate()
+        rate = Decimal(stored) if stored is not None else Decimal(1)
+        if rate <= 0:
+            rate = Decimal(1)
+    except Exception:
+        return Decimal(1)
+    _lvmon_rate_cache = (now, rate)
+    return rate
+
+
 # latest mon usd price from storage
 def _mon_price_usd() -> Decimal:
     global _mon_price_cache
@@ -1163,6 +1184,10 @@ def _mon_price_usd() -> Decimal:
 # usd price for a quote token, mon for native equivalents
 def _quote_price_usd(quote_token: str | None) -> Decimal:
     quote = (quote_token or WMON).lower()
+    if quote == LVMON:
+        # lvmon is a claim on leverup's vault, not a wrapper, and trades under
+        # parity. pricing it as mon overstates every token quoted in it
+        return _mon_price_usd() * _lvmon_rate()
     if quote in NATIVE_EQUIV_QUOTES:
         return _mon_price_usd()
     return Decimal(0)
