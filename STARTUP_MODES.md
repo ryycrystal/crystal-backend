@@ -226,31 +226,31 @@ python indexer_main.py --mode live --live-dump-dir chain-log-dump
 Create a derived Postgres state snapshot:
 
 ```powershell
-python db_snapshot.py create --out snapshots
+python -m scripts.db_snapshot create --out snapshots
 ```
 
 Create a labeled snapshot:
 
 ```powershell
-python db_snapshot.py create --out snapshots --label before_rebuild
+python -m scripts.db_snapshot create --out snapshots --label before_rebuild
 ```
 
 Restore a snapshot:
 
 ```powershell
-python db_snapshot.py restore snapshots\your_snapshot.dump
+python -m scripts.db_snapshot restore snapshots\your_snapshot.dump
 ```
 
 Restore with parallel jobs:
 
 ```powershell
-python db_snapshot.py restore snapshots\your_snapshot.dump --jobs 4
+python -m scripts.db_snapshot restore snapshots\your_snapshot.dump --jobs 4
 ```
 
 Restore then resume from dump and live:
 
 ```powershell
-python db_snapshot.py restore snapshots\your_snapshot.dump
+python -m scripts.db_snapshot restore snapshots\your_snapshot.dump
 python indexer_main.py --mode resume --dump-dir chain-log-dump --live-dump-dir chain-log-dump
 ```
 
@@ -259,13 +259,13 @@ python indexer_main.py --mode resume --dump-dir chain-log-dump --live-dump-dir c
 Benchmark a small replay range into Postgres:
 
 ```powershell
-python replay_benchmark.py --dump chain-log-dump --start 37709836 --end 37719836 --reset
+python -m scripts.replay_benchmark --dump chain-log-dump --start 37709836 --end 37719836 --reset
 ```
 
 Benchmark a later range without clearing derived state:
 
 ```powershell
-python replay_benchmark.py --dump chain-log-dump --start 38000000 --end 38010000
+python -m scripts.replay_benchmark --dump chain-log-dump --start 38000000 --end 38010000
 ```
 
 The output includes `blocks_per_sec`. For production sync, run multiple ranges
@@ -394,7 +394,7 @@ az containerapp update --name crystal-indexer --resource-group $env:AZ_RG --min-
 
 ## Data Integrity
 
-`doctor.py` answers "is the backend missing data" and repairs the raw log cache.
+`scripts/doctor.py` answers "is the backend missing data" and repairs the raw log cache.
 It needs the PG* env vars (point them at whichever DB you are checking) and RPC
 access. It reports:
 
@@ -408,25 +408,25 @@ access. It reports:
   symptom of past holes).
 
 ```powershell
-python doctor.py
+python -m scripts.doctor
 ```
 
 Cross-check sampled cached blocks against fresh RPC logs (N per 10M-block range):
 
 ```powershell
-python doctor.py --verify-rpc 5
+python -m scripts.doctor --verify-rpc 5
 ```
 
 Refill cache holes from RPC. Idempotent and resumable (`ON CONFLICT DO NOTHING`);
 re-run after any interruption and it recomputes what is still missing:
 
 ```powershell
-python doctor.py --refill
+python -m scripts.doctor --refill
 ```
 
 The live indexer caches raw logs for every block it processes (stream, gap
 worker, and RPC backfill all write `launchpad_block_logs`), so holes should only
-appear after operational surgery on the table or crashes; `doctor.py` in a cron
+appear after operational surgery on the table or crashes; `scripts/doctor.py` in a cron
 or before any reindex catches them.
 
 ### Built-In Self Check
@@ -442,7 +442,7 @@ and every sweep result is published to `launchpad_kv` under `integrity_last`.
 The API serves it at `GET /integrity`: `ok` is false whenever the last sweep had
 findings, no sweep has been published, or no block has been processed within the
 stall limit — point an uptime monitor at it and alert on `ok: false`. The sweep
-covers the recent window only; `doctor.py` remains the full-history audit.
+covers the recent window only; `scripts/doctor.py` remains the full-history audit.
 
 ### Clean Reindex Guard
 
@@ -451,10 +451,34 @@ reindex now refuses to start while cache holes exist, because replaying a gappy
 cache is how data vanishes silently. Fix with `--refill` first, or accept the
 loss explicitly with the `REINDEX_MAX_CACHE_HOLES` env var (default 0).
 
+### Tables A Clean Reindex Must Never Wipe
+
+`--clean` calls `clear_derived_state_from_block`, which deletes every table the
+indexer can rebuild by replaying cached logs. Five tables are deliberately absent
+from that delete list, and adding them would destroy data permanently:
+
+| Table | Why a replay cannot rebuild it |
+| --- | --- |
+| `crystal_vault_balance_samples` | Sampled over RPC on a timer, never derived from logs. It is the per-share NAV history behind vault PnL and APY. |
+| `referral_bindings` | Referral events were only indexed from Aug 2026 on; logs cached before that contain none, so a replay yields an empty table. |
+| `referral_rewards` | Polled from contract state (`claimableRewards`), not emitted as events. The contract has no credit or claim event to replay. |
+| `launchpad_block_logs` | The raw log cache itself — the input a replay reads. Wiping it makes every other rebuild impossible. |
+| `launchpad_kv` | Chain tip identity and seeder progress markers, used by the fork guard on the next start. |
+
+This is enforced by `tests/test_clear_derived_state.py`, which fails if any of
+these appears in the wipe list and also fails if a genuinely derived table stops
+being wiped. If you are adding a table to the delete list, that test is the
+gate: make it pass honestly rather than editing the expectations.
+
+The one this has already bitten: an August 2026 clean reindex would have wiped
+`crystal_vault_balance_samples` and silently erased all vault NAV history, since
+nothing on chain lets you reconstruct it. The table was removed from the list
+before that reindex ran.
+
 ### Quick Recovery Runbook
 
-1. Size the damage: run `python doctor.py` with PG* pointed at prod.
-2. Refill: `python doctor.py --refill` (any machine with DB + RPC access; safe
+1. Size the damage: run `python -m scripts.doctor` with PG* pointed at prod.
+2. Refill: `python -m scripts.doctor --refill` (any machine with DB + RPC access; safe
    while the indexer keeps running).
 3. Flip the prod indexer to a clean reindex. The args live in
    `crystal-indexer.yaml` (`containers[0].args`); set them to
@@ -479,7 +503,7 @@ The API stays up on stale data for the whole replay; only the indexer restarts.
 Compile-check changed Python files:
 
 ```powershell
-python -m py_compile indexer_main.py replay_dump.py replay_benchmark.py export_logs.py db_snapshot.py core\chain.py core\sequencer.py core\storage\launchpad.py core\storage\base.py api\routes\vaults.py api\routes\markets.py api\api.py
+python -m py_compile indexer_main.py replay_dump.py export_logs.py scripts\replay_benchmark.py scripts\db_snapshot.py core\chain.py core\sequencer.py core\storage\launchpad.py core\storage\base.py api\routes\vaults.py api\routes\markets.py api\api.py
 ```
 
 Show indexer flags:
@@ -503,7 +527,7 @@ python replay_dump.py --help
 Show snapshot flags:
 
 ```powershell
-python db_snapshot.py --help
+python -m scripts.db_snapshot --help
 ```
 
 Run tests when `pytest` is installed:
