@@ -562,3 +562,25 @@ async def verify_chain_continuity(storage_module) -> None:
                 f"block {tip_block} and reindexing"
             )
     print("[FORK GUARD] chain id, head continuity and tip hash all verified", flush=True)
+
+
+# read the lvmon pool's price once at startup so a fresh database does not price
+# lvmon at parity until the pool happens to trade. slot0's first word is the
+# sqrt price, the same value a swap log carries
+async def seed_lvmon_rate() -> None:
+    from core import oracle
+
+    if storage.get_lvmon_rate() is not None:
+        return
+    try:
+        data = await http_jsonrpc("eth_call", [{"to": oracle.LVMON_MON_POOL, "data": "0x3850c7bd"}, "latest"])
+        result = data.get("result") or ""
+        if len(result) < 66:
+            return
+        rate = oracle.lvmon_rate_from_v3swap({"sqrt_price_x96": int(result[2:66], 16)})
+        if rate is None:
+            return
+        SEQUENCER._state.set_lvmon_rate(rate)
+        print(f"[ORACLE] seeded LVMON rate at {rate}", flush=True)
+    except Exception as e:
+        print(f"[ORACLE] LVMON rate seed failed {e!r}, prices hold at the stored rate", flush=True)

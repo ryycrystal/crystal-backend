@@ -177,12 +177,19 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
         except Exception as e:
             print(f"[REF] Referral seed failed {e!r}, live events still index", flush=True)
 
+    async def _seed_lvmon():
+        try:
+            await backfill.seed_lvmon_rate()
+        except Exception as e:
+            print(f"[ORACLE] LVMON seed failed {e!r}", flush=True)
+
     tasks = [
         asyncio.create_task(stream_logs(start_block)),
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
         asyncio.create_task(integrity_worker()),
         asyncio.create_task(referral_rewards_worker()),
         asyncio.create_task(_seed_referrals()),
+        asyncio.create_task(_seed_lvmon()),
     ]
     if args.live_dump_dir:
         print(

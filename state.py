@@ -227,9 +227,32 @@ class State:
         self._last_head_ts: int | None = None
 
         self.mon_price_usd = Decimal("0.03")
+        # lvmon per mon, parity until its pool is observed or the stored rate loads
+        self.lvmon_rate = Decimal(1)
         self._basis_overlay: dict[tuple[str, str], list] = {}
         self._basis_block: int = -1
         self._seed_aux_prices()
+
+    # update the lvmon/mon rate and persist it. lvmon is not a wrapper, so its usd
+    # price is mon's scaled by whatever its own pool says it is worth right now
+    def set_lvmon_rate(self, value) -> None:
+        try:
+            rate = Decimal(value)
+        except Exception:
+            return
+
+        if rate <= 0:
+            return
+
+        self.lvmon_rate = rate
+        with self._lock:
+            if self.mon_price_usd > 0:
+                self.tokenToPrice[LVMON] = self.mon_price_usd * rate
+
+        try:
+            storage.set_lvmon_rate(rate)
+        except Exception as e:
+            print(f"[State] Failed to persist LVMON rate: {e!r}", flush=True)
 
     # update the mon usd price and persist it
     def set_mon_price_usd(self, value) -> None:
@@ -244,7 +267,7 @@ class State:
         self.mon_price_usd = px
         with self._lock:
             self.tokenToPrice[WMON] = px
-            self.tokenToPrice[LVMON] = px
+            self.tokenToPrice[LVMON] = px * self.lvmon_rate
 
         try:
             storage.set_mon_price_usd(px)
@@ -358,8 +381,14 @@ class State:
                     self.mon_price_usd = Decimal(stored)
             except Exception as e:
                 print(f"[State] Failed to load MON price from DB: {e!r}")
+            try:
+                stored_rate = storage.get_lvmon_rate()
+                if stored_rate is not None and Decimal(stored_rate) > 0:
+                    self.lvmon_rate = Decimal(stored_rate)
+            except Exception as e:
+                print(f"[State] Failed to load LVMON rate from DB: {e!r}")
             self.tokenToPrice[WMON] = self.mon_price_usd
-            self.tokenToPrice[LVMON] = self.mon_price_usd
+            self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
 
             market_rows = storage.load_crystal_markets_for_state()
             for row in market_rows:
@@ -1338,7 +1367,7 @@ class State:
         self.tokenToPrice.clear()
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
-            self.tokenToPrice[LVMON] = self.mon_price_usd
+            self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
 
     # fee actually taken on one curve trade, derived from the native reserve delta
     # rather than assumed, so a governance fee change is picked up immediately

@@ -748,10 +748,14 @@ class Sequencer:
 
             elif tag in ("V2SWAP", "V3SWAP"):
                 pool_addr = (log.get("address") or "").lower()
-                if tag == "V3SWAP" and pool_addr == "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower():
+                if tag == "V3SWAP" and pool_addr == oracle.MON_USD_POOL:
                     px = oracle.mon_price_from_v3swap(parsed)
                     if px is not None:
                         self._state.set_mon_price_usd(px)
+                elif tag == "V3SWAP" and pool_addr == oracle.LVMON_MON_POOL:
+                    rate = oracle.lvmon_rate_from_v3swap(parsed)
+                    if rate is not None:
+                        self._state.set_lvmon_rate(rate)
 
                 real_user = self._resolve_trade_user(
                     txh,

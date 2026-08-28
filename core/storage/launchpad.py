@@ -1794,8 +1794,8 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
     data = []
     for (addr, tok), p in position_updates.items():
         balance_insert = max(int(p["balance_token_delta"]), 0)
-        unrealized_insert = (
-            Decimal(balance_insert) * Decimal(p["last_price_native"]) - Decimal(max(int(p["cost_basis_delta"]), 0))
+        unrealized_insert = Decimal(balance_insert) * Decimal(p["last_price_native"]) - Decimal(
+            max(int(p["cost_basis_delta"]), 0)
         )
         total_insert = Decimal(p["realized_pnl_delta"]) + unrealized_insert
         data.append(
@@ -2367,9 +2367,14 @@ def update_pool_reserves(pool: str, reserve0: int, reserve1: int, blk: int, blk_
         WHERE pool = %s AND COALESCE(last_sync_block, 0) <= %s
     """
     args = (
-        int(reserve0), int(reserve1),
-        int(reserve1), int(reserve0),
-        int(blk), int(blk_ts), (pool or "").lower(), int(blk),
+        int(reserve0),
+        int(reserve1),
+        int(reserve1),
+        int(reserve0),
+        int(blk),
+        int(blk_ts),
+        (pool or "").lower(),
+        int(blk),
     )
     if cur is None:
         with db_cursor() as c:
@@ -2490,3 +2495,27 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
         }
         for kind, ts, blk, txh, _li, subject, symbol, name, amt_native, amt_token, price, usd in rows
     ]
+
+
+# lvmon priced in mon, persisted so a restart keeps the last observed rate instead
+# of falling back to parity and overstating every token quoted in lvmon
+def set_lvmon_rate(value) -> None:
+    val = Decimal(value)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_meta (key, value)
+            VALUES ('lvmon_mon_rate', %s)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value;
+            """,
+            (val,),
+        )
+
+
+# last persisted lvmon/mon rate, none when never observed
+def get_lvmon_rate():
+    with db_cursor() as cur:
+        cur.execute("SELECT value FROM launchpad_meta WHERE key = 'lvmon_mon_rate';")
+        row = cur.fetchone()
+    return row[0] if row else None
