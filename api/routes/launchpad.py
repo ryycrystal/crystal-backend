@@ -2277,18 +2277,32 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
 def chart_only(
     token_addr: str,
     chartres: int,
+    before_ts: int = 0,
+    limit: int = 0,
 ) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
     if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
         raise HTTPException(status_code=400)
 
-    # same stitched builder the token page uses, so the two charts cannot diverge
-    out = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None)
+    lim = max(1, min(int(limit or 1000), 5000))
+
+    # same stitched builder the token page uses, so the two charts cannot diverge.
+    # before_ts pages backwards: a chart scrolled past its first window asks for
+    # the bars older than the oldest one it holds
+    out = _build_ohlcv_from_db(
+        token_addr,
+        bucket_seconds=chartres,
+        max_buckets=lim,
+        before_ts=int(before_ts) or None,
+    )
 
     return {
         "token": token_addr,
         "resolution": chartres,
+        "before_ts": int(before_ts) or None,
+        # the oldest bucket served, so a client can ask for the next page back
+        "next_before_ts": int(out[0]["time"]) if out else None,
         "klines": out,
     }
 

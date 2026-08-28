@@ -1053,34 +1053,46 @@ def _build_ohlcv_from_db(
     token_addr: str,
     bucket_seconds: int,
     max_buckets: int | None = None,
+    before_ts: int | None = None,
 ) -> list[dict[str, Any]]:
     if bucket_seconds <= 0:
         return []
 
     token_addr = token_addr.lower()
 
-    limit_clause = ""
+    where = "token = %s AND resolution_sec = %s"
     params: list[Any] = [token_addr, bucket_seconds]
 
-    if max_buckets is not None and max_buckets > 0:
-        limit_clause = "ORDER BY bucket_start DESC LIMIT %s"
-        params.append(max_buckets)
-    else:
-        limit_clause = "ORDER BY bucket_start DESC LIMIT 1000"
+    # paging backwards through history. a chart that has scrolled past the newest
+    # window asks for what came before the oldest bar it holds, so without this
+    # the series simply stops at whatever the first page happened to cover
+    if before_ts is not None and before_ts > 0:
+        where += " AND bucket_start < %s"
+        params.append(int(before_ts))
+
+    limit = max_buckets if (max_buckets is not None and max_buckets > 0) else 1000
+    # one extra row to seed the stitch. the open of the first returned bar has to
+    # match the close of the bar before it, which lives on the previous page, so
+    # without the seed every page boundary would show a gap
+    params.append(int(limit) + 1)
 
     with db_cursor() as cur:
         cur.execute(
             f"""
             SELECT bucket_start, open_price, high_price, low_price, close_price, quote_volume
             FROM launchpad_ohlcv
-            WHERE token = %s AND resolution_sec = %s
-            {limit_clause}
+            WHERE {where}
+            ORDER BY bucket_start DESC LIMIT %s
             """,
             tuple(params),
         )
         rows = cur.fetchall()
 
     rows.reverse()
+    seeded = len(rows) > limit
+    # the seed is consumed for its close and dropped from the output below
+    seed_rows = rows[:1] if seeded else []
+    rows = rows[1:] if seeded else rows
 
     # candles are stored with open = the first trade's post-trade price, so a bucket
     # with one trade was a zero range doji and consecutive candles never shared an
@@ -1088,6 +1100,8 @@ def _build_ohlcv_from_db(
     # open to the previous close at serve time makes the move the candle body
     out: list[dict[str, Any]] = []
     prev_close: Decimal | None = None
+    if seed_rows:
+        prev_close = Decimal(seed_rows[0][4] or 0)
     for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
         o = Decimal(open_p or 0)
         hi = Decimal(high_p or 0)
