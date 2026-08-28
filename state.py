@@ -2752,6 +2752,32 @@ class State:
             except Exception:
                 pass
 
+    def lp_market_addresses(self) -> list[str]:
+        with self._lock:
+            return [
+                addr for addr, mi in self.addressToMarket.items() if addr and int(getattr(mi, "marketType", 0) or 0) > 1
+            ]
+
+    def reconcile_pool_shares(self, market: str, chain_supply: int) -> None:
+        maddr = (market or "").lower()
+        with self._lock:
+            mi = self.addressToMarket.get(maddr)
+            if mi is None:
+                return
+            ours = int(getattr(mi, "totalShares", 0) or 0)
+            chain = int(chain_supply)
+            if chain <= 0 or chain == ours:
+                return
+            print(
+                f"[Pools] share drift on {maddr}: replayed {ours} vs chain {chain}, healing",
+                flush=True,
+            )
+            mi.totalShares = chain
+            try:
+                storage.update_crystal_pool_total_shares(maddr, chain)
+            except Exception as e:
+                print(f"[Pools] failed to persist total shares for {maddr}: {e!r}", flush=True)
+
     def record_vault_balance_sample(
         self, vault: str, block: int, timestamp: int, quote_balance: int, base_balance: int, shares: int | None = None
     ) -> None:

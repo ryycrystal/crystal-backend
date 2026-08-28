@@ -478,11 +478,36 @@ async def stream_logs(start_block: int | None = None):
         delay = min(delay * 2, 10) + (0.0 if delay >= 10 else 0.25)
 
 
+async def _reconcile_pool_supplies(state, markets: list[str], blk_hex: str):
+    for i in range(0, len(markets), VAULT_SAMPLER_MULTICALL_CHUNK):
+        chunk = markets[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
+        try:
+            data = _encode_multicall3_aggregate3([(m, TOTAL_SUPPLY_CALLDATA) for m in chunk])
+            call_resp = await backfill.http_jsonrpc(
+                "eth_call",
+                [{"to": MULTICALL3_ADDR, "data": data}, blk_hex],
+            )
+            ret = call_resp.get("result")
+            results = _decode_multicall3_aggregate3_result(ret) if isinstance(ret, str) else []
+            if len(results) != len(chunk):
+                raise ValueError(f"multicall result length mismatch {len(results)} != {len(chunk)}")
+            for j, market in enumerate(chunk):
+                ok, raw = results[j]
+                if ok and isinstance(raw, (bytes, bytearray)) and len(raw) >= 32:
+                    state.reconcile_pool_shares(market, int.from_bytes(raw[:32], "big"))
+        except Exception as e:
+            print(f"[SAMPLER] pool supply chunk {i}-{i + len(chunk) - 1} failed: {e!r}", flush=True)
+
+
 async def vault_sampler(state):
     while True:
         try:
             vaults = list(getattr(state, "vaults", {}).keys())
-            if not vaults:
+            try:
+                lp_markets = state.lp_market_addresses()
+            except Exception:
+                lp_markets = []
+            if not vaults and not lp_markets:
                 await asyncio.sleep(VAULT_SAMPLER_INTERVAL)
                 continue
 
@@ -509,7 +534,10 @@ async def vault_sampler(state):
                 except Exception:
                     ts = int(time.time())
 
-            await _sample_vaults_multicall(state, vaults, blk_hex, blk_num, ts)
+            if vaults:
+                await _sample_vaults_multicall(state, vaults, blk_hex, blk_num, ts)
+            if lp_markets:
+                await _reconcile_pool_supplies(state, lp_markets, blk_hex)
 
         except Exception as e:
             print(f"[SAMPLER] {e!r}", flush=True)
