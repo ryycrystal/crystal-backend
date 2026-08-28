@@ -429,7 +429,7 @@ def test_token_channel_volume_and_tx_counts_are_24h(db):
 
 
 def test_realized_pnl_follows_the_moving_average_basis(db):
-    from rebuild_positions_pnl import _fold
+    from scripts.rebuild_positions_pnl import _fold
 
     trades = [
         ("0xa", 0, True, 100, 100),

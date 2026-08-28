@@ -308,6 +308,24 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            CREATE OR REPLACE VIEW launchpad_positions_live AS
+            SELECT p.user_address, p.token, p.token_bought, p.token_sold,
+                   p.native_spent, p.native_received, p.balance_token,
+                   p.realized_pnl_native,
+                   crystal_unrealized_pnl(p.balance_token, p.token_bought, p.token_sold,
+                                          p.cost_basis_native, k.last_price_native)
+                       AS unrealized_pnl_native,
+                   p.realized_pnl_native
+                       + crystal_unrealized_pnl(p.balance_token, p.token_bought, p.token_sold,
+                                                p.cost_basis_native, k.last_price_native)
+                       AS total_pnl_native,
+                   p.trade_count, p.buy_count, p.sell_count, p.cost_basis_native
+            FROM launchpad_positions p
+            LEFT JOIN launchpad_tokens k ON k.token = p.token;
+            """
+        )
+        cur.execute(
+            """
             ALTER TABLE launchpad_tokens
             ADD COLUMN IF NOT EXISTS token_uri TEXT;
             """

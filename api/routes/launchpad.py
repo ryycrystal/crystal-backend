@@ -91,7 +91,7 @@ def token_holders(
             SELECT user_address, balance_token, native_spent, native_received,
                    realized_pnl_native, unrealized_pnl_native, total_pnl_native,
                    trade_count, buy_count, sell_count, token_bought, token_sold
-            FROM launchpad_positions
+            FROM launchpad_positions_live
             WHERE {clause}
             ORDER BY {order}
             LIMIT %s OFFSET %s
@@ -716,7 +716,7 @@ def token_overview_graph(
                     sell_count,
                     token_bought,
                     token_sold
-                FROM launchpad_positions
+                FROM launchpad_positions_live
                 WHERE token = %s AND balance_token > 0 AND user_address <> ALL(%s)
                   AND {_sql_not_internal("user_address")}
                 ORDER BY balance_token DESC
@@ -801,7 +801,7 @@ def token_overview_graph(
                     sell_count,
                     token_bought,
                     token_sold
-                FROM launchpad_positions
+                FROM launchpad_positions_live
                 WHERE token = %s AND user_address <> ALL(%s) AND balance_token >= 0
                   AND {_sql_not_internal("user_address")}
                 ORDER BY total_pnl_native DESC
@@ -1281,7 +1281,7 @@ def _merged_portfolio(addrs: list[str], tok: str | None) -> dict[str, Any]:
                 t.last_price_native,
                 t.market,
                 t.source
-            FROM launchpad_positions p
+            FROM launchpad_positions_live p
             JOIN launchpad_tokens t ON t.token = p.token
             WHERE {where}
             GROUP BY p.token, t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
@@ -1424,7 +1424,7 @@ def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, An
                 t.last_price_native,
                 t.market,
                 t.source
-            FROM launchpad_positions p
+            FROM launchpad_positions_live p
             JOIN launchpad_tokens t ON t.token = p.token
             WHERE p.user_address = %s
             """,
@@ -1573,7 +1573,7 @@ def portfolio_summary(address: str) -> dict[str, Any]:
                 SUM(p.trade_count) as trade_count,
                 COUNT(*) FILTER (WHERE p.balance_token > 0) as active_positions,
                 COUNT(*) FILTER (WHERE p.trade_count > 0) as tokens_traded
-            FROM launchpad_positions p
+            FROM launchpad_positions_live p
             LEFT JOIN launchpad_tokens t ON t.token = p.token
             WHERE p.user_address = %s
             """,
@@ -1656,7 +1656,7 @@ def portfolio_positions(
                p.unrealized_pnl_native, p.total_pnl_native, p.trade_count,
                p.buy_count, p.sell_count,
                t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
-        FROM launchpad_positions p
+        FROM launchpad_positions_live p
         JOIN launchpad_tokens t ON t.token = p.token
         WHERE {where_clause}
         ORDER BY {sort_col} DESC, p.token DESC

@@ -82,7 +82,7 @@ def _position_rows(
                    native_spent, native_received, realized_pnl_native,
                    unrealized_pnl_native, total_pnl_native, trade_count,
                    buy_count, sell_count
-            FROM launchpad_positions
+            FROM launchpad_positions_live
             WHERE {where}
             ORDER BY {order_by}
             LIMIT %s
@@ -180,7 +180,7 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
                    p.unrealized_pnl_native, p.total_pnl_native, p.trade_count,
                    p.buy_count, p.sell_count,
                    t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
-            FROM launchpad_positions p
+            FROM launchpad_positions_live p
             JOIN launchpad_tokens t ON t.token = p.token
             WHERE p.user_address = ANY(%s)
             """,
