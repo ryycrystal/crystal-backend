@@ -1196,6 +1196,29 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS launchpad_transfers
+            (
+                block_number BIGINT NOT NULL,
+                log_index    INTEGER NOT NULL,
+                txhash       TEXT NOT NULL,
+                token        TEXT NOT NULL,
+                from_addr    TEXT NOT NULL,
+                to_addr      TEXT NOT NULL,
+                amount       NUMERIC(78, 0) NOT NULL,
+                PRIMARY KEY (block_number, log_index)
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_launchpad_transfers_token_block
+            ON launchpad_transfers (token, block_number, log_index);
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS crystal_revenue_samples
             (
                 block_number  BIGINT PRIMARY KEY,
