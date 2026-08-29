@@ -2404,7 +2404,7 @@ class State:
         if not ev:
             return
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
 
             vaddr = (ev.get("vault") or "").lower()
@@ -2506,7 +2506,7 @@ class State:
         if not ev:
             return
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vaddr = (ev.get("vault") or "").lower()
             if vaddr not in self.vaults:
@@ -2593,7 +2593,7 @@ class State:
         if not ev:
             return
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vaddr = (ev.get("vault") or "").lower()
             if vaddr not in self.vaults:
@@ -2671,7 +2671,7 @@ class State:
 
     def apply_vault_locked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vaddr = (ev.get("vault") or "").lower()
             vobj = self.vaults.get(vaddr)
@@ -2681,7 +2681,7 @@ class State:
 
     def apply_vault_unlocked(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vaddr = (ev.get("vault") or "").lower()
             vobj = self.vaults.get(vaddr)
@@ -2693,7 +2693,7 @@ class State:
 
     def apply_vault_closed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vaddr = (ev.get("vault") or "").lower()
             vobj = self.vaults.get(vaddr)
@@ -2703,7 +2703,7 @@ class State:
 
     def apply_vault_max_shares_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vobj = self.vaults.get((ev.get("vault") or "").lower())
             if vobj is not None:
@@ -2718,7 +2718,7 @@ class State:
 
     def apply_vault_lockup_changed(self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vobj = self.vaults.get((ev.get("vault") or "").lower())
             if vobj is not None:
@@ -2735,7 +2735,7 @@ class State:
         self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None
     ) -> None:
         with self._lock:
-            if (log_addr or "").lower() != h.CONTRACTS["VAULTS"].lower():
+            if (log_addr or "").lower() not in h.VAULT_FACTORY_ADDRS:
                 return
             vobj = self.vaults.get((ev.get("vault") or "").lower())
             if vobj is not None:

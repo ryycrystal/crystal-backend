@@ -32,3 +32,15 @@ def test_the_current_factory_is_still_the_configured_one():
 def test_factory_addresses_are_lowercase_and_unique():
     assert h.VAULT_FACTORY_ADDRS == [a.lower() for a in h.VAULT_FACTORY_ADDRS]
     assert len(set(h.VAULT_FACTORY_ADDRS)) == len(h.VAULT_FACTORY_ADDRS)
+
+
+def test_state_applies_vault_events_from_every_generation():
+    import inspect
+
+    import state as state_module
+
+    src = inspect.getsource(state_module)
+    assert 'h.CONTRACTS["VAULTS"].lower()' not in src, (
+        "a vault apply guard still pins to one factory, so retired generation events are dropped"
+    )
+    assert src.count("not in h.VAULT_FACTORY_ADDRS") >= 9
