@@ -1,12 +1,54 @@
 from __future__ import annotations
 
+import re
+
 from psycopg2.extras import Json
 
 from .base import db_cursor
 
+_SOCIAL_HOSTS = ("x.com/", "twitter.com/")
+_HANDLE_RE = re.compile(r"^[a-z0-9_]{1,15}$")
+_RESERVED_HANDLES = frozenset({"i", "home", "intent", "search", "share", "hashtag", "explore", "messages"})
+
 
 def _norm_username(name: str) -> str:
     return (name or "").strip().lstrip("@").lower()
+
+
+def handle_from_social_url(raw: str) -> str | None:
+    s = (raw or "").strip().lower()
+    if not s:
+        return None
+    for host in _SOCIAL_HOSTS:
+        idx = s.find(host)
+        if idx < 0:
+            continue
+        rest = s[idx + len(host) :].split("?")[0].split("#")[0].strip("/")
+        if not rest or "/" in rest:
+            return None
+        if rest in _RESERVED_HANDLES or not _HANDLE_RE.match(rest):
+            return None
+        return rest
+    return None
+
+
+def list_token_social_handles() -> set[str]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT social1, social2, social3, social4
+            FROM launchpad_tokens
+            WHERE social1 <> '' OR social2 <> '' OR social3 <> '' OR social4 <> ''
+            """
+        )
+        rows = cur.fetchall()
+    out: set[str] = set()
+    for row in rows:
+        for raw in row:
+            handle = handle_from_social_url(raw)
+            if handle:
+                out.add(handle)
+    return out
 
 
 def list_x_tracked_users() -> list[str]:
