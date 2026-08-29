@@ -781,9 +781,14 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                 reply = await _apply_subscribe(sub, msg)
                 await sub.send(reply)
                 tok = reply.get("token")
-                for ch in (reply.get("channels") or []) if tok else []:
+                chans = (reply.get("channels") or []) if tok else []
+
+                async def _baseline(ch: str, tok: str = tok) -> None:
                     with contextlib.suppress(Exception):
                         await HUB.send_snapshot(sub, tok, ch)
+
+                if chans:
+                    await asyncio.gather(*(_baseline(c) for c in chans))
             elif op == "unsubscribe":
                 await sub.send(await _apply_unsubscribe(sub, msg))
             elif op == "query":
