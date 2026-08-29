@@ -1266,51 +1266,93 @@ def _merged_portfolio(
     mon_price = _mon_price_usd()
 
     where = "p.user_address = ANY(%s)"
-    params: tuple = (addrs,)
+    params: list[Any] = [addrs]
     if tok:
         where += " AND p.token = %s"
-        params = (addrs, tok)
+        params.append(tok)
+
+    grouped = f"""
+        SELECT
+            p.token,
+            SUM(p.token_bought) AS token_bought,
+            SUM(p.token_sold) AS token_sold,
+            SUM(p.native_spent) AS native_spent,
+            SUM(p.native_received) AS native_received,
+            SUM(p.balance_token) AS balance_token,
+            SUM(p.realized_pnl_native) AS realized_pnl,
+            SUM(p.unrealized_pnl_native) AS unrealized_pnl,
+            COALESCE(
+                NULLIF(SUM(p.total_pnl_native), 0),
+                SUM(p.realized_pnl_native) + SUM(p.unrealized_pnl_native),
+                0
+            ) AS total_pnl,
+            SUM(p.trade_count) AS trade_count,
+            SUM(p.buy_count) AS buy_count,
+            SUM(p.sell_count) AS sell_count,
+            COUNT(*) AS wallet_count,
+            t.name,
+            t.symbol,
+            t.metadata_cid,
+            t.last_price_native,
+            t.market,
+            t.source
+        FROM launchpad_positions_live p
+        JOIN launchpad_tokens t ON t.token = p.token
+        WHERE {where}
+        GROUP BY p.token, t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+    """
+
+    page_filter = "WHERE g.balance_token > 0" if open_only else ""
+    page_params = list(params)
+    page_limit = ""
+    if limit > 0:
+        page_limit = "LIMIT %s OFFSET %s"
+        page_params.extend([int(limit), max(0, int(offset))])
 
     with db_cursor() as cur:
         cur.execute(
             f"""
             SELECT
-                p.token,
-                SUM(p.token_bought),
-                SUM(p.token_sold),
-                SUM(p.native_spent),
-                SUM(p.native_received),
-                SUM(p.balance_token),
-                SUM(p.realized_pnl_native),
-                SUM(p.unrealized_pnl_native),
-                SUM(p.total_pnl_native),
-                SUM(p.trade_count),
-                SUM(p.buy_count),
-                SUM(p.sell_count),
-                COUNT(*),
-                t.name,
-                t.symbol,
-                t.metadata_cid,
-                t.last_price_native,
-                t.market,
-                t.source
-            FROM launchpad_positions_live p
-            JOIN launchpad_tokens t ON t.token = p.token
-            WHERE {where}
-            GROUP BY p.token, t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+                COALESCE(SUM(g.balance_token * g.last_price_native), 0),
+                COALESCE(SUM(g.realized_pnl), 0),
+                COALESCE(SUM(g.unrealized_pnl), 0),
+                COALESCE(SUM(g.native_spent), 0),
+                COALESCE(SUM(g.native_received), 0),
+                COALESCE(SUM(g.trade_count), 0),
+                COUNT(*)
+            FROM ({grouped}) g
             """,
-            params,
+            tuple(params),
+        )
+        (
+            total_value_native,
+            total_realized_pnl,
+            total_unrealized_pnl,
+            total_native_spent,
+            total_native_received,
+            total_trades,
+            tokens_traded,
+        ) = cur.fetchone()
+
+        cur.execute(
+            f"""
+            SELECT g.*, COUNT(*) OVER () AS filtered_total
+            FROM ({grouped}) g
+            {page_filter}
+            ORDER BY g.total_pnl DESC, g.token
+            {page_limit}
+            """,
+            tuple(page_params),
         )
         rows = cur.fetchall()
 
-    positions: list[dict[str, Any]] = []
-    total_value_native = Decimal(0)
-    total_realized_pnl = Decimal(0)
-    total_unrealized_pnl = Decimal(0)
-    total_native_spent = 0
-    total_native_received = 0
-    total_trades = 0
+        if rows:
+            total = int(rows[0][-1] or 0)
+        else:
+            cur.execute(f"SELECT COUNT(*) FROM ({grouped}) g {page_filter}", tuple(params))
+            total = int(cur.fetchone()[0] or 0)
 
+    positions: list[dict[str, Any]] = []
     for (
         token,
         token_bought,
@@ -1331,23 +1373,17 @@ def _merged_portfolio(
         last_price_native,
         market,
         source,
+        _filtered_total,
     ) in rows:
         last_price_native = last_price_native or Decimal(0)
         balance_token = int(balance_token or 0)
         realized_pnl = realized_pnl or Decimal(0)
         unrealized_pnl = unrealized_pnl or Decimal(0)
-        total_pnl = total_pnl or (realized_pnl + unrealized_pnl)
+        total_pnl = total_pnl or Decimal(0)
         current_value_native = Decimal(balance_token) * last_price_native
 
-        total_value_native += current_value_native
-        total_realized_pnl += realized_pnl
-        total_unrealized_pnl += unrealized_pnl
-        total_native_spent += int(native_spent or 0)
-        total_native_received += int(native_received or 0)
-        total_trades += int(trade_count or 0)
-
         current_value_usd = current_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
-        total_pnl_usd = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
+        total_pnl_usd_row = total_pnl * mon_price / _WEI if mon_price > 0 else Decimal(0)
 
         positions.append(
             {
@@ -1363,7 +1399,7 @@ def _merged_portfolio(
                 "realized_pnl_native": _fmt(realized_pnl),
                 "unrealized_pnl_native": _fmt(unrealized_pnl),
                 "total_pnl_native": _fmt(total_pnl),
-                "total_pnl_usd": _fmt_usd(total_pnl_usd),
+                "total_pnl_usd": _fmt_usd(total_pnl_usd_row),
                 "last_price_native": _fmt(last_price_native),
                 "trade_count": int(trade_count or 0),
                 "buy_count": int(buy_count or 0),
@@ -1376,11 +1412,9 @@ def _merged_portfolio(
             }
         )
 
-    positions.sort(
-        key=lambda p: Decimal(p["total_pnl_native"]) if p["total_pnl_native"] is not None else Decimal(0),
-        reverse=True,
-    )
-
+    total_value_native = total_value_native or Decimal(0)
+    total_realized_pnl = total_realized_pnl or Decimal(0)
+    total_unrealized_pnl = total_unrealized_pnl or Decimal(0)
     total_pnl_native_val = total_realized_pnl + total_unrealized_pnl
     total_value_usd = total_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
     total_pnl_usd = total_pnl_native_val * mon_price / _WEI if mon_price > 0 else Decimal(0)
@@ -1392,18 +1426,11 @@ def _merged_portfolio(
         "unrealized_pnl_native": _fmt(total_unrealized_pnl),
         "total_pnl_native": _fmt(total_pnl_native_val),
         "total_pnl_usd": _fmt_usd(total_pnl_usd),
-        "native_spent": str(total_native_spent),
-        "native_received": str(total_native_received),
-        "trade_count": int(total_trades),
-        "tokens_traded": len(positions),
+        "native_spent": str(int(total_native_spent or 0)),
+        "native_received": str(int(total_native_received or 0)),
+        "trade_count": int(total_trades or 0),
+        "tokens_traded": int(tokens_traded or 0),
     }
-
-    if open_only:
-        positions = [p for p in positions if int(p["balance_token"] or 0) > 0]
-
-    total = len(positions)
-    if limit > 0:
-        positions = positions[max(0, offset) : max(0, offset) + limit]
 
     return {"summary": summary, "positions": positions, "total": total, "limit": limit, "offset": offset}
 
