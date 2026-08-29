@@ -2358,15 +2358,38 @@ def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) ->
         return [(int(b), float(r)) for b, r in cur.fetchall() if r is not None]
 
 
-def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = None) -> list[dict]:
+def wallet_activity(
+    users: list[str],
+    limit: int = 50,
+    before_ts: int | None = None,
+    before_key: tuple[int, int, int, str] | None = None,
+) -> list[dict]:
     addrs = [str(u).lower() for u in (users or [])]
     if not addrs:
         return []
     params: dict = {"u": addrs, "lim": int(limit)}
-    cutoff = ""
-    if before_ts is not None:
-        cutoff = " AND timestamp < %(cut)s"
+
+    def _cut(alias: str) -> str:
+        if before_key is not None:
+            return (
+                f" AND ({alias}.timestamp, {alias}.block_number, {alias}.log_index, {alias}.txhash)"
+                " < (%(cts)s, %(cblk)s, %(cli)s, %(ctx)s)"
+            )
+        if before_ts is not None:
+            return f" AND {alias}.timestamp < %(cut)s"
+        return ""
+
+    if before_key is not None:
+        params["cts"], params["cblk"], params["cli"], params["ctx"] = (
+            int(before_key[0]),
+            int(before_key[1]),
+            int(before_key[2]),
+            str(before_key[3]),
+        )
+    elif before_ts is not None:
         params["cut"] = int(before_ts)
+
+    cut_t, cut_d, cut_w, cut_c, cut_e = _cut("t"), _cut("d"), _cut("w"), _cut("c"), _cut("e")
 
     with db_cursor() as cur:
         cur.execute(
@@ -2379,19 +2402,19 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
                        t.price_native, t.usd_amount
                 FROM launchpad_trades t
                 JOIN launchpad_tokens k ON k.token = t.token
-                WHERE t.user_address = ANY(%(u)s){cutoff}
+                WHERE t.user_address = ANY(%(u)s){cut_t}
                 UNION ALL
                 SELECT 'vault_deposit', d.timestamp, d.block_number, d.txhash, d.log_index,
                        d.vault, v.name, v.name, d.quote_amount, d.base_amount, 0, 0
                 FROM crystal_vault_deposits d
                 LEFT JOIN crystal_vaults v ON v.vault = d.vault
-                WHERE d.user_address = ANY(%(u)s){cutoff}
+                WHERE d.user_address = ANY(%(u)s){cut_d}
                 UNION ALL
                 SELECT 'vault_withdraw', w.timestamp, w.block_number, w.txhash, w.log_index,
                        w.vault, v.name, v.name, w.quote_amount, w.base_amount, 0, 0
                 FROM crystal_vault_withdrawals w
                 LEFT JOIN crystal_vaults v ON v.vault = w.vault
-                WHERE w.user_address = ANY(%(u)s){cutoff}
+                WHERE w.user_address = ANY(%(u)s){cut_w}
                 UNION ALL
                 SELECT 'fee_claim', c.timestamp, c.block_number, c.txhash, c.log_index,
                        c.token,
@@ -2402,7 +2425,7 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
                        0, 0
                 FROM referral_claims c
                 LEFT JOIN launchpad_tokens k2 ON k2.token = c.token
-                WHERE c.user_address = ANY(%(u)s){cutoff}
+                WHERE c.user_address = ANY(%(u)s){cut_c}
                 UNION ALL
                 SELECT CASE WHEN e.kind = 'mint' THEN 'lp_deposit' ELSE 'lp_withdraw' END,
                        e.timestamp, e.block_number, e.txhash, e.log_index,
@@ -2410,7 +2433,7 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
                        e.amount_quote, e.amount_base, 0, 0
                 FROM crystal_pool_liquidity_events e
                 LEFT JOIN crystal_markets m ON m.market = e.market
-                WHERE e.user_address = ANY(%(u)s){cutoff}
+                WHERE e.user_address = ANY(%(u)s){cut_e}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s
@@ -2425,6 +2448,7 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
             "timestamp": int(ts or 0),
             "blockNumber": int(blk or 0),
             "txhash": txh,
+            "logIndex": int(li or 0),
             "subject": subject,
             "symbol": symbol or "",
             "name": name or "",
@@ -2433,7 +2457,7 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
             "priceNative": str(price or 0),
             "usdAmount": str(usd or 0),
         }
-        for kind, ts, blk, txh, _li, subject, symbol, name, amt_native, amt_token, price, usd in rows
+        for kind, ts, blk, txh, li, subject, symbol, name, amt_native, amt_token, price, usd in rows
     ]
 
 

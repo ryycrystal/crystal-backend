@@ -190,14 +190,41 @@ def mon_usd_series(from_ts: int = 0, to_ts: int = 0, resolution: int = 60) -> di
 
 
 @router.get("/activity/{wallet}")
-def wallet_activity(wallet: str, limit: int = 50, before_ts: int | None = None, addresses: str = "") -> dict[str, Any]:
+def wallet_activity(
+    wallet: str, limit: int = 50, before_ts: int | None = None, cursor: str = "", addresses: str = ""
+) -> dict[str, Any]:
+    from api.api import _decode_cursor, _encode_cursor
+
     ws = _wallets(wallet, addresses)
     lim = max(1, min(int(limit or 50), 200))
-    items = storage.wallet_activity(ws, limit=lim, before_ts=before_ts)
+
+    before_key = None
+    if cursor:
+        try:
+            c = _decode_cursor(cursor)
+            before_key = (int(c["ts"]), int(c["blk"]), int(c["li"]), str(c["tx"]))
+        except Exception:
+            raise HTTPException(status_code=400, detail="bad cursor") from None
+
+    items = storage.wallet_activity(ws, limit=lim, before_ts=before_ts, before_key=before_key)
+
+    next_cursor = None
+    if len(items) >= lim:
+        last = items[-1]
+        next_cursor = _encode_cursor(
+            {
+                "ts": int(last["timestamp"]),
+                "blk": int(last["blockNumber"]),
+                "li": int(last.get("logIndex") or 0),
+                "tx": last["txhash"],
+            }
+        )
+
     return {
         "wallet": ws[0],
         "wallets": ws,
         "items": items,
         "count": len(items),
+        "next_cursor": next_cursor,
         "next_before_ts": items[-1]["timestamp"] if len(items) >= lim else None,
     }
