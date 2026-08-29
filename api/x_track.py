@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import time
@@ -8,7 +9,7 @@ import uuid
 from email.utils import parsedate_to_datetime
 
 import httpx
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 import core.storage as storage
 from api.x_api import API_KEY, _compute_verified_flag, _normalize_verified_type
@@ -21,6 +22,9 @@ BACKLOG_LIMIT = int(os.getenv("TRACK_BACKLOG_LIMIT", "50"))
 LIVE_WINDOW_SECS = int(os.getenv("TRACK_LIVE_WINDOW", "900"))
 LEADER_TTL_SECS = int(os.getenv("TRACK_LEADER_TTL", "90"))
 SEED_USERS = [u.strip().lstrip("@").lower() for u in os.getenv("TRACKED_USERS", "").split(",") if u.strip()]
+TRACK_MAX_USERS = int(os.getenv("TRACK_MAX_USERS", "500"))
+TRACK_MAX_PER_REQUEST = int(os.getenv("TRACK_MAX_PER_REQUEST", "100"))
+ADMIN_TOKEN = os.getenv("X_TRACK_ADMIN_TOKEN", "")
 LAST_TWEETS_URL = "https://api.twitterapi.io/twitter/user/last_tweets"
 
 NODE_ID = uuid.uuid4().hex
@@ -190,6 +194,26 @@ async def _requested_usernames(req: Request) -> list[str]:
     return [str(u).strip().lstrip("@") for u in raw if str(u).strip()]
 
 
+def _require_admin(req: Request) -> None:
+    supplied = req.headers.get("x-admin-token", "")
+    if not ADMIN_TOKEN or not hmac.compare_digest(supplied, ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="admin token required")
+
+
+def _add_tracked(names: list[str]) -> None:
+    if not names:
+        return
+    if len(names) > TRACK_MAX_PER_REQUEST:
+        raise HTTPException(status_code=400, detail=f"at most {TRACK_MAX_PER_REQUEST} usernames per request")
+    existing = {u.lower() for u in storage.list_x_tracked_users()}
+    fresh = [n for n in names if n.lower() not in existing]
+    if not fresh:
+        return
+    if len(existing) + len(fresh) > TRACK_MAX_USERS:
+        raise HTTPException(status_code=429, detail=f"tracked list is capped at {TRACK_MAX_USERS} accounts")
+    storage.add_x_tracked_users(fresh)
+
+
 @router.get("/x/track")
 async def x_track_list():
     return {"tracked": storage.list_x_tracked_users()}
@@ -197,12 +221,13 @@ async def x_track_list():
 
 @router.post("/x/track")
 async def x_track_add(req: Request):
-    storage.add_x_tracked_users(await _requested_usernames(req))
+    _add_tracked(await _requested_usernames(req))
     return {"tracked": storage.list_x_tracked_users()}
 
 
 @router.delete("/x/track")
 async def x_track_remove(req: Request):
+    _require_admin(req)
     storage.remove_x_tracked_users(await _requested_usernames(req))
     return {"tracked": storage.list_x_tracked_users()}
 
@@ -211,7 +236,7 @@ async def x_track_remove(req: Request):
 async def x_tweets_get(usernames: str = "", limit: int = BACKLOG_LIMIT):
     names = [u.strip() for u in usernames.split(",") if u.strip()]
     if names:
-        storage.add_x_tracked_users(names)
+        _add_tracked(names)
     return storage.list_x_recent_tweets(names, max(1, min(int(limit), 200)))
 
 
@@ -219,7 +244,7 @@ async def x_tweets_get(usernames: str = "", limit: int = BACKLOG_LIMIT):
 async def x_tweets_post(req: Request, limit: int = BACKLOG_LIMIT):
     names = await _requested_usernames(req)
     if names:
-        storage.add_x_tracked_users(names)
+        _add_tracked(names)
     return storage.list_x_recent_tweets(names, max(1, min(int(limit), 200)))
 
 
