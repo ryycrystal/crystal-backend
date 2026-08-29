@@ -1223,6 +1223,9 @@ def users_portfolio_batch(
     merged: bool = False,
     limit: int = 0,
     offset: int = 0,
+    open_positions: bool = Query(
+        False, alias="open", description="merged only, drop positions whose balance is zero"
+    ),
 ) -> dict[str, Any]:
     addrs: list[str] = []
     for a in (addresses or "").split(","):
@@ -1238,7 +1241,9 @@ def users_portfolio_batch(
 
     if merged:
         return {
-            "merged": _merged_portfolio(addrs, tok or None, limit=max(0, min(limit, 1000)), offset=max(0, offset)),
+            "merged": _merged_portfolio(
+                addrs, tok or None, limit=max(0, min(limit, 1000)), offset=max(0, offset), open_only=open_positions
+            ),
             "addresses": addrs,
             "count": len(addrs),
             "token": tok or None,
@@ -1255,7 +1260,9 @@ def users_portfolio_batch(
     return {"users": out, "count": len(out), "token": tok or None}
 
 
-def _merged_portfolio(addrs: list[str], tok: str | None, limit: int = 0, offset: int = 0) -> dict[str, Any]:
+def _merged_portfolio(
+    addrs: list[str], tok: str | None, limit: int = 0, offset: int = 0, open_only: bool = False
+) -> dict[str, Any]:
     mon_price = _mon_price_usd()
 
     where = "p.user_address = ANY(%s)"
@@ -1390,6 +1397,9 @@ def _merged_portfolio(addrs: list[str], tok: str | None, limit: int = 0, offset:
         "trade_count": int(total_trades),
         "tokens_traded": len(positions),
     }
+
+    if open_only:
+        positions = [p for p in positions if int(p["balance_token"] or 0) > 0]
 
     total = len(positions)
     if limit > 0:
