@@ -38,11 +38,16 @@ async def reindex(start_block: int, batch: int, *, resume: bool = True) -> int:
         start_block = min_cached
 
     last_db = int(storage.get_last_processed_block() or 0)
-    resuming = resume and last_db >= start_block
 
-    if resuming:
-        start_block = last_db + 1
-        print(f"[Reindex] Resuming from block {start_block} (db had {last_db})")
+    if resume:
+        if last_db >= start_block:
+            start_block = last_db + 1
+            print(f"[Reindex] Resuming from block {start_block} (db had {last_db})")
+        else:
+            print(
+                f"[Reindex] Nothing processed at or past {start_block} (db max {last_db}); "
+                "indexing forward without clearing derived state, pass --clean to wipe and rebuild"
+            )
         SEQUENCER._state.rebuild_from_db()
     else:
         holes = storage.count_uncached_processed_blocks(start_block, max_cached)

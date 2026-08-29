@@ -1883,6 +1883,68 @@ def add_snipers_batch(snipers: list[tuple[str, str]], cur) -> set[tuple[str, str
     return set(snipers)
 
 
+CRYSTAL_LAUNCHPAD_SOURCE = 0
+
+
+def crystal_generation_counts(before_block: int, cur) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM launchpad_tokens WHERE source = %(src)s AND created_block < %(blk)s),
+            (SELECT COUNT(*) FROM crystal_markets WHERE created_block < %(blk)s)
+        """,
+        {"src": CRYSTAL_LAUNCHPAD_SOURCE, "blk": int(before_block)},
+    )
+    tokens, markets = cur.fetchone()
+    return {"tokens": int(tokens or 0), "markets": int(markets or 0)}
+
+
+def delete_crystal_generation_before(before_block: int, cur) -> dict[str, int]:
+    params = {"src": CRYSTAL_LAUNCHPAD_SOURCE, "blk": int(before_block)}
+    old_tokens = "(SELECT token FROM launchpad_tokens WHERE source = %(src)s AND created_block < %(blk)s)"
+    old_markets = "(SELECT market FROM crystal_markets WHERE created_block < %(blk)s)"
+
+    steps = [
+        ("launchpad_trades", f"DELETE FROM launchpad_trades WHERE token IN {old_tokens}"),
+        ("launchpad_positions", f"DELETE FROM launchpad_positions WHERE token IN {old_tokens}"),
+        ("launchpad_ohlcv", f"DELETE FROM launchpad_ohlcv WHERE token IN {old_tokens}"),
+        ("launchpad_snipers", f"DELETE FROM launchpad_snipers WHERE token IN {old_tokens}"),
+        ("crystal_orderbook_orders", f"DELETE FROM crystal_orderbook_orders WHERE market IN {old_markets}"),
+        ("crystal_orderbook_fills", f"DELETE FROM crystal_orderbook_fills WHERE market IN {old_markets}"),
+        ("crystal_orderbook_events", f"DELETE FROM crystal_orderbook_events WHERE market IN {old_markets}"),
+        ("crystal_market_trades", f"DELETE FROM crystal_market_trades WHERE market IN {old_markets}"),
+        ("crystal_pool_liquidity_events", f"DELETE FROM crystal_pool_liquidity_events WHERE market IN {old_markets}"),
+        ("crystal_pool_tvl_samples", f"DELETE FROM crystal_pool_tvl_samples WHERE market IN {old_markets}"),
+        ("crystal_pool_sync_events", f"DELETE FROM crystal_pool_sync_events WHERE market IN {old_markets}"),
+        ("crystal_pool_lp_users", f"DELETE FROM crystal_pool_lp_users WHERE market IN {old_markets}"),
+        ("crystal_pools", f"DELETE FROM crystal_pools WHERE market IN {old_markets}"),
+        ("launchpad_tokens", f"DELETE FROM launchpad_tokens WHERE token IN {old_tokens}"),
+        ("crystal_markets", "DELETE FROM crystal_markets WHERE created_block < %(blk)s"),
+    ]
+
+    removed: dict[str, int] = {}
+    for name, sql in steps:
+        cur.execute(sql, params)
+        removed[name] = max(cur.rowcount, 0)
+    return removed
+
+
+def nadfun_row_counts(cur) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM launchpad_tokens WHERE source <> %(src)s),
+            (SELECT COUNT(*) FROM launchpad_trades t JOIN launchpad_tokens k ON k.token = t.token
+                WHERE k.source <> %(src)s),
+            (SELECT COUNT(*) FROM launchpad_positions p JOIN launchpad_tokens k ON k.token = p.token
+                WHERE k.source <> %(src)s)
+        """,
+        {"src": CRYSTAL_LAUNCHPAD_SOURCE},
+    )
+    tokens, trades, positions = cur.fetchone()
+    return {"tokens": int(tokens or 0), "trades": int(trades or 0), "positions": int(positions or 0)}
+
+
 def clear_derived_state_from_block(start_block: int, cur=None) -> None:
     if cur is None:
         with db_cursor() as cur2:
@@ -2512,13 +2574,9 @@ def get_lvmon_rate():
     return row[0] if row else None
 
 
-def record_revenue_sample(
-    block_number: int, timestamp: int, balance_wei: int, mon_price_usd, cur=None
-) -> dict | None:
+def record_revenue_sample(block_number: int, timestamp: int, balance_wei: int, mon_price_usd, cur=None) -> dict | None:
     def _run(c):
-        c.execute(
-            "SELECT block_number, balance_wei FROM crystal_revenue_samples ORDER BY block_number DESC LIMIT 1"
-        )
+        c.execute("SELECT block_number, balance_wei FROM crystal_revenue_samples ORDER BY block_number DESC LIMIT 1")
         prev = c.fetchone()
         if prev is not None and int(prev[0]) >= int(block_number):
             return None
