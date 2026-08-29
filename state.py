@@ -2201,7 +2201,8 @@ class State:
             mi = self.addressToMarket.get(market)
             if mi is None or int(getattr(mi, "marketType", 0) or 0) <= 1:
                 return
-            user = (ev.get("to") or "").lower() if kind == "burn" else ""
+            source = (ev.get("to") or ev.get("sender")) if kind == "burn" else ev.get("sender")
+            user = (source or "").lower()
             storage.insert_pool_liquidity_event(
                 txhash=(txh or ""),
                 log_index=int(log_idx or 0),

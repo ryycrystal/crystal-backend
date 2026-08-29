@@ -670,6 +670,12 @@ def init_db() -> None:
         )
         cur.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_pool_liq_user_ts
+            ON crystal_pool_liquidity_events (user_address, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS crystal_pool_lp_users
             (
                 market        TEXT NOT NULL,

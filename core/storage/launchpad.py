@@ -2403,6 +2403,14 @@ def wallet_activity(users: list[str], limit: int = 50, before_ts: int | None = N
                 FROM referral_claims c
                 LEFT JOIN launchpad_tokens k2 ON k2.token = c.token
                 WHERE c.user_address = ANY(%(u)s){cutoff}
+                UNION ALL
+                SELECT CASE WHEN e.kind = 'mint' THEN 'lp_deposit' ELSE 'lp_withdraw' END,
+                       e.timestamp, e.block_number, e.txhash, e.log_index,
+                       e.market, COALESCE(m.base_ticker, ''), COALESCE(m.base_name, ''),
+                       e.amount_quote, e.amount_base, 0, 0
+                FROM crystal_pool_liquidity_events e
+                LEFT JOIN crystal_markets m ON m.market = e.market
+                WHERE e.user_address = ANY(%(u)s){cutoff}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s
