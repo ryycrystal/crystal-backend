@@ -1257,10 +1257,28 @@ class State:
 
             zero = "0x" + "0" * 40
             internal = {a.lower() for a in getattr(h, "ADDRS", [])}
+            venues = {
+                (getattr(lp, "market", "") or "").lower(),
+                (self.token_to_v3_pool.get(token) or "").lower(),
+            }
+            venues.discard("")
 
-            def adjust(user: str, delta: int) -> None:
+            move_tokens = 0
+            released = 0
+            endpoints = {from_addr, to_addr}
+            known_venue = any(
+                a in self.addressToMarket or a in self.v3_pools or a in self.launchpad_market_to_token
+                for a in endpoints
+            )
+            if not known_venue and not (endpoints & (internal | venues | {zero, ""})):
+                open_tokens, cost_basis = self._basis_for(from_addr, token, cur=cur)
+                if open_tokens > 0 and cost_basis > 0:
+                    move_tokens = min(int(amount), int(open_tokens))
+                    released = (int(cost_basis) * move_tokens) // int(open_tokens)
+
+            def adjust(user: str, delta: int, bought_delta: int, basis_delta: int) -> None:
                 addr = (user or "").lower()
-                if not addr or addr == zero or delta == 0:
+                if not addr or addr == zero or (delta == 0 and bought_delta == 0):
                     return
                 if addr in internal:
                     return
@@ -1269,7 +1287,7 @@ class State:
                     batch.add_position_delta(
                         user_address=addr,
                         token=token,
-                        token_bought_delta=0,
+                        token_bought_delta=int(bought_delta),
                         token_sold_delta=0,
                         native_spent_delta=0,
                         native_received_delta=0,
@@ -1279,12 +1297,13 @@ class State:
                         buy_count_delta=0,
                         sell_count_delta=0,
                         last_price_native=lp.last_price_native,
+                        cost_basis_delta=int(basis_delta),
                     )
                 else:
                     storage.upsert_position(
                         user_address=addr,
                         token=token,
-                        token_bought_delta=0,
+                        token_bought_delta=int(bought_delta),
                         token_sold_delta=0,
                         native_spent_delta=0,
                         native_received_delta=0,
@@ -1294,11 +1313,15 @@ class State:
                         buy_count_delta=0,
                         sell_count_delta=0,
                         last_price_native=lp.last_price_native,
+                        cost_basis_delta=int(basis_delta),
                         cur=cur,
                     )
 
-            adjust(from_addr, -amount)
-            adjust(to_addr, amount)
+            if move_tokens > 0:
+                self._basis_apply_transfer(from_addr, to_addr, token, move_tokens, released, cur=cur)
+
+            adjust(from_addr, -amount, -move_tokens, -released)
+            adjust(to_addr, amount, move_tokens, released)
 
     def _seed_aux_prices(self) -> None:
         with self._lock:
@@ -1371,6 +1394,16 @@ class State:
         entry = self._basis_for(user, token, cur=cur)
         entry[0] += int(token_amt)
         entry[1] += int(native_amt)
+
+    def _basis_apply_transfer(
+        self, from_user: str, to_user: str, token: str, token_amt: int, released: int, cur=None
+    ) -> None:
+        src_entry = self._basis_for(from_user, token, cur=cur)
+        src_entry[0] = max(src_entry[0] - int(token_amt), 0)
+        src_entry[1] = max(src_entry[1] - int(released), 0)
+        dst_entry = self._basis_for(to_user, token, cur=cur)
+        dst_entry[0] += int(token_amt)
+        dst_entry[1] += int(released)
 
     def _basis_apply_sell(self, user: str, token: str, token_amt: int, cur=None) -> int:
         entry = self._basis_for(user, token, cur=cur)

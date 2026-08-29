@@ -7,7 +7,11 @@ from typing import Any
 
 from fastapi import APIRouter
 
+import time
+
 from api.api import _mon_price_usd, storage
+from api.api import _fmt, _fmt_usd, _WEI
+from modules import revenue
 
 router = APIRouter()
 
@@ -30,8 +34,45 @@ def health() -> dict[str, Any]:
     return {"ok": True}
 
 
+def _revenue_block(days: int) -> dict[str, Any]:
+    now_ts = int(time.time())
+    t = storage.revenue_totals(now_ts)
+    mon_price = _mon_price_usd()
+
+    def native(v):
+        return Decimal(v) / _WEI
+
+    out = {
+        "feeAddress": revenue.CRYSTAL_FEE_ADDRESS,
+        "balanceNative": _fmt(native(t["balance_native"])),
+        "balanceUsd": _fmt_usd(native(t["balance_native"]) * mon_price),
+        "trackedNative": _fmt(native(t["tracked_native"])),
+        "trackedUsd": _fmt_usd(t["tracked_usd"]),
+        "native24h": _fmt(native(t["native_24h"])),
+        "usd24h": _fmt_usd(t["usd_24h"]),
+        "native7d": _fmt(native(t["native_7d"])),
+        "usd7d": _fmt_usd(t["usd_7d"]),
+        "samples": t["samples"],
+        "lastSampleAt": t["last_timestamp"],
+        "lastSampleBlock": t["last_block"],
+    }
+    if days > 0:
+        rows = storage.list_revenue_samples(now_ts - min(days, 90) * 86400, limit=2000)
+        out["series"] = [
+            {
+                "block": int(b),
+                "time": int(ts),
+                "balanceNative": _fmt(native(bal)),
+                "deltaNative": _fmt(native(dw)),
+                "deltaUsd": _fmt_usd(du),
+            }
+            for b, ts, bal, dw, du in rows
+        ]
+    return out
+
+
 @router.get("/integrity")
-def get_integrity() -> dict[str, Any]:
+def get_integrity(revenue_days: int = 0) -> dict[str, Any]:
     raw = storage.get_meta("integrity_last")
     sweep = json.loads(raw) if raw else None
     with storage.db_cursor() as cur:
@@ -46,4 +87,5 @@ def get_integrity() -> dict[str, Any]:
         "last_block": last_block,
         "seconds_since_last_block": round(stall, 1),
         "sweep": sweep,
+        "revenue": _revenue_block(max(0, int(revenue_days or 0))),
     }

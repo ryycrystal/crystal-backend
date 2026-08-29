@@ -592,46 +592,6 @@ def token_meta(token_addr: str) -> dict[str, Any]:
     }
 
 
-@router.get("/revenue")
-@ttl_cache("revenue", ttl_seconds=15)
-def crystal_revenue(days: int = 7, limit: int = 500) -> dict[str, Any]:
-    from modules import revenue
-
-    now_ts = int(time.time())
-    days = max(1, min(int(days or 7), 90))
-    t = storage.revenue_totals(now_ts)
-    mon_price = _mon_price_usd()
-
-    def native(v):
-        return Decimal(v) / _WEI
-
-    rows = storage.list_revenue_samples(now_ts - days * 86400, limit=limit)
-    return {
-        "feeAddress": revenue.CRYSTAL_FEE_ADDRESS,
-        "balanceNative": _fmt(native(t["balance_native"])),
-        "balanceUsd": _fmt_usd(native(t["balance_native"]) * mon_price),
-        "trackedNative": _fmt(native(t["tracked_native"])),
-        "trackedUsd": _fmt_usd(t["tracked_usd"]),
-        "native24h": _fmt(native(t["native_24h"])),
-        "usd24h": _fmt_usd(t["usd_24h"]),
-        "native7d": _fmt(native(t["native_7d"])),
-        "usd7d": _fmt_usd(t["usd_7d"]),
-        "samples": t["samples"],
-        "lastSampleAt": t["last_timestamp"],
-        "lastSampleBlock": t["last_block"],
-        "series": [
-            {
-                "block": int(b),
-                "time": int(ts),
-                "balanceNative": _fmt(native(bal)),
-                "deltaNative": _fmt(native(dw)),
-                "deltaUsd": _fmt_usd(du),
-            }
-            for b, ts, bal, dw, du in rows
-        ],
-    }
-
-
 @router.get("/pair/{pair_addr}/fees")
 def pair_fees(pair_addr: str) -> dict[str, Any]:
     from modules.nadfun import fetch_pair_fee_config
