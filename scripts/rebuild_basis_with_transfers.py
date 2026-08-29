@@ -16,7 +16,7 @@ def venue_addresses(cur):
     addrs.add(ZERO)
     cur.execute("SELECT DISTINCT lower(market) FROM launchpad_tokens WHERE COALESCE(market, '') <> ''")
     addrs.update(r[0] for r in cur.fetchall())
-    cur.execute("SELECT DISTINCT lower(pool_addr) FROM launchpad_pools WHERE COALESCE(pool_addr, '') <> ''")
+    cur.execute("SELECT DISTINCT lower(pool) FROM launchpad_pools WHERE COALESCE(pool, '') <> ''")
     addrs.update(r[0] for r in cur.fetchall())
     cur.execute("SELECT DISTINCT lower(market) FROM crystal_markets WHERE COALESCE(market, '') <> ''")
     addrs.update(r[0] for r in cur.fetchall())

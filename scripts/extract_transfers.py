@@ -4,6 +4,7 @@ import time
 from psycopg2.extras import execute_values
 
 import core.storage as storage
+from core import chain as h
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 PROGRESS_KEY = "extract_transfers_at"
@@ -21,7 +22,41 @@ SELECT_SQL = """
     WHERE b.number BETWEEN %s AND %s
       AND lower(l->'topics'->>0) = %s
       AND EXISTS (SELECT 1 FROM launchpad_tokens t WHERE t.token = lower(l->>'address'))
+      AND NOT EXISTS (
+            SELECT 1 FROM transfer_venue_addrs v
+            WHERE v.addr = '0x' || right(lower(l->'topics'->>1), 40)
+      )
+      AND NOT EXISTS (
+            SELECT 1 FROM transfer_venue_addrs v
+            WHERE v.addr = '0x' || right(lower(l->'topics'->>2), 40)
+      )
 """
+
+ZERO = "0x" + "0" * 40
+
+
+def build_venue_table(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transfer_venue_addrs (addr TEXT PRIMARY KEY);
+        TRUNCATE transfer_venue_addrs;
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO transfer_venue_addrs (addr)
+        SELECT DISTINCT a FROM (
+            SELECT lower(market) AS a FROM launchpad_tokens WHERE COALESCE(market, '') <> ''
+            UNION SELECT lower(pool) FROM launchpad_pools WHERE COALESCE(pool, '') <> ''
+            UNION SELECT lower(market) FROM crystal_markets WHERE COALESCE(market, '') <> ''
+            UNION SELECT unnest(%s::text[])
+        ) s WHERE a IS NOT NULL AND a <> ''
+        ON CONFLICT (addr) DO NOTHING
+        """,
+        ([*(a.lower() for a in getattr(h, "ADDRS", [])), ZERO],),
+    )
+    cur.execute("SELECT COUNT(*) FROM transfer_venue_addrs")
+    return cur.fetchone()[0]
 
 
 def to_addr(topic):
@@ -71,6 +106,9 @@ def main():
     args = ap.parse_args()
 
     storage.init_pool()
+    with storage.db_cursor() as cur:
+        n_venues = build_venue_table(cur)
+    print(f"[XFER] excluding {n_venues:,} venue addresses (pools, markets, contracts, zero)")
     lo, hi = storage.get_cached_block_range()
     if lo is None:
         raise RuntimeError("no cached blocks")
