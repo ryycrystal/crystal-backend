@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from decimal import Decimal
@@ -1599,6 +1600,34 @@ def get_block_logs(block_number: int) -> list[dict] | None:
     if not row:
         return None
     return row[0] or []
+
+
+def list_blocks_with_addresses(start_block: int, end_block: int, addresses: list[str], cur=None) -> list[int]:
+    clauses = " OR ".join(["logs @> %s::jsonb"] * len(addresses))
+    params = [start_block, end_block] + [json.dumps([{"address": a.lower()}]) for a in addresses]
+    sql = f"""
+        SELECT number FROM launchpad_block_logs
+        WHERE number BETWEEN %s AND %s AND ({clauses})
+        ORDER BY number
+    """
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+            return [int(r[0]) for r in cur2.fetchall()]
+    cur.execute(sql, params)
+    return [int(r[0]) for r in cur.fetchall()]
+
+
+def get_block_logs_for(numbers: list[int], cur=None) -> dict[int, list[dict]]:
+    if not numbers:
+        return {}
+    sql = "SELECT number, logs FROM launchpad_block_logs WHERE number = ANY(%s)"
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (list(numbers),))
+            return {int(n): (lg or []) for n, lg in cur2.fetchall()}
+    cur.execute(sql, (list(numbers),))
+    return {int(n): (lg or []) for n, lg in cur.fetchall()}
 
 
 def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int, list[dict]]:
