@@ -697,6 +697,9 @@ def token_overview_graph(
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
+        series_mon_usd = (
+            _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
+        )
 
         holders_list: list[dict[str, Any]] = []
 
@@ -1153,6 +1156,7 @@ def token_overview_graph(
             },
             "name": name,
             "sellTxs": sells_24h,
+            "monUsd": series_mon_usd,
             "series": {
                 "klines": series_klines,
             },
@@ -2188,6 +2192,21 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
     }
 
 
+def _mon_usd_window(start: int, end: int) -> dict[str, Any]:
+    from api.routes.orderbook import coarsened_resolution
+    from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
+
+    res = coarsened_resolution(end - start, 60)
+    points = storage.mon_usd_series(start, end, res, _MIN_PRICE_TRADE_WEI)
+    return {
+        "resolution": res,
+        "from": start,
+        "to": end,
+        "before": float(_mon_usd_at(start) or 0) or None,
+        "points": [{"t": t, "rate": r} for t, r in points],
+    }
+
+
 @router.get("/chart/{token_addr}/{chartres}")
 def chart_only(
     token_addr: str,
@@ -2210,22 +2229,7 @@ def chart_only(
         before_ts=int(before_ts) or None,
     )
 
-    mon_usd = None
-    if rates and out:
-        from api.routes.orderbook import coarsened_resolution
-        from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
-
-        r_start = int(out[0]["time"])
-        r_end = int(out[-1]["time"]) + chartres
-        r_res = coarsened_resolution(r_end - r_start, max(60, chartres))
-        points = storage.mon_usd_series(r_start, r_end, r_res, _MIN_PRICE_TRADE_WEI)
-        mon_usd = {
-            "resolution": r_res,
-            "from": r_start,
-            "to": r_end,
-            "before": float(_mon_usd_at(r_start) or 0) or None,
-            "points": [{"t": t, "rate": r} for t, r in points],
-        }
+    mon_usd = _mon_usd_window(int(out[0]["time"]), int(out[-1]["time"]) + chartres) if rates and out else None
 
     return {
         "token": token_addr,
