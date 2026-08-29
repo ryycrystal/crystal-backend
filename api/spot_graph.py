@@ -136,6 +136,42 @@ def _balances_at_many(
     return out
 
 
+def _vault_value_at(wallet: str, ts: int) -> Decimal:
+    addr = (wallet or "").lower()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            WITH held AS (
+                SELECT vault, SUM(s) AS shares FROM (
+                    SELECT vault, shares AS s FROM crystal_vault_deposits
+                    WHERE user_address = %s AND timestamp <= %s
+                    UNION ALL
+                    SELECT vault, -shares AS s FROM crystal_vault_withdrawals
+                    WHERE user_address = %s AND timestamp <= %s
+                ) x GROUP BY vault
+            )
+            SELECT h.shares, b.usd_value, b.shares
+            FROM held h
+            LEFT JOIN LATERAL (
+                SELECT usd_value, shares
+                FROM crystal_vault_balance_samples sm
+                WHERE sm.vault = h.vault AND sm.timestamp <= %s
+                ORDER BY sm.timestamp DESC, sm.block_number DESC
+                LIMIT 1
+            ) b ON TRUE
+            WHERE h.shares > 0
+            """,
+            (addr, ts, addr, ts, ts),
+        )
+        rows = cur.fetchall()
+    total = Decimal(0)
+    for held_shares, usd_value, supply in rows:
+        sup = Decimal(supply or 0)
+        if sup > 0:
+            total += Decimal(held_shares) / sup * Decimal(usd_value or 0)
+    return total
+
+
 def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], tokens: list[dict[str, Any]]) -> None:
     mon_usd = _mon_usd_at(ts)
     wmon = next((t["address"] for t in tokens if (t.get("ticker") or "").upper() == "WMON"), "")
@@ -151,6 +187,11 @@ def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], to
             value_usd += whole * price
             if mon_usd > 0:
                 value_native += whole * price / mon_usd
+    vaults_usd = _vault_value_at(wallet, ts)
+    if vaults_usd > 0:
+        value_usd += vaults_usd
+        if mon_usd > 0:
+            value_native += vaults_usd / mon_usd
     storage.write_spot_graph_bucket(
         wallet, ts, block, value_usd, value_native, {k: str(v) for k, v in balances.items()}
     )

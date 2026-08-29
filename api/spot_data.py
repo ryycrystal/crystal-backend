@@ -106,11 +106,13 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
             "supported": False,
             "rows": [],
             "vaults": [],
+            "liquidity": [],
             "summary": {
                 "totalAccountValue": None,
                 "walletValue": None,
                 "ordersValue": None,
                 "vaultsValue": None,
+                "liquidityValue": None,
                 "totalVolume": None,
                 "buySellRatio": None,
                 "activeOrders": None,
@@ -138,6 +140,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
 
     locked = storage.open_order_locked_by_token(supported)
     vaults_total, vault_rows = storage.vault_positions_usd(supported)
+    lp_total, lp_rows = storage.lp_positions_usd(supported)
 
     prices = spot_prices(_mon_price_usd())
     rows = []
@@ -178,7 +181,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
             }
         )
     rows.sort(key=lambda r: Decimal(r["totalValueUsd"] or r["valueUsd"] or 0), reverse=True)
-    total = wallet_total + orders_total + vaults_total
+    total = wallet_total + orders_total + vaults_total + lp_total
 
     return {
         "wallet": wallet,
@@ -188,11 +191,15 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
         "vaults": [
             {**v, "valueUsd": _fmt_usd(v["valueUsd"]) if v["valueUsd"] is not None else None} for v in vault_rows
         ],
+        "liquidity": [
+            {**lp, "valueUsd": _fmt_usd(lp["valueUsd"]) if lp["valueUsd"] is not None else None} for lp in lp_rows
+        ],
         "summary": {
             "totalAccountValue": _fmt_usd(total),
             "walletValue": _fmt_usd(wallet_total),
             "ordersValue": _fmt_usd(orders_total),
             "vaultsValue": _fmt_usd(vaults_total),
+            "liquidityValue": _fmt_usd(lp_total),
             "totalVolume": None,
             "buySellRatio": None,
             "activeOrders": None,

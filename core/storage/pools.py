@@ -835,3 +835,44 @@ def crystal_pool_reserves_for_markets(markets: list[str], cur=None) -> dict[str,
         m: {"reserveQuote": str(int(rq or 0)), "reserveBase": str(int(rb or 0)), "syncedAt": int(ts or 0)}
         for m, rq, rb, ts in rows
     }
+
+
+def lp_positions_usd(user) -> tuple[Decimal, list[dict]]:
+    users = [user.lower()] if isinstance(user, str) else [str(u).lower() for u in (user or [])]
+    if not users:
+        return Decimal(0), []
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT lu.market, lu.shares, p.total_shares, p.tvl_usd,
+                   m.base_ticker, m.quote_ticker
+            FROM crystal_pool_lp_users lu
+            JOIN crystal_pools p ON p.market = lu.market
+            LEFT JOIN crystal_markets m ON m.market = lu.market
+            WHERE lu.user_address = ANY(%s) AND lu.shares > 0
+            ORDER BY lu.market
+            """,
+            (users,),
+        )
+        rows = cur.fetchall()
+
+    total = Decimal(0)
+    folded: dict[str, dict] = {}
+    for market, shares, total_shares, tvl_usd, base_ticker, quote_ticker in rows:
+        supply = Decimal(total_shares or 0)
+        value = (Decimal(shares) / supply * Decimal(tvl_usd or 0)) if supply > 0 else None
+        if value is not None:
+            total += value
+        prev = folded.get(market)
+        if prev is None:
+            folded[market] = {
+                "market": market,
+                "pair": f"{base_ticker or ''}/{quote_ticker or ''}".strip("/"),
+                "shares": str(int(shares)),
+                "valueUsd": value,
+            }
+        else:
+            prev["shares"] = str(int(prev["shares"]) + int(shares))
+            if value is not None:
+                prev["valueUsd"] = (prev["valueUsd"] or Decimal(0)) + value
+    return total, list(folded.values())
