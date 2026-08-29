@@ -697,9 +697,7 @@ def token_overview_graph(
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
-        series_mon_usd = (
-            _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
-        )
+        series_mon_usd = _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
 
         holders_list: list[dict[str, Any]] = []
 
@@ -1223,9 +1221,7 @@ def users_portfolio_batch(
     merged: bool = False,
     limit: int = 0,
     offset: int = 0,
-    open_positions: bool = Query(
-        False, alias="open", description="merged only, drop positions whose balance is zero"
-    ),
+    open_positions: bool = Query(False, alias="open", description="merged only, drop positions whose balance is zero"),
 ) -> dict[str, Any]:
     addrs: list[str] = []
     for a in (addresses or "").split(","):
@@ -1242,7 +1238,11 @@ def users_portfolio_batch(
     if merged:
         return {
             "merged": _merged_portfolio(
-                addrs, tok or None, limit=max(0, min(limit, 1000)), offset=max(0, offset), open_only=open_positions
+                addrs,
+                tok or None,
+                limit=max(0, min(limit, 1000)),
+                offset=max(0, offset),
+                open_only=open_positions is True,
             ),
             "addresses": addrs,
             "count": len(addrs),

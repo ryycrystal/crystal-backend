@@ -245,7 +245,7 @@ def test_list_rows_carry_the_fields_the_search_can_filter_on(db, clean):
     for key in ("sniper_count", "sniper_addresses", "sniper_holding", "insider_holding", "pro_traders"):
         assert key in stats[TOKEN], f"batch holder stats missing {key}"
 
-    rows = _batch_serialize_tokens([TOKEN], set())
+    rows = _batch_serialize_tokens([TOKEN])
     row = rows[TOKEN]
     assert "snipers" in row and set(row["snipers"]) == {"count", "addresses", "holdingShare"}
     assert "insider_holding" in row, "insider_holding must be on the row, not hardcoded client side"
@@ -401,6 +401,7 @@ def test_token_meta_dumps_everything(db, clean, monkeypatch):
             "creator_fee_rate": 100,
             "curve_protocol_fee_rate": 40,
             "dex_protocol_fee_rate": 60,
+            "pool_fee_ppm": 3000,
         },
     )
     client = TestClient(api.api.app)
@@ -437,6 +438,7 @@ def test_pair_fees_cached_and_served(db, clean, monkeypatch):
             "creator_fee_rate": 100,
             "curve_protocol_fee_rate": 40,
             "dex_protocol_fee_rate": 60,
+            "pool_fee_ppm": 3000,
         }
 
     monkeypatch.setattr(mn, "fetch_pair_fee_config", fake_fetch)

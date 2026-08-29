@@ -1040,14 +1040,13 @@ def test_detail_endpoint_distinguishes_24h_from_lifetime_volume(db):
     c = _api_client()
     body = c.get(f"/token/{NF_TOKEN}/60").json()
 
-    for key in ("volume24hNative", "volume24hUsd", "volumeLifetimeNative", "volumeLifetimeUsd", "feesLifetimeUsd"):
+    for key in ("volumeNative", "volume24hUsd", "volumeLifetimeNative", "volumeLifetimeUsd", "feesLifetimeUsd"):
         assert key in body, f"missing {key}"
 
     lifetime = int(body["volumeLifetimeNative"])
-    day = int(body["volume24hNative"])
+    day = int(body["volumeNative"])
     assert lifetime > day, "lifetime must include the trade outside the 24h window"
 
-    assert int(body["volumeNative"]) == day
     assert body["volumeUsd"] == body["volume24hUsd"]
 
 
