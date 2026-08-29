@@ -573,7 +573,12 @@ class Sequencer:
                 )
                 if int(parsed.get("marketType") or 0) == 3 and parsed.get("baseAsset"):
                     self._state.apply_migrated(
-                        blk, blk_ts, {"token": parsed["baseAsset"]}, log.get("address", "").lower(), cur=cur, batch=batch
+                        blk,
+                        blk_ts,
+                        {"token": parsed["baseAsset"]},
+                        log.get("address", "").lower(),
+                        cur=cur,
+                        batch=batch,
                     )
 
             elif tag == "MPC":
