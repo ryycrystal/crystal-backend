@@ -2340,20 +2340,21 @@ def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) ->
     with db_cursor() as cur:
         cur.execute(
             """
-            SELECT bucket, (ARRAY_AGG(rate ORDER BY timestamp DESC))[1] AS close_rate
-            FROM (
-                SELECT (timestamp / %s) * %s AS bucket,
-                       timestamp,
-                       usd_amount / (native_amount / 1e18) AS rate
+            SELECT g AS bucket, lt.rate
+            FROM generate_series(%s / %s * %s, %s, %s) g
+            LEFT JOIN LATERAL (
+                SELECT usd_amount / (native_amount / 1e18) AS rate
                 FROM launchpad_trades
-                WHERE timestamp BETWEEN %s AND %s
+                WHERE timestamp >= g AND timestamp < g + %s
                   AND native_amount >= %s
                   AND usd_amount > 0
-            ) t
-            GROUP BY bucket
-            ORDER BY bucket
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ) lt ON true
+            WHERE lt.rate IS NOT NULL
+            ORDER BY g
             """,
-            (resolution, resolution, int(start_ts), int(end_ts), int(min_wei)),
+            (int(start_ts), resolution, resolution, int(end_ts), resolution, resolution, int(min_wei)),
         )
         return [(int(b), float(r)) for b, r in cur.fetchall() if r is not None]
 
