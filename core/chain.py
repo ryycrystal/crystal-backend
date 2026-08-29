@@ -69,6 +69,10 @@ VAULT_FACTORY_ADDR = _addr_from_env(
     "VAULT_FACTORY_ADDRESS",
     "VAULTS_ADDRESS",
 )
+VAULT_FACTORY_LEGACY_ADDR = _addr_from_env(
+    "0x3dbf7Da6BeC21F82E75e693cfF1d0BFA0Cd07Db1",
+    "VAULT_FACTORY_LEGACY_ADDRESS",
+)
 NADFUN_ADDR = _addr_from_env(
     "0xA7283d07812a02AFB7C09B60f8896bCEA3F90aCE",
     "NADFUN_ADDRESS",
@@ -88,6 +92,13 @@ NADFUN_ADDRS = _addrs_from_env(
     ],
     "NADFUN_ADDRESSES",
 )
+VAULT_FACTORY_ADDRS = _addrs_from_env(
+    [
+        VAULT_FACTORY_ADDR,
+        VAULT_FACTORY_LEGACY_ADDR,
+    ],
+    "VAULT_FACTORY_ADDRESSES",
+)
 
 CONTRACTS = {
     "ROUTER": CRYSTAL_ADDR,
@@ -97,7 +108,7 @@ CONTRACTS = {
     "NADFUN": NADFUN_ADDR,
     "REFERRALS": REFERRAL_MANAGER_ADDR,
 }
-ADDRS = list(dict.fromkeys([*(a.lower() for a in CONTRACTS.values()), *NADFUN_ADDRS]))
+ADDRS = list(dict.fromkeys([*(a.lower() for a in CONTRACTS.values()), *NADFUN_ADDRS, *VAULT_FACTORY_ADDRS]))
 
 EVENT_SIGS = {
     "0xaf714121669901a97bedd215ae52bf255f4b5ecb9b5baa168800e5bdcc32c21a": "MC",
@@ -255,7 +266,7 @@ def accepts_log_for_indexing(tag: str, addr: str) -> bool:
     if tag in ROUTER_EVENT_TAGS:
         return addr == CONTRACTS["ROUTER"].lower()
     if tag in VAULT_FACTORY_EVENT_TAGS:
-        return addr == CONTRACTS["VAULTS"].lower()
+        return addr in VAULT_FACTORY_ADDRS
     if tag in REFERRAL_EVENT_TAGS:
         return addr == CONTRACTS["REFERRALS"].lower()
     if tag in NADFUN_EVENT_TAGS:
