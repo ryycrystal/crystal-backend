@@ -571,6 +571,10 @@ class Sequencer:
                 self._state.apply_market_created(
                     blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch
                 )
+                if int(parsed.get("marketType") or 0) == 3 and parsed.get("baseAsset"):
+                    self._state.apply_migrated(
+                        blk, blk_ts, {"token": parsed["baseAsset"]}, log.get("address", "").lower(), cur=cur, batch=batch
+                    )
 
             elif tag == "MPC":
                 self._state.apply_market_params_changed(

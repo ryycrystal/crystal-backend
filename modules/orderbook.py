@@ -74,9 +74,18 @@ def parse_fill(addr: str, topics: list[str], data: str) -> dict | None:
 
 
 USER_REGISTERED_TOPIC = "0xc9c1b51eb96995e1cfea90cc81876d702d5d0a6bf11011d9963fd4d96886f102"
+USER_REGISTERED_V2_TOPIC = "0xe29d35093005f4d575e1003753426b57a7f64378ba73332eef9c6ccc2b8decd6"
 
 
 def parse_user_registered(addr: str, topics: list[str], data: str) -> dict | None:
+    if topics and str(topics[0]).lower() == USER_REGISTERED_V2_TOPIC:
+        if len(topics) < 3:
+            return None
+        return {
+            "is_margin": False,
+            "user": "0x" + topics[1][-40:].lower(),
+            "user_id": int(topics[2], 16),
+        }
     if len(topics) < 4:
         return None
     return {

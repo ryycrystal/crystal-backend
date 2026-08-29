@@ -53,6 +53,10 @@ def _decode_token_meta(data: bytes, base: int) -> tuple[str, int, str, str]:
     return token, decimals, ticker, name
 
 
+MARKET_CREATED_V2_TOPIC = "0x6535cb10b05d5c7e575df57a5cc8af1760fbb9a159730e9379460f907816a8ba"
+MARKET_PARAMS_CHANGED_V2_TOPIC = "0x6707271370cfc32da2a633047d48e0840473aa0a5477c1b19f151f12cd02ed85"
+
+
 def parse_market_created(addr: str, tops: list[str], data_no0x: str):
     is_canonical = False
     if len(tops) > 1:
@@ -66,10 +70,12 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
 
     data = bytes.fromhex(data_no0x)
 
+    v2 = bool(tops) and str(tops[0]).lower() == MARKET_CREATED_V2_TOPIC
     market_addr = _addr_at(data, 0)
-    quote_info_off = _u256_at(data, 32)
-    base_info_off = _u256_at(data, 64)
-    pos_details = 96
+    creator = _addr_at(data, 32) if v2 else _ZERO_ADDR
+    quote_info_off = _u256_at(data, 64 if v2 else 32)
+    base_info_off = _u256_at(data, 96 if v2 else 64)
+    pos_details = 128 if v2 else 96
 
     quote_address, quote_decimals, quote_ticker, quote_name = _decode_token_meta(data, quote_info_off)
     base_address, base_decimals, base_ticker, base_name = _decode_token_meta(data, base_info_off)
@@ -89,6 +95,7 @@ def parse_market_created(addr: str, tops: list[str], data_no0x: str):
 
     return {
         "isCanonical": is_canonical,
+        "creator": creator.lower(),
         "quoteAsset": quote_asset.lower(),
         "baseAsset": base_asset.lower(),
         "market": market_addr.lower(),
@@ -143,6 +150,18 @@ def parse_market_params_changed(addr: str, tops: list[str], data_no0x: str) -> d
 
     def u(i: int, d: int = 0) -> int:
         return int(words[i], 16) if i < len(words) else d
+
+    if bool(tops) and str(tops[0]).lower() == MARKET_PARAMS_CHANGED_V2_TOPIC:
+        return {
+            "market": market,
+            "creator": "0x" + words[0][-40:] if words else _ZERO_ADDR,
+            "minSize": u(1),
+            "takerFee": u(2),
+            "makerRebate": u(3),
+            "creatorFee": u(4),
+            "isAMMEnabled": bool(u(5)),
+            "isCanonical": bool(u(6)),
+        }
 
     return {
         "market": market,
