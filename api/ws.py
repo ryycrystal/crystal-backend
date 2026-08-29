@@ -45,6 +45,16 @@ IMPLEMENTED_CHANNELS = (
     "user_history",
 )
 
+_SNAPSHOT_ORDER = {
+    "user_positions": 0,
+    "balances": 1,
+    "positions": 2,
+    "token": 3,
+    "stats": 4,
+    "trades": 5,
+    "vaults": 6,
+}
+
 ORDERBOOK_CHANNELS = ("user_orders", "user_trades", "user_history")
 ORDERBOOK_HISTORY_LIMIT = 500
 
@@ -782,13 +792,9 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                 await sub.send(reply)
                 tok = reply.get("token")
                 chans = (reply.get("channels") or []) if tok else []
-
-                async def _baseline(ch: str, tok: str = tok) -> None:
+                for ch in sorted(chans, key=lambda c: _SNAPSHOT_ORDER.get(c, 99)):
                     with contextlib.suppress(Exception):
                         await HUB.send_snapshot(sub, tok, ch)
-
-                if chans:
-                    await asyncio.gather(*(_baseline(c) for c in chans))
             elif op == "unsubscribe":
                 await sub.send(await _apply_unsubscribe(sub, msg))
             elif op == "query":
