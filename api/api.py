@@ -1046,6 +1046,35 @@ def _build_ohlcv_from_db(
 
 
 app = FastAPI(title="backend", version="0.1.0")
+
+_EDGE_CACHEABLE = (
+    "/tokens",
+    "/token/",
+    "/chart/",
+    "/stats/",
+    "/holders/",
+    "/mon-usd/",
+    "/search/",
+    "/pair/",
+    "/markets/",
+    "/pools/list",
+    "/tiers",
+    "/leaderboard",
+)
+
+
+@app.middleware("http")
+async def _cache_control(request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and "cache-control" not in response.headers:
+        path = request.url.path
+        if any(path.startswith(p) for p in _EDGE_CACHEABLE):
+            response.headers["Cache-Control"] = "public, s-maxage=1, stale-while-revalidate=2"
+        else:
+            response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
