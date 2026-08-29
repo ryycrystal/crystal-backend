@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--i-know-the-indexer-is-stopped", action="store_true")
+    parser.add_argument("--allow-concurrent", action="store_true")
     args = parser.parse_args()
 
     addresses = [a.lower() for a in args.address]
@@ -117,10 +118,12 @@ def main() -> None:
         print("pass --address or --nadfun", file=sys.stderr)
         raise SystemExit(2)
 
-    if not args.dry_run and not args.i_know_the_indexer_is_stopped:
+    if not args.dry_run and not (args.i_know_the_indexer_is_stopped or args.allow_concurrent):
         print(
             "refusing to write while the indexer may be live: its in memory state would overwrite "
-            "replayed rows. stop the indexer, then pass --i-know-the-indexer-is-stopped",
+            "replayed rows. stop the indexer and pass --i-know-the-indexer-is-stopped, or pass "
+            "--allow-concurrent when every table this replay touches merges by delta and only "
+            "last_price_native is overwritten, which reconverges as the replay reaches the head",
             file=sys.stderr,
         )
         raise SystemExit(2)
