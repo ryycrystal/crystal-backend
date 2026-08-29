@@ -83,8 +83,7 @@ async def replay(start_block: int, end_block: int, addresses: list[str], batch: 
             cached = storage.get_block_logs_for(group, cur=cur)
             await backfill.ensure_block_timestamps(cached)
             filtered = _filter_logs(group, cached)
-            for blk in group:
-                SEQUENCER.process_chunk(blk, blk, {blk: filtered.get(blk, [])}, cur)
+            SEQUENCER.process_chunk(group[0], group[-1], filtered, cur)
             if dry_run:
                 cur.connection.rollback()
         done += len(group)
