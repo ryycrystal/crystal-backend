@@ -1196,6 +1196,27 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS crystal_revenue_samples
+            (
+                block_number  BIGINT PRIMARY KEY,
+                timestamp     BIGINT NOT NULL,
+                balance_wei   NUMERIC(78, 0) NOT NULL,
+                delta_wei     NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                mon_price_usd NUMERIC(50, 18) NOT NULL DEFAULT 0,
+                delta_usd     NUMERIC(50, 18) NOT NULL DEFAULT 0
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_revenue_ts
+            ON crystal_revenue_samples (timestamp DESC);
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS x_tracked_users
             (
                 username TEXT PRIMARY KEY,

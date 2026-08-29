@@ -164,6 +164,7 @@ async def start_metadata_worker(storage_module) -> None:
                     await recover_missing_uris(mod)
                     await sweep_missing_metadata(mod)
                     await sweep_pair_fees(mod)
+                    await asyncio.to_thread(revenue.sample_revenue, mod)
                 retry_batch = []
                 temp_hold = []
                 while _RETRY_QUEUE:
@@ -629,6 +630,8 @@ async def sweep_missing_metadata(storage_module, limit: int = 500) -> int:
         print(f"[Metadata] sweep re-queued {queued} tokens missing metadata", flush=True)
     return queued
 
+
+from modules import revenue  # noqa: E402
 
 _FEE_COLLECTOR_SELECTOR = "0xc415b95c"
 _GET_FEE_CONFIG_SELECTOR = "0x1e442b55"

@@ -2481,3 +2481,85 @@ def get_lvmon_rate():
         cur.execute("SELECT value FROM launchpad_meta WHERE key = 'lvmon_mon_rate';")
         row = cur.fetchone()
     return row[0] if row else None
+
+
+def record_revenue_sample(
+    block_number: int, timestamp: int, balance_wei: int, mon_price_usd, cur=None
+) -> dict | None:
+    def _run(c):
+        c.execute(
+            "SELECT block_number, balance_wei FROM crystal_revenue_samples ORDER BY block_number DESC LIMIT 1"
+        )
+        prev = c.fetchone()
+        if prev is not None and int(prev[0]) >= int(block_number):
+            return None
+        delta = Decimal(balance_wei) - (Decimal(prev[1]) if prev else Decimal(balance_wei))
+        if delta < 0:
+            delta = Decimal(0)
+        price = Decimal(str(mon_price_usd or 0))
+        delta_usd = (delta / Decimal(10) ** 18) * price
+        c.execute(
+            """
+            INSERT INTO crystal_revenue_samples
+                (block_number, timestamp, balance_wei, delta_wei, mon_price_usd, delta_usd)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (block_number) DO NOTHING
+            """,
+            (int(block_number), int(timestamp), int(balance_wei), int(delta), price, delta_usd),
+        )
+        return {"delta_wei": int(delta), "delta_usd": delta_usd, "first": prev is None}
+
+    if cur is not None:
+        return _run(cur)
+    with db_cursor() as c:
+        return _run(c)
+
+
+def revenue_totals(now_ts: int) -> dict:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(delta_wei), 0),
+                COALESCE(SUM(delta_usd), 0),
+                COALESCE(SUM(delta_wei) FILTER (WHERE timestamp > %(d1)s), 0),
+                COALESCE(SUM(delta_usd) FILTER (WHERE timestamp > %(d1)s), 0),
+                COALESCE(SUM(delta_wei) FILTER (WHERE timestamp > %(d7)s), 0),
+                COALESCE(SUM(delta_usd) FILTER (WHERE timestamp > %(d7)s), 0),
+                COUNT(*),
+                MAX(timestamp),
+                MAX(block_number)
+            FROM crystal_revenue_samples
+            """,
+            {"d1": int(now_ts) - 86400, "d7": int(now_ts) - 7 * 86400},
+        )
+        r = cur.fetchone()
+        cur.execute("SELECT balance_wei FROM crystal_revenue_samples ORDER BY block_number DESC LIMIT 1")
+        bal = cur.fetchone()
+    return {
+        "tracked_native": int(r[0] or 0),
+        "tracked_usd": Decimal(r[1] or 0),
+        "native_24h": int(r[2] or 0),
+        "usd_24h": Decimal(r[3] or 0),
+        "native_7d": int(r[4] or 0),
+        "usd_7d": Decimal(r[5] or 0),
+        "samples": int(r[6] or 0),
+        "last_timestamp": int(r[7] or 0),
+        "last_block": int(r[8] or 0),
+        "balance_native": int(bal[0]) if bal else 0,
+    }
+
+
+def list_revenue_samples(start_ts: int, limit: int = 500) -> list[tuple]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT block_number, timestamp, balance_wei, delta_wei, delta_usd
+            FROM crystal_revenue_samples
+            WHERE timestamp >= %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """,
+            (int(start_ts), int(max(1, min(limit, 5000)))),
+        )
+        return cur.fetchall()
