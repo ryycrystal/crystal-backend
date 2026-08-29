@@ -76,6 +76,64 @@ def remove_x_tracked_users(usernames: list[str]) -> None:
         cur.executemany("DELETE FROM x_tracked_users WHERE username = %s", rows)
 
 
+def list_user_tracked(key: str) -> list[str]:
+    with db_cursor() as cur:
+        cur.execute("SELECT username FROM x_user_tracked WHERE key = %s ORDER BY username", (key,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def count_user_tracked(key: str) -> int:
+    with db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM x_user_tracked WHERE key = %s", (key,))
+        return int(cur.fetchone()[0] or 0)
+
+
+def add_user_tracked(key: str, usernames: list[str]) -> None:
+    rows = [(key, u) for u in {_norm_username(n) for n in usernames or []} if u]
+    if not rows:
+        return
+    with db_cursor() as cur:
+        cur.executemany(
+            "INSERT INTO x_user_tracked (key, username) VALUES (%s, %s) ON CONFLICT (key, username) DO NOTHING",
+            rows,
+        )
+
+
+def remove_user_tracked(key: str, usernames: list[str]) -> None:
+    rows = [(key, u) for u in {_norm_username(n) for n in usernames or []} if u]
+    if not rows:
+        return
+    with db_cursor() as cur:
+        cur.executemany("DELETE FROM x_user_tracked WHERE key = %s AND username = %s", rows)
+
+
+def list_polled_usernames() -> list[str]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT username FROM x_tracked_users
+            UNION
+            SELECT username FROM x_user_tracked
+            ORDER BY username
+            """
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def count_polled_usernames() -> int:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT username FROM x_tracked_users
+                UNION
+                SELECT username FROM x_user_tracked
+            ) u
+            """
+        )
+        return int(cur.fetchone()[0] or 0)
+
+
 def insert_x_tweets(rows: list[tuple[str, str, int, dict]]) -> None:
     if not rows:
         return

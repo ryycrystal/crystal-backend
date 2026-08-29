@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from email.utils import parsedate_to_datetime
@@ -25,6 +26,7 @@ SEED_USERS = [u.strip().lstrip("@").lower() for u in os.getenv("TRACKED_USERS", 
 TRACK_MAX_USERS = int(os.getenv("TRACK_MAX_USERS", "500"))
 TRACK_MAX_PER_REQUEST = int(os.getenv("TRACK_MAX_PER_REQUEST", "100"))
 KNOWN_HANDLE_TTL_SECS = float(os.getenv("TRACK_KNOWN_HANDLE_TTL", "300"))
+TRACK_MAX_PER_USER = int(os.getenv("TRACK_MAX_PER_USER", "50"))
 ADMIN_TOKEN = os.getenv("X_TRACK_ADMIN_TOKEN", "")
 LAST_TWEETS_URL = "https://api.twitterapi.io/twitter/user/last_tweets"
 
@@ -134,7 +136,7 @@ async def _poll_loop() -> None:
         while True:
             try:
                 if storage.claim_x_poll_leader(NODE_ID, LEADER_TTL_SECS):
-                    for username in storage.list_x_tracked_users():
+                    for username in storage.list_polled_usernames():
                         try:
                             await _poll_user(client, username)
                         except Exception as e:
@@ -193,6 +195,29 @@ async def _requested_usernames(req: Request) -> list[str]:
     else:
         raw = (body or {}).get("usernames") or []
     return [str(u).strip().lstrip("@") for u in raw if str(u).strip()]
+
+
+_HEX = set("0123456789abcdef")
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
+def _tracker_key(key: str) -> str:
+    k = (key or "").strip().lower()
+    if len(k) != 64 or any(c not in _HEX for c in k):
+        raise HTTPException(status_code=400, detail="key must be 64 hex characters")
+    return k
+
+
+def _valid_handles(names: list[str]) -> list[str]:
+    if len(names) > TRACK_MAX_PER_REQUEST:
+        raise HTTPException(status_code=400, detail=f"at most {TRACK_MAX_PER_REQUEST} usernames per request")
+    out: list[str] = []
+    for n in names:
+        handle = str(n).strip().lstrip("@")
+        if not _HANDLE_RE.match(handle):
+            raise HTTPException(status_code=400, detail=f"invalid x handle: {handle[:32]}")
+        out.append(handle.lower())
+    return list(dict.fromkeys(out))
 
 
 def _require_admin(req: Request) -> None:
@@ -282,3 +307,32 @@ async def x_ws(ws: WebSocket):
         pass
     finally:
         CLIENTS.discard(ws)
+
+
+@router.get("/x/track/{key}")
+async def x_user_track_list(key: str):
+    return {"tracked": storage.list_user_tracked(_tracker_key(key))}
+
+
+@router.post("/x/track/{key}")
+async def x_user_track_add(key: str, req: Request):
+    k = _tracker_key(key)
+    names = _valid_handles(await _requested_usernames(req))
+    if not names:
+        return {"tracked": storage.list_user_tracked(k)}
+    existing = set(storage.list_user_tracked(k))
+    fresh = [n for n in names if n not in existing]
+    if fresh:
+        if len(existing) + len(fresh) > TRACK_MAX_PER_USER:
+            raise HTTPException(status_code=429, detail=f"you can track at most {TRACK_MAX_PER_USER} accounts")
+        if storage.count_polled_usernames() + len(fresh) > TRACK_MAX_USERS:
+            raise HTTPException(status_code=429, detail="the tracker is at capacity, try again later")
+        storage.add_user_tracked(k, fresh)
+    return {"tracked": storage.list_user_tracked(k)}
+
+
+@router.delete("/x/track/{key}")
+async def x_user_track_remove(key: str, req: Request):
+    k = _tracker_key(key)
+    storage.remove_user_tracked(k, await _requested_usernames(req))
+    return {"tracked": storage.list_user_tracked(k)}

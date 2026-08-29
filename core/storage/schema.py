@@ -1227,6 +1227,25 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS x_user_tracked
+            (
+                key      TEXT NOT NULL,
+                username TEXT NOT NULL,
+                added_at TIMESTAMPTZ NOT NULL DEFAULT Now(),
+                PRIMARY KEY (key, username)
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_x_user_tracked_username
+            ON x_user_tracked (username);
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS x_tweets
             (
                 id          BIGSERIAL PRIMARY KEY,
