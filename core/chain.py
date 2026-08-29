@@ -9,6 +9,7 @@ import modules.markets as m
 import modules.nadfun as n
 import modules.orderbook as ob
 import modules.pools as p
+import modules.protocol as proto
 import modules.referrals as ref
 import modules.vaults as v
 from env_loader import load_env
@@ -141,6 +142,10 @@ EVENT_SIGS = {
     m.MARKET_PARAMS_CHANGED_V2_TOPIC: "MPC",
     ref.REFERRAL_TOPIC: "REF",
     ref.CLAIM_TOPIC: "REFCLAIM",
+    proto.BALANCE_DEPOSIT_TOPIC: "IBD",
+    proto.BALANCE_WITHDRAW_TOPIC: "IBW",
+    proto.LAUNCHPAD_PARAMS_TOPIC: "LPC",
+    proto.GOV_CHANGED_TOPIC: "GOV",
 }
 TOPICS = list(EVENT_SIGS.keys())
 
@@ -178,9 +183,31 @@ PARSERS = {
     "UR": ob.parse_user_registered,
     "REF": ref.parse_referral,
     "REFCLAIM": ref.parse_rewards_claimed,
+    "IBD": proto.parse_balance_deposit,
+    "IBW": proto.parse_balance_withdraw,
+    "LPC": proto.parse_launchpad_params_changed,
+    "GOV": proto.parse_gov_changed,
 }
 
-ROUTER_EVENT_TAGS = {"MC", "MPC", "TR", "PMINT", "PBURN", "PSYNC", "TC", "LT", "MG", "OBU", "OBF", "UR", "REFCLAIM"}
+ROUTER_EVENT_TAGS = {
+    "MC",
+    "MPC",
+    "TR",
+    "PMINT",
+    "PBURN",
+    "PSYNC",
+    "TC",
+    "LT",
+    "MG",
+    "OBU",
+    "OBF",
+    "UR",
+    "REFCLAIM",
+    "IBD",
+    "IBW",
+    "LPC",
+    "GOV",
+}
 REFERRAL_EVENT_TAGS = {"REF"}
 VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "VMAX", "VLOCKUP", "VDECR"}
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}

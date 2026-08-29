@@ -489,6 +489,8 @@ class Sequencer:
                 "V3SWAP": 0,
                 "OBU": 0,
                 "OBF": 0,
+                "IBD": 0,
+                "IBW": 0,
                 "UR": 0,
             }
         )
@@ -604,6 +606,31 @@ class Sequencer:
 
             elif tag == "REF":
                 self._state.apply_referral(blk, blk_ts, parsed, log_idx=lii, cur=cur)
+
+            elif tag in ("IBD", "IBW"):
+                storage.insert_crystal_balance_event(
+                    txhash=txh or "",
+                    log_index=lii,
+                    kind=parsed["kind"],
+                    user_address=parsed["user"],
+                    user_id=parsed["user_id"],
+                    token=parsed["token"],
+                    amount=parsed["amount"],
+                    block_number=blk,
+                    timestamp=blk_ts,
+                    cur=cur,
+                )
+
+            elif tag in ("LPC", "GOV"):
+                storage.insert_crystal_protocol_event(
+                    txhash=txh or "",
+                    log_index=lii,
+                    kind=parsed["kind"],
+                    params=parsed["params"],
+                    block_number=blk,
+                    timestamp=blk_ts,
+                    cur=cur,
+                )
 
             elif tag == "REFCLAIM":
                 storage.write_referral_claims(
@@ -797,6 +824,8 @@ class Sequencer:
             "V3SWAP": 0,
             "OBU": 0,
             "OBF": 0,
+            "IBD": 0,
+            "IBW": 0,
         }
 
         batch = BatchAccumulator()

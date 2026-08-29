@@ -2481,7 +2481,14 @@ def wallet_activity(
     elif before_ts is not None:
         params["cut"] = int(before_ts)
 
-    cut_t, cut_d, cut_w, cut_c, cut_e = _cut("t"), _cut("d"), _cut("w"), _cut("c"), _cut("e")
+    cut_t, cut_d, cut_w, cut_c, cut_e, cut_b = (
+        _cut("t"),
+        _cut("d"),
+        _cut("w"),
+        _cut("c"),
+        _cut("e"),
+        _cut("b"),
+    )
 
     with db_cursor() as cur:
         cur.execute(
@@ -2526,6 +2533,14 @@ def wallet_activity(
                 FROM crystal_pool_liquidity_events e
                 LEFT JOIN crystal_markets m ON m.market = e.market
                 WHERE e.user_address = ANY(%(u)s){cut_e}
+                UNION ALL
+                SELECT CASE WHEN b.kind = 'deposit' THEN 'balance_deposit' ELSE 'balance_withdraw' END,
+                       b.timestamp, b.block_number, b.txhash, b.log_index,
+                       b.token, COALESCE(k3.symbol, ''), COALESCE(k3.name, ''),
+                       b.amount, 0, 0, 0
+                FROM crystal_balance_events b
+                LEFT JOIN launchpad_tokens k3 ON k3.token = b.token
+                WHERE b.user_address = ANY(%(u)s){cut_b}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s
@@ -2650,3 +2665,75 @@ def list_revenue_samples(start_ts: int, limit: int = 500) -> list[tuple]:
             (int(start_ts), int(max(1, min(limit, 5000)))),
         )
         return cur.fetchall()
+
+
+def insert_crystal_balance_event(
+    *,
+    txhash: str,
+    log_index: int,
+    kind: str,
+    user_address: str,
+    user_id: int,
+    token: str,
+    amount: int,
+    block_number: int,
+    timestamp: int,
+    cur=None,
+) -> None:
+    sql = """
+        INSERT INTO crystal_balance_events
+            (txhash, log_index, kind, user_address, user_id, token, amount, block_number, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (txhash, log_index) DO NOTHING
+    """
+    params = (
+        (txhash or "").lower(),
+        int(log_index),
+        kind,
+        (user_address or "").lower(),
+        int(user_id or 0),
+        (token or "").lower(),
+        int(amount or 0),
+        int(block_number),
+        int(timestamp),
+    )
+    if cur is not None:
+        cur.execute(sql, params)
+        return
+    with db_cursor() as c:
+        c.execute(sql, params)
+
+
+def insert_crystal_protocol_event(
+    *, txhash: str, log_index: int, kind: str, params: dict, block_number: int, timestamp: int, cur=None
+) -> None:
+    sql = """
+        INSERT INTO crystal_protocol_events (txhash, log_index, kind, params, block_number, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (txhash, log_index) DO NOTHING
+    """
+    args = ((txhash or "").lower(), int(log_index), kind, Json(params or {}), int(block_number), int(timestamp))
+    if cur is not None:
+        cur.execute(sql, args)
+        return
+    with db_cursor() as c:
+        c.execute(sql, args)
+
+
+def list_crystal_protocol_events(kind: str = "", limit: int = 50) -> list[dict]:
+    where = "WHERE kind = %s" if kind else ""
+    args: tuple = (kind, int(limit)) if kind else (int(limit),)
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT kind, params, block_number, timestamp, txhash
+            FROM crystal_protocol_events {where}
+            ORDER BY block_number DESC, log_index DESC
+            LIMIT %s
+            """,
+            args,
+        )
+        return [
+            {"kind": k, "params": p, "blockNumber": int(b or 0), "timestamp": int(t or 0), "txhash": tx}
+            for k, p, b, t, tx in cur.fetchall()
+        ]

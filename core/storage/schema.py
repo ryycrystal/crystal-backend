@@ -1240,6 +1240,49 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS crystal_balance_events
+            (
+                txhash       TEXT NOT NULL,
+                log_index    BIGINT NOT NULL,
+                kind         TEXT NOT NULL,
+                user_address TEXT NOT NULL,
+                user_id      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                token        TEXT NOT NULL,
+                amount       NUMERIC(78, 0) NOT NULL DEFAULT 0,
+                block_number BIGINT NOT NULL DEFAULT 0,
+                timestamp    BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_balance_user_ts
+            ON crystal_balance_events (user_address, timestamp DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crystal_protocol_events
+            (
+                txhash       TEXT NOT NULL,
+                log_index    BIGINT NOT NULL,
+                kind         TEXT NOT NULL,
+                params       JSONB NOT NULL,
+                block_number BIGINT NOT NULL DEFAULT 0,
+                timestamp    BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (txhash, log_index)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_crystal_protocol_kind_blk
+            ON crystal_protocol_events (kind, block_number DESC);
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS x_tracked_users
             (
                 username TEXT PRIMARY KEY,
