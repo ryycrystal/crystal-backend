@@ -26,6 +26,7 @@ from tests.test_launchpad_integration import (  # noqa: E402
 )
 
 WALLET = "0x00aa00bb00cc00dd00ee00ff00aa00bb00cc00dd"
+POOL = "0x1111111111111111111111111111111111111111"
 NOW = 1_800_000_000
 
 
@@ -60,7 +61,9 @@ def _setup(monkeypatch, balance_wei: int):
     _seed_trade("0xg1", 1000, NOW - 3 * 3600 + 100, "2.0")
     _seed_trade("0xg2", 2000, NOW - 3600 - 100, "3.0")
     monkeypatch.setattr(
-        sg, "_balances_at_many", lambda wallet, pairs, tokens: {ts: {"native": balance_wei} for ts, _b in pairs}
+        sg,
+        "_balances_at_many",
+        lambda wallet, pairs, tokens, lp_markets: {ts: {"native": balance_wei} for ts, _b in pairs},
     )
     return sg
 
@@ -87,11 +90,50 @@ def test_buckets_are_immutable(db, monkeypatch):
     sg._fill(WALLET)
     before = storage.get_spot_graph_buckets(WALLET, 0)
 
-    monkeypatch.setattr(sg, "_balances_at_many", lambda wallet, pairs, tokens: {ts: {"native": 1} for ts, _b in pairs})
+    monkeypatch.setattr(
+        sg, "_balances_at_many", lambda wallet, pairs, tokens, lp_markets: {ts: {"native": 1} for ts, _b in pairs}
+    )
     sg._fill(WALLET)
     after = storage.get_spot_graph_buckets(WALLET, 0)
 
     assert after == before, "a second fill must not change or duplicate rows"
+
+
+def test_fill_includes_lp_value_and_replaces_old_cache(db, monkeypatch):
+    sg = _setup(monkeypatch, 0)
+    wanted = sg._wanted_buckets(NOW)
+    stale_ts = min(wanted)
+    storage.write_spot_graph_bucket(WALLET, stale_ts, 1, Decimal(1), Decimal(0), {"native": "0"})
+    storage.insert_crystal_pool_tvl_sample(
+        market=POOL,
+        block_number=1,
+        log_index=0,
+        timestamp=NOW - 4 * 3600,
+        reserve_quote=0,
+        reserve_base=0,
+        tvl_usd=Decimal(400),
+        txhash="0xlptvl",
+    )
+    monkeypatch.setattr(sg.storage, "list_lp_markets_for_graph", lambda wallet: [POOL])
+    monkeypatch.setattr(
+        sg,
+        "_balances_at_many",
+        lambda wallet, pairs, tokens, lp_markets: {
+            ts: {
+                "native": 0,
+                f"{sg._LP_BALANCE_PREFIX}{POOL}": 25,
+                f"{sg._LP_SUPPLY_PREFIX}{POOL}": 100,
+            }
+            for ts, _block in pairs
+        },
+    )
+
+    sg._fill(WALLET)
+
+    rows = storage.get_spot_graph_buckets(WALLET, 0, sg.VALUE_VERSION)
+    assert len(rows) == len(wanted)
+    assert all(usd == Decimal(100) for _ts, usd, _native in rows)
+    assert dict((ts, usd) for ts, usd, _native in rows)[stale_ts] == Decimal(100)
 
 
 def test_grid_floors_at_indexed_history(db, monkeypatch):

@@ -150,6 +150,8 @@ def lp_positions(user_addr: str) -> dict[str, Any]:
         pool = _pool_row_to_api(pool_row) if pool_row else {"market": market}
         total = int(pool.get("totalShares") or 0)
         share_pct = (shares / total * 100.0) if total > 0 else None
+        tvl_usd = pool.get("tvlUsd")
+        value_usd = (shares / total * float(tvl_usd)) if total > 0 and tvl_usd is not None else None
         rq = int(pool.get("reserveQuote") or 0)
         rb = int(pool.get("reserveBase") or 0)
         cur_q = shares * rq // total if total > 0 else 0
@@ -159,6 +161,7 @@ def lp_positions(user_addr: str) -> dict[str, Any]:
                 "market": market,
                 "shares": str(shares),
                 "sharePct": share_pct,
+                "valueUsd": value_usd,
                 "lastTransfer": last_transfer,
                 "currentQuote": str(cur_q),
                 "currentBase": str(cur_b),

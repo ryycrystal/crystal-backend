@@ -547,6 +547,31 @@ def test_pools_route_get_pool_fallback_params_no_since_and_not_found():
         _assert_http_exc(lambda: pool_api.get_pool("0xMISSING"), 404)
 
 
+def test_lp_positions_include_current_usd_value():
+    user = "0x1111111111111111111111111111111111111111"
+    rows = [("0xpool", 250, 123, 100, 200)]
+    pool = {
+        "market": "0xpool",
+        "totalShares": "1000",
+        "reserveQuote": "4000",
+        "reserveBase": "8000",
+        "tvlUsd": 2000.0,
+    }
+    with (
+        patch.object(pool_api.storage, "list_lp_positions", return_value=rows),
+        patch.object(pool_api.storage, "get_crystal_pool_with_state", return_value=("row",)),
+        patch.object(pool_api, "_pool_row_to_api", return_value=pool),
+    ):
+        out = pool_api.lp_positions(user.upper())
+
+    position = out["positions"][0]
+    assert out["user"] == user
+    assert position["sharePct"] == 25.0
+    assert position["valueUsd"] == 500.0
+    assert position["currentQuote"] == "1000"
+    assert position["currentBase"] == "2000"
+
+
 if __name__ == "__main__":
     for fn in [
         test_pools_module_helpers_and_parsers,

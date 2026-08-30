@@ -2,6 +2,7 @@ MULTICALL3_ADDR = "0xca11bde05977b3631167028862be2a173976ca11"
 MULTICALL3_AGGREGATE3_SELECTOR = bytes.fromhex("82ad56cb")
 MULTICALL3_GET_ETH_BALANCE_SELECTOR = bytes.fromhex("4d2301cc")
 ERC20_BALANCE_OF_SELECTOR = bytes.fromhex("70a08231")
+ERC20_TOTAL_SUPPLY_SELECTOR = bytes.fromhex("18160ddd")
 
 
 def u256_at(buf: bytes, off: int) -> int:

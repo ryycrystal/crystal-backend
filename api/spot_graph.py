@@ -11,6 +11,7 @@ from typing import Any
 import core.storage as storage
 from core.multicall import (
     ERC20_BALANCE_OF_SELECTOR,
+    ERC20_TOTAL_SUPPLY_SELECTOR,
     MULTICALL3_ADDR,
     MULTICALL3_GET_ETH_BALANCE_SELECTOR,
     decode_multicall3_aggregate3_result,
@@ -26,6 +27,9 @@ FILL_PACE_SECONDS = float(os.getenv("SPOT_GRAPH_PACE", "0.2"))
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("SPOT_GRAPH_MAX_FAILURES", "5"))
 _WEI = Decimal(10) ** 18
 _MIN_PRICE_TRADE_WEI = 10**16
+VALUE_VERSION = 2
+_LP_BALANCE_PREFIX = "__lpBalance:"
+_LP_SUPPLY_PREFIX = "__lpSupply:"
 
 _inflight: set[str] = set()
 _inflight_lock = threading.Lock()
@@ -96,7 +100,10 @@ def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str)
 
 
 def _balances_at_many(
-    wallet: str, pairs: list[tuple[int, int]], tokens: list[dict[str, Any]]
+    wallet: str,
+    pairs: list[tuple[int, int]],
+    tokens: list[dict[str, Any]],
+    lp_markets: list[str],
 ) -> dict[int, dict[str, int] | None]:
     rpc = os.getenv("SPOT_GRAPH_RPC") or os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
     erc20 = [t["address"] for t in tokens if t["address"] != "native"]
@@ -104,6 +111,9 @@ def _balances_at_many(
     calls = [(MULTICALL3_ADDR, MULTICALL3_GET_ETH_BALANCE_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:]))]
     for addr in erc20:
         calls.append((addr, ERC20_BALANCE_OF_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:])))
+    for market in lp_markets:
+        calls.append((market, ERC20_BALANCE_OF_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:])))
+        calls.append((market, ERC20_TOTAL_SUPPLY_SELECTOR))
     data = encode_multicall3_aggregate3(calls)
 
     batch = [
@@ -132,6 +142,12 @@ def _balances_at_many(
         for j, addr in enumerate(erc20):
             okj, rawj = decoded[j + 1]
             balances[addr] = u256_at(rawj, 0) if okj else 0
+        lp_offset = 1 + len(erc20)
+        for j, market in enumerate(lp_markets):
+            ok_balance, raw_balance = decoded[lp_offset + j * 2]
+            ok_supply, raw_supply = decoded[lp_offset + j * 2 + 1]
+            balances[f"{_LP_BALANCE_PREFIX}{market}"] = u256_at(raw_balance, 0) if ok_balance else 0
+            balances[f"{_LP_SUPPLY_PREFIX}{market}"] = u256_at(raw_supply, 0) if ok_supply else 0
         out[ts] = balances
     return out
 
@@ -172,6 +188,38 @@ def _vault_value_at(wallet: str, ts: int) -> Decimal:
     return total
 
 
+def _lp_value_at(ts: int, balances: dict[str, int]) -> Decimal:
+    positions = []
+    for key, raw_balance in balances.items():
+        if not key.startswith(_LP_BALANCE_PREFIX) or raw_balance <= 0:
+            continue
+        market = key[len(_LP_BALANCE_PREFIX) :]
+        supply = int(balances.get(f"{_LP_SUPPLY_PREFIX}{market}", 0) or 0)
+        if supply > 0:
+            positions.append((market, int(raw_balance), supply))
+    if not positions:
+        return Decimal(0)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT requested.market, latest.tvl_usd
+            FROM UNNEST(%s::text[]) AS requested(market)
+            LEFT JOIN LATERAL (
+                SELECT tvl_usd
+                FROM crystal_pool_tvl_samples sample
+                WHERE sample.market = requested.market AND sample.timestamp <= %s
+                ORDER BY sample.timestamp DESC, sample.block_number DESC, sample.log_index DESC
+                LIMIT 1
+            ) latest ON TRUE
+            """,
+            ([market for market, _balance, _supply in positions], int(ts)),
+        )
+        values = {market: Decimal(tvl or 0) for market, tvl in cur.fetchall()}
+    return sum(
+        (Decimal(balance) / Decimal(supply)) * values.get(market, Decimal(0)) for market, balance, supply in positions
+    )
+
+
 def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], tokens: list[dict[str, Any]]) -> None:
     mon_usd = _mon_usd_at(ts)
     wmon = next((t["address"] for t in tokens if (t.get("ticker") or "").upper() == "WMON"), "")
@@ -192,9 +240,14 @@ def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], to
         value_usd += vaults_usd
         if mon_usd > 0:
             value_native += vaults_usd / mon_usd
-    storage.write_spot_graph_bucket(
-        wallet, ts, block, value_usd, value_native, {k: str(v) for k, v in balances.items()}
-    )
+    lp_usd = _lp_value_at(ts, balances)
+    if lp_usd > 0:
+        value_usd += lp_usd
+        if mon_usd > 0:
+            value_native += lp_usd / mon_usd
+    stored_balances = {k: str(v) for k, v in balances.items()}
+    stored_balances["__valueVersion"] = VALUE_VERSION
+    storage.write_spot_graph_bucket(wallet, ts, block, value_usd, value_native, stored_balances)
 
 
 def _wanted_buckets(now: int) -> list[int]:
@@ -215,10 +268,11 @@ def _fill(wallet: str) -> None:
             return
 
         tokens = spot_token_list()
+        lp_markets = storage.list_lp_markets_for_graph(wallet)
         wanted = _wanted_buckets(int(time.time()))
         if not wanted:
             return
-        have = storage.get_spot_graph_bucket_set(wallet, wanted[-1])
+        have = storage.get_spot_graph_bucket_set(wallet, wanted[-1], VALUE_VERSION)
         missing = [t for t in wanted if t not in have]
         failures = 0
         empty_batches = 0
@@ -232,7 +286,7 @@ def _fill(wallet: str) -> None:
             if not group:
                 continue
             try:
-                balances_by_ts = _balances_at_many(wallet, group, tokens)
+                balances_by_ts = _balances_at_many(wallet, group, tokens, lp_markets)
             except Exception as e:
                 failures += 1
                 print(f"[GRAPH] balance batch failed for {wallet} ({e!r})", flush=True)
@@ -280,7 +334,7 @@ def graph_for(wallet: str) -> dict[str, Any]:
     wallet = (wallet or "").lower()
     wanted = _wanted_buckets(int(time.time()))
     since = wanted[-1] if wanted else 0
-    rows = storage.get_spot_graph_buckets(wallet, since)
+    rows = storage.get_spot_graph_buckets(wallet, since, VALUE_VERSION)
     points = [{"t": ts, "v": float(usd)} for ts, usd, _native in rows]
     floor = int(storage.get_meta("spot_graph_floor") or 0)
     reachable = [t for t in wanted if t >= floor]

@@ -2323,7 +2323,11 @@ def write_spot_graph_bucket(
     sql = """
         INSERT INTO spot_graph_buckets (wallet, bucket_ts, block_number, value_usd, value_native, balances)
         VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (wallet, bucket_ts) DO NOTHING
+        ON CONFLICT (wallet, bucket_ts) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            value_usd = EXCLUDED.value_usd,
+            value_native = EXCLUDED.value_native,
+            balances = EXCLUDED.balances
     """
     params = ((wallet or "").lower(), int(bucket_ts), int(block_number), value_usd, value_native, Json(balances))
     if cur is not None:
@@ -2333,25 +2337,41 @@ def write_spot_graph_bucket(
         c.execute(sql, params)
 
 
-def get_spot_graph_buckets(wallet: str, since_ts: int) -> list[tuple[int, Decimal, Decimal]]:
+def get_spot_graph_buckets(
+    wallet: str, since_ts: int, value_version: int | None = None
+) -> list[tuple[int, Decimal, Decimal]]:
+    version_filter = ""
+    params: list = [(wallet or "").lower(), int(since_ts)]
+    if value_version is not None:
+        version_filter = "AND COALESCE(balances ->> '__valueVersion', '0') = %s"
+        params.append(str(int(value_version)))
     with db_cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT bucket_ts, value_usd, value_native
             FROM spot_graph_buckets
             WHERE wallet = %s AND bucket_ts >= %s
+              {version_filter}
             ORDER BY bucket_ts
             """,
-            ((wallet or "").lower(), int(since_ts)),
+            tuple(params),
         )
         return [(int(t), v or Decimal(0), n or Decimal(0)) for t, v, n in cur.fetchall()]
 
 
-def get_spot_graph_bucket_set(wallet: str, since_ts: int) -> set[int]:
+def get_spot_graph_bucket_set(wallet: str, since_ts: int, value_version: int | None = None) -> set[int]:
+    version_filter = ""
+    params: list = [(wallet or "").lower(), int(since_ts)]
+    if value_version is not None:
+        version_filter = "AND COALESCE(balances ->> '__valueVersion', '0') = %s"
+        params.append(str(int(value_version)))
     with db_cursor() as cur:
         cur.execute(
-            "SELECT bucket_ts FROM spot_graph_buckets WHERE wallet = %s AND bucket_ts >= %s",
-            ((wallet or "").lower(), int(since_ts)),
+            f"""
+            SELECT bucket_ts FROM spot_graph_buckets
+            WHERE wallet = %s AND bucket_ts >= %s {version_filter}
+            """,
+            tuple(params),
         )
         return {int(r[0]) for r in cur.fetchall()}
 

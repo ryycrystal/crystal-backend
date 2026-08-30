@@ -649,6 +649,21 @@ def list_lp_positions(user: str) -> list[tuple[str, int, int]]:
         ]
 
 
+def list_lp_markets_for_graph(user: str) -> list[str]:
+    addr = (user or "").lower()
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT market FROM crystal_pool_lp_users WHERE user_address = %s
+            UNION
+            SELECT market FROM crystal_pool_liquidity_events WHERE user_address = %s
+            ORDER BY market
+            """,
+            (addr, addr),
+        )
+        return [(row[0] or "").lower() for row in cur.fetchall() if row[0]]
+
+
 def insert_pool_liquidity_event(
     *,
     txhash: str,
