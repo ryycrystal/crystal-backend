@@ -117,6 +117,28 @@ def order_history(
     }
 
 
+_KLINE_RESOLUTIONS = (60, 300, 900, 3600, 14400, 86400)
+
+
+@router.get("/orderbook/klines/{market}")
+def market_klines(market: str, res: int = 3600, limit: int = 3000) -> dict[str, Any]:
+    m = (market or "").lower()
+    if not m.startswith("0x") or len(m) != 42:
+        raise HTTPException(status_code=400, detail="invalid market address")
+    if int(res) not in _KLINE_RESOLUTIONS:
+        raise HTTPException(status_code=400, detail=f"res must be one of {_KLINE_RESOLUTIONS}")
+    _ensure_fresh()
+    lim = max(1, min(int(limit or 3000), 3000))
+    rows = storage.market_klines(m, int(res), lim)
+    return {
+        "market": m,
+        "res": int(res),
+        "klines": rows,
+        "count": len(rows),
+        "as_of_block": int(storage.get_last_processed_block() or 0),
+    }
+
+
 _HEX = set("0123456789abcdef")
 
 

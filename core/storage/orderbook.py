@@ -575,6 +575,40 @@ def open_order_locked_by_token(user) -> dict[str, int]:
         return {t: int(v) for t, v in cur.fetchall() if t}
 
 
+def market_klines(market: str, res: int, limit: int = 3000) -> list[dict[str, Any]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT (timestamp / %(res)s) * %(res)s AS bucket_ts,
+                   (ARRAY_AGG(start_price ORDER BY timestamp, block_number, log_index))[1] AS open,
+                   MAX(GREATEST(start_price, end_price)) AS high,
+                   MIN(LEAST(start_price, end_price)) AS low,
+                   (ARRAY_AGG(end_price ORDER BY timestamp DESC, block_number DESC, log_index DESC))[1] AS close,
+                   SUM(CASE WHEN is_buy THEN amount_out ELSE amount_in END) AS base_volume,
+                   SUM(CASE WHEN is_buy THEN amount_in ELSE amount_out END) AS quote_volume
+            FROM crystal_market_trades
+            WHERE market = %(m)s
+            GROUP BY bucket_ts
+            ORDER BY bucket_ts DESC
+            LIMIT %(lim)s
+            """,
+            {"res": int(res), "m": (market or "").lower(), "lim": int(limit)},
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "time": int(t),
+            "open": str(int(o or 0)),
+            "high": str(int(h or 0)),
+            "low": str(int(lo or 0)),
+            "close": str(int(c or 0)),
+            "baseVolume": str(int(bv or 0)),
+            "quoteVolume": str(int(qv or 0)),
+        }
+        for t, o, h, lo, c, bv, qv in rows
+    ]
+
+
 def get_wallet_prefs(key: str) -> dict[str, Any] | None:
     with db_cursor() as cur:
         cur.execute("SELECT wallet_count, selected, updated_at FROM crystal_wallet_prefs WHERE key = %s", (key,))
