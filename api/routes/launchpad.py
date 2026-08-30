@@ -1409,6 +1409,7 @@ def _merged_portfolio(
                 "wallet_count": int(wallet_count or 0),
                 "market": market or None,
                 "source": _api_source(source),
+                "nadfun_version": _nadfun_version(token, source),
             }
         )
 
@@ -1549,6 +1550,7 @@ def user_portfolio(user_addr: str, include_native: bool = False) -> dict[str, An
                 "token_sold": str(token_sold),
                 "market": market or None,
                 "source": _api_source(source),
+                "nadfun_version": _nadfun_version(token, source),
             }
         )
 
@@ -1777,6 +1779,7 @@ def portfolio_positions(
                 "sell_count": int(sell_count or 0),
                 "market": market,
                 "source": _api_source(source),
+                "nadfun_version": _nadfun_version(token, source),
             }
         )
 
