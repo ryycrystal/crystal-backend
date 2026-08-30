@@ -164,31 +164,6 @@ def coarsened_resolution(span_seconds: int, res: int) -> int:
     return _RES_LADDER[-1]
 
 
-@router.get("/mon-usd/series")
-def mon_usd_series(from_ts: int = 0, to_ts: int = 0, resolution: int = 60) -> dict[str, Any]:
-    now = int(time.time())
-    end = int(to_ts) if to_ts else now
-    start = int(from_ts) if from_ts else end - 86400
-    res = max(1, min(int(resolution or 60), 86400))
-    if end < start:
-        start, end = end, start
-    if end == start:
-        end = start + res
-    res = coarsened_resolution(end - start, res)
-
-    from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
-
-    points = storage.mon_usd_series(start, end, res, _MIN_PRICE_TRADE_WEI)
-    before = float(_mon_usd_at(start) or 0)
-    return {
-        "resolution": res,
-        "from": start,
-        "to": end,
-        "before": before or None,
-        "points": [{"t": t, "rate": r} for t, r in points],
-    }
-
-
 @router.get("/activity/{wallet}")
 def wallet_activity(
     wallet: str, limit: int = 50, before_ts: int | None = None, cursor: str = "", addresses: str = ""
