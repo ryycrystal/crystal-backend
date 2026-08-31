@@ -1312,6 +1312,19 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS wallet_tracker_payloads
+            (
+                key        TEXT PRIMARY KEY,
+                version    SMALLINT NOT NULL,
+                iv         TEXT NOT NULL,
+                ciphertext TEXT NOT NULL,
+                updated_at BIGINT NOT NULL
+            );
+            """
+        )
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS x_tweets
             (
                 id          BIGSERIAL PRIMARY KEY,

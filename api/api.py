@@ -1191,11 +1191,13 @@ from api.routes.orderbook import router as orderbook_router
 from api.routes.pools import router as pools_router
 from api.routes.referrals import router as referrals_router
 from api.routes.system import router as system_router
+from api.routes.trackers import router as trackers_router
 from api.routes.vaults import router as vaults_router
 
 app.include_router(launchpad_router)
 app.include_router(referrals_router)
 app.include_router(system_router)
+app.include_router(trackers_router)
 app.include_router(vaults_router)
 app.include_router(markets_router)
 app.include_router(pools_router)
