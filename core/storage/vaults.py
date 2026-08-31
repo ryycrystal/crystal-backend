@@ -268,6 +268,26 @@ def upsert_crystal_vault_user_delta(
         cur.execute(sql, params)
 
 
+def set_crystal_vault_user_shares(
+    *,
+    vault: str,
+    user_address: str,
+    shares: int,
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        UPDATE crystal_vault_users
+        SET shares = GREATEST(%s, 0)
+        WHERE vault = %s AND user_address = %s;
+    """
+    params = (int(shares or 0), vault.lower(), user_address.lower())
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, params)
+    else:
+        cur.execute(sql, params)
+
+
 def upsert_crystal_vault_balance_sample(
     *,
     vault: str,

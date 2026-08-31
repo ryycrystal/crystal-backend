@@ -2786,6 +2786,33 @@ class State:
             except Exception:
                 pass
 
+    def vault_user_addresses(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return sorted(
+                (vault, user) for vault, users in self.vaultToUsers.items() for user in users if vault and user
+            )
+
+    def reconcile_vault_user_shares(self, vault: str, user: str, chain_balance: int) -> None:
+        vaddr = (vault or "").lower()
+        uaddr = (user or "").lower()
+        with self._lock:
+            vault_user = self.vaultToUsers.get(vaddr, {}).get(uaddr)
+            if vault_user is None:
+                return
+            ours = int(getattr(vault_user, "shares", 0) or 0)
+            chain = max(0, int(chain_balance))
+            if chain == ours:
+                return
+            print(
+                f"[Vaults] user share drift on {vaddr}/{uaddr}: replayed {ours} vs chain {chain}, healing",
+                flush=True,
+            )
+            vault_user.shares = chain
+            try:
+                storage.set_crystal_vault_user_shares(vault=vaddr, user_address=uaddr, shares=chain)
+            except Exception:
+                pass
+
     def lp_market_addresses(self) -> list[str]:
         with self._lock:
             return [

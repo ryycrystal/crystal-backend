@@ -22,6 +22,7 @@ VAULT_SAMPLER_INTERVAL = 30
 VAULT_SAMPLER_MULTICALL_CHUNK = 200
 GET_BALANCES_CALLDATA = bytes.fromhex("00113e08")
 TOTAL_SUPPLY_CALLDATA = bytes.fromhex("18160ddd")
+BALANCE_OF_SELECTOR = bytes.fromhex("70a08231")
 
 missing_blocks: deque[int] = deque()
 missing_set: set[int] = set()
@@ -87,6 +88,46 @@ async def _sample_vaults_multicall(state, vaults: list[str], blk_hex: str, blk_n
         except Exception as e:
             print(f"[SAMPLER] Multicall fallback for chunk {i}-{i + len(chunk) - 1}: {e!r}", flush=True)
             await _sample_vaults_serial(state, chunk, blk_hex, blk_num, ts)
+
+
+def _balance_of_calldata(user: str) -> bytes:
+    return BALANCE_OF_SELECTOR + bytes.fromhex(user.lower().removeprefix("0x").rjust(64, "0"))
+
+
+async def _reconcile_vault_users_serial(state, positions: list[tuple[str, str]], blk_hex: str):
+    for vault, user in positions:
+        try:
+            call_resp = await backfill.http_jsonrpc(
+                "eth_call",
+                [{"to": vault, "data": "0x" + _balance_of_calldata(user).hex()}, blk_hex],
+            )
+            ret = call_resp.get("result")
+            if isinstance(ret, str) and ret.startswith("0x"):
+                state.reconcile_vault_user_shares(vault, user, int(ret, 16))
+        except Exception:
+            continue
+
+
+async def _reconcile_vault_users_multicall(state, blk_hex: str):
+    positions = state.vault_user_addresses()
+    for i in range(0, len(positions), VAULT_SAMPLER_MULTICALL_CHUNK):
+        chunk = positions[i : i + VAULT_SAMPLER_MULTICALL_CHUNK]
+        try:
+            data = _encode_multicall3_aggregate3([(vault, _balance_of_calldata(user)) for vault, user in chunk])
+            call_resp = await backfill.http_jsonrpc(
+                "eth_call",
+                [{"to": MULTICALL3_ADDR, "data": data}, blk_hex],
+            )
+            ret = call_resp.get("result")
+            results = _decode_multicall3_aggregate3_result(ret) if isinstance(ret, str) else []
+            if len(results) != len(chunk):
+                raise ValueError(f"multicall result length mismatch {len(results)} != {len(chunk)}")
+            for (vault, user), (ok, raw) in zip(chunk, results):
+                if ok and isinstance(raw, (bytes, bytearray)) and len(raw) >= 32:
+                    state.reconcile_vault_user_shares(vault, user, int.from_bytes(raw[:32], "big"))
+        except Exception as e:
+            print(f"[SAMPLER] vault user chunk {i}-{i + len(chunk) - 1} failed: {e!r}", flush=True)
+            await _reconcile_vault_users_serial(state, chunk, blk_hex)
 
 
 def _add_missing(blk: int):
@@ -536,6 +577,7 @@ async def vault_sampler(state):
 
             if vaults:
                 await _sample_vaults_multicall(state, vaults, blk_hex, blk_num, ts)
+                await _reconcile_vault_users_multicall(state, blk_hex)
             if lp_markets:
                 await _reconcile_pool_supplies(state, lp_markets, blk_hex)
 
