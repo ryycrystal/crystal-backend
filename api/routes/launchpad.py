@@ -823,14 +823,8 @@ def token_overview_graph(
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
-        if not mini_klines:
-            seed = _initial_price_kline(created_at or now_ts, last_price_native, 3600)
-            mini_klines = [seed] if seed else []
 
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
-        if series and not series_klines:
-            seed = _initial_price_kline(created_at or now_ts, last_price_native, chartres)
-            series_klines = [seed] if seed else []
         series_mon_usd = _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
 
         holders_list: list[dict[str, Any]] = []
