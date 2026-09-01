@@ -175,6 +175,7 @@ def main():
                     """,
                     (token,),
                 )
+            if args.apply:
                 storage.set_meta(PROGRESS_KEY, token, cur=cur)
 
         if i % 500 == 0:
