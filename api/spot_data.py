@@ -180,6 +180,33 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
                 "totalValueUsd": _fmt_usd(combined) if combined is not None else None,
             }
         )
+    mon_usd = prices.get(NATIVE) or Decimal(0)
+    seen_addrs = {r["address"] for r in rows}
+    for g in storage.graduated_holdings(supported):
+        if g["token"] in seen_addrs:
+            continue
+        bal = Decimal(int(g["balance_raw"])) / Decimal(10) ** 18
+        price = (Decimal(g["last_price_native"]) * mon_usd) if mon_usd > 0 else None
+        value = (bal * price) if price is not None else None
+        if value is not None:
+            wallet_total += value
+        rows.append(
+            {
+                "address": g["token"],
+                "ticker": g["symbol"],
+                "name": g["name"],
+                "decimals": 18,
+                "balanceRaw": str(int(g["balance_raw"])),
+                "balance": _fmt(bal),
+                "lockedRaw": "0",
+                "locked": _fmt(Decimal(0)),
+                "lockedValueUsd": None,
+                "priceUsd": _fmt_usd(price) if price is not None else None,
+                "priceChange24h": None,
+                "valueUsd": _fmt_usd(value) if value is not None else None,
+                "totalValueUsd": _fmt_usd(value) if value is not None else None,
+            }
+        )
     rows.sort(key=lambda r: Decimal(r["totalValueUsd"] or r["valueUsd"] or 0), reverse=True)
     total = wallet_total + orders_total + vaults_total + lp_total
 

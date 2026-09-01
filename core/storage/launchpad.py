@@ -2810,3 +2810,31 @@ def list_crystal_protocol_events(kind: str = "", limit: int = 50) -> list[dict]:
             {"kind": k, "params": p, "blockNumber": int(b or 0), "timestamp": int(t or 0), "txhash": tx}
             for k, p, b, t, tx in cur.fetchall()
         ]
+
+def graduated_holdings(wallets: list[str]) -> list[dict]:
+    addrs = [str(w or "").lower() for w in (wallets or []) if w]
+    if not addrs:
+        return []
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.token, MAX(t.symbol), MAX(t.name), SUM(p.balance_token), MAX(t.last_price_native)
+            FROM launchpad_positions p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.user_address = ANY(%s) AND p.balance_token > 0 AND t.migrated
+            GROUP BY p.token
+            """,
+            (addrs,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "token": tok,
+            "symbol": sym or "",
+            "name": name or "",
+            "balance_raw": int(bal or 0),
+            "last_price_native": lp or 0,
+        }
+        for tok, sym, name, bal, lp in rows
+    ]
+
