@@ -1,0 +1,109 @@
+name: deploy
+
+# only a push to main deploys. fork pull requests cannot trigger this, which
+# matters because the repo is public
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: crystal-prod-rg
+  ACR_NAME: crystalprodacr
+  IMAGE_REPO: crystal-backend
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest ruff==0.6.9
+      - run: ruff check .
+      - run: ruff format --check .
+      - env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: pytest -q
+
+  deploy:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # tagging with the commit sha is the point: the running image can always be
+      # traced back to a commit, which a build from someone's working tree cannot
+      - name: build image in acr
+        run: |
+          az acr build --registry "$ACR_NAME" \
+            --image "$IMAGE_REPO:${GITHUB_SHA}" \
+            --image "$IMAGE_REPO:latest" .
+
+      - name: resolve registry login server
+        id: acr
+        run: echo "server=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      # the indexer runs the schema migrations, so it goes first and has to come
+      # back healthy before the api is allowed to move
+      - name: deploy indexer
+        run: |
+          az containerapp update --name crystal-indexer --resource-group "$RESOURCE_GROUP" \
+            --image "${{ steps.acr.outputs.server }}/$IMAGE_REPO:${GITHUB_SHA}" -o none
+
+      - name: wait for indexer to report healthy
+        run: |
+          for i in $(seq 1 30); do
+            state=$(az containerapp revision list -n crystal-indexer -g "$RESOURCE_GROUP" \
+              --query "[?properties.active] | [-1].properties.healthState" -o tsv)
+            echo "indexer health: ${state:-unknown} (${i}/30)"
+            [ "$state" = "Healthy" ] && exit 0
+            sleep 10
+          done
+          echo "indexer did not reach Healthy; not deploying the api" >&2
+          exit 1
+
+      - name: deploy api
+        run: |
+          az containerapp update --name crystal-api --resource-group "$RESOURCE_GROUP" \
+            --image "${{ steps.acr.outputs.server }}/$IMAGE_REPO:${GITHUB_SHA}" -o none
+
+      - name: smoke check
+        run: |
+          base="https://crystal-api.yellowfield-3f176fc9.japaneast.azurecontainerapps.io"
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' "$base/price/mon" || echo 000)
+            echo "smoke /price/mon -> $code (${i}/20)"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "api did not answer after deploy" >&2
+          exit 1
