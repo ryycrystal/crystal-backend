@@ -369,13 +369,17 @@ def clear_vault_gap(cur, hour: int, vault: str) -> None:
     )
 
 
+BLOCKING_GAP_REASONS = ("no_sample", "stale_sample")
+
+
 def worst_vault_gap(cur, week_start: int) -> tuple[str, int]:
     cur.execute(
         """
         SELECT vault, COUNT(*) AS hours FROM crystal_rewards_vault_gaps
-        WHERE week_start = %s GROUP BY vault ORDER BY hours DESC, vault LIMIT 1
+        WHERE week_start = %s AND reason = ANY(%s)
+        GROUP BY vault ORDER BY hours DESC, vault LIMIT 1
         """,
-        (int(week_start),),
+        (int(week_start), list(BLOCKING_GAP_REASONS)),
     )
     row = cur.fetchone()
     return (str(row[0]), int(row[1])) if row else ("", 0)

@@ -28,6 +28,10 @@ VOLUME_COLS = (
 )
 
 
+def _blocks(gap: dict[str, Any]) -> bool:
+    return gap["reason"] in storage.BLOCKING_GAP_REASONS and gap["hours"] > rewards.gap_tolerance()
+
+
 def _require_admin(req: Request) -> None:
     if not ADMIN_KEY:
         raise HTTPException(status_code=503, detail="rewards admin key not configured")
@@ -87,7 +91,7 @@ def rewards_status() -> dict[str, Any]:
         "weeks": weeks,
         "vaultGaps": {
             "toleranceHours": rewards.gap_tolerance(),
-            "blocking": [g for g in gaps if g["hours"] > rewards.gap_tolerance()],
+            "blocking": [g for g in gaps if _blocks(g)],
             "vaults": gaps,
         },
     }
@@ -307,7 +311,7 @@ def rewards_gaps(week_start: int = 0, limit: int = 200) -> dict[str, Any]:
         "ok": True,
         "toleranceHours": tolerance,
         "meaning": "hours a vault held shares but could not be valued, so its holders earned nothing",
-        "blocking": [g for g in rows if g["hours"] > tolerance],
+        "blocking": [g for g in rows if _blocks(g)],
         "gaps": rows,
     }
 

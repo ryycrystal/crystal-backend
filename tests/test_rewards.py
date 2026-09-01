@@ -907,3 +907,37 @@ def test_gaps_from_another_week_do_not_block_this_one(_clean_rewards):
         for i in range(rewards.gap_tolerance() + 4):
             storage.record_vault_gap(cur, week_end + i * 3600, VAULT, week_end, 3, 100, 0, "no_sample")
     assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
+
+
+def test_a_genuinely_empty_vault_does_not_block_the_close(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance() + 20):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 2, 100, WEEK1 + i * 3600, "zero_value")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1], (
+        "a fresh sample reporting zero is data, not an outage, and must not hold up a payout"
+    )
+
+
+def test_a_zero_valued_vault_is_still_visible_even_though_it_does_not_block(_clean_rewards):
+    with storage.db_cursor() as cur:
+        storage.record_vault_gap(cur, WEEK1, VAULT, WEEK1, 2, 100, WEEK1, "zero_value")
+    rows = _gaps()
+    assert len(rows) == 1 and rows[0]["reason"] == "zero_value"
+
+
+def test_stale_hours_still_block_when_mixed_with_zero_valued_ones(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    tolerance = rewards.gap_tolerance()
+    with storage.db_cursor() as cur:
+        for i in range(tolerance + 1):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 2, 100, 0, "stale_sample")
+        for i in range(50):
+            storage.record_vault_gap(cur, WEEK1 + (i + 99) * 3600, VAULT, WEEK1, 2, 100, WEEK1, "zero_value")
+    assert rewards.close_due_weeks(now_ts=now) == []
