@@ -2057,6 +2057,12 @@ def _safe_timezone(tz: str) -> str:
     return name
 
 
+@router.get("/portfolio/{address}/last-trades")
+def portfolio_last_trades(address: str, addresses: str = "") -> dict[str, Any]:
+    wallets = [a.strip().lower() for a in (addresses or address).split(",") if a.strip()][:25]
+    return {"lastTrades": storage.last_trade_ts_by_token(wallets)}
+
+
 @router.get("/portfolio/{address}/daily")
 def portfolio_daily(
     address: str,
