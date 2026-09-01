@@ -603,6 +603,18 @@ class Sequencer:
                 )
 
             elif tag == "TR":
+                # the event names whoever called the core, so a routed trade credits
+                # the settler or router rather than the trader. every other trade tag
+                # already walks the transfer graph back to the real wallet
+                real_user = self._resolve_trade_user(
+                    txh,
+                    parsed,
+                    log.get("address", "").lower(),
+                    transfer_maps,
+                )
+                if real_user:
+                    parsed = dict(parsed)
+                    parsed["user"] = real_user
                 self._state.apply_market_trade(
                     blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx
                 )
