@@ -2811,6 +2811,7 @@ def list_crystal_protocol_events(kind: str = "", limit: int = 50) -> list[dict]:
             for k, p, b, t, tx in cur.fetchall()
         ]
 
+
 def graduated_holdings(wallets: list[str]) -> list[dict]:
     addrs = [str(w or "").lower() for w in (wallets or []) if w]
     if not addrs:
@@ -2838,3 +2839,37 @@ def graduated_holdings(wallets: list[str]) -> list[dict]:
         for tok, sym, name, bal, lp in rows
     ]
 
+
+def pnl_24h(wallets: list[str], cutoff_ts: int) -> tuple[Decimal, Decimal]:
+    addrs = [str(w or "").lower() for w in (wallets or []) if w]
+    if not addrs:
+        return Decimal(0), Decimal(0)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            WITH realized AS (
+                SELECT COALESCE(SUM(realized_native), 0) AS v
+                FROM launchpad_trades
+                WHERE user_address = ANY(%(a)s) AND timestamp >= %(cut)s
+            ), unrealized AS (
+                SELECT COALESCE(SUM(
+                    p.balance_token * (t.last_price_native - COALESCE(o.close_price, t.last_price_native))
+                ), 0) AS v
+                FROM launchpad_positions p
+                JOIN launchpad_tokens t ON t.token = p.token
+                LEFT JOIN LATERAL (
+                    SELECT close_price FROM launchpad_ohlcv
+                    WHERE token = p.token AND resolution_sec = 3600 AND bucket_start <= %(cut)s
+                    ORDER BY bucket_start DESC
+                    LIMIT 1
+                ) o ON TRUE
+                WHERE p.user_address = ANY(%(a)s) AND p.balance_token > 0
+            )
+            SELECT realized.v, unrealized.v FROM realized, unrealized
+            """,
+            {"a": addrs, "cut": int(cutoff_ts)},
+        )
+        row = cur.fetchone()
+    if not row:
+        return Decimal(0), Decimal(0)
+    return Decimal(row[0] or 0), Decimal(row[1] or 0)

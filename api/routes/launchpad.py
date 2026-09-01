@@ -20,7 +20,6 @@ from api.api import (
     _fmt,
     _fmt_usd,
     _holders_for_token,
-    _initial_price_kline,
     _lifecycle_fields,
     _mon_price_usd,
     _nadfun_version,
@@ -1548,8 +1547,12 @@ def _merged_portfolio(
     total_value_usd = total_value_native * mon_price / _WEI if mon_price > 0 else Decimal(0)
     total_pnl_usd = total_pnl_native_val * mon_price / _WEI if mon_price > 0 else Decimal(0)
 
+    realized_24h, unrealized_24h = storage.pnl_24h(addrs, int(time.time()) - 86400)
+
     summary = {
         "portfolio_value_native": _fmt(total_value_native),
+        "realized_pnl_24h_native": _fmt(realized_24h),
+        "unrealized_pnl_24h_native": _fmt(unrealized_24h),
         "portfolio_value_usd": _fmt_usd(total_value_usd),
         "realized_pnl_native": _fmt(total_realized_pnl),
         "unrealized_pnl_native": _fmt(total_unrealized_pnl),
@@ -2396,22 +2399,6 @@ def chart_only(
         max_buckets=lim,
         before_ts=int(before_ts) or None,
     )
-
-    if not out:
-        with db_cursor() as cur:
-            cur.execute(
-                "SELECT created_at, last_price_native FROM launchpad_tokens WHERE token = %s",
-                (token_addr,),
-            )
-            token_row = cur.fetchone()
-        if token_row:
-            seed = _initial_price_kline(
-                token_row[0],
-                token_row[1],
-                chartres,
-                before_ts=int(before_ts) or None,
-            )
-            out = [seed] if seed else []
 
     mon_usd = _mon_usd_window(int(out[0]["time"]), int(out[-1]["time"]) + chartres) if rates and out else None
 
