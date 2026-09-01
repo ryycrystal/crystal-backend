@@ -30,12 +30,20 @@ def _rpc(method: str, params: list):
 
 
 def is_contract(addr: str) -> bool:
+    """True only for real contracts.
+
+    An eip 7702 delegated wallet carries code too: the 23 byte designator
+    0xef0100 followed by the implementation address. Those are still ordinary
+    user wallets, and treating them as contracts would both flag real traders as
+    suspects and block writing them back as the resolved trader.
+    """
     a = (addr or "").lower()
     if a in _code_cache:
         return _code_cache[a]
     try:
-        code = _rpc("eth_getCode", [a, "latest"])
-        out = bool(code) and code != "0x"
+        code = (_rpc("eth_getCode", [a, "latest"]) or "0x").lower()
+        delegated = code.startswith("0xef0100") and len(code) == 48
+        out = bool(code) and code != "0x" and not delegated
     except Exception:
         out = False
     _code_cache[a] = out
