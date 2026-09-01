@@ -4,12 +4,15 @@ from .base import db_cursor
 
 
 def init_db() -> None:
+    from .rewards import ensure_rewards_tables
+
     with db_cursor() as cur:
         cur.execute(
             """
             CREATE EXTENSION IF NOT EXISTS pg_trgm;
             """
         )
+        ensure_rewards_tables(cur=cur)
 
         cur.execute(
             """

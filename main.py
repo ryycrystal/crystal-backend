@@ -1,6 +1,7 @@
 import uvicorn
 from fastapi import FastAPI
 
+import core.rewards as rewards
 import core.storage as storage
 from api import x_track
 from api.api import app as api_app
@@ -12,6 +13,7 @@ app: FastAPI = api_app
 async def _startup() -> None:
     storage.init_pool()
     x_track.start_workers()
+    rewards.start_worker()
 
 
 @app.on_event("shutdown")
