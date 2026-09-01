@@ -42,6 +42,7 @@ def evaluate(
     processed: int,
     holes: int,
     vault_divergences: list | None = None,
+    vault_counter_drift: list | None = None,
 ) -> dict:
     expected = max(window_end - window_start + 1, 0)
     gaps = max(expected - processed, 0) if expected else 0
@@ -62,6 +63,13 @@ def evaluate(
             f"{len(divs)} vault depositors whose ledger disagrees with their chain shares, "
             f"worst {worst[1][:10]} in {worst[0][:10]} ledger {worst[2]} vs chain {worst[3]}"
         )
+    drift = list(vault_counter_drift or [])
+    if drift:
+        d0 = drift[0]
+        findings.append(
+            f"{len(drift)} vault depositor counters disagree with the ledger, "
+            f"first {d0[1][:10]} in {d0[0][:10]} {d0[2]} {d0[3]} vs {d0[4]}"
+        )
     return {
         "ts": int(time.time()),
         "last_block": last_block,
@@ -73,6 +81,10 @@ def evaluate(
         "cache_holes": holes,
         "vault_ledger_divergences": [
             {"vault": v, "user": u, "ledgerNet": str(n), "chainShares": str(c)} for v, u, n, c in divs
+        ],
+        "vault_user_counter_drift": [
+            {"vault": v, "user": u, "field": f, "stored": str(s), "actual": str(a)}
+            for v, u, f, s, a in drift
         ],
         "findings": findings,
         "ok": not findings,
@@ -101,7 +113,14 @@ async def sweep() -> dict:
     except Exception as e:
         print(f"[INTEGRITY] vault ledger check failed {e!r}", flush=True)
         divergences = []
-    result = evaluate(p_max, stall, head, window_start, window_end, processed, holes, divergences)
+    try:
+        counter_drift = storage.vault_user_counter_drift(INTEGRITY_VAULT_DIVERGENCE_LIMIT)
+    except Exception as e:
+        print(f"[INTEGRITY] vault counter check failed {e!r}", flush=True)
+        counter_drift = []
+    result = evaluate(
+        p_max, stall, head, window_start, window_end, processed, holes, divergences, counter_drift
+    )
     storage.set_meta("integrity_last", json.dumps(result))
     return result
 

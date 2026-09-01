@@ -642,6 +642,57 @@ def vault_ledger_divergences(limit: int = 50) -> list[tuple[str, str, int, int]]
         return [(str(a), str(b), int(c or 0), int(e or 0)) for a, b, c, e in cur.fetchall()]
 
 
+def vault_user_counter_drift(limit: int = 50) -> list[tuple[str, str, str, int, int]]:
+    """Depositor counters that disagree with the rows they summarise.
+
+    shares self-heals against balanceOf and the ledger sums are checked separately,
+    but deposits/withdraws/last_* are only ever moved by upsert_crystal_vault_user_delta.
+    Anything that writes a flow row without going through that seam - a backfill, a
+    repair script - leaves the counters behind with nothing to notice, and the vault
+    page renders an exited depositor as one that never withdrew.
+
+    One row per disagreeing field: (vault, user, field, stored, actual).
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            WITH d AS (
+                SELECT vault, user_address, COUNT(*) n, MAX(timestamp) last_ts
+                FROM crystal_vault_deposits GROUP BY vault, user_address
+            ), w AS (
+                SELECT vault, user_address, COUNT(*) n, MAX(timestamp) last_ts
+                FROM crystal_vault_withdrawals GROUP BY vault, user_address
+            ), j AS (
+                SELECT u.vault, u.user_address,
+                       u.deposits, COALESCE(d.n, 0) dep_n,
+                       u.withdraws, COALESCE(w.n, 0) wd_n,
+                       u.last_deposit, COALESCE(d.last_ts, 0) dep_ts,
+                       u.last_withdraw, COALESCE(w.last_ts, 0) wd_ts
+                FROM crystal_vault_users u
+                LEFT JOIN d ON d.vault = u.vault AND d.user_address = u.user_address
+                LEFT JOIN w ON w.vault = u.vault AND w.user_address = u.user_address
+            )
+            SELECT vault, user_address, 'deposits', deposits, dep_n
+            FROM j WHERE deposits <> dep_n
+            UNION ALL
+            SELECT vault, user_address, 'withdraws', withdraws, wd_n
+            FROM j WHERE withdraws <> wd_n
+            UNION ALL
+            SELECT vault, user_address, 'last_deposit', last_deposit, dep_ts
+            FROM j WHERE last_deposit <> dep_ts
+            UNION ALL
+            SELECT vault, user_address, 'last_withdraw', last_withdraw, wd_ts
+            FROM j WHERE last_withdraw <> wd_ts
+            ORDER BY 1, 2, 3
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [
+            (str(a), str(b), str(c), int(d or 0), int(e or 0)) for a, b, c, d, e in cur.fetchall()
+        ]
+
+
 def vault_sample_nav_before(vault: str, ts: int) -> tuple[int, float, int] | None:
     """Latest sample strictly before ts that can price a share on its own.
 
