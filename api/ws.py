@@ -98,7 +98,9 @@ MAX_CONCURRENT_TOKEN_PUSHES = 6
 
 SNAPSHOT_READ_ATTEMPTS = 3
 
-VAULTS_INTERVAL_SECONDS = 5.0
+# the vault list body got ~13x cheaper to build once sample reduction moved
+# into sql, so this gate can be tight enough that a deposit shows up promptly
+VAULTS_INTERVAL_SECONDS = 2.0
 
 BALANCES_INTERVAL_SECONDS = 3.0
 

@@ -409,7 +409,7 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
 
 
 @router.get("/vaults/list")
-@ttl_cache("vaults:list", ttl_seconds=3)
+@ttl_cache("vaults:list", ttl_seconds=2)
 def list_vaults(
     user: str | None = Query(None, description="optional user address for userShares enrichment"),
     search: str | None = Query(None, min_length=0, max_length=128),
@@ -687,9 +687,10 @@ def vault_refresh_balance(
 
 
 @router.get("/vaults/{address}/{user}")
-# every vault page open recomputed this from scratch; a short ttl with a stale
-# window absorbs a burst of opens without holding anyone on yesterday's numbers
-@ttl_cache("vaults:summary", ttl_seconds=5, serve_stale_seconds=20)
+# short enough to be imperceptible: the vaults channel invalidates this the
+# moment a deposit or withdrawal lands and the client refetches immediately, so
+# anything longer shows the position it just replaced. no stale serving here.
+@ttl_cache("vaults:summary", ttl_seconds=2)
 def vault_user_summary(
     address: str,
     user: str,
