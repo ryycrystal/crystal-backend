@@ -10,6 +10,7 @@ import core.storage as storage
 from core import chain as h
 from core.sequencer import Sequencer
 from core.storage import db_cursor
+from scripts.rebuild_positions_pnl import _fold, _write
 from state import RPC_HTTP
 
 _code_cache: dict[str, bool] = {}
@@ -73,6 +74,52 @@ def resolve_real_trader(seq, txh: str, token: str, current_user: str, is_buy: bo
         return (seq._resolve_trade_user(txh, parsed, h.CONTRACTS["ROUTER"].lower(), maps) or "").lower()
     except Exception:
         return ""
+
+
+def rebuild_positions_for_user(user: str) -> int:
+    """Refold a wallet's trades so its positions match the rows it now owns.
+
+    Moving a trade between wallets leaves both sides' cost basis stale: the old
+    wallet keeps basis it never earned and the new one has none, so its next sell
+    books the whole sale as profit.
+    """
+    addr = (user or "").lower()
+    if not addr:
+        return 0
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token, txhash, log_index, is_buy, native_amount, token_amount
+            FROM launchpad_trades WHERE user_address = %s
+            ORDER BY token, timestamp, log_index
+            """,
+            (addr,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return 0
+
+    trade_rows: list[tuple[str, int, int]] = []
+    position_rows: list[tuple] = []
+    pending: list[tuple] = []
+    current: str | None = None
+
+    def flush(tok: str | None) -> None:
+        nonlocal pending
+        if tok is None or not pending:
+            return
+        per_trade, realized_total, basis = _fold(pending)
+        trade_rows.extend(per_trade)
+        position_rows.append((addr, tok, realized_total, basis))
+        pending = []
+
+    for token, txhash, log_index, is_buy, na, ta in rows:
+        if token != current:
+            flush(current)
+            current = token
+        pending.append((txhash, log_index, is_buy, na, ta))
+    flush(current)
+    return _write(trade_rows, position_rows, True)
 
 
 def main() -> None:
@@ -154,6 +201,7 @@ def main() -> None:
     print(f"[TRADERS] {len(rows)} rows credited to a contract", flush=True)
 
     fixed = unresolved = unchanged = 0
+    touched: set[str] = set()
     for txh, log_index, token, user_address, is_buy in rows:
         real = resolve_real_trader(seq, txh, token, user_address, is_buy)
         if not real:
@@ -176,10 +224,21 @@ def main() -> None:
                     f"UPDATE {args.table} SET user_address = %s WHERE txhash = %s AND log_index = %s",
                     (real, txh, log_index),
                 )
+        touched.add((user_address or "").lower())
+        touched.add(real)
         fixed += 1
 
     verb = "repaired" if args.apply else "would repair"
     print(f"[TRADERS] {verb} {fixed}, unresolved {unresolved}, left alone {unchanged}", flush=True)
+
+    if args.table == "launchpad_trades" and touched:
+        verb = "rebuilt" if args.apply else "would rebuild"
+        print(f"[TRADERS] {verb} positions for {len(touched)} wallets on both sides of the move", flush=True)
+        if args.apply:
+            rebuilt = 0
+            for addr in sorted(touched):
+                rebuilt += rebuild_positions_for_user(addr)
+            print(f"[TRADERS] corrected {rebuilt} position rows", flush=True)
 
 
 if __name__ == "__main__":
