@@ -51,6 +51,10 @@ jobs:
   deploy:
     needs: gate
     runs-on: ubuntu-latest
+    # gated on the production environment: a human reviewer has to approve before
+    # this job starts. azure's federated credential is bound to this environment,
+    # so a workflow that skips it cannot get a token at all
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
