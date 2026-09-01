@@ -533,9 +533,7 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
                     (vaults, hour),
                 )
                 samples = {str(v).lower(): (Decimal(u or 0), int(sts)) for v, u, sts in cur.fetchall()}
-                vault_usd = {
-                    v: usd for v, (usd, sts) in samples.items() if sts >= hour - VAULT_SAMPLE_STALENESS
-                }
+                vault_usd = {v: usd for v, (usd, sts) in samples.items() if sts >= hour - VAULT_SAMPLE_STALENESS}
                 supply: dict[str, Decimal] = {}
                 holder_count: dict[str, int] = {}
                 for v, _u, sh, _pn in holdings:

@@ -688,9 +688,7 @@ def vault_user_counter_drift(limit: int = 50) -> list[tuple[str, str, str, int, 
             """,
             (int(limit),),
         )
-        return [
-            (str(a), str(b), str(c), int(d or 0), int(e or 0)) for a, b, c, d, e in cur.fetchall()
-        ]
+        return [(str(a), str(b), str(c), int(d or 0), int(e or 0)) for a, b, c, d, e in cur.fetchall()]
 
 
 def vault_sample_nav_before(vault: str, ts: int) -> tuple[int, float, int] | None:

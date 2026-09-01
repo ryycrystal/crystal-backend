@@ -83,8 +83,7 @@ def evaluate(
             {"vault": v, "user": u, "ledgerNet": str(n), "chainShares": str(c)} for v, u, n, c in divs
         ],
         "vault_user_counter_drift": [
-            {"vault": v, "user": u, "field": f, "stored": str(s), "actual": str(a)}
-            for v, u, f, s, a in drift
+            {"vault": v, "user": u, "field": f, "stored": str(s), "actual": str(a)} for v, u, f, s, a in drift
         ],
         "findings": findings,
         "ok": not findings,
@@ -118,9 +117,7 @@ async def sweep() -> dict:
     except Exception as e:
         print(f"[INTEGRITY] vault counter check failed {e!r}", flush=True)
         counter_drift = []
-    result = evaluate(
-        p_max, stall, head, window_start, window_end, processed, holes, divergences, counter_drift
-    )
+    result = evaluate(p_max, stall, head, window_start, window_end, processed, holes, divergences, counter_drift)
     storage.set_meta("integrity_last", json.dumps(result))
     return result
 
