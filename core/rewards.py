@@ -140,6 +140,24 @@ def _wm_get(key: str, default: str) -> str:
     return raw if raw is not None else default
 
 
+# accrual is a read-modify-write over a watermark and every contrib upsert is
+# additive, so two workers running the same batch would double it. the read goes
+# through the accruing transaction and every accrual transaction takes this lock
+# first, which postgres releases on commit or rollback, so a second worker waits
+# and then reads the advanced watermark instead of replaying the batch
+REWARDS_LOCK_KEY = 782301944117
+
+
+def _lock_accrual(cur) -> None:
+    cur.execute("SELECT pg_advisory_xact_lock(%s)", (REWARDS_LOCK_KEY,))
+
+
+def _wm_read(cur, key: str, default: str) -> str:
+    cur.execute("SELECT value FROM launchpad_kv WHERE key = %s", (key,))
+    row = cur.fetchone()
+    return row[0] if row and row[0] is not None else default
+
+
 def _mon_usd_at(cur, ts: int) -> Decimal:
     cur.execute(
         """
@@ -210,7 +228,8 @@ def accrue_launchpad(guard=None) -> int:
         if guard is not None and not guard():
             return processed
         with db_cursor() as cur:
-            wm = int(_wm_get("rewards_wm_launchpad", "0"))
+            _lock_accrual(cur)
+            wm = int(_wm_read(cur, "rewards_wm_launchpad", "0"))
             deny = storage.rewards_denylist(cur)
             cur.execute(
                 """
@@ -270,7 +289,8 @@ def accrue_spot_takers(guard=None) -> int:
         if guard is not None and not guard():
             return processed
         with db_cursor() as cur:
-            wm_ts, wm_tx, wm_li = _parse_keyset(_wm_get("rewards_wm_spot_taker", "0||-1"))
+            _lock_accrual(cur)
+            wm_ts, wm_tx, wm_li = _parse_keyset(_wm_read(cur, "rewards_wm_spot_taker", "0||-1"))
             deny = storage.rewards_denylist(cur)
             stables = storage.rewards_stable_tokens(cur)
             markets = _markets_meta(cur)
@@ -344,7 +364,8 @@ def accrue_spot_makers(guard=None) -> int:
         if guard is not None and not guard():
             return processed
         with db_cursor() as cur:
-            wm_ts, wm_tx, wm_li = _parse_keyset(_wm_get("rewards_wm_spot_maker", "0||-1"))
+            _lock_accrual(cur)
+            wm_ts, wm_tx, wm_li = _parse_keyset(_wm_read(cur, "rewards_wm_spot_maker", "0||-1"))
             deny = storage.rewards_denylist(cur)
             stables = storage.rewards_stable_tokens(cur)
             markets = _markets_meta(cur)
@@ -429,7 +450,8 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
         if guard is not None and not guard():
             return hours_done
         with db_cursor() as cur:
-            wm = int(_wm_get("rewards_wm_vault_hour", "0"))
+            _lock_accrual(cur)
+            wm = int(_wm_read(cur, "rewards_wm_vault_hour", "0"))
             if wm <= 0:
                 wm = (max(start_ts, 0) // 3600) * 3600
             hour = wm + 3600

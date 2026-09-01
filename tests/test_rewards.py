@@ -584,3 +584,32 @@ def test_predeposit_boost_burns_on_round_trip(_clean_rewards):
     c = _contrib(U1)
     assert c["vault"] == pytest.approx(4000.0 * 3)
     assert c["points"] == pytest.approx(600.0 * 2 + 200.0)
+
+
+def test_concurrent_accrual_cannot_double_count(_clean_rewards):
+    import threading
+
+    rewards = _clean_rewards
+    _seed_token(TOK_A, None)
+    for i in range(60):
+        _seed_launchpad_trade(500 + i, TOK_A, U1, WEEK1 + 10 + i, 10.0)
+
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            barrier.wait()
+            rewards.accrue_launchpad()
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert _contrib(U1)["points"] == pytest.approx(600.0)
+    assert _contrib(U1)["pregrad"] == pytest.approx(600.0)
