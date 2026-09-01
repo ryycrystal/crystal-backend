@@ -2873,3 +2873,42 @@ def pnl_24h(wallets: list[str], cutoff_ts: int) -> tuple[Decimal, Decimal]:
     if not row:
         return Decimal(0), Decimal(0)
     return Decimal(row[0] or 0), Decimal(row[1] or 0)
+
+
+def pools_needing_reserve_refresh(limit: int = 200, stale_seconds: int = 300, lookback_seconds: int = 86400):
+    now = int(time.time())
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.pool, p.token_addr, p.token_is_0, COALESCE(p.last_sync_at, 0) AS synced_at
+            FROM launchpad_pools p
+            JOIN LATERAL (
+                SELECT MAX(timestamp) AS last_trade_at
+                FROM launchpad_trades
+                WHERE token = p.token_addr AND timestamp > %s
+            ) t ON TRUE
+            WHERE t.last_trade_at IS NOT NULL
+              AND COALESCE(p.last_sync_at, 0) < %s
+            ORDER BY t.last_trade_at DESC
+            LIMIT %s
+            """,
+            (now - int(lookback_seconds), now - int(stale_seconds), int(limit)),
+        )
+        return cur.fetchall()
+
+
+def force_pool_reserves(pool: str, reserve_token: int, reserve_native: int, blk: int, blk_ts: int, cur=None) -> None:
+    sql = """
+        UPDATE launchpad_pools
+        SET reserve_token = %s,
+            reserve_native = %s,
+            last_sync_block = GREATEST(COALESCE(last_sync_block, 0), %s),
+            last_sync_at = %s
+        WHERE pool = %s
+    """
+    args = (int(reserve_token), int(reserve_native), int(blk), int(blk_ts), (pool or "").lower())
+    if cur is None:
+        with db_cursor() as c:
+            c.execute(sql, args)
+    else:
+        cur.execute(sql, args)

@@ -584,9 +584,6 @@ def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
         data["reserveBase"] = res["reserveToken"]
         data["reservesFrom"] = "pair"
         data["reservesSyncedAt"] = res.get("syncedAt", 0)
-        # these reserves only advance when the indexer sees a Sync from this pair,
-        # so a quiet pool serves values that are days old. handing the client the
-        # pool address lets it read the pair itself before it prices a trade
         data["pool"] = res.get("pool") or ""
 
     remaining = {

@@ -9,6 +9,7 @@ import backfill
 import core.storage as storage
 import export_logs
 from core.integrity import integrity_worker
+from core.pool_reserve_sync import pool_reserve_worker
 from core.referral_rewards import referral_rewards_worker
 from core.sequencer import SEQUENCER
 from core.stream import BACKFILL_BATCH, stream_logs, vault_sampler
@@ -180,6 +181,7 @@ async def _start_live(args: argparse.Namespace, start_block: int) -> None:
         asyncio.create_task(vault_sampler(SEQUENCER._state)),
         asyncio.create_task(integrity_worker()),
         asyncio.create_task(referral_rewards_worker()),
+        asyncio.create_task(pool_reserve_worker()),
         asyncio.create_task(_seed_referrals()),
         asyncio.create_task(_seed_lvmon()),
     ]

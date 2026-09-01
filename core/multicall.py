@@ -30,10 +30,10 @@ def abi_bytes(data: bytes) -> bytes:
     return abi_u256(len(d)) + d + (b"\x00" * pad)
 
 
-def encode_multicall3_aggregate3(calls: list[tuple[str, bytes]]) -> str:
+def encode_multicall3_aggregate3(calls: list[tuple[str, bytes]], allow_failure: bool = False) -> str:
     elems = []
     for target, calldata in calls:
-        body = abi_addr(target) + abi_bool(False) + abi_u256(96) + abi_bytes(calldata)
+        body = abi_addr(target) + abi_bool(allow_failure) + abi_u256(96) + abi_bytes(calldata)
         elems.append(body)
     n = len(elems)
     arr_heads_size = 32 * n
