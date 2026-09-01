@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from urllib.parse import quote
 
 import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.pool import PoolError, ThreadedConnectionPool
 
 from env_loader import load_env
 
@@ -95,6 +95,22 @@ def _get_pool() -> ThreadedConnectionPool:
     return _POOL
 
 
+_POOL_WAIT_SECONDS = float(os.getenv("DB_POOL_WAIT_SECONDS", "10"))
+
+
+def _getconn_waiting(pool: ThreadedConnectionPool) -> psycopg2.extensions.connection:
+    deadline = time.monotonic() + _POOL_WAIT_SECONDS
+    delay = 0.02
+    while True:
+        try:
+            return pool.getconn()
+        except PoolError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
+
+
 def acquire_indexer_lock(wait_seconds: float = 90.0) -> psycopg2.extensions.connection:
     pool = _get_pool()
     deadline = time.monotonic() + max(wait_seconds, 0.0)
@@ -151,7 +167,7 @@ def release_indexer_lock(conn: psycopg2.extensions.connection | None) -> None:
 @contextmanager
 def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
     pool = _get_pool()
-    conn = pool.getconn()
+    conn = _getconn_waiting(pool)
 
     try:
         if conn.autocommit:
@@ -167,5 +183,31 @@ def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
             raise
         finally:
             cur.close()
+    finally:
+        pool.putconn(conn)
+
+
+@contextmanager
+def db_autocommit_cursor() -> Iterator[psycopg2.extensions.cursor]:
+    pool = _get_pool()
+    conn = _getconn_waiting(pool)
+
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+            try:
+                reset_cur = conn.cursor()
+                reset_cur.execute("RESET ALL")
+                reset_cur.close()
+            except Exception:
+                pass
+            try:
+                conn.autocommit = False
+            except Exception:
+                pass
     finally:
         pool.putconn(conn)
