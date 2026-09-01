@@ -292,6 +292,24 @@ async def x_tweets_post(req: Request, limit: int = BACKLOG_LIMIT):
     return storage.list_x_recent_tweets(names, max(1, min(int(limit), 200)))
 
 
+@router.get("/x/held-tokens")
+async def x_held_tokens(address: str = ""):
+    addrs = [a.strip().lower() for a in (address or "").split(",") if a.strip()][:25]
+    if not addrs:
+        return {"tokens": []}
+    rows = storage.held_tokens_with_handles(addrs)
+    # the poller only fetches handles on the tracked list, so a token the user
+    # holds has to join it or its alerts would never arrive
+    try:
+        existing = {u.lower() for u in storage.list_x_tracked_users()}
+        fresh = [r["handle"] for r in rows if r["handle"].lower() not in existing]
+        if fresh:
+            _add_tracked(fresh[:TRACK_MAX_PER_REQUEST])
+    except Exception:
+        pass
+    return {"tokens": rows}
+
+
 @router.websocket("/x/ws")
 async def x_ws(ws: WebSocket):
     await ws.accept()

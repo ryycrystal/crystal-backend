@@ -200,3 +200,41 @@ def claim_x_poll_leader(holder: str, ttl_seconds: int = 90) -> bool:
             (holder, holder, int(ttl_seconds)),
         )
         return cur.fetchone() is not None
+
+
+def held_tokens_with_handles(wallets: list[str]) -> list[dict]:
+    addrs = [str(w or "").lower() for w in (wallets or []) if w]
+    if not addrs:
+        return []
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT t.token, t.symbol, t.name, t.metadata_cid, t.source, t.last_price_native,
+                   t.migrated, t.circulating_supply, t.social1, t.social2, t.social3, t.social4
+            FROM launchpad_positions p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.user_address = ANY(%s) AND p.balance_token > 0
+              AND (t.social1 <> '' OR t.social2 <> '' OR t.social3 <> '' OR t.social4 <> '')
+            """,
+            (addrs,),
+        )
+        rows = cur.fetchall()
+    out = []
+    for token, symbol, name, cid, source, price, migrated, supply, s1, s2, s3, s4 in rows:
+        handle = next((h for h in (handle_from_social_url(x) for x in (s1, s2, s3, s4)) if h), None)
+        if not handle:
+            continue
+        out.append(
+            {
+                "token": token,
+                "handle": handle,
+                "symbol": symbol or "",
+                "name": name or "",
+                "metadata_cid": cid or "",
+                "source": int(source or 0),
+                "last_price_native": str(price or 0),
+                "migrated": bool(migrated),
+                "circulating_supply": str(int(supply or 0)),
+            }
+        )
+    return out
