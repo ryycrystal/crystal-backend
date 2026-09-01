@@ -765,7 +765,7 @@ def token_overview_graph(
     excluded_static = list(_static_internal_addrs())
 
     try:
-        if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+        if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400, 604800):
             raise HTTPException(status_code=400)
 
         token_addr = token_addr.lower()
@@ -2385,7 +2385,7 @@ def chart_only(
 ) -> dict[str, Any]:
     token_addr = token_addr.lower()
 
-    if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+    if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400, 604800):
         raise HTTPException(status_code=400)
 
     lim = max(1, min(int(limit or 1000), 5000))
