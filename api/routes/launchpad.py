@@ -2419,11 +2419,10 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
     }
 
 
-def _mon_usd_window(start: int, end: int) -> dict[str, Any]:
-    from api.routes.orderbook import coarsened_resolution
+@ttl_cache("mon_usd:window", ttl_seconds=60, serve_stale_seconds=300)
+def _mon_usd_window_for(start: int, end: int, res: int) -> dict[str, Any]:
     from api.spot_graph import _MIN_PRICE_TRADE_WEI, _mon_usd_at
 
-    res = coarsened_resolution(end - start, 60)
     points = storage.mon_usd_series(start, end, res, _MIN_PRICE_TRADE_WEI)
     return {
         "resolution": res,
@@ -2432,6 +2431,19 @@ def _mon_usd_window(start: int, end: int) -> dict[str, Any]:
         "before": float(_mon_usd_at(start) or 0) or None,
         "points": [{"t": t, "rate": r} for t, r in points],
     }
+
+
+def _mon_usd_window(start: int, end: int) -> dict[str, Any]:
+    from api.routes.orderbook import coarsened_resolution
+
+    start = int(start)
+    end = int(end)
+    res = coarsened_resolution(max(end - start, 1), 60)
+    snapped_start = (start // res) * res
+    snapped_end = (end // res) * res
+    if snapped_end <= snapped_start:
+        snapped_end = snapped_start + res
+    return _mon_usd_window_for(snapped_start, snapped_end, res)
 
 
 @router.get("/chart/{token_addr}/{chartres}")
