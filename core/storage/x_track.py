@@ -238,3 +238,40 @@ def held_tokens_with_handles(wallets: list[str]) -> list[dict]:
             }
         )
     return out
+
+
+def held_or_listed_handles() -> set[str]:
+    """handles that earn their poll slot: on someone's personal list, or the x
+    account of a token someone still holds"""
+    keep: set[str] = set()
+    with db_cursor() as cur:
+        cur.execute("SELECT DISTINCT username FROM x_user_tracked")
+        keep.update(r[0] for r in cur.fetchall() if r[0])
+        cur.execute(
+            """
+            SELECT DISTINCT t.social1, t.social2, t.social3, t.social4
+            FROM launchpad_tokens t
+            WHERE (t.social1 <> '' OR t.social2 <> '' OR t.social3 <> '' OR t.social4 <> '')
+              AND EXISTS (
+                SELECT 1 FROM launchpad_positions p
+                WHERE p.token = t.token AND p.balance_token > 0
+              )
+            """
+        )
+        for row in cur.fetchall():
+            for raw in row:
+                handle = handle_from_social_url(raw)
+                if handle:
+                    keep.add(handle.lower())
+    return keep
+
+
+def prune_x_tracked_users(protected: set[str]) -> list[str]:
+    keep = {h.lower() for h in held_or_listed_handles()} | {p.lower() for p in protected}
+    with db_cursor() as cur:
+        cur.execute("SELECT username FROM x_tracked_users")
+        current = [r[0] for r in cur.fetchall() if r[0]]
+        stale = [u for u in current if u.lower() not in keep]
+        if stale:
+            cur.execute("DELETE FROM x_tracked_users WHERE username = ANY(%s)", (stale,))
+    return stale

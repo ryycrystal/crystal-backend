@@ -17,7 +17,7 @@ from api.x_api import API_KEY, _compute_verified_flag, _normalize_verified_type
 
 router = APIRouter()
 
-POLL_INTERVAL = float(os.getenv("TRACK_POLL_INTERVAL", "30"))
+POLL_INTERVAL = float(os.getenv("TRACK_POLL_INTERVAL", "60"))
 FANOUT_INTERVAL = float(os.getenv("TRACK_FANOUT_INTERVAL", "2"))
 BACKLOG_LIMIT = int(os.getenv("TRACK_BACKLOG_LIMIT", "50"))
 LIVE_WINDOW_SECS = int(os.getenv("TRACK_LIVE_WINDOW", "900"))
@@ -25,6 +25,7 @@ LEADER_TTL_SECS = int(os.getenv("TRACK_LEADER_TTL", "90"))
 SEED_USERS = [u.strip().lstrip("@").lower() for u in os.getenv("TRACKED_USERS", "").split(",") if u.strip()]
 TRACK_MAX_USERS = int(os.getenv("TRACK_MAX_USERS", "500"))
 TRACK_MAX_PER_REQUEST = int(os.getenv("TRACK_MAX_PER_REQUEST", "100"))
+PRUNE_INTERVAL_SECS = float(os.getenv("TRACK_PRUNE_INTERVAL", "3600"))
 KNOWN_HANDLE_TTL_SECS = float(os.getenv("TRACK_KNOWN_HANDLE_TTL", "300"))
 TRACK_MAX_PER_USER = int(os.getenv("TRACK_MAX_PER_USER", "50"))
 ADMIN_TOKEN = os.getenv("X_TRACK_ADMIN_TOKEN", "")
@@ -132,10 +133,22 @@ async def _poll_user(client: httpx.AsyncClient, username: str) -> int:
 
 
 async def _poll_loop() -> None:
+    last_prune = 0.0
     async with httpx.AsyncClient(timeout=20.0) as client:
         while True:
             try:
                 if storage.claim_x_poll_leader(NODE_ID, LEADER_TTL_SECS):
+                    # every handle costs a paid call per cycle forever, so drop the
+                    # ones auto enrolled for a token nobody holds any more
+                    now = time.time()
+                    if now - last_prune > PRUNE_INTERVAL_SECS:
+                        last_prune = now
+                        try:
+                            dropped = await asyncio.to_thread(storage.prune_x_tracked_users, set(SEED_USERS))
+                            if dropped:
+                                print(f"[XTRACK] pruned {len(dropped)} unheld handles", flush=True)
+                        except Exception as e:
+                            print(f"[XTRACK] prune failed: {e!r}", flush=True)
                     for username in storage.list_polled_usernames():
                         try:
                             await _poll_user(client, username)
