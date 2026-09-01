@@ -1,5 +1,7 @@
 import argparse
 import time
+
+import psycopg2
 from decimal import Decimal
 
 from psycopg2.extras import execute_values
@@ -120,79 +122,86 @@ def main():
     shown = 0
     t0 = time.perf_counter()
     for i, token in enumerate(tokens, 1):
-        with storage.db_cursor() as cur:
-            events = events_for_token(cur, token)
-            if not events:
-                continue
-            users, sell_realized = fold(events, venues)
-            cur.execute(
-                "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native "
-                "FROM launchpad_positions WHERE token = %s",
-                (token,),
-            )
-            current = {r[0]: (int(r[1] or 0), int(r[2] or 0), Decimal(r[3] or 0)) for r in cur.fetchall()}
-
-            updates = []
-            for addr, (open_t, basis, bought, sold, realized) in users.items():
-                cur_row = current.get(addr)
-                if cur_row is None:
-                    continue
-                if cur_row[0] == bought and cur_row[1] == basis and cur_row[2] == realized:
-                    continue
-                updates.append((addr, token, int(bought), int(basis), realized))
-                if shown < args.show:
-                    print(
-                        f"  {addr[:12]}.. {token[:12]}.. bought {cur_row[0]/1e18:,.2f}->{bought/1e18:,.2f} "
-                        f"basis {cur_row[1]/1e18:,.4f}->{basis/1e18:,.4f} "
-                        f"realized {float(cur_row[2])/1e18:,.4f}->{float(realized)/1e18:,.4f}"
+        for attempt in range(4):
+            try:
+                with storage.db_cursor() as cur:
+                    events = events_for_token(cur, token)
+                    if not events:
+                        continue
+                    users, sell_realized = fold(events, venues)
+                    cur.execute(
+                        "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native "
+                        "FROM launchpad_positions WHERE token = %s",
+                        (token,),
                     )
-                    shown += 1
-            scanned += len(current)
-            changed += len(updates)
+                    current = {r[0]: (int(r[1] or 0), int(r[2] or 0), Decimal(r[3] or 0)) for r in cur.fetchall()}
 
-            if updates and args.apply:
-                execute_values(
-                    cur,
-                    """
-                    UPDATE launchpad_positions p SET
-                        token_bought = v.bought,
-                        cost_basis_native = v.basis,
-                        realized_pnl_native = v.realized
-                    FROM (VALUES %s) AS v(addr, tok, bought, basis, realized)
-                    WHERE p.user_address = v.addr AND p.token = v.tok
-                    """,
-                    [(a, t, b, c, d) for a, t, b, c, d in updates],
-                    template="(%s, %s, %s::numeric, %s::numeric, %s::numeric)",
-                    page_size=1000,
-                )
-                cur.execute(
-                    """
-                    UPDATE launchpad_positions p SET
-                        unrealized_pnl_native = crystal_unrealized_pnl(
-                            p.balance_token, p.token_bought, p.token_sold, p.cost_basis_native, k.last_price_native),
-                        total_pnl_native = p.realized_pnl_native + crystal_unrealized_pnl(
-                            p.balance_token, p.token_bought, p.token_sold, p.cost_basis_native, k.last_price_native)
-                    FROM launchpad_tokens k
-                    WHERE k.token = p.token AND p.token = %s
-                    """,
-                    (token,),
-                )
-            if args.apply and sell_realized:
-                execute_values(
-                    cur,
-                    """
-                    UPDATE launchpad_trades t SET realized_native = v.realized
-                    FROM (VALUES %s) AS v(tx, li, realized)
-                    WHERE t.txhash = v.tx AND t.log_index = v.li
-                      AND t.realized_native IS DISTINCT FROM v.realized
-                    """,
-                    sell_realized,
-                    template="(%s, %s::integer, %s::numeric)",
-                    page_size=2000,
-                )
-            if args.apply:
-                storage.set_meta(PROGRESS_KEY, token, cur=cur)
+                    updates = []
+                    for addr, (open_t, basis, bought, sold, realized) in users.items():
+                        cur_row = current.get(addr)
+                        if cur_row is None:
+                            continue
+                        if cur_row[0] == bought and cur_row[1] == basis and cur_row[2] == realized:
+                            continue
+                        updates.append((addr, token, int(bought), int(basis), realized))
+                        if shown < args.show:
+                            print(
+                                f"  {addr[:12]}.. {token[:12]}.. bought {cur_row[0]/1e18:,.2f}->{bought/1e18:,.2f} "
+                                f"basis {cur_row[1]/1e18:,.4f}->{basis/1e18:,.4f} "
+                                f"realized {float(cur_row[2])/1e18:,.4f}->{float(realized)/1e18:,.4f}"
+                            )
+                            shown += 1
+                    scanned += len(current)
+                    changed += len(updates)
 
+                    if updates and args.apply:
+                        execute_values(
+                            cur,
+                            """
+                            UPDATE launchpad_positions p SET
+                                token_bought = v.bought,
+                                cost_basis_native = v.basis,
+                                realized_pnl_native = v.realized
+                            FROM (VALUES %s) AS v(addr, tok, bought, basis, realized)
+                            WHERE p.user_address = v.addr AND p.token = v.tok
+                            """,
+                            [(a, t, b, c, d) for a, t, b, c, d in updates],
+                            template="(%s, %s, %s::numeric, %s::numeric, %s::numeric)",
+                            page_size=1000,
+                        )
+                        cur.execute(
+                            """
+                            UPDATE launchpad_positions p SET
+                                unrealized_pnl_native = crystal_unrealized_pnl(
+                                    p.balance_token, p.token_bought, p.token_sold, p.cost_basis_native, k.last_price_native),
+                                total_pnl_native = p.realized_pnl_native + crystal_unrealized_pnl(
+                                    p.balance_token, p.token_bought, p.token_sold, p.cost_basis_native, k.last_price_native)
+                            FROM launchpad_tokens k
+                            WHERE k.token = p.token AND p.token = %s
+                            """,
+                            (token,),
+                        )
+                    if args.apply and sell_realized:
+                        execute_values(
+                            cur,
+                            """
+                            UPDATE launchpad_trades t SET realized_native = v.realized
+                            FROM (VALUES %s) AS v(tx, li, realized)
+                            WHERE t.txhash = v.tx AND t.log_index = v.li
+                              AND t.realized_native IS DISTINCT FROM v.realized
+                            """,
+                            sell_realized,
+                            template="(%s, %s::integer, %s::numeric)",
+                            page_size=2000,
+                        )
+                    if args.apply:
+                        storage.set_meta(PROGRESS_KEY, token, cur=cur)
+
+                break
+            except psycopg2.errors.DeadlockDetected:
+                if attempt == 3:
+                    raise
+                time.sleep(1 + attempt * 2)
         if i % 500 == 0:
             el = time.perf_counter() - t0
             print(
