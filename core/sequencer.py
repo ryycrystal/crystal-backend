@@ -873,6 +873,9 @@ class Sequencer:
             self._block_timestamps.pop(blk, None)
 
         batch.flush(cur)
+        # positions are now committed, so the cost basis overlay can safely re-seed
+        # from the table again on the next chunk
+        self._state.basis_clear_overlay()
         storage.record_blocks_processed_batch(processed_blocks, cur=cur)
 
         if self._on_block:

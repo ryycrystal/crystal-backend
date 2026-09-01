@@ -948,7 +948,7 @@ class State:
                     except Exception:
                         price_native = Decimal(0)
 
-            self._basis_reset_if_new_block(blk)
+            self._basis_reset_if_new_block(blk, batched=batch is not None)
             prev_native_reserve = 0
 
             lp = self.launchpad_tokens.get(token)
@@ -1396,10 +1396,23 @@ class State:
             self._basis_overlay[key] = entry
         return entry
 
-    def _basis_reset_if_new_block(self, blk: int) -> None:
+    def _basis_reset_if_new_block(self, blk: int, batched: bool = False) -> None:
+        # the overlay is seeded from launchpad_positions, but a batch holds its
+        # position deltas until the whole chunk flushes. clearing per block inside a
+        # chunk therefore re-reads a row that does not have this chunk's buys yet, so
+        # a sell of tokens bought a few blocks earlier finds no basis and books the
+        # entire proceeds as profit. inside a batch the overlay IS the running truth:
+        # keep it, and let the flush boundary clear it.
+        if batched:
+            self._basis_block = blk
+            return
         if blk != self._basis_block:
             self._basis_block = blk
             self._basis_overlay.clear()
+
+    def basis_clear_overlay(self) -> None:
+        self._basis_overlay.clear()
+        self._basis_block = -1
 
     def _basis_apply_buy(self, user: str, token: str, token_amt: int, native_amt: int, cur=None) -> None:
         entry = self._basis_for(user, token, cur=cur)
@@ -1742,7 +1755,7 @@ class State:
         user = (ev.get("user") or "").lower()
 
         if user:
-            self._basis_reset_if_new_block(blk)
+            self._basis_reset_if_new_block(blk, batched=batch is not None)
             cost_basis_delta = 0
             if is_buy:
                 token_bought_delta, token_sold_delta = int(token_amt), 0
