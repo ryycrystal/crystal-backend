@@ -1,12 +1,44 @@
 from __future__ import annotations
 
+import logging
+import random
+import time
+
+import psycopg2
+
 from .base import db_cursor
+
+_SCHEMA_LOCK_TIMEOUT = "5s"
+_SCHEMA_MAX_ATTEMPTS = 20
+
+log = logging.getLogger("schema")
 
 
 def init_db() -> None:
+    last: Exception | None = None
+    for attempt in range(_SCHEMA_MAX_ATTEMPTS):
+        try:
+            _init_db_once()
+            return
+        except (psycopg2.errors.DeadlockDetected, psycopg2.errors.LockNotAvailable) as exc:
+            last = exc
+            delay = min(30.0, 1.5 * (attempt + 1)) + random.random()
+            log.warning(
+                "init_db contended with live readers (attempt %d/%d), retrying in %.1fs",
+                attempt + 1,
+                _SCHEMA_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+    if last is not None:
+        raise last
+
+
+def _init_db_once() -> None:
     from .rewards import ensure_rewards_tables
 
     with db_cursor() as cur:
+        cur.execute(f"SET LOCAL lock_timeout = '{_SCHEMA_LOCK_TIMEOUT}'")
         cur.execute(
             """
             CREATE EXTENSION IF NOT EXISTS pg_trgm;
