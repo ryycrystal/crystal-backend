@@ -168,8 +168,18 @@ def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | Non
     last_vps = usd_last / sh_last
     if first_vps <= 0:
         return None
-    pct = ((last_vps / first_vps) - 1.0) * 100.0
-    return (pct * (365.0 * 86400.0 / window), window)
+    ratio = last_vps / first_vps
+    if ratio <= 0:
+        return None
+    periods = 365.0 * 86400.0 / window
+    try:
+        apy = (ratio**periods - 1.0) * 100.0
+    except OverflowError:
+        apy = float("inf")
+    if not (apy == apy):
+        return None
+    apy = min(apy, 100000.0)
+    return (apy, window)
 
 
 def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:

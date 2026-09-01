@@ -1482,7 +1482,26 @@ def test_vault_apy_pct_from_samples():
         with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
             apy = vault_api._vault_apy_pct("0xv")
     assert apy is not None
-    assert abs(apy - 1.0 * 365.0) < 1e-6
+    assert abs(apy - ((1.01**365.0) - 1.0) * 100.0) < 1e-6
+
+    losing = [
+        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (2, now - day, 0, 0, 50.0, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=losing):
+            worst = vault_api._vault_apy_pct("0xv")
+    assert worst is not None
+    assert -100.0 <= worst < 0.0
+
+    mooning = [
+        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (2, now - day, 0, 0, 500.0, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=mooning):
+            capped = vault_api._vault_apy_pct("0xv")
+    assert capped == 100000.0
 
     with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[rows[0]]):
         assert vault_api._vault_apy_pct("0xv") is None
