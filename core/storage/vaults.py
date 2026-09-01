@@ -608,6 +608,39 @@ def sum_vault_share_flows_after(vault: str, ts: int, inclusive: bool = False) ->
     return minted, burned
 
 
+def vault_sample_nav_before(vault: str, ts: int) -> tuple[int, float, int] | None:
+    """Latest sample strictly before ts that can price a share on its own.
+
+    The usd value and the share count come from the same on-chain read, so a NAV
+    built from them cannot mix one moment's value with another moment's supply.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT timestamp, usd_value, shares FROM crystal_vault_balance_samples
+            WHERE vault = %s AND timestamp < %s AND usd_value > 0 AND shares > 0
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            (vault.lower(), int(ts)),
+        )
+        row = cur.fetchone()
+    return (int(row[0] or 0), float(row[1]), int(row[2])) if row else None
+
+
+def vault_sample_nav_at_or_after(vault: str, ts: int) -> tuple[int, float, int] | None:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT timestamp, usd_value, shares FROM crystal_vault_balance_samples
+            WHERE vault = %s AND timestamp >= %s AND usd_value > 0 AND shares > 0
+            ORDER BY timestamp ASC LIMIT 1
+            """,
+            (vault.lower(), int(ts)),
+        )
+        row = cur.fetchone()
+    return (int(row[0] or 0), float(row[1]), int(row[2])) if row else None
+
+
 def vault_sample_usd_before(vault: str, ts: int) -> tuple[int, float] | None:
     with db_cursor() as cur:
         cur.execute(

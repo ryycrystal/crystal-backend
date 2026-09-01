@@ -262,16 +262,30 @@ def _avg_cost_from_flows(flows: list[tuple[int, float]]) -> tuple[int, float, fl
 
 
 def _nav_at_flow(vault_addr: str, ts: int, circ_now: int) -> tuple[float, int, bool] | None:
+    # price a share from a single sample: its usd value and its share count come
+    # from the same on-chain read. rebuilding the supply from circulating shares
+    # minus later flows divided one moment's value by another moment's supply,
+    # which spiked the nav ~28x across a large withdraw-then-redeposit and booked
+    # tens of thousands of dollars of cost basis a vault this size never held
+    before = storage.vault_sample_nav_before(vault_addr, ts)
+    if before is not None:
+        return (before[1] / before[2], before[0], False)
+    after = storage.vault_sample_nav_at_or_after(vault_addr, ts)
+    if after is not None:
+        return (after[1] / after[2], after[0], True)
+
+    # samples predating the shares column carry no supply of their own, so fall
+    # back to the reconstruction rather than losing the flow entirely
     minted_incl, burned_incl = storage.sum_vault_share_flows_after(vault_addr, ts, inclusive=True)
     supply_before = circ_now - minted_incl + burned_incl
-    before = storage.vault_sample_usd_before(vault_addr, ts)
-    if before is not None and supply_before > 0:
-        return (before[1] / supply_before, before[0], False)
+    legacy_before = storage.vault_sample_usd_before(vault_addr, ts)
+    if legacy_before is not None and supply_before > 0:
+        return (legacy_before[1] / supply_before, legacy_before[0], True)
     minted_after, burned_after = storage.sum_vault_share_flows_after(vault_addr, ts)
     supply_after = circ_now - minted_after + burned_after
-    after = storage.vault_sample_usd_at_or_after(vault_addr, ts)
-    if after is not None and supply_after > 0:
-        return (after[1] / supply_after, after[0], True)
+    legacy_after = storage.vault_sample_usd_at_or_after(vault_addr, ts)
+    if legacy_after is not None and supply_after > 0:
+        return (legacy_after[1] / supply_after, legacy_after[0], True)
     return None
 
 
