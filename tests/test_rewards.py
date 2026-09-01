@@ -395,3 +395,105 @@ def test_bucket_clamps_premain_activity_into_week_one(_clean_rewards):
     assert rewards.bucket_for(WEEK1 + 86400, WEEK1) == WEEK1
     assert rewards.bucket_for(rewards.week_end_for(WEEK1) + 10, WEEK1) == rewards.week_end_for(WEEK1)
     assert rewards.bucket_end(WEEK1) == rewards.week_end_for(WEEK1)
+
+
+def test_launch_timeline_end_to_end(_clean_rewards):
+    rewards = _clean_rewards
+    vault_start = int(datetime(2026, 9, 8, 7, 0, tzinfo=LA).timestamp())
+    week1_end = rewards.week_end_for(WEEK1)
+    week2_end = rewards.week_end_for(week1_end)
+    storage.set_meta("rewards_vault_start", str(vault_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+
+    lp1, lp2, t1, t2, r1 = U1, U2, U3, U4, "0x" + "55" * 20
+    d1 = vault_start + 3600 + 1
+    d2 = WEEK1 + 86400 + 1
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xl1'), (2, 0, %s, %s, %s, 100, 0, 0, '0xl2')",
+            (d1, VAULT, lp1, d2, VAULT, lp2),
+        )
+        for k in range(23):
+            cur.execute(
+                "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+                "VALUES (%s, %s, %s, 0, 0, 2400)",
+                (VAULT, 100 + k, vault_start + k * 86400),
+            )
+
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(11, TOK_A, t1, WEEK1 + 12 * 3600, 1000.0)
+    _seed_market(MKT_VOL, USDC, WMON)
+    _seed_taker("0xw2", week1_end + 86400, MKT_VOL, t2, 200_000_000)
+    _seed_launchpad_trade(12, TOK_A, t1, week2_end + 5, 0.0)
+    storage.upsert_referral_binding(t1, r1, 1, 0, WEEK1)
+
+    now = week2_end + 100
+    rewards.accrue_launchpad()
+    rewards.accrue_spot_takers()
+    rewards.accrue_spot_makers()
+    while rewards.accrue_vaults(now_ts=now) > 0:
+        pass
+
+    first_hour = ((d1 // 3600) + 1) * 3600
+    lp2_hour = ((d2 // 3600) + 1) * 3600
+    solo_hours = (d2 // 3600) - (first_hour // 3600) + 1
+    shared_w1 = (week1_end - lp2_hour) // 3600 + 1
+    shared_w2 = (week2_end - week1_end) // 3600
+
+    c_lp1 = _contrib(lp1)
+    c_lp2 = _contrib(lp2)
+    assert c_lp1["vault"] == pytest.approx(solo_hours * 2400 + shared_w1 * 1200, rel=1e-9)
+    assert c_lp1["points"] == pytest.approx(solo_hours * 360.0 + shared_w1 * 180.0, rel=1e-9)
+    assert c_lp2["vault"] == pytest.approx(shared_w1 * 1200, rel=1e-9)
+    assert c_lp2["points"] == pytest.approx(shared_w1 * 60.0, rel=1e-9)
+    c_lp1_w2 = _contrib(lp1, week1_end)
+    assert c_lp1_w2["points"] == pytest.approx(shared_w2 * 180.0, rel=1e-9)
+    assert _contrib(t1)["points"] == pytest.approx(1000.0)
+    assert _contrib(t2, week1_end)["points"] == pytest.approx(10.0)
+
+    closed = rewards.close_due_weeks(now_ts=now)
+    assert closed == [WEEK1, week1_end]
+
+    import math as _m
+    pts = {
+        lp1: c_lp1["points"], lp2: c_lp2["points"], t1: 1000.0,
+    }
+    adj = {w: _m.pow(p, 0.8) for w, p in pts.items()}
+    total_adj = sum(adj.values())
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "SELECT wallet, crystals, rank, participants, status FROM crystal_rewards_distributions WHERE week_start = %s",
+            (WEEK1,),
+        )
+        w1 = {w: (float(c), int(rk), int(n), s) for w, c, rk, n, s in cur.fetchall()}
+        cur.execute(
+            "SELECT wallet, crystals, rank, participants, status FROM crystal_rewards_distributions WHERE week_start = %s",
+            (week1_end,),
+        )
+        w2 = {w: (float(c), int(rk), int(n), s) for w, c, rk, n, s in cur.fetchall()}
+
+    assert set(w1) == {lp1, lp2, t1}
+    for w in (lp1, lp2, t1):
+        assert w1[w][0] == pytest.approx(1_000_000 * adj[w] / total_adj, rel=1e-6)
+    assert w1[lp1][1:] == (1, 3, "diamond")
+    order = sorted(pts, key=pts.get, reverse=True)
+    assert order[0] == lp1
+
+    assert set(w2) == {lp1, lp2, t2}
+    total_w2 = sum(v[0] for v in w2.values())
+    assert total_w2 == pytest.approx(1_000_000, rel=1e-6)
+
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT wallet, kind, amount, ref FROM crystal_rewards_grants ORDER BY id")
+        grants = [(w, k, float(a), r) for w, k, a, r in cur.fetchall()]
+        t1_crystals = w1[t1][0]
+        bal_r1 = storage.get_rewards_balance(cur, r1)
+    expected_referrer = sum(m[1] for m in rewards.milestones() if m[0] <= t1_crystals)
+    expected_welcome = sum(m[2] for m in rewards.milestones() if m[0] <= t1_crystals)
+    assert bal_r1 == pytest.approx(expected_referrer, rel=1e-9)
+    assert sum(a for w, k, a, _r in grants if w == t1 and k == "welcome") == pytest.approx(expected_welcome, rel=1e-9)
+
+    assert rewards.close_due_weeks(now_ts=now) == []
+    assert rewards.accrue_vaults(now_ts=now) == 0
