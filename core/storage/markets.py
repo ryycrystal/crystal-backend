@@ -306,6 +306,66 @@ def list_crystal_markets_dump():
         return cur.fetchall()
 
 
+def crystal_market_stats_24h():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            WITH recent AS (
+                SELECT *
+                FROM crystal_market_trades
+                WHERE timestamp >= EXTRACT(EPOCH FROM NOW())::bigint - 86400
+            ), aggregates AS (
+                SELECT market,
+                       (ARRAY_AGG(start_price ORDER BY timestamp, block_number, log_index))[1] AS open_price,
+                       MAX(GREATEST(start_price, end_price)) AS high_price,
+                       MIN(LEAST(start_price, end_price)) AS low_price,
+                       (ARRAY_AGG(end_price ORDER BY timestamp DESC, block_number DESC, log_index DESC))[1] AS last_price,
+                       SUM(CASE WHEN is_buy THEN amount_in ELSE amount_out END) AS quote_volume
+                FROM recent
+                GROUP BY market
+            ), ranked AS (
+                SELECT r.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY market
+                           ORDER BY timestamp DESC, block_number DESC, log_index DESC
+                       ) AS rank
+                FROM recent r
+            )
+            SELECT a.market, a.open_price, a.high_price, a.low_price, a.last_price, a.quote_volume,
+                   COALESCE(
+                       JSON_AGG(
+                           JSON_BUILD_OBJECT(
+                               'txhash', r.txhash,
+                               'logIndex', r.log_index,
+                               'timestamp', r.timestamp,
+                               'isBuy', r.is_buy,
+                               'amountIn', r.amount_in::text,
+                               'amountOut', r.amount_out::text,
+                               'startPrice', r.start_price::text,
+                               'endPrice', r.end_price::text
+                           ) ORDER BY r.timestamp DESC, r.block_number DESC, r.log_index DESC
+                       ) FILTER (WHERE r.rank <= 50),
+                       '[]'::json
+                   ) AS trades
+            FROM aggregates a
+            LEFT JOIN ranked r ON r.market = a.market AND r.rank <= 50
+            GROUP BY a.market, a.open_price, a.high_price, a.low_price, a.last_price, a.quote_volume
+            """
+        )
+        rows = cur.fetchall()
+    return {
+        market: {
+            "openPrice": str(int(open_price or 0)),
+            "highPrice": str(int(high_price or 0)),
+            "lowPrice": str(int(low_price or 0)),
+            "lastPrice": str(int(last_price or 0)),
+            "quoteVolume": str(int(quote_volume or 0)),
+            "trades": trades or [],
+        }
+        for market, open_price, high_price, low_price, last_price, quote_volume, trades in rows
+    }
+
+
 def list_crystal_pool_markets():
     with db_cursor() as cur:
         cur.execute(

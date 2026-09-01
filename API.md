@@ -19,6 +19,7 @@ Three fixed buckets, 30 rows each, fully enriched (see §6 row shape):
 
 Optional params:
 - `since_block=<n>` — delta mode: buckets contain **only tokens touched after n** (traded/created/migrated), plus `ids` = full current membership per bucket (drop anything you hold that isn't in `ids`). ~97% smaller when quiet.
+- `source=0|1` — optional launchpad source filter. `0` returns only native Crystal launches; `1` returns nad.fun launches across supported generations.
 - `exclude_dev`, `exclude_ca`, `exclude_website`, `exclude_twitter` — comma-separated blacklists (see §5).
 - `filters=<url-encoded JSON>` — **per-bucket filters**, one call:
   `{"new":{"marketcap_min":20},"approaching":{...},"graduated":{"marketcap_min":200}}`
@@ -51,7 +52,7 @@ Curve reserves **freeze at graduation**, so never read `raw.curve_native_reserve
 - `/stats/{addr}` — windowed stats: `change_pct_5m/1h/6h/24h`, `price_ref_*`, per-window buy/sell counts + USD volumes. Windowed values live **only** here (and inside the overview's `stats`).
 - `/holders/{addr}` — holder list with PnL fields, USD values.
 - `/token/{addr}/trades?limit=&before=` — range-queryable trades. Trade id = `txhash-logIndex` (decimal logIndex).
-- `/chart/{addr}/{res}` — klines only, same stitched builder as the overview.
+- `/chart/{addr}/{res}` — klines only, same stitched builder as the overview. Before the first trade, both chart responses contain one zero-volume flat point at the token's creation price so clients can initialize immediately.
 - **Portfolio scope**: the backend only carries wallets that have interacted with
   Crystal (any indexed position, orderbook order, LP share, or vault deposit).
   `/spot/{wallet}` answers `supported: false` with empty rows/graph for anyone

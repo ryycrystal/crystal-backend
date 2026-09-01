@@ -978,6 +978,36 @@ def _scaled_price(p: Any) -> str:
     return format(scaled.quantize(_PRICE_QUANTUM).normalize(), "f")
 
 
+def _initial_price_kline(
+    created_at: Any,
+    price_native: Any,
+    bucket_seconds: int,
+    before_ts: int | None = None,
+) -> dict[str, Any] | None:
+    """Return a response-only seed point until the first real OHLC bucket exists."""
+    try:
+        timestamp = int(created_at or 0)
+        price = Decimal(price_native or 0)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if bucket_seconds <= 0 or timestamp <= 0 or price <= 0:
+        return None
+
+    bucket_start = (timestamp // bucket_seconds) * bucket_seconds
+    if before_ts is not None and before_ts > 0 and bucket_start >= before_ts:
+        return None
+
+    scaled = _scaled_price(price)
+    return {
+        "time": str(bucket_start),
+        "open": scaled,
+        "high": scaled,
+        "low": scaled,
+        "close": scaled,
+        "quoteVolume": "0",
+    }
+
+
 def _build_ohlcv_from_db(
     token_addr: str,
     bucket_seconds: int,

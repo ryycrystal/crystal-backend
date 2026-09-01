@@ -190,6 +190,23 @@ def test_series_can_be_omitted(db):
     assert len(json.dumps(slim)) < len(json.dumps(full)), "slim payload must be smaller"
 
 
+def test_pretrade_token_has_initial_chart_point(db):
+    st = _new_state()
+    created_at = int(time.time()) - 30
+    _create(st, blk=100, ts=created_at)
+
+    client = _api_client()
+    overview = client.get(f"/token/{TOKEN}/60").json()
+    chart = client.get(f"/chart/{TOKEN}/60").json()
+
+    for bars in (overview["series"]["klines"], overview["mini"]["klines"], chart["klines"]):
+        assert len(bars) == 1
+        point = bars[0]
+        assert Decimal(point["close"]) > 0
+        assert point["open"] == point["high"] == point["low"] == point["close"]
+        assert point["quoteVolume"] == "0"
+
+
 def test_batch_user_endpoint(db):
     st = _new_state()
     _create(st, blk=100, ts=1000)

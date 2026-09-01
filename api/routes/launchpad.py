@@ -20,6 +20,7 @@ from api.api import (
     _fmt,
     _fmt_usd,
     _holders_for_token,
+    _initial_price_kline,
     _lifecycle_fields,
     _mon_price_usd,
     _nadfun_version,
@@ -171,10 +172,36 @@ def _list_tokens_cached(since_block: int, since: int) -> dict[str, Any]:
     return _list_tokens_impl(since_block, since, {})
 
 
+def _normalize_source_filter(source: Any) -> str:
+    raw = "" if source is None else str(source).strip()
+    if raw == "":
+        return ""
+    try:
+        src = int(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="source must be 0 or 1") from None
+    if src not in (0, 1):
+        raise HTTPException(status_code=400, detail="source must be 0 or 1")
+    return str(src)
+
+
+def _source_where(source: Any, alias: str = "") -> tuple[list[str], list]:
+    raw = _normalize_source_filter(source)
+    if raw == "":
+        return [], []
+    src = int(raw)
+
+    prefix = f"{alias}." if alias else ""
+    if src == 0:
+        return [f"{prefix}source = 0"], []
+    return [f"{prefix}source <> 0"], []
+
+
 @router.get("/tokens")
 def list_tokens(
     since_block: int = Query(0, ge=0, description="only tokens touched after this block"),
     since: int = Query(0, ge=0, description="same, as a unix timestamp. block is exact, prefer it"),
+    source: str = Query("", description="0 native/crystal, 1 nad.fun"),
     exclude_dev: str = Query("", description="comma separated creator addresses"),
     exclude_ca: str = Query("", description="comma separated token addresses"),
     exclude_website: str = Query("", description="comma separated bare hostnames"),
@@ -199,6 +226,8 @@ def list_tokens(
         for bucket, phase in phase_by_bucket.items():
             f = dict(per_bucket.get(bucket) or {})
             f.update(ex)
+            if source:
+                f["source"] = source
             f["phase"] = phase
             res = _search_impl(str(f.pop("query", "") or ""), str(f.pop("sort", "") or ""), 30, 0, f)
             key = {"new": "recent_created", "approaching": "recent_approaching", "graduated": "recent_graduated"}[
@@ -210,14 +239,17 @@ def list_tokens(
         out["applied_filters"] = applied
         out["as_of_block"] = storage.get_last_processed_block() or 0
         return out
-    if not any(ex.values()):
+    if not source and not any(ex.values()):
         return _list_tokens_cached(since_block, since)
-    return _list_tokens_impl(since_block, since, ex)
+    return _list_tokens_impl(since_block, since, {**ex, "source": source or None})
 
 
 def _list_tokens_impl(since_block: int, since: int, ex: dict) -> dict[str, Any]:
     t0 = time.time()
     bl_where, bl_params = storage.blacklist_clauses(ex, "")
+    src_where, src_params = _source_where(ex.get("source"))
+    bl_where.extend(src_where)
+    bl_params.extend(src_params)
     bl_sql = ("".join(f" AND {c}" for c in bl_where)) if bl_where else ""
     with db_cursor() as cur:
         cur.execute(
@@ -696,7 +728,14 @@ def token_overview_graph(
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
+        if not mini_klines:
+            seed = _initial_price_kline(created_at or now_ts, last_price_native, 3600)
+            mini_klines = [seed] if seed else []
+
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
+        if series and not series_klines:
+            seed = _initial_price_kline(created_at or now_ts, last_price_native, chartres)
+            series_klines = [seed] if seed else []
         series_mon_usd = _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
 
         holders_list: list[dict[str, Any]] = []
@@ -2269,6 +2308,22 @@ def chart_only(
         before_ts=int(before_ts) or None,
     )
 
+    if not out:
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT created_at, last_price_native FROM launchpad_tokens WHERE token = %s",
+                (token_addr,),
+            )
+            token_row = cur.fetchone()
+        if token_row:
+            seed = _initial_price_kline(
+                token_row[0],
+                token_row[1],
+                chartres,
+                before_ts=int(before_ts) or None,
+            )
+            out = [seed] if seed else []
+
     mon_usd = _mon_usd_window(int(out[0]["time"]), int(out[-1]["time"]) + chartres) if rates and out else None
 
     return {
@@ -2482,6 +2537,13 @@ def search_tokens_post(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict) -> dict[str, Any]:
+    filters = dict(filters or {})
+    source = _normalize_source_filter(filters.get("source"))
+    if source:
+        filters["source"] = source
+    else:
+        filters.pop("source", None)
+
     token_addrs, circ_map, total = storage.search_tokens_filtered(
         query=query,
         filters=filters,

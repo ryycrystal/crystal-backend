@@ -151,3 +151,44 @@ def test_tokens_since_returns_only_changed(db):
     later = [r["token"] for b in ("recent_created", "recent_approaching", "recent_graduated") for r in nothing[b]]
     assert later == [], "nothing changed after a future block"
     assert nothing["ids"]["recent_created"], "membership is still returned"
+
+
+def test_tokens_source_filter_keeps_native_membership(db):
+    st = _new_state()
+    now = int(time.time())
+    native = "0x" + f"{101:040x}"
+    nadfun = "0x" + f"{102:040x}"
+    _mk(st, native, "Native", "NAT", 100, now - 10)
+    _mk(st, nadfun, "Nadfun", "NAD", 101, now - 5)
+    _x(db, "UPDATE launchpad_tokens SET source = 1 WHERE token = %s", (nadfun,))
+
+    import api.api as api_mod
+
+    api_mod._cache.clear()
+    body = _api_client().get("/tokens", params={"source": "0", "since_block": 1}).json()
+
+    rows = [r["token"] for b in ("recent_created", "recent_approaching", "recent_graduated") for r in body[b]]
+    ids = [t for b in ("recent_created", "recent_approaching", "recent_graduated") for t in body["ids"][b]]
+    assert native in rows
+    assert nadfun not in rows
+    assert native in ids
+    assert nadfun not in ids
+
+    api_mod._cache.clear()
+    search = _api_client().get("/search/query", params={"source": "0"}).json()
+    search_ids = [row["token"] for row in search["results"]]
+    assert native in search_ids
+    assert nadfun not in search_ids
+
+    api_mod._cache.clear()
+    post_search = _api_client().post("/search/query", json={"source": 0}).json()
+    post_ids = [row["token"] for row in post_search["results"]]
+    assert native in post_ids
+    assert nadfun not in post_ids
+
+
+def test_source_filter_rejects_unknown_values(db):
+    client = _api_client()
+    assert client.get("/tokens", params={"source": "crystal"}).status_code == 400
+    assert client.get("/search/query", params={"source": "2"}).status_code == 400
+    assert client.post("/search/query", json={"source": -1}).status_code == 400

@@ -85,5 +85,20 @@ def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> dict[str, Any]:
 @router.get("/markets/list")
 def list_markets_dump() -> dict[str, Any]:
     rows = storage.list_crystal_markets_dump()
-    markets = [_crystal_market_dump_row_to_api(r) for r in rows]
+    stats = storage.crystal_market_stats_24h()
+    markets = []
+    for row in rows:
+        market = _crystal_market_dump_row_to_api(row)
+        market["stats24h"] = stats.get(
+            market["market"],
+            {
+                "openPrice": "0",
+                "highPrice": "0",
+                "lowPrice": "0",
+                "lastPrice": str(market["params"]["lastPrice"] or 0),
+                "quoteVolume": "0",
+                "trades": [],
+            },
+        )
+        markets.append(market)
     return {"count": len(markets), "markets": markets}

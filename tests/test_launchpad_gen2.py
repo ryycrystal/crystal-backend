@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.adapters import native  # noqa: E402
 
-I = native.INITIAL_TOKEN_SUPPLY
+SUPPLY = native.INITIAL_TOKEN_SUPPLY
 G = native.GRADUATED_TOKEN_SUPPLY
 V = native.VIRTUAL_TOKEN_SUPPLY
 IC, GC = native.GEN_SUPPLIES[2]
@@ -19,7 +19,7 @@ def adapter():
 
 def test_virtual_supply_matches_the_contract_formula():
     assert V == 66_666_666_666_666_666_666_666_667
-    assert IC == I + V
+    assert IC == SUPPLY + V
     assert GC == G + V
 
 
@@ -41,11 +41,11 @@ def test_gen_defaults_to_1(monkeypatch):
 def test_gen1_math_is_unchanged(monkeypatch):
     monkeypatch.delenv("CRYSTAL_LAUNCHPAD_GEN", raising=False)
     a = adapter()
-    st = a.curve_state({"token_reserve": I - 10**24, "native_reserve": N0})
+    st = a.curve_state({"token_reserve": SUPPLY - 10**24, "native_reserve": N0})
     assert st.tokens_sold == 10**24
-    assert a.curve_state({"token_reserve": I + 1, "native_reserve": N0}) is None
-    assert a.initial_price_native() == Decimal(N0) / Decimal(I)
-    k = N0 * I
+    assert a.curve_state({"token_reserve": SUPPLY + 1, "native_reserve": N0}) is None
+    assert a.initial_price_native() == Decimal(N0) / Decimal(SUPPLY)
+    k = N0 * SUPPLY
     assert native.NativeLaunchpadAdapter.graduation_native_reserve(k) == k // G
 
 

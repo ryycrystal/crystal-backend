@@ -2501,13 +2501,18 @@ def wallet_activity(
     elif before_ts is not None:
         params["cut"] = int(before_ts)
 
-    cut_t, cut_d, cut_w, cut_c, cut_e, cut_b = (
+    cut_t, cut_d, cut_w, cut_c, cut_e, cut_b, cut_o, cut_f, cut_m, cut_r, cut_k = (
         _cut("t"),
         _cut("d"),
         _cut("w"),
         _cut("c"),
         _cut("e"),
         _cut("b"),
+        _cut("o"),
+        _cut("f"),
+        _cut("mt"),
+        _cut("r"),
+        _cut("k"),
     )
 
     with db_cursor() as cur:
@@ -2561,6 +2566,54 @@ def wallet_activity(
                 FROM crystal_balance_events b
                 LEFT JOIN launchpad_tokens k3 ON k3.token = b.token
                 WHERE b.user_address = ANY(%(u)s){cut_b}
+                UNION ALL
+                SELECT CASE o.action
+                           WHEN 'add' THEN 'order_place'
+                           WHEN 'remove' THEN 'order_cancel'
+                           ELSE 'order_update'
+                       END,
+                       o.timestamp, o.block_number, o.txhash, o.log_index,
+                       o.market, COALESCE(m2.base_ticker, ''), COALESCE(m2.base_name, ''),
+                       0, o.size, o.price, 0
+                FROM crystal_orderbook_events o
+                LEFT JOIN crystal_markets m2 ON m2.market = o.market
+                WHERE o.user_address = ANY(%(u)s){cut_o}
+                UNION ALL
+                SELECT 'order_fill', f.timestamp, f.block_number, f.txhash, f.log_index,
+                       f.market, COALESCE(m3.base_ticker, ''), COALESCE(m3.base_name, ''),
+                       f.amount_high, f.amount_out, f.price, 0
+                FROM crystal_orderbook_fills f
+                LEFT JOIN crystal_markets m3 ON m3.market = f.market
+                WHERE f.maker = ANY(%(u)s){cut_f}
+                UNION ALL
+                SELECT CASE WHEN mt.is_buy THEN 'taker_buy' ELSE 'taker_sell' END,
+                       mt.timestamp, mt.block_number, mt.txhash, mt.log_index,
+                       mt.market, COALESCE(m4.base_ticker, ''), COALESCE(m4.base_name, ''),
+                       CASE WHEN mt.is_buy THEN mt.amount_in ELSE mt.amount_out END,
+                       CASE WHEN mt.is_buy THEN mt.amount_out ELSE mt.amount_in END,
+                       mt.end_price, 0
+                FROM crystal_market_trades mt
+                LEFT JOIN crystal_markets m4 ON m4.market = mt.market
+                WHERE mt.user_address = ANY(%(u)s){cut_m}
+                UNION ALL
+                SELECT 'referral_use', r.timestamp, r.block_number,
+                       CONCAT('referral-', r.referee, '-', r.block_number, '-', r.log_index), r.log_index,
+                       CASE WHEN r.referee = ANY(%(u)s) THEN r.referrer ELSE r.referee END,
+                       '', '', 0, 0, 0, 0
+                FROM referral_bindings r
+                WHERE (r.referee = ANY(%(u)s) OR r.referrer = ANY(%(u)s)){cut_r}
+                UNION ALL
+                SELECT 'token_create', k.created_at, k.created_block,
+                       CONCAT('token-create-', k.token), 0,
+                       k.token, k.symbol, k.name, 0, 0, k.last_price_native, 0
+                FROM launchpad_tokens k
+                WHERE k.creator = ANY(%(u)s){cut_k}
+                UNION ALL
+                SELECT 'token_graduate', k.migrated_at, k.migrated_block,
+                       CONCAT('token-graduate-', k.token), 1,
+                       k.token, k.symbol, k.name, 0, 0, k.last_price_native, 0
+                FROM launchpad_tokens k
+                WHERE k.creator = ANY(%(u)s) AND k.migrated = TRUE AND k.migrated_at > 0{cut_k}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s

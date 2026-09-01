@@ -20,9 +20,15 @@ def main() -> None:
     parser.add_argument("--rps", type=float, default=4.0)
     parser.add_argument("--start-block", type=lambda x: int(x, 0), required=True)
     parser.add_argument("--end-block", type=lambda x: int(x, 0), required=True)
+    parser.add_argument("--all-blocks", action="store_true")
     args = parser.parse_args()
 
     storage.init_pool()
+
+    if args.all_blocks:
+        targets = list(range(args.start_block, args.end_block + 1))
+        _repair(args, targets)
+        return
 
     with storage.db_cursor() as cur:
         cur.execute(
@@ -40,6 +46,10 @@ def main() -> None:
             ),
         )
         targets = [int(r[0]) for r in cur.fetchall()]
+    _repair(args, targets)
+
+
+def _repair(args, targets: list[int]) -> None:
     if not targets:
         print("[REPAIR] nothing to repair", flush=True)
         return

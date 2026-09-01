@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter
 
-import time
-
-from api.api import _mon_price_usd, storage
-from api.api import _fmt, _fmt_usd, _WEI
+from api.api import _WEI, _fmt, _fmt_usd, _mon_price_usd, storage
 from modules import revenue
 
 router = APIRouter()
