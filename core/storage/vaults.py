@@ -383,6 +383,15 @@ def get_crystal_vault_latest_balance(vault: str):
         return cur.fetchone()
 
 
+def get_market_quote_ticker(market: str) -> str:
+    if not market:
+        return ""
+    with db_cursor() as cur:
+        cur.execute("SELECT COALESCE(quote_ticker, '') FROM crystal_markets WHERE market = %s", (market.lower(),))
+        row = cur.fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
 def get_crystal_vault_user(vault: str, user_address: str):
     with db_cursor() as cur:
         cur.execute(

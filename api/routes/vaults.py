@@ -144,28 +144,70 @@ def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
 
 VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
 
+_STABLE_QUOTE_TICKERS = {"usdc", "usdt", "usdt0", "ausd", "usde", "dai", "usd"}
+_APY_META_CACHE: dict[str, tuple[float, tuple[int, int, bool]]] = {}
+_APY_META_TTL = 300.0
 
-def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | None:
+
+def _vault_apy_meta(vault_addr: str) -> tuple[int, int, bool] | None:
+    hit = _APY_META_CACHE.get(vault_addr)
+    if hit and (time.time() - hit[0]) < _APY_META_TTL:
+        return hit[1]
+    v = storage.get_crystal_vault(vault_addr)
+    if not v:
+        return None
+    qd = int(v[14] or 0)
+    bd = int(v[15] or 0)
+    ticker = ""
+    try:
+        ticker = storage.get_market_quote_ticker(str(v[3] or "").lower()) or ""
+    except Exception:
+        ticker = ""
+    meta = (qd, bd, ticker.strip().lower() in _STABLE_QUOTE_TICKERS)
+    _APY_META_CACHE[vault_addr] = (time.time(), meta)
+    return meta
+
+
+def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str] | None:
     now_ts = int(time.time())
     try:
         rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=now_ts - window_days * 86400, limit=0)
     except Exception:
         return None
     shared = [
-        (int(r[1] or 0), float(r[4] or 0.0), int(r[5] or 0))
+        (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0), float(r[4] or 0.0), int(r[5] or 0))
         for r in rows
         if len(r) > 5 and int(r[5] or 0) > 0 and float(r[4] or 0.0) > 0
     ]
     if len(shared) < 2:
         return None
     shared.sort(key=lambda p: p[0])
-    t_first, usd_first, sh_first = shared[0]
-    t_last, usd_last, sh_last = shared[-1]
+    t_first, q_first, b_first, usd_first, sh_first = shared[0]
+    t_last, q_last, b_last, usd_last, sh_last = shared[-1]
     window = t_last - t_first
     if window < VAULT_APY_MIN_WINDOW_SECS:
         return None
+
+    basis = "usd"
     first_vps = usd_first / sh_first
     last_vps = usd_last / sh_last
+
+    try:
+        meta = _vault_apy_meta(vault_addr)
+    except Exception:
+        meta = None
+    if meta and meta[2] and meta[0] > 0 and meta[1] > 0 and b_first > 0 and b_last > 0:
+        qd, bd, _ = meta
+        qu_first = q_first / (10.0**qd)
+        bu_first = b_first / (10.0**bd)
+        qu_last = q_last / (10.0**qd)
+        bu_last = b_last / (10.0**bd)
+        p_ref = (usd_last - qu_last) / bu_last
+        if p_ref > 0 and (usd_first - qu_first) > 0:
+            first_vps = (qu_first + bu_first * p_ref) / sh_first
+            last_vps = (qu_last + bu_last * p_ref) / sh_last
+            basis = "strategy"
+
     if first_vps <= 0:
         return None
     ratio = last_vps / first_vps
@@ -179,7 +221,7 @@ def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int] | Non
     if not (apy == apy):
         return None
     apy = min(apy, 100000.0)
-    return (apy, window)
+    return (apy, window, basis)
 
 
 def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
@@ -392,6 +434,14 @@ def list_vaults(
         u_shares = int(user_shares or 0)
         user_share_pct = (u_shares / circ) if circ > 0 and u_shares > 0 else 0.0
         row_apy = _vault_apy(str(vault_addr).lower())
+        try:
+            owner_row = storage.get_crystal_vault_user(str(vault_addr).lower(), str(owner or "").lower())
+        except Exception:
+            owner_row = None
+        owner_shares = int(owner_row[0] or 0) if owner_row else 0
+        owner_cap = 20 * owner_shares
+        max_shares_i = int(max_shares or 0)
+        effective_max_shares = min(max_shares_i, owner_cap) if max_shares_i > 0 else owner_cap
         snapshot = None
         if include_snapshot:
             snapshot = _vault_snapshot_from_samples(
@@ -425,6 +475,8 @@ def list_vaults(
                 "lockup": int(lockup or 0),
                 "decreaseOnWithdraw": bool(decrease_on_withdraw),
                 "maxShares": str(int(max_shares or 0)),
+                "ownerShares": str(owner_shares),
+                "effectiveMaxShares": str(effective_max_shares),
                 "totalShares": str(int(circulating_shares or 0)),
                 "userShares": str(u_shares),
                 "userSharePct": user_share_pct,
@@ -440,6 +492,7 @@ def list_vaults(
                 "lastDeposit": int(last_deposit or 0),
                 "apyPct": row_apy[0] if row_apy else None,
                 "apyWindowSecs": row_apy[1] if row_apy else None,
+                "apyBasis": row_apy[2] if row_apy else None,
                 "latestBalance": {
                     "block": int(latest_block or 0),
                     "timestamp": int(latest_ts or 0),
@@ -719,13 +772,24 @@ def vault_user_summary(
 
     apy_pct = None
     apy_window_secs = None
+    apy_basis = None
     try:
         apy_out = _vault_apy(vaddr)
         if apy_out:
-            apy_pct, apy_window_secs = apy_out
+            apy_pct, apy_window_secs, apy_basis = apy_out
     except Exception:
         apy_pct = None
         apy_window_secs = None
+        apy_basis = None
+
+    try:
+        owner_row = storage.get_crystal_vault_user(vaddr, str(owner or "").lower())
+    except Exception:
+        owner_row = None
+    owner_shares = int(owner_row[0] or 0) if owner_row else 0
+    owner_cap = 20 * owner_shares
+    max_shares_i = int(max_shares or 0)
+    effective_max_shares = min(max_shares_i, owner_cap) if max_shares_i > 0 else owner_cap
 
     return {
         "ok": True,
@@ -741,6 +805,8 @@ def vault_user_summary(
             "decimals": {"quoteDecimals": int(quote_decimals or 0), "baseDecimals": int(base_decimals or 0)},
             "params": {
                 "maxShares": int(max_shares or 0),
+                "ownerShares": owner_shares,
+                "effectiveMaxShares": effective_max_shares,
                 "circulatingShares": int(circulating_shares or 0),
                 "lockup": int(lockup or 0),
                 "decreaseOnWithdraw": bool(decrease_on_withdraw),
@@ -751,6 +817,7 @@ def vault_user_summary(
         "tvlUsd": latest["usdValue"],
         "apyPct": apy_pct,
         "apyWindowSecs": apy_window_secs,
+        "apyBasis": apy_basis,
         "userBalance": {
             "address": uaddr,
             "shares": u_shares,

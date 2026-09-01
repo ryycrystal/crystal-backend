@@ -1507,6 +1507,31 @@ def test_vault_apy_pct_from_samples():
         assert vault_api._vault_apy_pct("0xv") is None
 
 
+def test_vault_apy_strategy_basis_strips_price_moves():
+    day = 86400
+    now = 2_100_000_000
+    vault_row = [None] * 16
+    vault_row[3] = "0xmarket"
+    vault_row[14] = 6
+    vault_row[15] = 18
+    rows = [
+        (1, now - 2 * day, 100 * 10**6, 100 * 10**18, 200.0, 1000),
+        (2, now - day, 100 * 10**6, 100 * 10**18, 150.0, 1000),
+    ]
+    vault_api._APY_META_CACHE.clear()
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+            with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
+                with patch.object(vault_api.storage, "get_market_quote_ticker", return_value="USDC"):
+                    out = vault_api._vault_apy("0xv")
+    vault_api._APY_META_CACHE.clear()
+    assert out is not None
+    apy, window, basis = out
+    assert basis == "strategy"
+    assert abs(apy) < 1e-9
+    assert window == day
+
+
 def test_vault_history_per_share_pnl_ignores_flows():
     vault_row = _vault_row(vault="0xv")
     pts_rows = [
