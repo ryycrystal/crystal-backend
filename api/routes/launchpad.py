@@ -2667,3 +2667,77 @@ def _search_impl(query: str, sort: str, limit: int, offset: int, filters: dict) 
         results.append(data)
 
     return {**base, "count": len(results), "results": results}
+
+
+@router.get("/pnl/{token_addr}/{address}")
+def token_pnl(
+    token_addr: str,
+    address: str,
+    days: int = Query(0, ge=0, le=3650, description="0 for lifetime, otherwise the trailing window"),
+) -> dict[str, Any]:
+    tok = (token_addr or "").strip().lower()
+    addr = (address or "").strip().lower()
+    if not tok or not addr:
+        raise HTTPException(status_code=400, detail="token and address are required")
+
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.balance_token, p.token_bought, p.token_sold,
+                   p.native_spent, p.native_received, p.total_pnl_native,
+                   COALESCE(t.last_price_native, 0)
+            FROM launchpad_positions p
+            LEFT JOIN launchpad_tokens t ON t.token = p.token
+            WHERE p.user_address = %s AND p.token = %s
+            """,
+            (addr, tok),
+        )
+        row = cur.fetchone()
+
+        if not row:
+            return {
+                "token": tok,
+                "address": addr,
+                "windowDays": days or None,
+                "balance_token": "0",
+                "token_bought": "0",
+                "token_sold": "0",
+                "native_spent": "0",
+                "native_received": "0",
+                "total_pnl_native": "0",
+                "last_price_native": "0",
+            }
+
+        balance, bought, sold, spent, received, total_pnl, last_price = row
+
+        if days > 0:
+            cutoff = int(time.time()) - days * 86400
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(token_amount) FILTER (WHERE is_buy), 0),
+                    COALESCE(SUM(token_amount) FILTER (WHERE NOT is_buy), 0),
+                    COALESCE(SUM(native_amount) FILTER (WHERE is_buy), 0),
+                    COALESCE(SUM(native_amount) FILTER (WHERE NOT is_buy), 0)
+                FROM launchpad_trades
+                WHERE user_address = %s AND token = %s AND timestamp >= %s
+                """,
+                (addr, tok, cutoff),
+            )
+            bought, sold, spent, received = cur.fetchone()
+            mark = Decimal(balance or 0) / Decimal(10) ** 18 * Decimal(last_price or 0)
+            realized = (Decimal(received or 0) - Decimal(spent or 0)) / Decimal(10) ** 18
+            total_pnl = (realized + mark) * Decimal(10) ** 18
+
+    return {
+        "token": tok,
+        "address": addr,
+        "windowDays": days or None,
+        "balance_token": str(int(balance or 0)),
+        "token_bought": str(int(bought or 0)),
+        "token_sold": str(int(sold or 0)),
+        "native_spent": str(int(spent or 0)),
+        "native_received": str(int(received or 0)),
+        "total_pnl_native": _fmt(total_pnl or 0),
+        "last_price_native": _fmt(last_price or 0),
+    }
