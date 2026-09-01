@@ -11,6 +11,7 @@ INTEGRITY_WINDOW = int(os.getenv("INTEGRITY_WINDOW", "100000"))
 INTEGRITY_TIP_MARGIN = int(os.getenv("INTEGRITY_TIP_MARGIN", "256"))
 INTEGRITY_STALL_LIMIT = int(os.getenv("INTEGRITY_STALL_LIMIT", "60"))
 INTEGRITY_HEAD_LAG_LIMIT = int(os.getenv("INTEGRITY_HEAD_LAG_LIMIT", "100"))
+INTEGRITY_VAULT_DIVERGENCE_LIMIT = int(os.getenv("INTEGRITY_VAULT_DIVERGENCE_LIMIT", "50"))
 
 
 def _processed_state() -> tuple[int | None, int | None, float]:
@@ -40,6 +41,7 @@ def evaluate(
     window_end: int,
     processed: int,
     holes: int,
+    vault_divergences: list | None = None,
 ) -> dict:
     expected = max(window_end - window_start + 1, 0)
     gaps = max(expected - processed, 0) if expected else 0
@@ -53,6 +55,13 @@ def evaluate(
         findings.append(f"{gaps} blocks never processed in the last {expected}")
     if holes:
         findings.append(f"{holes} processed blocks missing cached logs in the last {expected}")
+    divs = list(vault_divergences or [])
+    if divs:
+        worst = divs[0]
+        findings.append(
+            f"{len(divs)} vault depositors whose ledger disagrees with their chain shares, "
+            f"worst {worst[1][:10]} in {worst[0][:10]} ledger {worst[2]} vs chain {worst[3]}"
+        )
     return {
         "ts": int(time.time()),
         "last_block": last_block,
@@ -62,6 +71,9 @@ def evaluate(
         "window": [window_start, window_end],
         "processed_gaps": gaps,
         "cache_holes": holes,
+        "vault_ledger_divergences": [
+            {"vault": v, "user": u, "ledgerNet": str(n), "chainShares": str(c)} for v, u, n, c in divs
+        ],
         "findings": findings,
         "ok": not findings,
     }
@@ -81,7 +93,15 @@ async def sweep() -> dict:
     window_end = max(p_max - INTEGRITY_TIP_MARGIN, p_min)
     window_start = max(window_end - INTEGRITY_WINDOW + 1, p_min)
     processed, holes = _window_counts(window_start, window_end)
-    result = evaluate(p_max, stall, head, window_start, window_end, processed, holes)
+    # a dropped vault event leaves the flow ledger permanently ahead of the chain,
+    # and nothing else notices: the depositor rows self-heal against balanceOf while
+    # the ledger pnl is derived from does not
+    try:
+        divergences = storage.vault_ledger_divergences(INTEGRITY_VAULT_DIVERGENCE_LIMIT)
+    except Exception as e:
+        print(f"[INTEGRITY] vault ledger check failed {e!r}", flush=True)
+        divergences = []
+    result = evaluate(p_max, stall, head, window_start, window_end, processed, holes, divergences)
     storage.set_meta("integrity_last", json.dumps(result))
     return result
 

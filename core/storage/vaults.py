@@ -608,6 +608,40 @@ def sum_vault_share_flows_after(vault: str, ts: int, inclusive: bool = False) ->
     return minted, burned
 
 
+def vault_ledger_divergences(limit: int = 50) -> list[tuple[str, str, int, int]]:
+    """Depositors whose deposit/withdrawal ledger disagrees with their chain shares.
+
+    crystal_vault_users.shares is reconciled against balanceOf by the sampler, but
+    nothing validated the flow ledger those rows are derived from. A vault event
+    dropped at index time (wrong or not-yet-configured factory address) leaves the
+    ledger permanently ahead, and blocks are only processed once, so fixing the
+    acceptance rule does not repair history. PnL reads the ledger, so the gap shows
+    up as a position the holder no longer has.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT u.vault, u.user_address,
+                   COALESCE(d.dep, 0) - COALESCE(w.wd, 0) AS ledger_net,
+                   u.shares
+            FROM crystal_vault_users u
+            LEFT JOIN (
+                SELECT vault, user_address, SUM(shares) dep
+                FROM crystal_vault_deposits GROUP BY vault, user_address
+            ) d ON d.vault = u.vault AND d.user_address = u.user_address
+            LEFT JOIN (
+                SELECT vault, user_address, SUM(shares) wd
+                FROM crystal_vault_withdrawals GROUP BY vault, user_address
+            ) w ON w.vault = u.vault AND w.user_address = u.user_address
+            WHERE COALESCE(d.dep, 0) - COALESCE(w.wd, 0) <> u.shares
+            ORDER BY ABS(COALESCE(d.dep, 0) - COALESCE(w.wd, 0) - u.shares) DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [(str(a), str(b), int(c or 0), int(e or 0)) for a, b, c, e in cur.fetchall()]
+
+
 def vault_sample_nav_before(vault: str, ts: int) -> tuple[int, float, int] | None:
     """Latest sample strictly before ts that can price a share on its own.
 
