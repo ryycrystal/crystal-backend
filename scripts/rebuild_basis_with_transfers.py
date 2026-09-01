@@ -1,9 +1,8 @@
 import argparse
 import time
-
-import psycopg2
 from decimal import Decimal
 
+import psycopg2
 from psycopg2.extras import execute_values
 
 import core.storage as storage
@@ -146,9 +145,9 @@ def main():
                         updates.append((addr, token, int(bought), int(basis), realized))
                         if shown < args.show:
                             print(
-                                f"  {addr[:12]}.. {token[:12]}.. bought {cur_row[0]/1e18:,.2f}->{bought/1e18:,.2f} "
-                                f"basis {cur_row[1]/1e18:,.4f}->{basis/1e18:,.4f} "
-                                f"realized {float(cur_row[2])/1e18:,.4f}->{float(realized)/1e18:,.4f}"
+                                f"  {addr[:12]}.. {token[:12]}.. bought {cur_row[0] / 1e18:,.2f}->{bought / 1e18:,.2f} "
+                                f"basis {cur_row[1] / 1e18:,.4f}->{basis / 1e18:,.4f} "
+                                f"realized {float(cur_row[2]) / 1e18:,.4f}->{float(realized) / 1e18:,.4f}"
                             )
                             shown += 1
                     scanned += len(current)
@@ -198,15 +197,22 @@ def main():
                         storage.set_meta(PROGRESS_KEY, token, cur=cur)
 
                 break
-            except psycopg2.errors.DeadlockDetected:
+            except (
+                psycopg2.errors.DeadlockDetected,
+                psycopg2.OperationalError,
+                psycopg2.InterfaceError,
+            ) as e:
+                # a dropped server connection is as survivable as a deadlock here:
+                # the token is retried and the pool hands back a fresh connection
                 if attempt == 3:
                     raise
-                time.sleep(1 + attempt * 2)
+                print(f"[BASIS] {token} retry {attempt + 1}: {type(e).__name__}", flush=True)
+                time.sleep(2 + attempt * 3)
         if i % 500 == 0:
             el = time.perf_counter() - t0
             print(
                 f"[BASIS] {i:,}/{len(tokens):,} tokens, {changed:,} rows changed of {scanned:,} "
-                f"({i/el:,.1f} tok/s, eta {(len(tokens)-i)/max(i/el,0.001)/60:,.0f}m)",
+                f"({i / el:,.1f} tok/s, eta {(len(tokens) - i) / max(i / el, 0.001) / 60:,.0f}m)",
                 flush=True,
             )
 
