@@ -1280,10 +1280,12 @@ app.include_router(markets_router)
 app.include_router(pools_router)
 app.include_router(orderbook_router)
 
+from api.routes.fun import router as fun_router  # noqa: E402
 from api.routes.rewards import router as rewards_router  # noqa: E402
 from api.ws import router as ws_router  # noqa: E402
 from api.x_track import router as x_track_router  # noqa: E402
 
+app.include_router(fun_router)
 app.include_router(rewards_router)
 app.include_router(ws_router)
 app.include_router(x_track_router)
