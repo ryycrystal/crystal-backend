@@ -15,7 +15,7 @@ def _series(n, start=1_000_000, step=30, value=100.0):
 
 def test_a_lone_spike_never_represents_its_bucket():
     pts = _series(600)
-    pts[301]["v"] = 5.0  # one bad sample among 600
+    pts[301]["v"] = 5.0  # one bad sample among 600, interior so anchoring cannot save it
     out = _bucket_median_by_time(pts, 48, TS, VAL)
     assert len(out) <= 48
     assert all(p["v"] == 100.0 for p in out), "an outlier leaked into the rendered series"
@@ -28,7 +28,8 @@ def test_the_old_picker_could_surface_that_same_spike():
     landed_on = {int(p["timestamp"]) for p in _sample_evenly_by_time(clean, 48, TS)}
 
     pts = _series(600)
-    spiked = next(p for p in pts if int(p["timestamp"]) in landed_on and p is not pts[-1])
+    interior = pts[1:-1]  # the ends are anchored on purpose, so spike the middle
+    spiked = next(p for p in interior if int(p["timestamp"]) in landed_on)
     spiked["v"] = 5.0
 
     assert any(p["v"] == 5.0 for p in _sample_evenly_by_time(pts, 48, TS))
@@ -56,10 +57,13 @@ def test_real_level_shifts_survive():
     assert any(p["v"] == 200.0 for p in out)
 
 
-def test_the_series_ends_on_the_newest_sample():
+def test_the_series_is_anchored_to_the_real_first_and_last_samples():
     pts = _series(600)
+    pts[0]["v"] = 0.0  # a pnl series starts at its baseline and must plot it
     pts[-1]["v"] = 123.5
     out = _bucket_median_by_time(pts, 48, TS, VAL)
+    assert out[0]["timestamp"] == pts[0]["timestamp"]
+    assert out[0]["v"] == 0.0
     assert out[-1]["timestamp"] == pts[-1]["timestamp"]
     assert out[-1]["v"] == 123.5
 
