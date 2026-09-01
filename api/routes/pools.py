@@ -17,9 +17,14 @@ def _pool_row_to_api(row) -> dict[str, Any]:
 
 
 def _sample_pool_chart_points(points: list[dict[str, Any]], max_points: int = 48) -> list[dict[str, Any]]:
-    from api.api import _sample_evenly_by_time
+    from api.api import _bucket_median_by_time
 
-    return _sample_evenly_by_time(points, max_points, lambda p: int((p or {}).get("timestamp") or 0))
+    return _bucket_median_by_time(
+        points,
+        max_points,
+        lambda p: int((p or {}).get("timestamp") or 0),
+        lambda p: float((p or {}).get("tvl") or 0.0),
+    )
 
 
 @router.get("/pools/list")

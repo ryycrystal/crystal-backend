@@ -713,6 +713,7 @@ def token_meta(token_addr: str) -> dict[str, Any]:
         "reserveBase": reserves["reserveBase"],
         "reservesFrom": reserves.get("reservesFrom", "curve"),
         "reservesSyncedAt": reserves.get("reservesSyncedAt", 0),
+        "pool": reserves.get("pool", ""),
         "fees": fees,
         "as_of_block": storage.get_last_processed_block() or 0,
     }

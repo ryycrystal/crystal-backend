@@ -114,6 +114,16 @@ def predeposit_multiplier() -> float:
     return _meta_float("rewards_predeposit_multiplier", 3.0)
 
 
+def predeposit_start_ts() -> int:
+    raw = storage.get_meta("rewards_predeposit_start")
+    if raw:
+        try:
+            return int(float(raw))
+        except Exception:
+            pass
+    return vault_start_ts()
+
+
 def week_start_for(ts: int) -> int:
     dt = datetime.fromtimestamp(int(ts), LA)
     days_since_wed = (dt.weekday() - 2) % 7
@@ -441,6 +451,7 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
     main_start = program_start_ts()
     start_ts = min(vault_start_ts(), main_start)
     cutoff = predeposit_cutoff_ts()
+    pd_start = predeposit_start_ts()
     pd_mult = Decimal(str(predeposit_multiplier()))
     now_ts = int(now_ts if now_ts is not None else time.time())
     r = rates()
@@ -465,47 +476,46 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
             pd_vaults = storage.rewards_predeposit_vaults(cur)
             cur.execute(
                 """
-                SELECT vault, user_address, SUM(delta),
-                       SUM(CASE WHEN ts <= %s THEN delta ELSE 0 END)
-                FROM (
-                    SELECT vault, user_address, shares AS delta, timestamp AS ts
+                SELECT vault, user_address, delta, ts FROM (
+                    SELECT vault, user_address, shares AS delta, timestamp AS ts,
+                           block_number, log_index
                     FROM crystal_vault_deposits WHERE timestamp <= %s
                     UNION ALL
-                    SELECT vault, user_address, -shares, timestamp
+                    SELECT vault, user_address, -shares, timestamp,
+                           block_number, log_index
                     FROM crystal_vault_withdrawals WHERE timestamp <= %s
-                ) x
-                GROUP BY vault, user_address
-                HAVING SUM(delta) > 0
+                ) e
+                ORDER BY vault, user_address, ts, block_number, log_index
                 """,
-                (min(hour, cutoff), hour, hour),
+                (hour, hour),
             )
-            holdings = cur.fetchall()
-            allowance: dict[tuple[str, str], Decimal] = {
-                (str(v).lower(), str(u).lower()): max(Decimal(0), Decimal(int(pn or 0))) for v, u, _sh, pn in holdings
-            }
-            if hour > cutoff:
-                cur.execute(
-                    """
-                    SELECT vault, user_address, delta FROM (
-                        SELECT vault, user_address, shares AS delta, timestamp AS ts, block_number, log_index
-                        FROM crystal_vault_deposits WHERE timestamp > %s AND timestamp <= %s
-                        UNION ALL
-                        SELECT vault, user_address, -shares, timestamp, block_number, log_index
-                        FROM crystal_vault_withdrawals WHERE timestamp > %s AND timestamp <= %s
-                    ) e ORDER BY ts, block_number, log_index
-                    """,
-                    (cutoff, hour, cutoff, hour),
-                )
-                unboosted: dict[tuple[str, str], Decimal] = {}
-                for v, u, delta in cur.fetchall():
-                    key = (str(v).lower(), str(u).lower())
-                    if key not in allowance:
-                        continue
-                    bal = unboosted.get(key, Decimal(0)) + Decimal(int(delta))
-                    if bal < 0:
-                        allowance[key] = max(Decimal(0), allowance[key] + bal)
-                        bal = Decimal(0)
-                    unboosted[key] = bal
+            # one ordered pass splits every position into shares that earned the
+            # pre-deposit boost and shares that did not. only deposits inside the
+            # announced window are boosted, and a withdrawal spends unboosted
+            # shares first so the boost survives ordinary trimming but is burned
+            # for good once someone dips below what they pre-deposited
+            books: dict[tuple[str, str], list[Decimal]] = {}
+            for v, u, delta, ts in cur.fetchall():
+                key = (str(v).lower(), str(u).lower())
+                book = books.setdefault(key, [Decimal(0), Decimal(0)])
+                amount = Decimal(int(delta))
+                if amount >= 0:
+                    boosted_deposit = pd_start <= int(ts) <= cutoff
+                    book[0 if boosted_deposit else 1] += amount
+                else:
+                    owed = -amount
+                    spend = min(owed, book[1])
+                    book[1] -= spend
+                    owed -= spend
+                    if owed > 0:
+                        book[0] = max(Decimal(0), book[0] - owed)
+            holdings = [
+                (v, u, b[0] + b[1], b[0])
+                for (v, u), b in books.items()
+                if b[0] + b[1] > 0
+            ]
+            allowance = {(v, u): boost for v, u, _total, boost in holdings}
+
             if holdings:
                 vaults = sorted({str(h[0]).lower() for h in holdings})
                 cur.execute(

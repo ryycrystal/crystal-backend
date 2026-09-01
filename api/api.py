@@ -1213,6 +1213,50 @@ def _quote_price_usd(quote_token: str | None) -> Decimal:
     return Decimal(0)
 
 
+def _bucket_median_by_time(items, max_points: int, ts_getter, value_getter) -> list:
+    """Pick one real sample per evenly spaced bucket, the one holding the bucket's
+    median value.
+
+    Nearest-to-target picking shows a single arbitrary sample out of the ~60 that
+    a bucket covers, so one outlier either becomes the whole bucket or vanishes
+    depending on where the rolling window puts the targets, and the same data
+    draws a different curve on every load. Choosing the median sample keeps real
+    timestamps and real values while a lone spike can never represent a bucket.
+    """
+    pts = [it for it in (items or []) if it is not None]
+    if max_points <= 0 or len(pts) <= max_points:
+        return pts
+    pts = sorted(pts, key=lambda x: int(ts_getter(x) or 0))
+    start_ts = int(ts_getter(pts[0]) or 0)
+    end_ts = int(ts_getter(pts[-1]) or 0)
+    if end_ts <= start_ts:
+        return pts[-max_points:]
+
+    span = end_ts - start_ts
+    buckets: list[list] = [[] for _ in range(max_points)]
+    for p in pts:
+        ts = int(ts_getter(p) or 0)
+        idx = int((ts - start_ts) * max_points / span)
+        buckets[min(max(idx, 0), max_points - 1)].append(p)
+
+    out = []
+    for bucket in buckets:
+        if not bucket:
+            continue
+        ordered = sorted(bucket, key=lambda x: float(value_getter(x) or 0.0))
+        out.append(ordered[len(ordered) // 2])
+    out.sort(key=lambda x: int(ts_getter(x) or 0))
+    if not out:
+        return pts[-max_points:]
+
+    # both ends are anchored to the real samples: the newest is what every
+    # headline number is read from, and the oldest is the baseline a pnl series
+    # measures from, so a median there would start the curve off zero
+    out[0] = pts[0]
+    out[-1] = pts[-1]
+    return out
+
+
 def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
     pts = [it for it in (items or []) if it is not None]
     if max_points <= 0 or len(pts) <= max_points:

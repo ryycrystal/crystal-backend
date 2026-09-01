@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from api.api import _sample_evenly_by_time, storage, time, ttl_cache
+from api.api import _bucket_median_by_time, storage, time, ttl_cache
 from state import RPC_HTTP, State
 
 router = APIRouter()
@@ -345,7 +345,9 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
     pct = _per_share_pct_change(pts)
 
     if points and int(points) > 0:
-        pts = _sample_evenly_by_time(pts, int(points), lambda p: int(p.get("timestamp") or 0))
+        pts = _bucket_median_by_time(
+            pts, int(points), lambda p: int(p.get("timestamp") or 0), lambda p: float(p.get("usdValue") or 0.0)
+        )
 
     tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
     return {
@@ -892,8 +894,12 @@ def vault_history(
 
     tvl_full = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
     pnl_full = _per_share_pnl_series(pts)
-    tvl_series = _sample_evenly_by_time(tvl_full, 48, lambda p: int(p.get("timestamp") or 0))
-    pnl_series = _sample_evenly_by_time(pnl_full, 48, lambda p: int(p.get("timestamp") or 0))
+    tvl_series = _bucket_median_by_time(
+        tvl_full, 48, lambda p: int(p.get("timestamp") or 0), lambda p: float(p.get("tvlUsd") or 0.0)
+    )
+    pnl_series = _bucket_median_by_time(
+        pnl_full, 48, lambda p: int(p.get("timestamp") or 0), lambda p: float(p.get("pnlUsd") or 0.0)
+    )
 
     tf_name = {1: "day", 2: "week", 3: "month", 4: "all"}[timeframe_i]
     return {
