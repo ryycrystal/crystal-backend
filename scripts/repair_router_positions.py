@@ -57,6 +57,14 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--traders", required=True, help="comma separated router addresses")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "also drop rows where the router still has trades of its own. only for a known stateless "
+            "execution contract, whose forwarded trades could not be traced back to a wallet"
+        ),
+    )
     args = parser.parse_args()
 
     storage.init_pool()
@@ -96,11 +104,13 @@ def main() -> None:
         has_own_trades = new["trade_count"] > 0
         holds_tokens = int(balance or 0) > 0
 
-        if not has_own_trades and not holds_tokens:
+        if not holds_tokens and (not has_own_trades or args.force):
             # nothing of its own left once the forwarded trades were reattributed,
             # so the row is pure noise on holder lists and pnl leaderboards
+            residue = f" ({new['trade_count']} untraceable forwarded trades)" if has_own_trades else ""
             print(
-                f"[ROUTERPOS] delete {addr[:12]} {token[:12]} (was pnl {float(realized or 0) / 1e18:,.1f})",
+                f"[ROUTERPOS] delete {addr[:12]} {token[:12]} "
+                f"(was pnl {float(realized or 0) / 1e18:,.1f}){residue}",
                 flush=True,
             )
             if args.apply:
