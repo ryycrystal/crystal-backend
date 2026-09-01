@@ -140,10 +140,6 @@ def _wm_get(key: str, default: str) -> str:
     return raw if raw is not None else default
 
 
-def _hold_leader() -> bool:
-    return storage.claim_rewards_leader(NODE_ID, LEADER_TTL)
-
-
 def _mon_usd_at(cur, ts: int) -> Decimal:
     cur.execute(
         """
