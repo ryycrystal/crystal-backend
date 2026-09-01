@@ -636,6 +636,111 @@ def vault_sample_usd_at_or_after(vault: str, ts: int) -> tuple[int, float] | Non
     return (int(row[0] or 0), float(row[1])) if row and row[1] is not None else None
 
 
+def vault_sample_window_stats(vault: str, start_ts: int | None = None):
+    """min, max and latest usd plus the first and last rows that can price a share.
+
+    the chart stats and the apy only ever needed these few numbers, but they were
+    derived by shipping every sample in the window to python.
+    """
+    where = "vault = %s"
+    params: list = [vault.lower()]
+    if start_ts is not None:
+        where += " AND timestamp >= %s"
+        params.append(int(start_ts))
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            WITH win AS (
+                SELECT timestamp, block_number, quote_balance, base_balance, usd_value, shares
+                FROM crystal_vault_balance_samples
+                WHERE {where}
+            ),
+            priced AS (
+                SELECT timestamp, quote_balance, base_balance, usd_value, shares FROM win
+                WHERE shares > 0 AND usd_value > 0
+            ),
+            lo AS (SELECT * FROM priced ORDER BY timestamp ASC LIMIT 1),
+            hi AS (SELECT * FROM priced ORDER BY timestamp DESC LIMIT 1)
+            SELECT
+                (SELECT MIN(usd_value) FROM win),
+                (SELECT MAX(usd_value) FROM win),
+                (SELECT COUNT(*) FROM win),
+                (SELECT usd_value FROM win ORDER BY timestamp DESC, block_number DESC LIMIT 1),
+                (SELECT timestamp FROM lo), (SELECT quote_balance FROM lo),
+                (SELECT base_balance FROM lo), (SELECT usd_value FROM lo), (SELECT shares FROM lo),
+                (SELECT timestamp FROM hi), (SELECT quote_balance FROM hi),
+                (SELECT base_balance FROM hi), (SELECT usd_value FROM hi), (SELECT shares FROM hi)
+            """,
+            params,
+        )
+        return cur.fetchone()
+
+
+def list_crystal_vault_sample_medians(vault: str, start_ts: int | None = None, buckets: int = 48):
+    """Per-bucket median samples plus the true window endpoints.
+
+    Mirrors _bucket_median_by_time: evenly spaced buckets, and within each the
+    real row holding the median value (ties fall back to the earlier sample, the
+    same way a stable sort by value does). Doing it here means the API no longer
+    pulls every sample in the window just to keep a few dozen of them.
+    """
+    where = "vault = %s"
+    params: list = [vault.lower()]
+    if start_ts is not None:
+        where += " AND timestamp >= %s"
+        params.append(int(start_ts))
+    n = int(max(1, buckets))
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            WITH win AS (
+                SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
+                FROM crystal_vault_balance_samples
+                WHERE {where}
+            ),
+            bounds AS (SELECT MIN(timestamp) AS mn, MAX(timestamp) AS mx FROM win),
+            tagged AS (
+                SELECT w.*,
+                       LEAST(
+                           GREATEST(((w.timestamp - b.mn) * {n}) / GREATEST(1, b.mx - b.mn), 0),
+                           {n} - 1
+                       ) AS bucket
+                FROM win w CROSS JOIN bounds b
+            ),
+            ranked AS (
+                SELECT t.*,
+                       ROW_NUMBER() OVER (PARTITION BY bucket ORDER BY usd_value, timestamp, block_number DESC) AS rn,
+                       COUNT(*) OVER (PARTITION BY bucket) AS cnt
+                FROM tagged t
+            )
+            SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
+            FROM ranked
+            WHERE rn = (cnt / 2) + 1
+            ORDER BY timestamp
+            """,
+            params,
+        )
+        medians = cur.fetchall()
+
+        cur.execute(
+            f"""
+            (SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
+             FROM crystal_vault_balance_samples WHERE {where}
+             ORDER BY timestamp ASC, block_number DESC LIMIT 1)
+            UNION ALL
+            (SELECT block_number, timestamp, quote_balance, base_balance, usd_value, shares
+             FROM crystal_vault_balance_samples WHERE {where}
+             ORDER BY timestamp DESC, block_number ASC LIMIT 1)
+            """,
+            params + params,
+        )
+        ends = cur.fetchall()
+
+    first_row = ends[0] if ends else None
+    last_row = ends[1] if len(ends) > 1 else first_row
+    return medians, first_row, last_row
+
+
 def list_crystal_vault_balance_samples(vault: str, start_ts: int | None = None, limit: int = 0):
     with db_cursor() as cur:
         if start_ts is None:

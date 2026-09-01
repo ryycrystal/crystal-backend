@@ -143,6 +143,10 @@ def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
 
 
 VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
+# the summary used to return every sample in the window: tens of thousands of
+# points no client reads, since the chart pulls /history and the list carries its
+# own snapshot
+SUMMARY_SNAPSHOT_POINTS = 200
 
 _STABLE_QUOTE_TICKERS = {"usdc", "usdt", "usdt0", "ausd", "usde", "dai", "usd"}
 _APY_META_CACHE: dict[str, tuple[float, tuple[int, int, bool]]] = {}
@@ -171,19 +175,29 @@ def _vault_apy_meta(vault_addr: str) -> tuple[int, int, bool] | None:
 def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str] | None:
     now_ts = int(time.time())
     try:
-        rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=now_ts - window_days * 86400, limit=0)
+        # only the earliest and latest priced sample feed this, so the window is
+        # collapsed in sql rather than shipped row by row
+        stats = storage.vault_sample_window_stats(vault_addr, start_ts=now_ts - window_days * 86400)
     except Exception:
         return None
-    shared = [
-        (int(r[1] or 0), int(r[2] or 0), int(r[3] or 0), float(r[4] or 0.0), int(r[5] or 0))
-        for r in rows
-        if len(r) > 5 and int(r[5] or 0) > 0 and float(r[4] or 0.0) > 0
-    ]
-    if len(shared) < 2:
+    if not stats or stats[4] is None or stats[9] is None or stats[4] == stats[9]:
         return None
-    shared.sort(key=lambda p: p[0])
-    t_first, q_first, b_first, usd_first, sh_first = shared[0]
-    t_last, q_last, b_last, usd_last, sh_last = shared[-1]
+    t_first, q_first, b_first, usd_first, sh_first = (
+        int(stats[4] or 0),
+        int(stats[5] or 0),
+        int(stats[6] or 0),
+        float(stats[7] or 0.0),
+        int(stats[8] or 0),
+    )
+    t_last, q_last, b_last, usd_last, sh_last = (
+        int(stats[9] or 0),
+        int(stats[10] or 0),
+        int(stats[11] or 0),
+        float(stats[12] or 0.0),
+        int(stats[13] or 0),
+    )
+    if sh_first <= 0 or sh_last <= 0 or usd_first <= 0 or usd_last <= 0:
+        return None
     window = t_last - t_first
     if window < VAULT_APY_MIN_WINDOW_SECS:
         return None
@@ -325,29 +339,47 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
     else:
         start_ts = None
 
-    rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=start_ts, limit=0)
+    # the headline stats come back exact from one aggregate query, and the drawn
+    # series is bucketed to its final point count in sql, so neither depends on
+    # streaming every sample in the window into python
+    stats = storage.vault_sample_window_stats(vault_addr, start_ts=start_ts)
+    if not stats or not int(stats[2] or 0):
+        return None
+
+    last = float(stats[3] or 0.0)
+    pct = 0.0
+    if stats[7] is not None and stats[12] is not None and int(stats[8] or 0) > 0 and int(stats[13] or 0) > 0:
+        first_vps = float(stats[7]) / int(stats[8])
+        last_vps = float(stats[12]) / int(stats[13])
+        if first_vps > 0:
+            pct = ((last_vps / first_vps) - 1.0) * 100.0
+
+    want = int(points) if points and int(points) > 0 else 0
+    if want:
+        rows, first_row, last_row = storage.list_crystal_vault_sample_medians(
+            vault_addr, start_ts=start_ts, buckets=want
+        )
+    else:
+        rows = storage.list_crystal_vault_balance_samples(vault_addr, start_ts=start_ts, limit=0)
+        first_row = last_row = None
     if not rows:
         return None
 
-    pts = [
-        {
+    def _pt(r):
+        return {
             "block": int(r[0] or 0),
             "timestamp": int(r[1] or 0),
             "usdValue": float(r[4] or 0.0),
             "shares": int(r[5] or 0) if len(r) > 5 else 0,
         }
-        for r in rows
-    ]
+
+    pts = [_pt(r) for r in rows]
     pts.sort(key=lambda p: int(p["timestamp"]))
-
-    values = [float(p["usdValue"]) for p in pts]
-    last = values[-1] if values else 0.0
-    pct = _per_share_pct_change(pts)
-
-    if points and int(points) > 0:
-        pts = _bucket_median_by_time(
-            pts, int(points), lambda p: int(p.get("timestamp") or 0), lambda p: float(p.get("usdValue") or 0.0)
-        )
+    # both ends stay real samples, matching _bucket_median_by_time: the newest is
+    # what the headline numbers read from and the oldest is the pnl baseline
+    if want and first_row is not None and last_row is not None and len(pts) > 1:
+        pts[0] = _pt(first_row)
+        pts[-1] = _pt(last_row)
 
     tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
     return {
@@ -356,8 +388,8 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
         "stats": {
             "pctChange": pct,
             "lastUsd": last,
-            "min": min(values) if values else 0.0,
-            "max": max(values) if values else 0.0,
+            "min": float(stats[0] or 0.0),
+            "max": float(stats[1] or 0.0),
         },
     }
 
@@ -641,6 +673,9 @@ def vault_refresh_balance(
 
 
 @router.get("/vaults/{address}/{user}")
+# every vault page open recomputed this from scratch; a short ttl with a stale
+# window absorbs a burst of opens without holding anyone on yesterday's numbers
+@ttl_cache("vaults:summary", ttl_seconds=5, serve_stale_seconds=20)
 def vault_user_summary(
     address: str,
     user: str,
@@ -752,7 +787,7 @@ def vault_user_summary(
         )
 
     timeframe_i = _parse_timeframe(snapshot_timeframe)
-    snapshot = _vault_snapshot_from_samples(vaddr, timeframe=timeframe_i, points=0)
+    snapshot = _vault_snapshot_from_samples(vaddr, timeframe=timeframe_i, points=SUMMARY_SNAPSHOT_POINTS)
     if snapshot is None and float(latest["usdValue"] or 0.0) > 0:
         last_usd = float(latest["usdValue"] or 0.0)
         snapshot = {

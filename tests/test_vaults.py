@@ -431,6 +431,68 @@ def test_parse_market_created_dynamic_offsets_decode_correctly():
     assert out["marketType"] == 2
 
 
+def _stats_from_rows(rows):
+    """Mirror of storage.vault_sample_window_stats so tests can still declare
+    intent as sample rows while the route reads reduced values."""
+    if not rows:
+        return (None, None, 0, None, None, None, None, None, None, None, None, None, None, None)
+    norm = [
+        (
+            int(r[0] or 0),
+            int(r[1] or 0),
+            int(r[2] or 0),
+            int(r[3] or 0),
+            float(r[4] or 0.0),
+            int(r[5] or 0) if len(r) > 5 else 0,
+        )
+        for r in rows
+    ]
+    by_ts = sorted(norm, key=lambda r: (r[1], r[0]))
+    usd = [r[4] for r in norm]
+    last_usd = by_ts[-1][4]
+    priced = [r for r in by_ts if r[5] > 0 and r[4] > 0]
+    lo = priced[0] if priced else None
+    hi = priced[-1] if priced else None
+    return (
+        min(usd),
+        max(usd),
+        len(norm),
+        last_usd,
+        lo[1] if lo else None,
+        lo[2] if lo else None,
+        lo[3] if lo else None,
+        lo[4] if lo else None,
+        lo[5] if lo else None,
+        hi[1] if hi else None,
+        hi[2] if hi else None,
+        hi[3] if hi else None,
+        hi[4] if hi else None,
+        hi[5] if hi else None,
+    )
+
+
+def _medians_from_rows(rows, buckets):
+    """Mirror of storage.list_crystal_vault_sample_medians."""
+    if not rows:
+        return [], None, None
+    pts = sorted(rows, key=lambda r: (int(r[1] or 0), int(r[0] or 0)))
+    start, end = int(pts[0][1] or 0), int(pts[-1][1] or 0)
+    span = max(1, end - start)
+    n = max(1, int(buckets))
+    grouped = [[] for _ in range(n)]
+    for r in pts:
+        idx = int((int(r[1] or 0) - start) * n / span)
+        grouped[min(max(idx, 0), n - 1)].append(r)
+    out = []
+    for g in grouped:
+        if not g:
+            continue
+        ordered = sorted(g, key=lambda r: (float(r[4] or 0.0), int(r[1] or 0)))
+        out.append(ordered[len(ordered) // 2])
+    out.sort(key=lambda r: int(r[1] or 0))
+    return out, pts[0], pts[-1]
+
+
 def test_vault_snapshot_from_samples_timeframes_and_raw_default_behavior():
     now_ts = 2_000_000_000
     rows = []
@@ -439,8 +501,9 @@ def test_vault_snapshot_from_samples_timeframes_and_raw_default_behavior():
         rows.append((1000 + i, ts, 0, 0, float(i)))
 
     with patch.object(vault_api.time, "time", return_value=float(now_ts)):
-        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows) as m:
-            snap = vault_api._vault_snapshot_from_samples("0xabc", timeframe=1)
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
+            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows) as m:
+                snap = vault_api._vault_snapshot_from_samples("0xabc", timeframe=1)
     assert snap is not None
     assert len(snap["tvl"]) == len(rows)
     assert snap["tvl"][0] == [rows[0][1], float(rows[0][4])]
@@ -450,21 +513,30 @@ def test_vault_snapshot_from_samples_timeframes_and_raw_default_behavior():
 
     for tf, delta in ((2, 7 * 86400), (3, 30 * 86400), (4, None)):
         with patch.object(vault_api.time, "time", return_value=float(now_ts)):
-            with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows) as m2:
-                vault_api._vault_snapshot_from_samples("0xabc", timeframe=tf)
+            with patch.object(
+                vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)
+            ) as ms:
+                with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows) as m2:
+                    vault_api._vault_snapshot_from_samples("0xabc", timeframe=tf)
         expect_start = None if delta is None else now_ts - delta
+        ms.assert_called_once_with("0xabc", start_ts=expect_start)
         m2.assert_called_once_with("0xabc", start_ts=expect_start, limit=0)
 
 
 def test_vault_snapshot_from_samples_optional_downsampling_and_empty_cases():
     rows = [(i, 1000 + i, 0, 0, float(i)) for i in range(6)]
-    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[]):
+    with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows([])):
         assert vault_api._vault_snapshot_from_samples("0xabc", timeframe=4) is None
 
-    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
-        snap2 = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=2)
-        snap4 = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=4)
-        snap_zero = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=4)
+    with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
+        with patch.object(
+            vault_api.storage,
+            "list_crystal_vault_sample_medians",
+            side_effect=lambda v, start_ts=None, buckets=48: _medians_from_rows(rows, buckets),
+        ):
+            snap2 = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=2)
+            snap4 = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=4)
+            snap_zero = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4, points=4)
 
     assert len(snap2["tvl"]) == 2
     assert snap2["tvl"][0][1] == 0.0
@@ -480,8 +552,9 @@ def test_vault_snapshot_from_samples_pct_when_first_value_zero():
         (1, 1000, 0, 0, 0.0),
         (2, 1010, 0, 0, 5.0),
     ]
-    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
-        snap = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4)
+    with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+            snap = vault_api._vault_snapshot_from_samples("0xabc", timeframe=4)
     assert snap["stats"]["pctChange"] == 0.0
     assert snap["stats"]["lastUsd"] == 5.0
 
@@ -1479,7 +1552,7 @@ def test_vault_apy_pct_from_samples():
         (2, now - day, 0, 0, 101.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
-        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
             apy = vault_api._vault_apy_pct("0xv")
     assert apy is not None
     assert abs(apy - ((1.01**365.0) - 1.0) * 100.0) < 1e-6
@@ -1489,7 +1562,7 @@ def test_vault_apy_pct_from_samples():
         (2, now - day, 0, 0, 50.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
-        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=losing):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(losing)):
             worst = vault_api._vault_apy_pct("0xv")
     assert worst is not None
     assert -100.0 <= worst < 0.0
@@ -1499,11 +1572,11 @@ def test_vault_apy_pct_from_samples():
         (2, now - day, 0, 0, 500.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
-        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=mooning):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(mooning)):
             capped = vault_api._vault_apy_pct("0xv")
     assert capped == 100000.0
 
-    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=[rows[0]]):
+    with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows([rows[0]])):
         assert vault_api._vault_apy_pct("0xv") is None
 
 
@@ -1520,7 +1593,7 @@ def test_vault_apy_strategy_basis_strips_price_moves():
     ]
     vault_api._APY_META_CACHE.clear()
     with patch.object(vault_api.time, "time", return_value=float(now)):
-        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
             with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
                 with patch.object(vault_api.storage, "get_market_quote_ticker", return_value="USDC"):
                     out = vault_api._vault_apy("0xv")
@@ -1610,8 +1683,9 @@ def test_vault_snapshot_pct_change_is_per_share():
         (1, 1000, 0, 0, 100.0, 1000),
         (2, 1010, 0, 0, 200.0, 2000),
     ]
-    with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
-        snap = vault_api._vault_snapshot_from_samples("0xv", timeframe=4)
+    with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
+        with patch.object(vault_api.storage, "list_crystal_vault_balance_samples", return_value=rows):
+            snap = vault_api._vault_snapshot_from_samples("0xv", timeframe=4)
     assert abs(snap["stats"]["pctChange"]) < 1e-9
     assert snap["stats"]["lastUsd"] == 200.0
 
