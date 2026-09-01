@@ -26,7 +26,7 @@ def venue_addresses(cur):
 def events_for_token(cur, token):
     cur.execute(
         """
-        SELECT block_number, log_index, 't', user_address, is_buy, native_amount, token_amount, ''
+        SELECT block_number, log_index, 't', user_address, is_buy, native_amount, token_amount, txhash
         FROM launchpad_trades WHERE token = %s
         UNION ALL
         SELECT block_number, log_index, 'x', from_addr, NULL, 0, amount, to_addr
@@ -40,6 +40,7 @@ def events_for_token(cur, token):
 
 def fold(events, venues):
     users: dict[str, list] = {}
+    sell_realized: list[tuple] = []
 
     def slot(addr):
         return users.setdefault(addr, [0, 0, 0, 0, Decimal(0)])
@@ -70,6 +71,7 @@ def fold(events, venues):
                     u[1] = basis - released
                 u[3] += amount
                 u[4] += Decimal(int(native or 0) - released)
+                sell_realized.append((counterparty, idx, int(native or 0) - released))
         else:
             to = (counterparty or "").lower()
             if actor in venues or to in venues or actor == to:
@@ -86,7 +88,7 @@ def fold(events, venues):
             dst[0] += move
             dst[1] += released
             dst[2] += move
-    return users
+    return users, sell_realized
 
 
 def main():
@@ -122,7 +124,7 @@ def main():
             events = events_for_token(cur, token)
             if not events:
                 continue
-            users = fold(events, venues)
+            users, sell_realized = fold(events, venues)
             cur.execute(
                 "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native "
                 "FROM launchpad_positions WHERE token = %s",
@@ -174,6 +176,19 @@ def main():
                     WHERE k.token = p.token AND p.token = %s
                     """,
                     (token,),
+                )
+            if args.apply and sell_realized:
+                execute_values(
+                    cur,
+                    """
+                    UPDATE launchpad_trades t SET realized_native = v.realized
+                    FROM (VALUES %s) AS v(tx, li, realized)
+                    WHERE t.txhash = v.tx AND t.log_index = v.li
+                      AND t.realized_native IS DISTINCT FROM v.realized
+                    """,
+                    sell_realized,
+                    template="(%s, %s::integer, %s::numeric)",
+                    page_size=2000,
                 )
             if args.apply:
                 storage.set_meta(PROGRESS_KEY, token, cur=cur)
