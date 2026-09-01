@@ -97,9 +97,7 @@ async def reconcile_once(limit: int = RECONCILE_BATCH) -> dict:
                 skipped += 1
                 continue
 
-            await asyncio.to_thread(
-                storage.force_pool_reserves, pool, reserve_token, reserve_native, head, now_ts
-            )
+            await asyncio.to_thread(storage.force_pool_reserves, pool, reserve_token, reserve_native, head, now_ts)
             repaired += 1
             if kind == "v2":
                 v2_count += 1
