@@ -80,7 +80,7 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
             f"""
             SELECT tr.txhash, tr.log_index, tr.timestamp, tr.block_number, tr.user_address,
                    tr.is_buy, tr.native_amount, tr.token_amount, tr.price_native,
-                   tr.token, t.symbol, t.name, t.metadata_cid
+                   tr.token, t.symbol, t.name, t.metadata_cid, t.source, t.migrated
             FROM launchpad_trades tr
             JOIN launchpad_tokens t ON t.token = tr.token
             WHERE {where}
@@ -92,7 +92,23 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
         rows = cur.fetchall()
 
     out = []
-    for txhash, log_index, ts, blk, caller, is_buy, native_amt, token_amt, price, token, symbol, name, cid in rows:
+    for (
+        txhash,
+        log_index,
+        ts,
+        blk,
+        caller,
+        is_buy,
+        native_amt,
+        token_amt,
+        price,
+        token,
+        symbol,
+        name,
+        cid,
+        source,
+        migrated,
+    ) in rows:
         out.append(
             {
                 "id": f"{txhash}-{int(log_index)}",
@@ -107,6 +123,8 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
                 "symbol": symbol or "TKN",
                 "name": name or symbol or "Token",
                 "metadataCid": cid or "",
+                "source": _api_source(source),
+                "migrated": bool(migrated),
             }
         )
     return out

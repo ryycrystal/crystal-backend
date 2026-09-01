@@ -2319,7 +2319,9 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                 tr.token,
                 t.symbol,
                 t.name,
-                t.metadata_cid
+                t.metadata_cid,
+                t.source,
+                t.migrated
             FROM launchpad_trades tr
             JOIN launchpad_tokens t ON t.token = tr.token
             WHERE tr.user_address = ANY(%s)
@@ -2346,6 +2348,8 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
         symbol,
         name,
         metadata_cid,
+        tok_source,
+        tok_migrated,
     ) in rows:
         is_buy_flag = bool(is_buy)
         native_amount = int(native_amount or 0)
@@ -2373,6 +2377,8 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                     "name": name or symbol or "",
                     "metadataCid": metadata_cid or "",
                     "time": str(int(ts_tr)),
+                    "source": _api_source(tok_source),
+                    "migrated": bool(tok_migrated),
                 }
             }
         )
