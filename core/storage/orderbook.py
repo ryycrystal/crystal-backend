@@ -757,3 +757,28 @@ def open_orders_for_portfolio(user) -> list[dict[str, Any]]:
         }
         for market, is_buy, base_ticker, quote_ticker, token, decimals, locked, count in rows
     ]
+
+
+def wallets_last_activity(user) -> dict[str, int]:
+    addrs = _addr_list(user)
+    if not addrs:
+        return {}
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT addr, MAX(ts) FROM (
+                SELECT user_address AS addr, MAX(timestamp) AS ts
+                FROM launchpad_trades WHERE user_address = ANY(%(a)s) GROUP BY 1
+                UNION ALL
+                SELECT user_address, MAX(timestamp)
+                FROM crystal_market_trades WHERE user_address = ANY(%(a)s) GROUP BY 1
+                UNION ALL
+                SELECT user_address, MAX(timestamp)
+                FROM crystal_orderbook_events WHERE user_address = ANY(%(a)s) GROUP BY 1
+            ) u
+            GROUP BY addr
+            """,
+            {"a": addrs},
+        )
+        rows = cur.fetchall()
+    return {a: int(ts) for a, ts in rows if a and ts}

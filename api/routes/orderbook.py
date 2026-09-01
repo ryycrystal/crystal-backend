@@ -186,6 +186,14 @@ def coarsened_resolution(span_seconds: int, res: int) -> int:
     return _RES_LADDER[-1]
 
 
+@router.get("/wallets/last-active")
+def wallets_last_active(addresses: str = "") -> dict[str, Any]:
+    addrs = [a.strip().lower() for a in (addresses or "").split(",") if a.strip()][:100]
+    if not addrs:
+        return {"lastActive": {}}
+    return {"lastActive": storage.wallets_last_activity(addrs)}
+
+
 @router.get("/activity/{wallet}")
 def wallet_activity(
     wallet: str, limit: int = 50, before_ts: int | None = None, cursor: str = "", addresses: str = ""
