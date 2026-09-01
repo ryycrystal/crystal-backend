@@ -1087,7 +1087,7 @@ def _build_ohlcv_from_db(
                 slot[3] = lo_new if lo_old <= 0 else (min(lo_old, lo_new) if lo_new > 0 else lo_old)
                 slot[4] = close_p
                 slot[5] += int(qv or 0)
-        rows = [tuple(v) for _, v in sorted(grouped.items())][-(limit + 1):]
+        rows = [tuple(v) for _, v in sorted(grouped.items())][-(limit + 1) :]
 
     seeded = len(rows) > limit
     seed_rows = rows[:1] if seeded else []

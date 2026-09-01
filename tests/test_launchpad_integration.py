@@ -51,6 +51,8 @@ LAUNCHPAD_TABLES = (
     "launchpad_users",
     "launchpad_tokens",
     "launchpad_blocks",
+    "launchpad_ohlcv",
+    "spot_graph_buckets",
 )
 
 

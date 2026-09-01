@@ -13,7 +13,6 @@ from api.api import (
     _build_ohlcv_from_db,
     _fmt,
     _fmt_usd,
-    _initial_price_kline,
     _lifecycle_fields,
     _nadfun_version,
     _quote_price_usd,
@@ -72,7 +71,7 @@ def fun_token_overview(
 
     t0 = time.time()
     try:
-        if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 86400):
+        if chartres not in (1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400, 604800):
             raise HTTPException(status_code=400)
 
         token_addr = token_addr.lower()
@@ -122,14 +121,8 @@ def fun_token_overview(
         marketcap_usd = marketcap_native_raw * quote_price_usd if quote_price_usd > 0 else Decimal(0)
 
         mini_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=3600, max_buckets=24)
-        if not mini_klines:
-            seed = _initial_price_kline(created_at or now_ts, last_price_native, 3600)
-            mini_klines = [seed] if seed else []
 
         series_klines = _build_ohlcv_from_db(token_addr, bucket_seconds=chartres, max_buckets=None) if series else []
-        if series and not series_klines:
-            seed = _initial_price_kline(created_at or now_ts, last_price_native, chartres)
-            series_klines = [seed] if seed else []
         series_mon_usd = _mon_usd_window(int(series_klines[0]["time"]), now_ts) if series_klines else None
 
         with db_cursor() as cur:
@@ -147,9 +140,7 @@ def fun_token_overview(
             trade_rows = cur.fetchall()
         trades_out = _trade_rows_out(trade_rows)
 
-        tracked_addrs = sorted(
-            {a.strip().lower() for a in tracked.split(",") if a.strip()}
-        )
+        tracked_addrs = sorted({a.strip().lower() for a in tracked.split(",") if a.strip()})
         tracked_trades_out: list[dict[str, Any]] = []
         if tracked_addrs:
             with db_cursor() as cur:
@@ -386,4 +377,8 @@ def fun_users_positions_batch(
             "count": len(addrs),
         }
     finally:
-        log.info("fun_users_positions_batch n=%s dt_ms=%.1f", addresses.count(",") + 1 if addresses else 0, (time.time() - t0) * 1000)
+        log.info(
+            "fun_users_positions_batch n=%s dt_ms=%.1f",
+            addresses.count(",") + 1 if addresses else 0,
+            (time.time() - t0) * 1000,
+        )

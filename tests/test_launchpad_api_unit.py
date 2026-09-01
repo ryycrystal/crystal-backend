@@ -67,8 +67,7 @@ def test_token_feeds_use_independent_rankings(monkeypatch):
         launchpad,
         "_batch_serialize_tokens",
         lambda addresses: {
-            address: {"token": address, "source": 0, "circulating_supply": "1"}
-            for address in addresses
+            address: {"token": address, "source": 0, "circulating_supply": "1"} for address in addresses
         },
     )
     monkeypatch.setattr(launchpad.storage, "get_last_processed_block", lambda: 123)

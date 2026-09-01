@@ -99,7 +99,7 @@ def test_buckets_are_immutable(db, monkeypatch):
     assert after == before, "a second fill must not change or duplicate rows"
 
 
-def test_fill_includes_lp_value_and_replaces_old_cache(db, monkeypatch):
+def test_fill_includes_lp_value_and_replaces_old_cache(db, clean, monkeypatch):
     sg = _setup(monkeypatch, 0)
     wanted = sg._wanted_buckets(NOW)
     stale_ts = min(wanted)
