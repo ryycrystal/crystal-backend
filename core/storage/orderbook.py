@@ -721,3 +721,39 @@ def wallet_first_activity_ts(user) -> int | None:
         )
         row = cur.fetchone()
     return int(row[0]) if row and row[0] else None
+
+
+def open_orders_for_portfolio(user) -> list[dict[str, Any]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.market,
+                   o.is_buy,
+                   m.base_ticker,
+                   m.quote_ticker,
+                   LOWER(CASE WHEN o.is_buy THEN m.quote_address ELSE m.base_address END) AS token,
+                   CASE WHEN o.is_buy THEN m.quote_decimals ELSE m.base_decimals END AS decimals,
+                   SUM(o.size) AS locked,
+                   COUNT(*) AS order_count
+            FROM crystal_orderbook_orders o
+            JOIN crystal_markets m ON m.market = o.market
+            WHERE o.user_address = ANY(%s) AND o.status = 'open' AND o.size > 0
+            GROUP BY o.market, o.is_buy, m.base_ticker, m.quote_ticker, token, decimals
+            ORDER BY locked DESC
+            """,
+            (_addr_list(user),),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "market": market,
+            "isBuy": bool(is_buy),
+            "baseTicker": base_ticker or "",
+            "quoteTicker": quote_ticker or "",
+            "token": token,
+            "decimals": int(decimals or 18),
+            "lockedRaw": int(locked or 0),
+            "orderCount": int(count or 0),
+        }
+        for market, is_buy, base_ticker, quote_ticker, token, decimals, locked, count in rows
+    ]

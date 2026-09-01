@@ -107,6 +107,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
             "rows": [],
             "vaults": [],
             "liquidity": [],
+            "orders": [],
             "summary": {
                 "totalAccountValue": None,
                 "firstActivityTs": None,
@@ -209,6 +210,24 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
             }
         )
     rows.sort(key=lambda r: Decimal(r["totalValueUsd"] or r["valueUsd"] or 0), reverse=True)
+
+    order_rows = []
+    for o in storage.open_orders_for_portfolio(supported):
+        price = prices.get(o["token"])
+        locked = Decimal(o["lockedRaw"]) / Decimal(10) ** int(o["decimals"])
+        value = (locked * price) if price is not None else None
+        order_rows.append(
+            {
+                "market": o["market"],
+                "isBuy": o["isBuy"],
+                "pair": f"{o['baseTicker']}/{o['quoteTicker']}" if o["baseTicker"] and o["quoteTicker"] else "",
+                "orderCount": o["orderCount"],
+                "lockedRaw": str(o["lockedRaw"]),
+                "locked": _fmt(locked),
+                "valueUsd": _fmt_usd(value) if value is not None else None,
+            }
+        )
+
     total = wallet_total + orders_total + vaults_total + lp_total
 
     return {
@@ -222,6 +241,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
         "liquidity": [
             {**lp, "valueUsd": _fmt_usd(lp["valueUsd"]) if lp["valueUsd"] is not None else None} for lp in lp_rows
         ],
+        "orders": order_rows,
         "summary": {
             "totalAccountValue": _fmt_usd(total),
             "firstActivityTs": storage.wallet_first_activity_ts(supported),
