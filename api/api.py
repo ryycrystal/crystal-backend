@@ -541,7 +541,7 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
     for token, last, ref_24h, ref_launch in rows:
         last_d = Decimal(last or 0)
         out[token] = {
-            "change_pct_24h": pct(last_d, ref_24h),
+            "change_pct_24h": pct(last_d, ref_24h or ref_launch),
             "change_pct_since_launch": pct(last_d, ref_launch),
         }
     return out
