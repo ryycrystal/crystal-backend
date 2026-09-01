@@ -1040,15 +1040,24 @@ def _build_ohlcv_from_db(
 
     token_addr = token_addr.lower()
 
+    stored = (1, 5, 15, 60, 300, 900, 3600, 14400, 86400)
+    base_res = bucket_seconds
+    if bucket_seconds not in stored:
+        divisors = [r for r in stored if bucket_seconds % r == 0]
+        if not divisors:
+            return []
+        base_res = divisors[-1]
+
     where = "token = %s AND resolution_sec = %s"
-    params: list[Any] = [token_addr, bucket_seconds]
+    params: list[Any] = [token_addr, base_res]
 
     if before_ts is not None and before_ts > 0:
         where += " AND bucket_start < %s"
         params.append(int(before_ts))
 
     limit = max_buckets if (max_buckets is not None and max_buckets > 0) else 1000
-    params.append(int(limit) + 1)
+    span = bucket_seconds // base_res
+    params.append((int(limit) + 1) * span)
 
     with db_cursor() as cur:
         cur.execute(
@@ -1063,6 +1072,23 @@ def _build_ohlcv_from_db(
         rows = cur.fetchall()
 
     rows.reverse()
+
+    if base_res != bucket_seconds:
+        grouped: dict[int, list] = {}
+        for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
+            gb = (int(bucket_start) // bucket_seconds) * bucket_seconds
+            slot = grouped.get(gb)
+            if slot is None:
+                grouped[gb] = [gb, open_p, high_p, low_p, close_p, int(qv or 0)]
+            else:
+                slot[2] = max(Decimal(slot[2] or 0), Decimal(high_p or 0))
+                lo_new = Decimal(low_p or 0)
+                lo_old = Decimal(slot[3] or 0)
+                slot[3] = lo_new if lo_old <= 0 else (min(lo_old, lo_new) if lo_new > 0 else lo_old)
+                slot[4] = close_p
+                slot[5] += int(qv or 0)
+        rows = [tuple(v) for _, v in sorted(grouped.items())][-(limit + 1):]
+
     seeded = len(rows) > limit
     seed_rows = rows[:1] if seeded else []
     rows = rows[1:] if seeded else rows
