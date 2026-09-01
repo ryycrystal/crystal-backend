@@ -566,14 +566,18 @@ class Hub:
             key = (token, f"positions:{id(sub)}")
             prev = self._prev_rows.get(key)
             self._prev_rows[key] = mine
-            if prev is None:
+            # the first frame for a subscriber is the whole set, not a diff. saying
+            # "delta" let the client merge it into whatever it still held from an
+            # earlier connection, so rows the server no longer lists never went away
+            is_full = prev is None
+            if is_full:
                 upserts, removed = list(mine.values()), []
             else:
                 upserts = [v for k, v in mine.items() if prev.get(k) != v]
                 removed = [k for k in prev if k not in mine]
-            if not upserts and not removed:
+            if not upserts and not removed and not is_full:
                 continue
-            env = self._envelope(token, "positions", watermark, "delta")
+            env = self._envelope(token, "positions", watermark, "snapshot" if is_full else "delta")
             payload = {**env, "upserts": upserts, "seq": sub.next_seq(token, "positions")}
             if removed:
                 payload["removed"] = removed
@@ -600,14 +604,18 @@ class Hub:
             key = (token, f"user_positions:{id(sub)}")
             prev = self._prev_rows.get(key)
             self._prev_rows[key] = mine
-            if prev is None:
+            # the first frame for a subscriber is the whole set, not a diff. saying
+            # "delta" let the client merge it into whatever it still held from an
+            # earlier connection, so rows the server no longer lists never went away
+            is_full = prev is None
+            if is_full:
                 upserts, removed = list(mine.values()), []
             else:
                 upserts = [v for k, v in mine.items() if prev.get(k) != v]
                 removed = [k for k in prev if k not in mine]
-            if not upserts and not removed:
+            if not upserts and not removed and not is_full:
                 continue
-            env = self._envelope(token, "user_positions", watermark, "delta")
+            env = self._envelope(token, "user_positions", watermark, "snapshot" if is_full else "delta")
             payload = {**env, "upserts": upserts, "seq": sub.next_seq(token, "user_positions")}
             if removed:
                 payload["removed"] = removed
