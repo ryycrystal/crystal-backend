@@ -2595,6 +2595,14 @@ def wallet_activity(
                 FROM crystal_market_trades mt
                 LEFT JOIN crystal_markets m4 ON m4.market = mt.market
                 WHERE mt.user_address = ANY(%(u)s){cut_m}
+                  -- a graduated launchpad token trades on a crystal market too, and
+                  -- the same log lands in both tables. the launchpad row carries the
+                  -- symbol and price, so drop the duplicate here
+                  AND NOT EXISTS (
+                      SELECT 1 FROM launchpad_trades lt
+                      WHERE lt.txhash = mt.txhash AND lt.log_index = mt.log_index
+                        AND lt.user_address = mt.user_address
+                  )
                 UNION ALL
                 SELECT 'referral_use', r.timestamp, r.block_number,
                        CONCAT('referral-', r.referee, '-', r.block_number, '-', r.log_index), r.log_index,
