@@ -287,3 +287,103 @@ def fun_token_overview(
     finally:
         dt = (time.time() - t0) * 1000
         log.info("fun_token_overview token=%s chartres=%s dt_ms=%.1f", token_addr, chartres, dt)
+
+
+def _fun_positions_by_wallet(addrs: list[str], include_token: str | None) -> dict[str, list[dict[str, Any]]]:
+    where = "p.user_address = ANY(%s) AND (p.balance_token > 0"
+    params: list[Any] = [addrs]
+    if include_token:
+        where += " OR p.token = %s"
+        params.append(include_token)
+    where += ")"
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+                p.user_address, p.token, p.token_bought, p.token_sold,
+                p.native_spent, p.native_received, p.balance_token,
+                t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+            FROM launchpad_positions_live p
+            JOIN launchpad_tokens t ON t.token = p.token
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+
+    out: dict[str, list[dict[str, Any]]] = {a: [] for a in addrs}
+    for (
+        user_address,
+        token,
+        token_bought,
+        token_sold,
+        native_spent,
+        native_received,
+        balance_token,
+        name,
+        symbol,
+        metadata_cid,
+        last_price_native,
+        market,
+        source,
+    ) in rows:
+        last_price_native = last_price_native or Decimal(0)
+        balance_token = int(balance_token or 0)
+        out.setdefault((user_address or "").lower(), []).append(
+            {
+                "token": token,
+                "symbol": symbol,
+                "name": name,
+                "metadata_cid": metadata_cid or "",
+                "balance_token": str(balance_token),
+                "balance_native": _fmt(Decimal(balance_token) * last_price_native),
+                "native_spent": str(int(native_spent or 0)),
+                "native_received": str(int(native_received or 0)),
+                "token_bought": str(int(token_bought or 0)),
+                "token_sold": str(int(token_sold or 0)),
+                "last_price_native": _fmt(last_price_native),
+                "market": market or None,
+                "source": _api_source(source),
+                "nadfun_version": _nadfun_version(token, source),
+            }
+        )
+    return out
+
+
+@router.get("/fun/user/{user_addr}")
+def fun_user_positions(user_addr: str, token: str = Query("")) -> dict[str, Any]:
+    t0 = time.time()
+    try:
+        addr = user_addr.lower()
+        tok = (token or "").strip().lower() or None
+        by_wallet = _fun_positions_by_wallet([addr], tok)
+        return {"user": addr, "positions": by_wallet.get(addr, [])}
+    finally:
+        log.info("fun_user_positions user=%s dt_ms=%.1f", user_addr, (time.time() - t0) * 1000)
+
+
+@router.get("/fun/user")
+def fun_users_positions_batch(
+    addresses: str = Query(""),
+    token: str = Query(""),
+) -> dict[str, Any]:
+    t0 = time.time()
+    try:
+        addrs: list[str] = []
+        for a in (addresses or "").split(","):
+            a = a.strip().lower()
+            if a and a not in addrs:
+                addrs.append(a)
+        if not addrs:
+            return {"users": {}, "count": 0}
+        if len(addrs) > 100:
+            raise HTTPException(status_code=400, detail="max 100 addresses")
+        tok = (token or "").strip().lower() or None
+        by_wallet = _fun_positions_by_wallet(addrs, tok)
+        return {
+            "users": {a: {"positions": by_wallet.get(a, [])} for a in addrs},
+            "count": len(addrs),
+        }
+    finally:
+        log.info("fun_users_positions_batch n=%s dt_ms=%.1f", addresses.count(",") + 1 if addresses else 0, (time.time() - t0) * 1000)
