@@ -139,6 +139,18 @@ def main():
                     rows,
                     page_size=2000,
                 )
+            if rows:
+                cur.execute(
+                    """
+                    DELETE FROM launchpad_transfers x
+                    USING launchpad_trades tr
+                    WHERE x.block_number BETWEEN %s AND %s
+                      AND tr.block_number BETWEEN %s AND %s
+                      AND tr.txhash = x.txhash
+                      AND tr.token = x.token
+                    """,
+                    (chunk_start, chunk_end, chunk_start, chunk_end),
+                )
             storage.set_meta(PROGRESS_KEY, str(chunk_end), cur=cur)
         total += len(rows)
         elapsed = time.perf_counter() - t0
