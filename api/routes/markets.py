@@ -117,3 +117,10 @@ def list_markets_dump() -> dict[str, Any]:
         market["usdVolume24h"] = str(usd)
         markets.append(market)
     return {"count": len(markets), "markets": markets}
+
+
+@router.get("/price/mon")
+def mon_price() -> dict[str, Any]:
+    from api.api import _mon_price_usd
+
+    return {"usd": float(_mon_price_usd())}
