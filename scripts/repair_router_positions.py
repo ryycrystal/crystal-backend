@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.storage as storage
+from core import chain as h
 from core.storage import db_cursor
 
 
@@ -55,7 +56,11 @@ def main() -> None:
         description="clear the phantom positions a pass through router accumulated from forwarded tokens"
     )
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--traders", required=True, help="comma separated router addresses")
+    parser.add_argument(
+        "--traders",
+        default="",
+        help="comma separated router addresses. defaults to the known pass through list in core.chain",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
         "--force",
@@ -68,7 +73,7 @@ def main() -> None:
     args = parser.parse_args()
 
     storage.init_pool()
-    routers = [a.strip().lower() for a in args.traders.split(",") if a.strip()]
+    routers = [a.strip().lower() for a in args.traders.split(",") if a.strip()] or list(h.PASSTHROUGH_ADDRS)
     limit_sql = f"LIMIT {int(args.limit)}" if args.limit > 0 else ""
 
     with db_cursor() as cur:

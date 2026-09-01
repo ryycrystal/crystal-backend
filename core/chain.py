@@ -92,6 +92,17 @@ NADFUN_ADDRS = _addrs_from_env(
     ],
     "NADFUN_ADDRESSES",
 )
+# stateless execution contracts that forward somebody else's trade. they never hold a
+# position of their own, so a row for one is always wrong. add to this list, or set
+# PASSTHROUGH_ADDRESSES, whenever a new aggregator or router turns up on a holder list
+PASSTHROUGH_ADDRS = _addrs_from_env(
+    [
+        "0xC2D3689cF6ce2859a3ffBc8fE09ab4C8623766b8",
+        "0x0000000000001fF3684f28c67538d4D072C22734",
+        "0x1AB7ea187CEe63Cf01bBD8fa8837C748a769F8DF",
+    ],
+    "PASSTHROUGH_ADDRESSES",
+)
 VAULT_FACTORY_ADDRS = _addrs_from_env(
     [
         VAULT_FACTORY_ADDR,

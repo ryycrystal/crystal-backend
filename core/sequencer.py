@@ -89,6 +89,9 @@ class BatchAccumulator:
         last_price_native,
         cost_basis_delta: int = 0,
     ):
+        if user_address.lower() in h.PASSTHROUGH_ADDRS:
+            return
+
         key = (user_address.lower(), token.lower())
         if key not in self.position_updates:
             self.position_updates[key] = {
@@ -298,6 +301,7 @@ class Sequencer:
                 print(f"[DEBUG] [{t['log_idx']}] {t['from'][:10]}... -> {t['to'][:10]}... amt={t['amount']}")
 
         zero_addr = "0x" + "0" * 40
+        skip = {pool, zero_addr, *h.PASSTHROUGH_ADDRS}
 
         if is_buy:
             net_by_addr = defaultdict(int)
@@ -308,7 +312,7 @@ class Sequencer:
                 if t["amount"] > 0:
                     has_outgoing.add(t["from"])
 
-            candidates = [(addr, net) for addr, net in net_by_addr.items() if addr not in (pool, zero_addr) and net > 0]
+            candidates = [(addr, net) for addr, net in net_by_addr.items() if addr not in skip and net > 0]
 
             if candidates:
                 max_net = max(c[1] for c in candidates)
@@ -367,14 +371,14 @@ class Sequencer:
 
             for t in reversed(ordered):
                 to_addr = t["to"]
-                if to_addr != pool and to_addr != zero_addr:
+                if to_addr not in skip:
                     if debug:
                         print(f"[DEBUG] Buy: fallback last recipient {to_addr[:10]}...")
                     return to_addr
         elif is_buy is False:
             for t in ordered:
                 from_addr = t["from"]
-                if from_addr != pool and from_addr != zero_addr:
+                if from_addr not in skip:
                     if debug:
                         print(f"[DEBUG] Sell: using first sender {from_addr[:10]}...")
                     return from_addr
