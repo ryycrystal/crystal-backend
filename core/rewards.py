@@ -44,6 +44,7 @@ POLL_SECONDS = int(os.getenv("REWARDS_POLL", "120"))
 LEADER_TTL = int(os.getenv("REWARDS_LEADER_TTL", "300"))
 MAX_VAULT_HOURS_PER_RUN = int(os.getenv("REWARDS_MAX_VAULT_HOURS", "72"))
 VAULT_SAMPLE_STALENESS = 86400
+MAX_WEEK_GAP_HOURS = int(os.getenv("REWARDS_MAX_GAP_HOURS", "6"))
 NODE_ID = f"{os.getenv('HOSTNAME', 'node')}-{uuid.uuid4().hex[:8]}"
 
 
@@ -75,6 +76,14 @@ def pool_size() -> float:
 
 def exponent() -> float:
     return _meta_float("rewards_exponent", DEFAULT_EXPONENT)
+
+
+def gap_tolerance() -> int:
+    return max(0, int(_meta_float("rewards_max_gap_hours", float(MAX_WEEK_GAP_HOURS))))
+
+
+def gap_ack_key(week_start: int) -> str:
+    return f"rewards_gaps_ack_{int(week_start)}"
 
 
 def milestones() -> list[list[float]]:
@@ -523,15 +532,46 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
                     """,
                     (vaults, hour),
                 )
+                samples = {str(v).lower(): (Decimal(u or 0), int(sts)) for v, u, sts in cur.fetchall()}
                 vault_usd = {
-                    str(v).lower(): Decimal(u or 0)
-                    for v, u, sts in cur.fetchall()
-                    if int(sts) >= hour - VAULT_SAMPLE_STALENESS
+                    v: usd for v, (usd, sts) in samples.items() if sts >= hour - VAULT_SAMPLE_STALENESS
                 }
                 supply: dict[str, Decimal] = {}
+                holder_count: dict[str, int] = {}
                 for v, _u, sh, _pn in holdings:
-                    supply[str(v).lower()] = supply.get(str(v).lower(), Decimal(0)) + Decimal(int(sh))
+                    vl = str(v).lower()
+                    supply[vl] = supply.get(vl, Decimal(0)) + Decimal(int(sh))
+                    holder_count[vl] = holder_count.get(vl, 0) + 1
                 ws = bucket_for(hour - 1, main_start)
+                # a vault holding shares that cannot be valued this hour earns nothing
+                # for everyone in it, and nothing downstream would ever say so. record
+                # the hour so the close can refuse to bake a sampling outage into
+                # permanent balances
+                valued: list[str] = []
+                for vl, sup in supply.items():
+                    if vault_usd.get(vl, Decimal(0)) > 0 and sup > 0:
+                        valued.append(vl)
+                        continue
+                    last_usd, last_ts = samples.get(vl, (Decimal(0), 0))
+                    if last_ts <= 0:
+                        reason = "no_sample"
+                    elif last_ts < hour - VAULT_SAMPLE_STALENESS:
+                        reason = "stale_sample"
+                    elif last_usd <= 0:
+                        reason = "zero_value"
+                    else:
+                        reason = "no_supply"
+                    if storage.record_vault_gap(cur, hour, vl, ws, holder_count.get(vl, 0), sup, last_ts, reason):
+                        print(
+                            f"[REWARDS] vault {vl} unvalued at hour {hour} ({reason}, "
+                            f"last sample {last_ts}); {holder_count.get(vl, 0)} holders earned nothing",
+                            flush=True,
+                        )
+                if valued:
+                    cur.execute(
+                        "DELETE FROM crystal_rewards_vault_gaps WHERE hour = %s AND vault = ANY(%s)",
+                        (hour, valued),
+                    )
                 for v, user, sh, _pn in holdings:
                     v = str(v).lower()
                     user = str(user).lower()
@@ -685,6 +725,19 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
         if row and bool(row[0]):
             return False
         if not _sources_caught_up(cur, week_end):
+            return None
+        # distributions are permanent, so never finalize a week whose vault hours
+        # were valued at zero by a sampling outage. the week simply stays open and
+        # retries until the samples backfill or an admin acknowledges the gap
+        gap_vault, gap_hours = storage.worst_vault_gap(cur, week_start)
+        tolerance = gap_tolerance()
+        if gap_hours > tolerance and _wm_read(cur, gap_ack_key(week_start), "") != "1":
+            print(
+                f"[REWARDS] refusing to close week {week_start}: vault {gap_vault} had "
+                f"{gap_hours} unvalued hours (tolerance {tolerance}); backfill the samples "
+                f"or acknowledge with POST {os.getenv('REWARDS_PATH_PREFIX', 'results')}/acknowledge-gaps",
+                flush=True,
+            )
             return None
         deny = storage.rewards_denylist(cur)
         cur.execute(

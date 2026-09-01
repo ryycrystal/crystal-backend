@@ -61,6 +61,7 @@ def rewards_status() -> dict[str, Any]:
             {"weekStart": int(a), "weekEnd": int(b), "participants": int(c), "finalized": bool(d)}
             for a, b, c, d in cur.fetchall()
         ]
+        gaps = storage.vault_gaps(cur, limit=20)
     return {
         "ok": True,
         "now": now,
@@ -84,6 +85,11 @@ def rewards_status() -> dict[str, Any]:
         "wallets": int(n_wallets or 0),
         "totalCrystals": float(total_crystals or 0),
         "weeks": weeks,
+        "vaultGaps": {
+            "toleranceHours": rewards.gap_tolerance(),
+            "blocking": [g for g in gaps if g["hours"] > rewards.gap_tolerance()],
+            "vaults": gaps,
+        },
     }
 
 
@@ -290,3 +296,35 @@ def rewards_run(req: Request) -> dict[str, Any]:
     if not storage.claim_rewards_leader(holder, rewards.LEADER_TTL):
         raise HTTPException(status_code=409, detail="rewards worker holds leadership; try again later")
     return {"ok": True, "result": rewards.run_once(leader_holder=holder)}
+
+
+@router.get(PREFIX + "/gaps")
+def rewards_gaps(week_start: int = 0, limit: int = 200) -> dict[str, Any]:
+    with db_cursor() as cur:
+        rows = storage.vault_gaps(cur, week_start if week_start > 0 else None, limit)
+    tolerance = rewards.gap_tolerance()
+    return {
+        "ok": True,
+        "toleranceHours": tolerance,
+        "meaning": "hours a vault held shares but could not be valued, so its holders earned nothing",
+        "blocking": [g for g in rows if g["hours"] > tolerance],
+        "gaps": rows,
+    }
+
+
+@router.post(PREFIX + "/acknowledge-gaps")
+async def rewards_acknowledge_gaps(req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    payload = await req.json()
+    ws = int(payload.get("weekStart") or payload.get("week_start") or 0)
+    if ws <= 0:
+        raise HTTPException(status_code=400, detail="provide weekStart")
+    storage.set_meta(rewards.gap_ack_key(ws), "1")
+    return {"ok": True, "weekStart": ws, "acknowledged": True}
+
+
+@router.delete(PREFIX + "/acknowledge-gaps/{week_start}")
+def rewards_unacknowledge_gaps(week_start: int, req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    storage.set_meta(rewards.gap_ack_key(int(week_start)), "0")
+    return {"ok": True, "weekStart": int(week_start), "acknowledged": False}

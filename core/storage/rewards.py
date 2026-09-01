@@ -158,6 +158,27 @@ def ensure_rewards_tables(cur=None) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS crystal_rewards_vault_gaps
+        (
+            hour        BIGINT NOT NULL,
+            vault       TEXT NOT NULL,
+            week_start  BIGINT NOT NULL,
+            holders     BIGINT NOT NULL DEFAULT 0,
+            shares      NUMERIC(78, 0) NOT NULL DEFAULT 0,
+            last_sample BIGINT NOT NULL DEFAULT 0,
+            reason      TEXT NOT NULL,
+            PRIMARY KEY (hour, vault)
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_crystal_rewards_vault_gaps_week
+        ON crystal_rewards_vault_gaps (week_start, vault);
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS crystal_rewards_leader
         (
             id           INTEGER PRIMARY KEY,
@@ -311,3 +332,78 @@ def list_predeposit_vaults() -> list[str]:
     with db_cursor() as cur:
         cur.execute("SELECT vault FROM crystal_rewards_predeposit_vaults ORDER BY vault")
         return [str(r[0]) for r in cur.fetchall()]
+
+
+def record_vault_gap(
+    cur,
+    hour: int,
+    vault: str,
+    week_start: int,
+    holders: int,
+    shares,
+    last_sample: int,
+    reason: str,
+) -> bool:
+    cur.execute(
+        """
+        INSERT INTO crystal_rewards_vault_gaps
+            (hour, vault, week_start, holders, shares, last_sample, reason)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (hour, vault) DO UPDATE
+        SET week_start = EXCLUDED.week_start, holders = EXCLUDED.holders,
+            shares = EXCLUDED.shares, last_sample = EXCLUDED.last_sample,
+            reason = EXCLUDED.reason
+        WHERE crystal_rewards_vault_gaps.reason IS DISTINCT FROM EXCLUDED.reason
+           OR crystal_rewards_vault_gaps.last_sample IS DISTINCT FROM EXCLUDED.last_sample
+           OR crystal_rewards_vault_gaps.holders IS DISTINCT FROM EXCLUDED.holders
+        """,
+        (int(hour), str(vault).lower(), int(week_start), int(holders), shares, int(last_sample), reason),
+    )
+    return cur.rowcount > 0
+
+
+def clear_vault_gap(cur, hour: int, vault: str) -> None:
+    cur.execute(
+        "DELETE FROM crystal_rewards_vault_gaps WHERE hour = %s AND vault = %s",
+        (int(hour), str(vault).lower()),
+    )
+
+
+def worst_vault_gap(cur, week_start: int) -> tuple[str, int]:
+    cur.execute(
+        """
+        SELECT vault, COUNT(*) AS hours FROM crystal_rewards_vault_gaps
+        WHERE week_start = %s GROUP BY vault ORDER BY hours DESC, vault LIMIT 1
+        """,
+        (int(week_start),),
+    )
+    row = cur.fetchone()
+    return (str(row[0]), int(row[1])) if row else ("", 0)
+
+
+def vault_gaps(cur, week_start: int | None = None, limit: int = 200) -> list[dict]:
+    sql = """
+        SELECT vault, week_start, COUNT(*) AS hours, MIN(hour), MAX(hour),
+               MAX(holders), MAX(last_sample),
+               (ARRAY_AGG(reason ORDER BY hour DESC))[1]
+        FROM crystal_rewards_vault_gaps
+    """
+    params: tuple = ()
+    if week_start is not None:
+        sql += " WHERE week_start = %s"
+        params = (int(week_start),)
+    sql += " GROUP BY vault, week_start ORDER BY hours DESC, vault LIMIT %s"
+    cur.execute(sql, params + (max(1, min(int(limit), 1000)),))
+    return [
+        {
+            "vault": str(v),
+            "weekStart": int(ws),
+            "hours": int(n),
+            "firstHour": int(lo),
+            "lastHour": int(hi),
+            "holders": int(h or 0),
+            "lastSample": int(ls or 0),
+            "reason": str(r),
+        }
+        for v, ws, n, lo, hi, h, ls, r in cur.fetchall()
+    ]

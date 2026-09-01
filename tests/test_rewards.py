@@ -55,6 +55,7 @@ REWARDS_TABLES = (
     "crystal_rewards_milestones",
     "crystal_rewards_campaigns",
     "crystal_rewards_denylist",
+    "crystal_rewards_vault_gaps",
     "crystal_market_trades",
     "crystal_orderbook_fills",
     "crystal_vault_deposits",
@@ -745,3 +746,164 @@ def test_boost_survives_trimming_but_burns_below_the_predeposit(_clean_rewards):
     # the boost is burned, leaving 50 boosted shares of a 50 share position
     assert c["vault"] == pytest.approx(50.0)
     assert c["points"] / c["vault"] == pytest.approx(0.15)
+
+
+def _deposit(idx: int, user: str, shares: int, ts: int, vault: str = VAULT) -> None:
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, "
+            "user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (%s, 0, %s, %s, %s, %s, 0, 0, %s)",
+            (idx, ts, vault, user, shares, f"0xg{idx:04d}"),
+        )
+
+
+def _sample(ts: int, usd: float, vault: str = VAULT, block: int = 10) -> None:
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, "
+            "quote_balance, base_balance, usd_value) VALUES (%s, %s, %s, 0, 0, %s)",
+            (vault, block, ts, usd),
+        )
+
+
+def _gaps(week: int | None = None) -> list[dict]:
+    with storage.db_cursor() as cur:
+        return storage.vault_gaps(cur, week)
+
+
+def test_vault_hour_with_no_sample_is_recorded_not_silently_skipped(_clean_rewards, capsys):
+    rewards = _clean_rewards
+    hour1 = WEEK1 + 3600
+    _deposit(1, U1, 100, WEEK1)
+    assert rewards.accrue_vaults(now_ts=hour1 + 10) == 1
+    assert _contrib(U1) is None, "an unvalued vault must not pay out"
+    gaps = _gaps()
+    assert len(gaps) == 1
+    assert gaps[0]["vault"] == VAULT
+    assert gaps[0]["reason"] == "no_sample"
+    assert gaps[0]["holders"] == 1
+    assert gaps[0]["hours"] == 1
+    assert "unvalued" in capsys.readouterr().out, "the outage must be loud"
+
+
+def test_stale_and_zero_samples_are_distinguished(_clean_rewards):
+    rewards = _clean_rewards
+    hour1 = WEEK1 + 3600
+    _deposit(1, U1, 100, WEEK1)
+    _sample(hour1 - rewards.VAULT_SAMPLE_STALENESS - 60, 4000.0)
+    assert rewards.accrue_vaults(now_ts=hour1 + 10) == 1
+    assert _gaps()[0]["reason"] == "stale_sample"
+
+    storage.set_meta("rewards_wm_vault_hour", str(WEEK1))
+    _sample(hour1 - 60, 0.0, block=11)
+    assert rewards.accrue_vaults(now_ts=hour1 + 10) == 1
+    assert _gaps()[0]["reason"] == "zero_value"
+
+
+def test_backfilled_sample_clears_the_recorded_gap(_clean_rewards):
+    rewards = _clean_rewards
+    hour1 = WEEK1 + 3600
+    _deposit(1, U1, 100, WEEK1)
+    assert rewards.accrue_vaults(now_ts=hour1 + 10) == 1
+    assert len(_gaps()) == 1
+
+    storage.set_meta("rewards_wm_vault_hour", str(WEEK1))
+    _sample(hour1 - 60, 4000.0)
+    assert rewards.accrue_vaults(now_ts=hour1 + 10) == 1
+    assert _gaps() == [], "a backfilled sample must clear the gap it caused"
+    assert _contrib(U1)["points"] == pytest.approx(200.0)
+
+
+def _clean_close_sources(now: int) -> int:
+    import core.rewards as rewards
+
+    week_end = rewards.week_end_for(WEEK1)
+    with storage.db_cursor() as cur:
+        storage.add_rewards_contrib(cur, WEEK1, U1, now, points=500)
+    storage.set_meta("rewards_wm_vault_hour", str(week_end))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(91, TOK_A, "0x" + "91" * 20, week_end + 5, 0.0)
+    storage.set_meta("rewards_wm_launchpad", "999999")
+    return week_end
+
+
+def test_close_refuses_while_a_vault_gap_exceeds_tolerance(_clean_rewards, capsys):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    tolerance = rewards.gap_tolerance()
+    with storage.db_cursor() as cur:
+        for i in range(tolerance + 1):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 3, 100, 0, "no_sample")
+
+    assert rewards.close_due_weeks(now_ts=now) == [], "a sampling outage must block the close"
+    assert "refusing to close" in capsys.readouterr().out
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM crystal_rewards_distributions")
+        assert int(cur.fetchone()[0]) == 0
+        assert storage.get_rewards_balance(cur, U1) == 0.0
+
+
+def test_close_proceeds_at_exactly_the_tolerance(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance()):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 3, 100, 0, "no_sample")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
+
+
+def test_gap_tolerance_counts_per_vault_not_in_total(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    other = "0x" + "dd" * 20
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance()):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 3, 100, 0, "no_sample")
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, other, WEEK1, 3, 100, 0, "no_sample")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1], "two tolerable vaults are not one intolerable one"
+
+
+def test_acknowledging_the_gap_lets_the_week_close(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance() + 5):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 3, 100, 0, "no_sample")
+    assert rewards.close_due_weeks(now_ts=now) == []
+
+    storage.set_meta(rewards.gap_ack_key(WEEK1), "1")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
+    with storage.db_cursor() as cur:
+        assert storage.get_rewards_balance(cur, U1) == pytest.approx(rewards.pool_size(), rel=1e-9)
+
+
+def test_acknowledging_one_week_does_not_unblock_another(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance() + 1):
+            storage.record_vault_gap(cur, WEEK1 + i * 3600, VAULT, WEEK1, 3, 100, 0, "no_sample")
+    storage.set_meta(rewards.gap_ack_key(week_end), "1")
+    assert rewards.close_due_weeks(now_ts=now) == [], "the ack must be scoped to its own week"
+
+
+def test_gaps_from_another_week_do_not_block_this_one(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    _clean_close_sources(now)
+    with storage.db_cursor() as cur:
+        for i in range(rewards.gap_tolerance() + 4):
+            storage.record_vault_gap(cur, week_end + i * 3600, VAULT, week_end, 3, 100, 0, "no_sample")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
