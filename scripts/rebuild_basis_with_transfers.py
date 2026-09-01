@@ -129,7 +129,7 @@ def main():
                         break
                     users, sell_realized = fold(events, venues)
                     cur.execute(
-                        "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native "
+                        "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native, token_sold "
                         "FROM launchpad_positions WHERE token = %s",
                         (token,),
                     )
@@ -140,9 +140,14 @@ def main():
                         cur_row = current.get(addr)
                         if cur_row is None:
                             continue
-                        if cur_row[0] == bought and cur_row[1] == basis and cur_row[2] == realized:
+                        if (
+                            cur_row[0] == bought
+                            and cur_row[1] == basis
+                            and cur_row[2] == realized
+                            and cur_row[3] == sold
+                        ):
                             continue
-                        updates.append((addr, token, int(bought), int(basis), realized))
+                        updates.append((addr, token, int(bought), int(basis), realized, int(sold)))
                         if shown < args.show:
                             print(
                                 f"  {addr[:12]}.. {token[:12]}.. bought {cur_row[0] / 1e18:,.2f}->{bought / 1e18:,.2f} "
@@ -160,12 +165,13 @@ def main():
                             UPDATE launchpad_positions p SET
                                 token_bought = v.bought,
                                 cost_basis_native = v.basis,
-                                realized_pnl_native = v.realized
-                            FROM (VALUES %s) AS v(addr, tok, bought, basis, realized)
+                                realized_pnl_native = v.realized,
+                                token_sold = v.sold
+                            FROM (VALUES %s) AS v(addr, tok, bought, basis, realized, sold)
                             WHERE p.user_address = v.addr AND p.token = v.tok
                             """,
-                            [(a, t, b, c, d) for a, t, b, c, d in updates],
-                            template="(%s, %s, %s::numeric, %s::numeric, %s::numeric)",
+                            [(a, t, b, c, d, e) for a, t, b, c, d, e in updates],
+                            template="(%s, %s, %s::numeric, %s::numeric, %s::numeric, %s::numeric)",
                             page_size=1000,
                         )
                         cur.execute(
