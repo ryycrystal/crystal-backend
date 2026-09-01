@@ -73,6 +73,20 @@ def _orderbook_wallet_body(channel: str, wallet: str) -> dict:
 
 PSEUDO_TOKENS = ("tokens", "portfolio", "vaults")
 
+
+def _is_tokens_slot(token: str) -> bool:
+    # "tokens" serves every source; "tokens:0" / "tokens:1" serve one, so a client
+    # that only renders one launchpad is not handed the other's rows and then left
+    # filtering them out of a fixed size recent bucket
+    return token == "tokens" or (token.startswith("tokens:") and token[7:].isdigit())
+
+
+def _tokens_slot_filter(token: str) -> dict:
+    if token.startswith("tokens:"):
+        return {"source": token[7:]}
+    return {}
+
+
 SNAPSHOT_CHANNELS = ("token", "stats", "dev_tokens")
 
 FALLBACK_TICK_SECONDS = 2.0
@@ -288,14 +302,18 @@ class Hub:
         if channel == "dev_tokens":
             return {"devTokens": await asyncio.to_thread(d.dev_tokens, token)}
         if channel == "tokens":
-            from api.routes.launchpad import _list_tokens_cached
+            from api.routes.launchpad import _list_tokens_cached, _list_tokens_impl
 
-            body = await asyncio.to_thread(_list_tokens_cached, 0, 0)
+            ex = _tokens_slot_filter(token)
+            if ex:
+                body = await asyncio.to_thread(_list_tokens_impl, 0, 0, ex)
+            else:
+                body = await asyncio.to_thread(_list_tokens_cached, 0, 0)
             rows = {}
             for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
                 for r in body.get(bucket) or []:
                     rows[(r.get("token") or "").lower()] = r
-            self._prev_rows[("tokens", "tokens")] = rows
+            self._prev_rows[(token, "tokens")] = rows
             return body
         if channel == "positions":
             addrs = sorted(sub.addresses)
@@ -398,13 +416,13 @@ class Hub:
     async def _push_tokens_list(self, token: str, watermark: int) -> None:
         from api.routes.launchpad import _list_tokens_impl
 
-        body = await asyncio.to_thread(_list_tokens_impl, 0, 0, {})
+        body = await asyncio.to_thread(_list_tokens_impl, 0, 0, _tokens_slot_filter(token))
         rows: dict[str, dict] = {}
         for bucket in ("recent_created", "recent_approaching", "recent_graduated"):
             for r in body.get(bucket) or []:
                 rows[(r.get("token") or "").lower()] = r
-        prev = self._prev_rows.get(("tokens", "tokens")) or {}
-        self._prev_rows[("tokens", "tokens")] = rows
+        prev = self._prev_rows.get((token, "tokens")) or {}
+        self._prev_rows[(token, "tokens")] = rows
 
         new = [r for k, r in rows.items() if k not in prev]
         gone = [k for k in prev if k not in rows]
@@ -418,7 +436,7 @@ class Hub:
                 patches[k] = diff
         if not new and not gone and not patches:
             return
-        env = self._envelope("tokens", "tokens", watermark, "delta")
+        env = self._envelope(token, "tokens", watermark, "delta")
         payload = {
             **env,
             "new": new,
@@ -430,7 +448,7 @@ class Hub:
                 for b in ("recent_created", "recent_approaching", "recent_graduated")
             },
         }
-        await self.broadcast("tokens", "tokens", payload)
+        await self.broadcast(token, "tokens", payload)
 
     def _envelope(self, token: str, channel: str, watermark: int, kind: str) -> dict[str, Any]:
         return {
@@ -737,7 +755,7 @@ HUB = Hub()
 async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, Any]:
     token = str(msg.get("token") or "").lower().strip()
     channels = msg.get("channels") or []
-    if token not in PSEUDO_TOKENS and (not token.startswith("0x") or len(token) != 42):
+    if token not in PSEUDO_TOKENS and not _is_tokens_slot(token) and (not token.startswith("0x") or len(token) != 42):
         return {"op": "error", "error": "invalid token address"}
     if not isinstance(channels, list) or not channels:
         return {"op": "error", "error": "channels must be a non-empty list"}
