@@ -27,6 +27,7 @@ KNOWN_CHANNELS = (
     "user_orders",
     "user_trades",
     "user_history",
+    "tracked_trades",
 )
 IMPLEMENTED_CHANNELS = (
     "token",
@@ -43,6 +44,7 @@ IMPLEMENTED_CHANNELS = (
     "user_orders",
     "user_trades",
     "user_history",
+    "tracked_trades",
 )
 
 _SNAPSHOT_ORDER = {
@@ -184,6 +186,7 @@ class Hub:
         self.lock = asyncio.Lock()
         self._last_sent: dict[tuple[str, str], int] = {}
         self._prev_rows: dict[tuple[str, str], dict[str, dict]] = {}
+        self._tracked_trades_cursor: dict[str, int] = {}
         self._task: asyncio.Task | None = None
         self._push_sem = asyncio.Semaphore(MAX_CONCURRENT_TOKEN_PUSHES)
         self._balances_checked: dict[str, float] = {}
@@ -300,6 +303,9 @@ class Hub:
         if channel == "user_positions":
             addrs = sorted(sub.addresses)
             return {"upserts": await asyncio.to_thread(d.positions_for_wallets, addrs)}
+        if channel == "tracked_trades":
+            addrs = sorted(sub.addresses)
+            return {"added": await asyncio.to_thread(d.tracked_wallet_trades, addrs)}
         if channel == "balances":
             from api.spot_data import spot_body
 
@@ -380,6 +386,7 @@ class Hub:
                 "dev_tokens": self._push_dev_tokens,
                 "positions": self._push_positions,
                 "user_positions": self._push_user_positions,
+                "tracked_trades": self._push_tracked_trades,
                 "balances": self._push_balances,
                 "vaults": self._push_vaults,
             }.get(channel)
@@ -585,6 +592,38 @@ class Hub:
             if removed:
                 payload["removed"] = removed
             await sub.send(payload)
+
+    async def _push_tracked_trades(self, token: str, watermark: int) -> None:
+        from api.ws_data import tracked_wallet_trades
+
+        async with self.lock:
+            targets = [
+                s
+                for s in self.subscribers
+                if s.wants(token, "tracked_trades") and s.addresses and (token, "tracked_trades") in s.primed
+            ]
+        if not targets:
+            return
+
+        cursor = self._tracked_trades_cursor.get(token)
+        if cursor is None:
+            self._tracked_trades_cursor[token] = int(watermark or 0)
+            return
+
+        union = sorted({a for s in targets for a in s.addresses})
+        rows = await asyncio.to_thread(tracked_wallet_trades, union, cursor, 200)
+        self._tracked_trades_cursor[token] = max(
+            int(watermark or 0), *(int(r.get("blockNumber") or 0) for r in rows), cursor
+        )
+        if not rows:
+            return
+
+        for sub in targets:
+            mine = [r for r in rows if r["caller"] in sub.addresses]
+            if not mine:
+                continue
+            env = self._envelope(token, "tracked_trades", watermark, "delta")
+            await sub.send({**env, "added": mine, "seq": sub.next_seq(token, "tracked_trades")})
 
     async def _push_balances(self, token: str, watermark: int) -> None:
         from api.spot_data import spot_body

@@ -65,6 +65,53 @@ def recent_trades(token: str) -> list[dict[str, Any]]:
     return out
 
 
+def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+    addrs = [a.lower() for a in addresses if a]
+    if not addrs:
+        return []
+    where = "tr.user_address = ANY(%s)"
+    params: list[Any] = [addrs]
+    if after_block > 0:
+        where += " AND tr.block_number > %s"
+        params.append(int(after_block))
+    params.append(int(limit))
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT tr.txhash, tr.log_index, tr.timestamp, tr.block_number, tr.user_address,
+                   tr.is_buy, tr.native_amount, tr.token_amount, tr.price_native,
+                   tr.token, t.symbol, t.name, t.metadata_cid
+            FROM launchpad_trades tr
+            JOIN launchpad_tokens t ON t.token = tr.token
+            WHERE {where}
+            ORDER BY tr.timestamp DESC, tr.log_index DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+    out = []
+    for txhash, log_index, ts, blk, caller, is_buy, native_amt, token_amt, price, token, symbol, name, cid in rows:
+        out.append(
+            {
+                "id": f"{txhash}-{int(log_index)}",
+                "time": int(ts or 0),
+                "blockNumber": int(blk or 0),
+                "caller": (caller or "").lower(),
+                "isBuy": bool(is_buy),
+                "nativeAmount": str(int(native_amt or 0)),
+                "tokenAmount": str(int(token_amt or 0)),
+                "price": _scaled_price(price),
+                "token": (token or "").lower(),
+                "symbol": symbol or "TKN",
+                "name": name or symbol or "Token",
+                "metadataCid": cid or "",
+            }
+        )
+    return out
+
+
 def _last_price(token: str) -> Decimal:
     with db_cursor() as cur:
         cur.execute("SELECT last_price_native FROM launchpad_tokens WHERE token = %s", (token,))
