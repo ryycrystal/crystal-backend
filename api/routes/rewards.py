@@ -13,7 +13,7 @@ from core.storage.base import db_cursor
 
 router = APIRouter()
 
-PREFIX = "/" + os.getenv("REWARDS_PATH_PREFIX", "awejriopajfopiapow").strip("/")
+PREFIX = "/" + os.getenv("REWARDS_PATH_PREFIX", "results").strip("/")
 ADMIN_KEY = os.getenv("REWARDS_ADMIN_KEY", "")
 ZERO_ADDR = "0x" + "0" * 40
 
@@ -105,18 +105,30 @@ def rewards_week(week_start: int, limit: int = 100) -> dict[str, Any]:
         )
         dist = [
             {
-                "wallet": w, "rawPoints": float(rp), "adjusted": float(adj),
-                "share": float(sh), "crystals": float(c), "rank": int(rk), "status": st,
+                "wallet": w,
+                "rawPoints": float(rp),
+                "adjusted": float(adj),
+                "share": float(sh),
+                "crystals": float(c),
+                "rank": int(rk),
+                "status": st,
             }
             for w, rp, adj, sh, c, rk, st in cur.fetchall()
         ]
     return {
         "ok": True,
         "weekStart": int(week_start),
-        "week": None if not wk else {
-            "weekEnd": int(wk[0]), "pool": float(wk[1]), "exponent": float(wk[2]),
-            "participants": int(wk[3]), "totalRaw": float(wk[4]), "totalAdjusted": float(wk[5]),
-            "finalized": bool(wk[6]), "finalizedAt": int(wk[7] or 0),
+        "week": None
+        if not wk
+        else {
+            "weekEnd": int(wk[0]),
+            "pool": float(wk[1]),
+            "exponent": float(wk[2]),
+            "participants": int(wk[3]),
+            "totalRaw": float(wk[4]),
+            "totalAdjusted": float(wk[5]),
+            "finalized": bool(wk[6]),
+            "finalizedAt": int(wk[7] or 0),
         },
         "distributions": dist,
     }

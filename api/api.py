@@ -547,6 +547,24 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
     return out
 
 
+def _batch_get_native_volume_24h(token_addrs: list[str]) -> dict[str, int]:
+    if not token_addrs:
+        return {}
+    cutoff = int(time.time()) - 86400
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token, COALESCE(SUM(native_amount), 0)
+            FROM launchpad_trades
+            WHERE token = ANY(%s) AND timestamp >= %s
+            GROUP BY token
+            """,
+            (token_addrs, cutoff),
+        )
+        rows = cur.fetchall()
+    return {token: int(volume or 0) for token, volume in rows}
+
+
 def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
     migrated = [t for t, d in token_data.items() if d.get("migrated")]
     if not migrated:
@@ -691,6 +709,7 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
         data["top10_addresses"] = stats.get("top10_addresses", [])
 
     changes = _batch_get_price_changes(list(token_data.keys()))
+    native_volume_24h = _batch_get_native_volume_24h(list(token_data.keys()))
     raw_sources = {t: d.get("sourceRaw") for t, d in token_data.items()}
     _markets = [(d.get("market") or "").lower() for d in token_data.values() if d.get("market")]
     pair_fee_map = storage.get_pair_fees_batch(_markets)
@@ -709,6 +728,8 @@ def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:
         ch = changes.get(token) or {}
         data["change_pct_24h"] = ch.get("change_pct_24h")
         data["change_pct_since_launch"] = ch.get("change_pct_since_launch")
+        data["volume_native_24h"] = str(native_volume_24h.get(token, 0))
+        data["volumeNative"] = str(native_volume_24h.get(token, 0))
         market = (data.get("market") or "").lower()
         src = int(raw_sources.get(token) or 0)
         data["fees"] = {

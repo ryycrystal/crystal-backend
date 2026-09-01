@@ -214,8 +214,15 @@ def rewards_campaigns(cur) -> list[tuple[str, float, int, int]]:
 
 def add_rewards_contrib(cur, week_start: int, wallet: str, now_ts: int, **deltas) -> None:
     cols = (
-        "pregrad_usd", "grad_usd", "spot_taker_usd", "spot_maker_usd",
-        "stable_taker_usd", "stable_maker_usd", "vault_usd_hours", "bonus_points", "points",
+        "pregrad_usd",
+        "grad_usd",
+        "spot_taker_usd",
+        "spot_maker_usd",
+        "stable_taker_usd",
+        "stable_maker_usd",
+        "vault_usd_hours",
+        "bonus_points",
+        "points",
     )
     values = [float(deltas.get(c, 0) or 0) for c in cols]
     if not any(values):
@@ -224,8 +231,8 @@ def add_rewards_contrib(cur, week_start: int, wallet: str, now_ts: int, **deltas
     cur.execute(
         f"""
         INSERT INTO crystal_rewards_contrib
-            (week_start, wallet, {', '.join(cols)}, updated_at)
-        VALUES (%s, %s, {', '.join('%s' for _ in cols)}, %s)
+            (week_start, wallet, {", ".join(cols)}, updated_at)
+        VALUES (%s, %s, {", ".join("%s" for _ in cols)}, %s)
         ON CONFLICT (week_start, wallet) DO UPDATE
         SET {sets}, updated_at = EXCLUDED.updated_at
         """,

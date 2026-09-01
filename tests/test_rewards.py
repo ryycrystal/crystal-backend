@@ -96,9 +96,17 @@ def _seed_token(token: str, migrated_at: int | None) -> None:
 
 def _seed_launchpad_trade(idx: int, token: str, user: str, ts: int, usd: float) -> None:
     storage.insert_trade(
-        block_number=idx, log_index=0, timestamp=ts, token=token, user_address=user,
-        is_buy=True, native_amount=10**18, token_amount=10**18,
-        usd_amount=Decimal(str(usd)), price_native=Decimal(1), txhash=f"0xlp{idx:04d}",
+        block_number=idx,
+        log_index=0,
+        timestamp=ts,
+        token=token,
+        user_address=user,
+        is_buy=True,
+        native_amount=10**18,
+        token_amount=10**18,
+        usd_amount=Decimal(str(usd)),
+        price_native=Decimal(1),
+        txhash=f"0xlp{idx:04d}",
     )
 
 
@@ -138,9 +146,16 @@ def _seed_fill(tx: str, li: int, ts: int, market: str, maker: str, quote_amt: in
                  maker_is_buy, price, order_id, remaining, amount_high, amount_out)
             VALUES (%s, %s, 1, %s, %s, %s, %s, 0, 1, 0, %s, %s)
             """,
-            (tx, li, ts, market, maker, maker_is_buy,
-             quote_amt if not maker_is_buy else 10**18,
-             quote_amt if maker_is_buy else 10**18),
+            (
+                tx,
+                li,
+                ts,
+                market,
+                maker,
+                maker_is_buy,
+                quote_amt if not maker_is_buy else 10**18,
+                quote_amt if maker_is_buy else 10**18,
+            ),
         )
 
 
@@ -457,8 +472,11 @@ def test_launch_timeline_end_to_end(_clean_rewards):
     assert closed == [WEEK1, week1_end]
 
     import math as _m
+
     pts = {
-        lp1: c_lp1["points"], lp2: c_lp2["points"], t1: 1000.0,
+        lp1: c_lp1["points"],
+        lp2: c_lp2["points"],
+        t1: 1000.0,
     }
     adj = {w: _m.pow(p, 0.8) for w, p in pts.items()}
     total_adj = sum(adj.values())

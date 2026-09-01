@@ -23,6 +23,17 @@ Optional params:
 - `exclude_dev`, `exclude_ca`, `exclude_website`, `exclude_twitter` — comma-separated blacklists (see §5).
 - `filters=<url-encoded JSON>` — **per-bucket filters**, one call:
   `{"new":{"marketcap_min":20},"approaching":{...},"graduated":{"marketcap_min":200}}`
+
+### GET `/tokens/feeds`
+
+Independent launchpad discovery rankings. Params: `source=0|1`, `limit=1..100`.
+
+- `trending`: highest rolling 24-hour native-token volume.
+- `new`: newest non-graduated launches by creation time.
+- `near_graduation`: non-graduated launches closest to graduation.
+- `graduated`: most recently graduated launches.
+
+Rows include `volume_native_24h` and its frontend-compatible alias `volumeNative`, both in raw wei.
   Each bucket accepts any §4 filter plus `query`/`sort`. Response adds `<bucket>_total` and per-bucket `applied_filters`.
 
 ### GET|POST `/search/query`
@@ -243,8 +254,8 @@ Pool `apy24h`/`dailyYield24h` = invariant growth per share (wash-resistant), not
 upstream API, server-cached. `POST /x?clear=1` clears that cache. Needs `X_BEARER_TOKEN`
 in the environment or it answers 500.
 
-### Full route inventory (44)
-Token lists `/tokens`, `/search/query` (GET+POST) · Token detail `/token/{a}/{res}`,
+### Full route inventory (45)
+Token lists `/tokens`, `/tokens/feeds`, `/search/query` (GET+POST) · Token detail `/token/{a}/{res}`,
 `/token/{a}/meta`, `/token/{a}/trades`, `/chart/{a}/{res}`, `/stats/{a}`, `/holders/{a}`,
 `/pair/{p}/fees` · Portfolio `/user`, `/user/{a}`, `/spot/{w}`, `/portfolio/{a}`,
 `/portfolio/{a}/positions`, `/portfolio/{a}/history`, `/portfolio/{a}/daily`,

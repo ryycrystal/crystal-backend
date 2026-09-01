@@ -240,7 +240,10 @@ def accrue_launchpad() -> int:
                 rate = r["grad"] if graduated else r["pregrad"]
                 field = "grad_usd" if graduated else "pregrad_usd"
                 storage.add_rewards_contrib(
-                    cur, bucket_for(ts, start_ts), user, now_ts,
+                    cur,
+                    bucket_for(ts, start_ts),
+                    user,
+                    now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             storage.set_meta("rewards_wm_launchpad", str(int(rows[-1][0])), cur=cur)
@@ -292,7 +295,9 @@ def accrue_spot_takers() -> int:
                 """,
                 (txhashes,),
             )
-            self_fills = {(str(a), str(b).lower(), str(c).lower()): Decimal(int(d or 0)) for a, b, c, d in cur.fetchall()}
+            self_fills = {
+                (str(a), str(b).lower(), str(c).lower()): Decimal(int(d or 0)) for a, b, c, d in cur.fetchall()
+            }
             now_ts = int(time.time())
             for ts, tx, li, market, user, is_buy, amount_in, amount_out in rows:
                 ts = int(ts)
@@ -314,7 +319,10 @@ def accrue_spot_takers() -> int:
                 rate = r["stable_taker"] if stable else r["spot_taker"]
                 field = "stable_taker_usd" if stable else "spot_taker_usd"
                 storage.add_rewards_contrib(
-                    cur, bucket_for(ts, start_ts), user, now_ts,
+                    cur,
+                    bucket_for(ts, start_ts),
+                    user,
+                    now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             last = rows[-1]
@@ -381,7 +389,10 @@ def accrue_spot_makers() -> int:
                 rate = r["stable_maker"] if stable else r["spot_maker"]
                 field = "stable_maker_usd" if stable else "spot_maker_usd"
                 storage.add_rewards_contrib(
-                    cur, bucket_for(ts, start_ts), maker, now_ts,
+                    cur,
+                    bucket_for(ts, start_ts),
+                    maker,
+                    now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             last = rows[-1]
@@ -476,7 +487,10 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                     weighted = usd_total * (boosted * pd_mult + (shares - boosted)) / sup
                     mult = _campaign_multiplier(campaigns, v, hour)
                     storage.add_rewards_contrib(
-                        cur, ws, user, now_ts,
+                        cur,
+                        ws,
+                        user,
+                        now_ts,
                         vault_usd_hours=user_usd,
                         points=weighted * rate * mult,
                     )

@@ -197,6 +197,101 @@ def _source_where(source: Any, alias: str = "") -> tuple[list[str], list]:
     return [f"{prefix}source <> 0"], []
 
 
+@router.get("/tokens/feeds")
+@ttl_cache("tokens:feeds", ttl_seconds=3, serve_stale_seconds=30)
+def token_feeds(
+    source: str = Query("", description="0 native/crystal, 1 nad.fun"),
+    limit: int = Query(30, ge=1, le=100),
+) -> dict[str, Any]:
+    source_where, source_params = _source_where(source, "t")
+    source_sql = "".join(f" AND {clause}" for clause in source_where)
+    cutoff = int(time.time()) - 86400
+
+    with db_cursor() as cur:
+        cur.execute(
+            f"""
+            WITH volume_24h AS (
+                SELECT token, COALESCE(SUM(native_amount), 0) AS native_volume
+                FROM launchpad_trades
+                WHERE timestamp >= %s
+                GROUP BY token
+            )
+            SELECT t.token
+            FROM launchpad_tokens t
+            LEFT JOIN volume_24h v ON v.token = t.token
+            WHERE TRUE{source_sql}
+            ORDER BY COALESCE(v.native_volume, 0) DESC,
+                     t.created_at DESC NULLS LAST,
+                     t.created_block DESC NULLS LAST
+            LIMIT %s
+            """,
+            (cutoff,) + tuple(source_params) + (limit,),
+        )
+        trending = [row[0] for row in cur.fetchall()]
+
+        cur.execute(
+            f"""
+            SELECT t.token
+            FROM launchpad_tokens t
+            WHERE t.migrated = FALSE{source_sql}
+            ORDER BY t.created_at DESC NULLS LAST, t.created_block DESC NULLS LAST
+            LIMIT %s
+            """,
+            tuple(source_params) + (limit,),
+        )
+        newest = [row[0] for row in cur.fetchall()]
+
+        cur.execute(
+            f"""
+            SELECT t.token
+            FROM launchpad_tokens t
+            WHERE t.migrated = FALSE{source_sql}
+            ORDER BY t.circulating_supply DESC,
+                     t.created_at DESC NULLS LAST,
+                     t.created_block DESC NULLS LAST
+            LIMIT %s
+            """,
+            tuple(source_params) + (limit,),
+        )
+        near_graduation = [row[0] for row in cur.fetchall()]
+
+        cur.execute(
+            f"""
+            SELECT t.token
+            FROM launchpad_tokens t
+            WHERE t.migrated = TRUE{source_sql}
+            ORDER BY t.migrated_at DESC NULLS LAST, t.migrated_block DESC NULLS LAST
+            LIMIT %s
+            """,
+            tuple(source_params) + (limit,),
+        )
+        graduated = [row[0] for row in cur.fetchall()]
+
+    all_addresses = list(dict.fromkeys(trending + newest + near_graduation + graduated))
+    token_data = _batch_serialize_tokens(all_addresses)
+
+    def rows(addresses: list[str]) -> list[dict[str, Any]]:
+        result = []
+        for token in addresses:
+            data = token_data.get(token)
+            if not data:
+                continue
+            data["graduationPercentageBps"] = _graduation_pct(
+                data.get("circulating_supply"),
+                _true_source(data),
+            )
+            result.append(data)
+        return result
+
+    return {
+        "trending": rows(trending),
+        "new": rows(newest),
+        "near_graduation": rows(near_graduation),
+        "graduated": rows(graduated),
+        "as_of_block": storage.get_last_processed_block() or 0,
+    }
+
+
 @router.get("/tokens")
 def list_tokens(
     since_block: int = Query(0, ge=0, description="only tokens touched after this block"),
