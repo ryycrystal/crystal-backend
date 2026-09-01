@@ -140,6 +140,10 @@ def _wm_get(key: str, default: str) -> str:
     return raw if raw is not None else default
 
 
+def _hold_leader() -> bool:
+    return storage.claim_rewards_leader(NODE_ID, LEADER_TTL)
+
+
 def _mon_usd_at(cur, ts: int) -> Decimal:
     cur.execute(
         """
@@ -202,11 +206,13 @@ def _is_stable_market(meta: dict, stables: set[str]) -> bool:
     return meta["quote_address"] in stables and meta["base_address"] in stables
 
 
-def accrue_launchpad() -> int:
+def accrue_launchpad(guard=None) -> int:
     start_ts = program_start_ts()
     r = rates()
     processed = 0
     while True:
+        if guard is not None and not guard():
+            return processed
         with db_cursor() as cur:
             wm = int(_wm_get("rewards_wm_launchpad", "0"))
             deny = storage.rewards_denylist(cur)
@@ -260,11 +266,13 @@ def _parse_keyset(raw: str) -> tuple[int, str, int]:
         return 0, "", -1
 
 
-def accrue_spot_takers() -> int:
+def accrue_spot_takers(guard=None) -> int:
     start_ts = program_start_ts()
     r = rates()
     processed = 0
     while True:
+        if guard is not None and not guard():
+            return processed
         with db_cursor() as cur:
             wm_ts, wm_tx, wm_li = _parse_keyset(_wm_get("rewards_wm_spot_taker", "0||-1"))
             deny = storage.rewards_denylist(cur)
@@ -332,11 +340,13 @@ def accrue_spot_takers() -> int:
             return processed
 
 
-def accrue_spot_makers() -> int:
+def accrue_spot_makers(guard=None) -> int:
     start_ts = program_start_ts()
     r = rates()
     processed = 0
     while True:
+        if guard is not None and not guard():
+            return processed
         with db_cursor() as cur:
             wm_ts, wm_tx, wm_li = _parse_keyset(_wm_get("rewards_wm_spot_maker", "0||-1"))
             deny = storage.rewards_denylist(cur)
@@ -410,7 +420,7 @@ def _campaign_multiplier(campaigns, vault: str, ts: int) -> Decimal:
     return best
 
 
-def accrue_vaults(now_ts: int | None = None) -> int:
+def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
     main_start = program_start_ts()
     start_ts = min(vault_start_ts(), main_start)
     cutoff = predeposit_cutoff_ts()
@@ -420,6 +430,8 @@ def accrue_vaults(now_ts: int | None = None) -> int:
     rate = Decimal(str(r["vault_hour"]))
     hours_done = 0
     while hours_done < MAX_VAULT_HOURS_PER_RUN:
+        if guard is not None and not guard():
+            return hours_done
         with db_cursor() as cur:
             wm = int(_wm_get("rewards_wm_vault_hour", "0"))
             if wm <= 0:
@@ -436,7 +448,7 @@ def accrue_vaults(now_ts: int | None = None) -> int:
             cur.execute(
                 """
                 SELECT vault, user_address, SUM(delta),
-                       SUM(CASE WHEN delta > 0 AND ts <= %s THEN delta ELSE 0 END)
+                       SUM(CASE WHEN ts <= %s THEN delta ELSE 0 END)
                 FROM (
                     SELECT vault, user_address, shares AS delta, timestamp AS ts
                     FROM crystal_vault_deposits WHERE timestamp <= %s
@@ -450,6 +462,32 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                 (min(hour, cutoff), hour, hour),
             )
             holdings = cur.fetchall()
+            allowance: dict[tuple[str, str], Decimal] = {
+                (str(v).lower(), str(u).lower()): max(Decimal(0), Decimal(int(pn or 0))) for v, u, _sh, pn in holdings
+            }
+            if hour > cutoff:
+                cur.execute(
+                    """
+                    SELECT vault, user_address, delta FROM (
+                        SELECT vault, user_address, shares AS delta, timestamp AS ts, block_number, log_index
+                        FROM crystal_vault_deposits WHERE timestamp > %s AND timestamp <= %s
+                        UNION ALL
+                        SELECT vault, user_address, -shares, timestamp, block_number, log_index
+                        FROM crystal_vault_withdrawals WHERE timestamp > %s AND timestamp <= %s
+                    ) e ORDER BY ts, block_number, log_index
+                    """,
+                    (cutoff, hour, cutoff, hour),
+                )
+                unboosted: dict[tuple[str, str], Decimal] = {}
+                for v, u, delta in cur.fetchall():
+                    key = (str(v).lower(), str(u).lower())
+                    if key not in allowance:
+                        continue
+                    bal = unboosted.get(key, Decimal(0)) + Decimal(int(delta))
+                    if bal < 0:
+                        allowance[key] = max(Decimal(0), allowance[key] + bal)
+                        bal = Decimal(0)
+                    unboosted[key] = bal
             if holdings:
                 vaults = sorted({str(h[0]).lower() for h in holdings})
                 cur.execute(
@@ -467,10 +505,10 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                     if int(sts) >= hour - VAULT_SAMPLE_STALENESS
                 }
                 supply: dict[str, Decimal] = {}
-                for v, _u, sh, _pd in holdings:
+                for v, _u, sh, _pn in holdings:
                     supply[str(v).lower()] = supply.get(str(v).lower(), Decimal(0)) + Decimal(int(sh))
                 ws = bucket_for(hour - 1, main_start)
-                for v, user, sh, pre_dep in holdings:
+                for v, user, sh, _pn in holdings:
                     v = str(v).lower()
                     user = str(user).lower()
                     if user in deny:
@@ -480,7 +518,7 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                     if usd_total <= 0 or sup <= 0:
                         continue
                     shares = Decimal(int(sh))
-                    boosted = min(shares, Decimal(int(pre_dep or 0)))
+                    boosted = min(shares, allowance.get((v, user), Decimal(0)))
                     if pd_vaults and v not in pd_vaults:
                         boosted = Decimal(0)
                     user_usd = usd_total * shares / sup
@@ -658,6 +696,8 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
                 """,
                 (week_start, wallet, points, adjusted[i], share, crystals, rank, total, status),
             )
+            if cur.rowcount != 1:
+                continue
             prev_balances[wallet] = Decimal(str(storage.get_rewards_balance(cur, wallet)))
             storage.add_rewards_balance(cur, wallet, crystals, now_ts)
             balances[wallet] = prev_balances[wallet] + crystals
@@ -677,14 +717,15 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
     return True
 
 
-def run_once(now_ts: int | None = None) -> dict:
+def run_once(now_ts: int | None = None, leader_holder: str | None = None) -> dict:
     storage.ensure_rewards_tables()
+    guard = (lambda: storage.claim_rewards_leader(leader_holder, LEADER_TTL)) if leader_holder else (lambda: True)
     out = {
-        "launchpad": accrue_launchpad(),
-        "spot_takers": accrue_spot_takers(),
-        "spot_makers": accrue_spot_makers(),
-        "vault_hours": accrue_vaults(now_ts),
-        "weeks_closed": close_due_weeks(now_ts),
+        "launchpad": accrue_launchpad(guard),
+        "spot_takers": accrue_spot_takers(guard),
+        "spot_makers": accrue_spot_makers(guard),
+        "vault_hours": accrue_vaults(now_ts, guard),
+        "weeks_closed": close_due_weeks(now_ts) if guard() else [],
     }
     return out
 
@@ -693,7 +734,7 @@ def _loop() -> None:
     while True:
         try:
             if storage.claim_rewards_leader(NODE_ID, LEADER_TTL):
-                run_once()
+                run_once(leader_holder=NODE_ID)
         except Exception as e:
             print(f"[REWARDS] cycle failed: {e!r}", flush=True)
         time.sleep(POLL_SECONDS)

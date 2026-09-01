@@ -515,3 +515,72 @@ def test_launch_timeline_end_to_end(_clean_rewards):
 
     assert rewards.close_due_weeks(now_ts=now) == []
     assert rewards.accrue_vaults(now_ts=now) == 0
+
+
+def test_double_close_cannot_double_pay(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    now = week_end + 100
+    with storage.db_cursor() as cur:
+        storage.add_rewards_contrib(cur, WEEK1, U1, now, points=500)
+    storage.set_meta("rewards_wm_vault_hour", str(week_end))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(97, TOK_A, "0x" + "97" * 20, week_end + 5, 0.0)
+    storage.set_meta("rewards_wm_launchpad", "999999")
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
+    with storage.db_cursor() as cur:
+        bal = storage.get_rewards_balance(cur, U1)
+        cur.execute("UPDATE crystal_rewards_weeks SET finalized = FALSE WHERE week_start = %s", (WEEK1,))
+    assert rewards.close_due_weeks(now_ts=now) == [WEEK1]
+    with storage.db_cursor() as cur:
+        assert storage.get_rewards_balance(cur, U1) == pytest.approx(bal, rel=1e-12)
+        cur.execute("SELECT COUNT(*) FROM crystal_rewards_grants")
+        assert int(cur.fetchone()[0]) == 0
+
+
+def test_leadership_guard_stops_accrual(_clean_rewards):
+    rewards = _clean_rewards
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(96, TOK_A, U1, WEEK1 + 10, 100.0)
+    assert rewards.accrue_launchpad(guard=lambda: False) == 0
+    assert _contrib(U1) is None
+    assert rewards.accrue_launchpad(guard=lambda: True) > 0
+    assert _contrib(U1)["points"] == pytest.approx(100.0)
+
+
+def test_leader_claim_exclusivity(_clean_rewards):
+    assert storage.claim_rewards_leader("node-a", 300)
+    assert not storage.claim_rewards_leader("node-b", 300)
+    assert storage.claim_rewards_leader("node-a", 300)
+    with storage.db_cursor() as cur:
+        cur.execute("UPDATE crystal_rewards_leader SET heartbeat_at = Now() - interval '10 minutes' WHERE id = 1")
+    assert storage.claim_rewards_leader("node-b", 300)
+
+
+def test_predeposit_boost_burns_on_round_trip(_clean_rewards):
+    rewards = _clean_rewards
+    vault_start = WEEK1 - 7200
+    storage.set_meta("rewards_vault_start", str(vault_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xb1'), (3, 0, %s, %s, %s, 100, 0, 0, '0xb2')",
+            (vault_start, VAULT, U1, WEEK1 + 200, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_withdrawals (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (2, 0, %s, %s, %s, 100, 0, 0, '0xbw')",
+            (WEEK1 + 100, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+            "VALUES (%s, 10, %s, 0, 0, 4000)",
+            (VAULT, vault_start),
+        )
+    while rewards.accrue_vaults(now_ts=WEEK1 + 3610) > 0:
+        pass
+    c = _contrib(U1)
+    assert c["vault"] == pytest.approx(4000.0 * 3)
+    assert c["points"] == pytest.approx(600.0 * 2 + 200.0)

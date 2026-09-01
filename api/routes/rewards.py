@@ -219,4 +219,7 @@ def rewards_wallet(address: str) -> dict[str, Any]:
 @router.post(PREFIX + "/run")
 def rewards_run(req: Request) -> dict[str, Any]:
     _require_admin(req)
-    return {"ok": True, "result": rewards.run_once()}
+    holder = f"manual-{rewards.NODE_ID}"
+    if not storage.claim_rewards_leader(holder, rewards.LEADER_TTL):
+        raise HTTPException(status_code=409, detail="rewards worker holds leadership; try again later")
+    return {"ok": True, "result": rewards.run_once(leader_holder=holder)}

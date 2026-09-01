@@ -36,6 +36,12 @@ def ensure_rewards_tables(cur=None) -> None:
     )
     cur.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_crystal_rewards_contrib_wallet
+        ON crystal_rewards_contrib (wallet, week_start DESC);
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS crystal_rewards_weeks
         (
             week_start     BIGINT PRIMARY KEY,
