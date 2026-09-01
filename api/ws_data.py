@@ -69,22 +69,38 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
     addrs = [a.lower() for a in addresses if a]
     if not addrs:
         return []
-    where = "tr.user_address = ANY(%s)"
+    where = "TRUE"
     params: list[Any] = [addrs]
     if after_block > 0:
-        where += " AND tr.block_number > %s"
+        where = "w.block_number > %s"
         params.append(int(after_block))
     params.append(int(limit))
     with db_cursor() as cur:
+        # a running position per wallet and token tells whether a buy opened a new
+        # position or added to one, and whether a sell closed it out. the window has
+        # to see every trade the wallet ever made in that token, so the block cursor
+        # is applied after it rather than in the same where clause
         cur.execute(
             f"""
-            SELECT tr.txhash, tr.log_index, tr.timestamp, tr.block_number, tr.user_address,
-                   tr.is_buy, tr.native_amount, tr.token_amount, tr.price_native,
-                   tr.token, t.symbol, t.name, t.metadata_cid, t.source, t.migrated
-            FROM launchpad_trades tr
-            JOIN launchpad_tokens t ON t.token = tr.token
+            WITH walked AS (
+                SELECT tr.txhash, tr.log_index, tr.timestamp, tr.block_number, tr.user_address,
+                       tr.is_buy, tr.native_amount, tr.token_amount, tr.price_native, tr.token,
+                       SUM(CASE WHEN tr.is_buy THEN tr.token_amount ELSE -tr.token_amount END)
+                           OVER (PARTITION BY tr.user_address, tr.token
+                                 ORDER BY tr.block_number, tr.log_index
+                                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS pos_after
+                FROM launchpad_trades tr
+                WHERE tr.user_address = ANY(%s)
+            )
+            SELECT w.txhash, w.log_index, w.timestamp, w.block_number, w.user_address,
+                   w.is_buy, w.native_amount, w.token_amount, w.price_native,
+                   w.token, t.symbol, t.name, t.metadata_cid, t.source, t.migrated,
+                   w.pos_after,
+                   w.pos_after - CASE WHEN w.is_buy THEN w.token_amount ELSE -w.token_amount END
+            FROM walked w
+            JOIN launchpad_tokens t ON t.token = w.token
             WHERE {where}
-            ORDER BY tr.timestamp DESC, tr.log_index DESC
+            ORDER BY w.timestamp DESC, w.log_index DESC
             LIMIT %s
             """,
             params,
@@ -108,7 +124,14 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
         cid,
         source,
         migrated,
+        pos_after,
+        pos_before,
     ) in rows:
+        after = int(pos_after or 0)
+        before = int(pos_before or 0)
+        # selling out rarely lands on exactly zero, so treat a tail under a
+        # thousandth of the pre-trade position as a closed position
+        closed_out = after <= 0 or (before > 0 and after * 1000 <= before)
         out.append(
             {
                 "id": f"{txhash}-{int(log_index)}",
@@ -125,6 +148,8 @@ def tracked_wallet_trades(addresses: list[str], after_block: int = 0, limit: int
                 "metadataCid": cid or "",
                 "source": _api_source(source),
                 "migrated": bool(migrated),
+                "openedPosition": bool(is_buy) and before <= 0,
+                "closedPosition": (not is_buy) and closed_out,
             }
         )
     return out

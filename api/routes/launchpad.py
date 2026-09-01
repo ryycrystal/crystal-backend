@@ -2308,26 +2308,38 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
     with db_cursor() as cur:
         cur.execute(
             """
+            WITH walked AS (
+                SELECT tr.log_index, tr.timestamp, tr.user_address, tr.is_buy,
+                       tr.native_amount, tr.token_amount, tr.price_native, tr.txhash, tr.token,
+                       tr.block_number,
+                       SUM(CASE WHEN tr.is_buy THEN tr.token_amount ELSE -tr.token_amount END)
+                           OVER (PARTITION BY tr.user_address, tr.token
+                                 ORDER BY tr.block_number, tr.log_index
+                                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS pos_after
+                FROM launchpad_trades tr
+                WHERE tr.user_address = ANY(%s)
+            )
             SELECT
-                tr.log_index,
-                tr.timestamp,
-                tr.user_address,
-                tr.is_buy,
-                tr.native_amount,
-                tr.token_amount,
-                tr.price_native,
-                tr.txhash,
-                tr.token,
+                w.log_index,
+                w.timestamp,
+                w.user_address,
+                w.is_buy,
+                w.native_amount,
+                w.token_amount,
+                w.price_native,
+                w.txhash,
+                w.token,
                 t.symbol,
                 t.name,
                 t.metadata_cid,
                 t.source,
-                t.migrated
-            FROM launchpad_trades tr
-            JOIN launchpad_tokens t ON t.token = tr.token
-            WHERE tr.user_address = ANY(%s)
+                t.migrated,
+                w.pos_after,
+                w.pos_after - CASE WHEN w.is_buy THEN w.token_amount ELSE -w.token_amount END
+            FROM walked w
+            JOIN launchpad_tokens t ON t.token = w.token
             -- log_index keeps same block trades in chain order, see above
-            ORDER BY tr.timestamp DESC, tr.log_index DESC, tr.txhash DESC
+            ORDER BY w.timestamp DESC, w.log_index DESC, w.txhash DESC
             LIMIT 50
             """,
             (list(addrs),),
@@ -2351,8 +2363,13 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
         metadata_cid,
         tok_source,
         tok_migrated,
+        pos_after,
+        pos_before,
     ) in rows:
         is_buy_flag = bool(is_buy)
+        after_amt = int(pos_after or 0)
+        before_amt = int(pos_before or 0)
+        closed_out = after_amt <= 0 or (before_amt > 0 and after_amt * 1000 <= before_amt)
         native_amount = int(native_amount or 0)
         token_amount = int(token_amount or 0)
 
@@ -2373,6 +2390,8 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                     "block": str(int(ts_tr)),
                     "id": f"{txhash}-{log_index}",
                     "isBuy": is_buy_flag,
+                    "openedPosition": is_buy_flag and before_amt <= 0,
+                    "closedPosition": (not is_buy_flag) and closed_out,
                     "priceNativePerTokenWad": _scaled_price(price_native),
                     "symbol": symbol or "",
                     "name": name or symbol or "",
