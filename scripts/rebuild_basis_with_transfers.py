@@ -127,7 +127,7 @@ def main():
                 with storage.db_cursor() as cur:
                     events = events_for_token(cur, token)
                     if not events:
-                        continue
+                        break
                     users, sell_realized = fold(events, venues)
                     cur.execute(
                         "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native "
