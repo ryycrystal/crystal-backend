@@ -576,9 +576,13 @@ def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
         log.warning("pool reserve lookup failed: %r", e)
         pair_reserves = {}
 
+    drained: dict[str, dict] = {}
     for token, res in pair_reserves.items():
         data = token_data.get(token)
         if data is None:
+            continue
+        if int(res["reserveNative"] or 0) <= 0 or int(res["reserveToken"] or 0) <= 0:
+            drained[token] = res
             continue
         data["reserveQuote"] = res["reserveNative"]
         data["reserveBase"] = res["reserveToken"]
@@ -586,29 +590,46 @@ def _apply_live_pool_reserves(token_data: dict[str, dict]) -> None:
         data["reservesSyncedAt"] = res.get("syncedAt", 0)
         data["pool"] = res.get("pool") or ""
 
+    def _mark_drained() -> None:
+        for token, res in drained.items():
+            data = token_data.get(token)
+            if data is None:
+                continue
+            data["reserveQuote"] = "0"
+            data["reserveBase"] = "0"
+            data["reservesFrom"] = "pair"
+            data["reservesSyncedAt"] = res.get("syncedAt", 0)
+            data["pool"] = res.get("pool") or ""
+
+    applied = {t for t in pair_reserves if t not in drained}
     remaining = {
         (token_data[t].get("market") or "").lower(): t
         for t in migrated
-        if t not in pair_reserves and token_data[t].get("market")
+        if t not in applied and token_data[t].get("market")
     }
     if not remaining:
+        _mark_drained()
         return
     try:
         market_reserves = storage.crystal_pool_reserves_for_markets(list(remaining))
     except Exception as e:
         log.warning("crystal pool reserve lookup failed: %r", e)
+        _mark_drained()
         return
 
     for market, res in market_reserves.items():
         token = remaining.get(market)
         if not token:
             continue
+        drained.pop(token, None)
         data = token_data[token]
         data["reserveQuote"] = res["reserveQuote"]
         data["reserveBase"] = res["reserveBase"]
         data["reservesFrom"] = "crystal_pool"
         data["reservesSyncedAt"] = res.get("syncedAt", 0)
         data["pool"] = market
+
+    _mark_drained()
 
 
 def _batch_serialize_tokens(token_addrs: list[str]) -> dict[str, dict]:

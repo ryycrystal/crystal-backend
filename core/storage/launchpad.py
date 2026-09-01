@@ -2430,7 +2430,7 @@ def pool_reserves_for_tokens(tokens: list[str], cur=None) -> dict[str, dict]:
     sql = """
         SELECT token_addr, pool, reserve_token, reserve_native, last_sync_at
         FROM launchpad_pools
-        WHERE token_addr = ANY(%s) AND (reserve_token > 0 OR reserve_native > 0)
+        WHERE token_addr = ANY(%s)
     """
     args = ([t.lower() for t in tokens],)
     if cur is None:
