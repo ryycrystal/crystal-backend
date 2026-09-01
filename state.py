@@ -2685,9 +2685,23 @@ class State:
                 last_withdraw=ts,
                 cur=cur,
             )
+            # the contract closes and locks a vault the moment its owner burns
+            # their last share, without emitting any event, so it can only be
+            # derived here. missing it leaves a dead vault listed as Active with
+            # a deposit button whose every press reverts
+            owner_exited = (
+                user == (vobj.owner or "").lower()
+                and not vobj.closed
+                and (u.shares if u is not None else users[user].shares) == 0
+            )
+            if owner_exited:
+                vobj.closed = True
+                vobj.locked = True
             storage.update_crystal_vault_fields(
                 vault=vaddr,
                 circulating_shares=vobj.circulatingShares,
+                closed=True if owner_exited else None,
+                locked=True if owner_exited else None,
                 updated_block=blk,
                 updated_at=ts,
                 cur=cur,

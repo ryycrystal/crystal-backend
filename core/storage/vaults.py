@@ -691,6 +691,30 @@ def vault_user_counter_drift(limit: int = 50) -> list[tuple[str, str, str, int, 
         return [(str(a), str(b), str(c), int(d or 0), int(e or 0)) for a, b, c, d, e in cur.fetchall()]
 
 
+def vault_status_divergences(limit: int = 50) -> list[tuple[str, str, int]]:
+    """Vaults still marked open whose owner holds no shares.
+
+    The contract closes and locks a vault inside the owner's final withdraw
+    without emitting any event, so a dropped or backfilled withdraw leaves the
+    row open forever: the vault lists as Active and every deposit reverts.
+    Rows are (vault, owner, circulating_shares).
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT v.vault, v.owner, v.circulating_shares
+            FROM crystal_vaults v
+            LEFT JOIN crystal_vault_users u
+              ON u.vault = v.vault AND u.user_address = v.owner
+            WHERE NOT v.closed AND COALESCE(u.shares, 0) = 0
+            ORDER BY v.circulating_shares DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [(str(a), str(b), int(c or 0)) for a, b, c in cur.fetchall()]
+
+
 def vault_sample_nav_before(vault: str, ts: int) -> tuple[int, float, int] | None:
     """Latest sample strictly before ts that can price a share on its own.
 

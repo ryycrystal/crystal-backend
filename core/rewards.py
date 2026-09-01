@@ -580,8 +580,12 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
                     if usd_total <= 0 or sup <= 0:
                         continue
                     shares = Decimal(int(sh))
+                    # fail closed: the boost exists only for vaults explicitly
+                    # listed. an empty list used to mean every vault qualified,
+                    # so forgetting to seed it before launch would have handed
+                    # the 3x boost to the whole program
                     boosted = min(shares, allowance.get((v, user), Decimal(0)))
-                    if pd_vaults and v not in pd_vaults:
+                    if v not in pd_vaults:
                         boosted = Decimal(0)
                     user_usd = usd_total * shares / sup
                     weighted = usd_total * (boosted * pd_mult + (shares - boosted)) / sup
@@ -718,6 +722,10 @@ def close_due_weeks(now_ts: int | None = None) -> list[int]:
 def _close_week(week_start: int, now_ts: int) -> bool | None:
     week_end = bucket_end(week_start)
     with db_cursor() as cur:
+        # the finalized check below is check-then-act: without the same advisory
+        # lock every accrual takes, two nodes surviving a leader handoff could
+        # both read finalized=false and interleave the close
+        _lock_accrual(cur)
         cur.execute("SELECT finalized FROM crystal_rewards_weeks WHERE week_start = %s", (week_start,))
         row = cur.fetchone()
         if row and bool(row[0]):

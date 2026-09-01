@@ -99,17 +99,37 @@ def _vault_usd_from_state(st, quote, base, quote_bal, base_bal, qd, bd) -> float
         return 0.0
 
 
+def _chain_unlock_timestamp(vault: str, user: str) -> int | None:
+    """unlockTimestamp(user) straight from the vault contract.
+
+    The contract stamps each depositor's unlock at deposit time with the lockup
+    then in effect, so recomputing last_deposit + current lockup silently
+    diverges the moment an owner calls changeLockup: raised, the ui blocks a
+    withdrawal the chain would allow; lowered, it offers one the chain reverts.
+    """
+    try:
+        data = "0x28f0e093" + user.lower().replace("0x", "").rjust(64, "0")
+        out = _rpc_jsonrpc_sync("eth_call", [{"to": vault, "data": data}, "latest"])
+        return int(str(out.get("result") or "0x0"), 16)
+    except Exception:
+        return None
+
+
 def _vault_user_lockup_fields(
     *,
     now_ts: int,
     lockup_seconds: int,
     user_row,
     user_shares: int,
+    chain_unlock_at: int | None = None,
 ) -> dict[str, int | bool]:
     last_deposit = int(user_row[3] or 0) if user_row and len(user_row) > 3 else 0
     last_withdraw = int(user_row[4] or 0) if user_row and len(user_row) > 4 else 0
     lockup_i = int(lockup_seconds or 0)
-    unlock_at = (last_deposit + lockup_i) if (last_deposit > 0 and lockup_i > 0) else 0
+    if chain_unlock_at is not None:
+        unlock_at = int(chain_unlock_at)
+    else:
+        unlock_at = (last_deposit + lockup_i) if (last_deposit > 0 and lockup_i > 0) else 0
     locked = bool(int(user_shares or 0) > 0 and unlock_at > int(now_ts))
     remaining = max(0, int(unlock_at) - int(now_ts)) if locked else 0
     return {
@@ -831,11 +851,15 @@ def vault_user_summary(
     user_row = storage.get_crystal_vault_user(vaddr, uaddr)
     u_shares = int(user_row[0] or 0) if user_row else 0
     now_ts = int(time.time())
+    # the withdraw button gates on this, so it must match the contract even
+    # after a changeLockup; the recomputed value stays as the rpc fallback
+    chain_unlock = _chain_unlock_timestamp(vaddr, uaddr) if u_shares > 0 else None
     lock_fields = _vault_user_lockup_fields(
         now_ts=now_ts,
         lockup_seconds=int(lockup or 0),
         user_row=user_row,
         user_shares=u_shares,
+        chain_unlock_at=chain_unlock,
     )
 
     if circ > 0 and u_shares > 0:

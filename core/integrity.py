@@ -43,6 +43,7 @@ def evaluate(
     holes: int,
     vault_divergences: list | None = None,
     vault_counter_drift: list | None = None,
+    vault_status_drift: list | None = None,
 ) -> dict:
     expected = max(window_end - window_start + 1, 0)
     gaps = max(expected - processed, 0) if expected else 0
@@ -70,6 +71,13 @@ def evaluate(
             f"{len(drift)} vault depositor counters disagree with the ledger, "
             f"first {d0[1][:10]} in {d0[0][:10]} {d0[2]} {d0[3]} vs {d0[4]}"
         )
+    status_drift = list(vault_status_drift or [])
+    if status_drift:
+        s0 = status_drift[0]
+        findings.append(
+            f"{len(status_drift)} vaults still open with a shareless owner (the contract "
+            f"closes these silently), first {s0[0][:10]} owner {s0[1][:10]}"
+        )
     return {
         "ts": int(time.time()),
         "last_block": last_block,
@@ -84,6 +92,9 @@ def evaluate(
         ],
         "vault_user_counter_drift": [
             {"vault": v, "user": u, "field": f, "stored": str(s), "actual": str(a)} for v, u, f, s, a in drift
+        ],
+        "vault_status_drift": [
+            {"vault": v, "owner": o, "circulatingShares": str(c)} for v, o, c in status_drift
         ],
         "findings": findings,
         "ok": not findings,
@@ -117,7 +128,15 @@ async def sweep() -> dict:
     except Exception as e:
         print(f"[INTEGRITY] vault counter check failed {e!r}", flush=True)
         counter_drift = []
-    result = evaluate(p_max, stall, head, window_start, window_end, processed, holes, divergences, counter_drift)
+    try:
+        status_drift = storage.vault_status_divergences(INTEGRITY_VAULT_DIVERGENCE_LIMIT)
+    except Exception as e:
+        print(f"[INTEGRITY] vault status check failed {e!r}", flush=True)
+        status_drift = []
+    result = evaluate(
+        p_max, stall, head, window_start, window_end, processed, holes,
+        divergences, counter_drift, status_drift,
+    )
     storage.set_meta("integrity_last", json.dumps(result))
     return result
 

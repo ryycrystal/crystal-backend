@@ -373,6 +373,7 @@ def test_vault_predeposit_boost(_clean_rewards):
     storage.set_meta("rewards_vault_start", str(vault_start))
     storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
     storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
     with storage.db_cursor() as cur:
         cur.execute(
             "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
@@ -421,6 +422,7 @@ def test_launch_timeline_end_to_end(_clean_rewards):
     storage.set_meta("rewards_vault_start", str(vault_start))
     storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
     storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
 
     lp1, lp2, t1, t2, r1 = U1, U2, U3, U4, "0x" + "55" * 20
     d1 = vault_start + 3600 + 1
@@ -564,6 +566,7 @@ def test_predeposit_boost_burns_on_round_trip(_clean_rewards):
     storage.set_meta("rewards_vault_start", str(vault_start))
     storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
     storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
     with storage.db_cursor() as cur:
         cur.execute(
             "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
@@ -681,6 +684,7 @@ def test_boost_only_covers_deposits_inside_the_window(_clean_rewards):
     storage.set_meta("rewards_predeposit_start", str(pd_start))
     storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
     storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
 
     early, inwin, late = U1, U2, U3
     with storage.db_cursor() as cur:
@@ -718,6 +722,7 @@ def test_boost_survives_trimming_but_burns_below_the_predeposit(_clean_rewards):
     storage.set_meta("rewards_predeposit_start", str(pd_start))
     storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
     storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
 
     with storage.db_cursor() as cur:
         cur.execute(
@@ -941,3 +946,30 @@ def test_stale_hours_still_block_when_mixed_with_zero_valued_ones(_clean_rewards
         for i in range(50):
             storage.record_vault_gap(cur, WEEK1 + (i + 99) * 3600, VAULT, WEEK1, 2, 100, WEEK1, "zero_value")
     assert rewards.close_due_weeks(now_ts=now) == []
+
+
+def test_unlisted_vault_gets_no_predeposit_boost(_clean_rewards):
+    # fail closed: before this, an empty predeposit table meant EVERY vault
+    # qualified, so forgetting to seed it before 9/8 would have handed the 3x
+    # boost to the whole program
+    rewards = _clean_rewards
+    vault_start = WEEK1 - 7200
+    storage.set_meta("rewards_vault_start", str(vault_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xnl1')",
+            (vault_start, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+            "VALUES (%s, 10, %s, 0, 0, 1000)",
+            (VAULT, vault_start),
+        )
+    assert rewards.accrue_vaults(now_ts=vault_start + 3610) == 1
+    assert _contrib(U1)["points"] == pytest.approx(50.0)
+    storage.add_predeposit_vaults([VAULT])
+    assert rewards.accrue_vaults(now_ts=vault_start + 7210) == 1
+    assert _contrib(U1)["points"] == pytest.approx(50.0 + 150.0)
