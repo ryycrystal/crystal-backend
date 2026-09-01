@@ -121,17 +121,80 @@ def _vault_user_lockup_fields(
     }
 
 
-def _per_share_pnl_series(pts: list[dict]) -> list[dict]:
+def _strategy_vps(pts: list[dict], meta: tuple[int, int, bool] | None) -> tuple[list[float | None], float] | None:
+    """Per-share value of each point with the base asset held at one constant price.
+
+    Pricing every point at the same p_ref takes the base asset's own move out of
+    the series, leaving only what the strategy did to the inventory. It is the
+    transform _vault_apy already applies to its two endpoints, widened to the whole
+    series so the chart, the snapshot and the headline cannot disagree.
+
+    Only meaningful when the quote leg is a stablecoin, since p_ref is backed out
+    of the latest sample as (usd - quote) / base. Returns one entry per input point,
+    None where the point cannot price a share.
+    """
+    if not meta or not meta[2] or len(pts) < 2:
+        return None
+    qd, bd, _ = meta
+    if qd <= 0 or bd <= 0:
+        return None
+
+    def usable(p):
+        return int(p.get("shares") or 0) > 0 and float(p.get("usdValue") or 0.0) > 0
+
+    last = next((p for p in reversed(pts) if usable(p)), None)
+    if last is None:
+        return None
+    qu_last = float(last.get("quoteBalance") or 0) / (10.0**qd)
+    bu_last = float(last.get("baseBalance") or 0) / (10.0**bd)
+    if bu_last <= 0:
+        return None
+    p_ref = (float(last["usdValue"]) - qu_last) / bu_last
+    if p_ref <= 0:
+        return None
+
+    out: list[float | None] = []
+    priced = 0
+    for p in pts:
+        if not usable(p):
+            out.append(None)
+            continue
+        qu = float(p.get("quoteBalance") or 0) / (10.0**qd)
+        bu = float(p.get("baseBalance") or 0) / (10.0**bd)
+        vps = (qu + bu * p_ref) / int(p["shares"])
+        if vps <= 0:
+            out.append(None)
+            continue
+        out.append(vps)
+        priced += 1
+    if priced < 2:
+        return None
+    return out, p_ref
+
+
+def _per_share_pnl_series(pts: list[dict], meta: tuple[int, int, bool] | None = None) -> list[dict]:
+    """Cumulative flow-neutral pnl over the window, in dollars and percent.
+
+    Working per share means deposits and withdrawals never register as
+    performance, and when meta allows a constant-price basis the base asset's own
+    move does not either. What is left is what the strategy did, which is the same
+    quantity the apy is annualised from.
+    """
+    strat = _strategy_vps(pts, meta)
+    vps_list = strat[0] if strat is not None else None
     out = []
     base_vps = None
     prev_vps = None
     cum_usd = 0.0
     last_pct = 0.0
-    for p in pts:
+    for i, p in enumerate(pts):
         sh = int(p.get("shares") or 0)
         usd = float(p.get("usdValue") or 0.0)
-        if sh > 0 and usd > 0:
-            vps = usd / sh
+        if vps_list is not None:
+            vps = vps_list[i]
+        else:
+            vps = (usd / sh) if (sh > 0 and usd > 0) else None
+        if vps is not None and sh > 0:
             if base_vps is None:
                 base_vps = vps
                 prev_vps = vps
@@ -383,6 +446,8 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
         return {
             "block": int(r[0] or 0),
             "timestamp": int(r[1] or 0),
+            "quoteBalance": int(r[2] or 0),
+            "baseBalance": int(r[3] or 0),
             "usdValue": float(r[4] or 0.0),
             "shares": int(r[5] or 0) if len(r) > 5 else 0,
         }
@@ -396,11 +461,26 @@ def _vault_snapshot_from_samples(vault_addr: str, timeframe: int = 1, points: in
         pts[-1] = _pt(last_row)
 
     tvl = [[int(p["timestamp"]), float(p["usdValue"])] for p in pts]
+
+    pct_usd = pct
+    try:
+        meta = _vault_apy_meta(vault_addr)
+    except Exception:
+        meta = None
+    basis = "strategy" if _strategy_vps(pts, meta) is not None else "usd"
+    pnl_rows = _per_share_pnl_series(pts, meta)
+    pnl = [[int(r["timestamp"]), float(r["pnlUsd"])] for r in pnl_rows]
+    if pnl_rows:
+        pct = float(pnl_rows[-1]["pnlPct"])
+
     return {
         "timeframe": int(timeframe),
         "tvl": tvl,
+        "pnl": pnl,
         "stats": {
             "pctChange": pct,
+            "pctChangeUsd": pct_usd,
+            "basis": basis,
             "lastUsd": last,
             "min": float(stats[0] or 0.0),
             "max": float(stats[1] or 0.0),
@@ -502,7 +582,15 @@ def list_vaults(
                 snapshot = {
                     "timeframe": timeframe_i,
                     "tvl": [],
-                    "stats": {"pctChange": 0.0, "lastUsd": last_usd, "min": last_usd, "max": last_usd},
+                    "pnl": [],
+                    "stats": {
+                        "pctChange": 0.0,
+                        "pctChangeUsd": 0.0,
+                        "basis": "usd",
+                        "lastUsd": last_usd,
+                        "min": last_usd,
+                        "max": last_usd,
+                    },
                 }
         items.append(
             {
@@ -808,8 +896,11 @@ def vault_user_summary(
         snapshot = {
             "timeframe": timeframe_i,
             "tvl": [],
+            "pnl": [],
             "stats": {
                 "pctChange": 0.0,
+                "pctChangeUsd": 0.0,
+                "basis": "usd",
                 "lastUsd": last_usd,
                 "min": last_usd,
                 "max": last_usd,
@@ -943,7 +1034,12 @@ def vault_history(
     raw_count = len(pts)
 
     tvl_full = [{"timestamp": int(p["timestamp"]), "tvlUsd": float(p["usdValue"])} for p in pts]
-    pnl_full = _per_share_pnl_series(pts)
+    try:
+        hist_meta = _vault_apy_meta(vaddr)
+    except Exception:
+        hist_meta = None
+    pnl_basis = "strategy" if _strategy_vps(pts, hist_meta) is not None else "usd"
+    pnl_full = _per_share_pnl_series(pts, hist_meta)
     tvl_series = _bucket_median_by_time(
         tvl_full, 48, lambda p: int(p.get("timestamp") or 0), lambda p: float(p.get("tvlUsd") or 0.0)
     )
@@ -965,5 +1061,10 @@ def vault_history(
             "circulatingShares": int(circulating_shares or 0),
         },
         "series": {"tvl": tvl_series, "pnl": pnl_series},
-        "info": {"timeframe": tf_name, "count": len(tvl_series), "rawCount": raw_count},
+        "info": {
+            "timeframe": tf_name,
+            "count": len(tvl_series),
+            "rawCount": raw_count,
+            "pnlBasis": pnl_basis,
+        },
     }
