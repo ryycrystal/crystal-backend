@@ -496,15 +496,8 @@ class Sequencer:
         )
         seen = set()
 
-        has_trades = False
-        for log in logs:
-            topics = log.get("topics") or []
-            if not topics:
-                continue
-            tag = h.EVENT_SIGS.get(topics[0].lower())
-            if tag in ("LT", "TR", "NFB", "NFS", "V2SWAP", "V3SWAP"):
-                has_trades = True
-                break
+        trade_txs = self._collect_trade_txs(logs)
+        has_trades = bool(trade_txs)
 
         def _mark_processed(c):
             if not record_processed:
@@ -517,10 +510,10 @@ class Sequencer:
 
         if cur is None:
             with db_cursor() as cur:
-                self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+                self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch, trade_txs)
                 _mark_processed(cur)
         else:
-            self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch)
+            self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch, trade_txs)
             _mark_processed(cur)
 
         if counts_out is None:
@@ -536,8 +529,29 @@ class Sequencer:
                 f"NFPEN {counts['NFPEN']} NFT {counts['NFT']} TF {counts['TF']}"
             )
 
+    def _collect_trade_txs(self, logs: list[dict]) -> set[str]:
+        txs: set[str] = set()
+        for log in logs:
+            topics = log.get("topics") or []
+            if not topics:
+                continue
+            tag = h.EVENT_SIGS.get(topics[0].lower())
+            if tag in ("LT", "TR", "NFB", "NFS", "V2SWAP", "V3SWAP"):
+                txh = (log.get("transactionHash") or "").lower()
+                if txh:
+                    txs.add(txh)
+        return txs
+
     def _process_block_inner(
-        self, blk: int, logs: list[dict], cur, counts: dict, seen: set, has_trades: bool, batch: BatchAccumulator = None
+        self,
+        blk: int,
+        logs: list[dict],
+        cur,
+        counts: dict,
+        seen: set,
+        has_trades: bool,
+        batch: BatchAccumulator = None,
+        trade_txs: set[str] | None = None,
     ):
         self._preload_missing_v2_tokens(blk, logs, cur)
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
@@ -753,7 +767,13 @@ class Sequencer:
                         )
                     else:
                         self._state.apply_token_transfer(
-                            parsed, blk, blk_ts, log["address"].lower(), cur=cur, batch=batch
+                            parsed,
+                            blk,
+                            blk_ts,
+                            log["address"].lower(),
+                            cur=cur,
+                            batch=batch,
+                            in_trade_tx=bool(trade_txs and (txh or "").lower() in trade_txs),
                         )
 
             elif tag == "V2SYNC":

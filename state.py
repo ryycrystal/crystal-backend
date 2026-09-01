@@ -1237,7 +1237,14 @@ class State:
         return pool or None
 
     def apply_token_transfer(
-        self, ev: dict, blk: int, ts: int, _log_addr: str, cur: psycopg2.extensions.cursor | None = None, batch=None
+        self,
+        ev: dict,
+        blk: int,
+        ts: int,
+        _log_addr: str,
+        cur: psycopg2.extensions.cursor | None = None,
+        batch=None,
+        in_trade_tx: bool = False,
     ) -> None:
         with self._lock:
             token = (ev.get("token") or "").lower()
@@ -1270,7 +1277,7 @@ class State:
                 a in self.addressToMarket or a in self.v3_pools or a in self.launchpad_market_to_token
                 for a in endpoints
             )
-            if not known_venue and not (endpoints & (internal | venues | {zero, ""})):
+            if not known_venue and not in_trade_tx and not (endpoints & (internal | venues | {zero, ""})):
                 open_tokens, cost_basis = self._basis_for(from_addr, token, cur=cur)
                 if open_tokens > 0 and cost_basis > 0:
                     move_tokens = min(int(amount), int(open_tokens))
