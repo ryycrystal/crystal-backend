@@ -98,13 +98,20 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--show", type=int, default=10)
     ap.add_argument("--restart", action="store_true")
+    ap.add_argument("--tokens-file", default="", help="repair only the tokens listed here, one per line")
     args = ap.parse_args()
 
     storage.init_pool()
     with storage.db_cursor() as cur:
         venues = venue_addresses(cur)
-        cur.execute("SELECT token FROM launchpad_tokens ORDER BY token")
-        tokens = [r[0] for r in cur.fetchall()]
+        if args.tokens_file:
+            with open(args.tokens_file, encoding="utf-8") as fh:
+                wanted = sorted({ln.strip().lower() for ln in fh if ln.strip()})
+            cur.execute("SELECT token FROM launchpad_tokens WHERE token = ANY(%s) ORDER BY token", (wanted,))
+            tokens = [r[0] for r in cur.fetchall()]
+        else:
+            cur.execute("SELECT token FROM launchpad_tokens ORDER BY token")
+            tokens = [r[0] for r in cur.fetchall()]
     print(f"[BASIS] {len(tokens):,} tokens, {len(venues):,} venue addresses excluded")
 
     start_at = ""
@@ -133,8 +140,14 @@ def main():
                         "FROM launchpad_positions WHERE token = %s",
                         (token,),
                     )
-                    current = {r[0]: (int(r[1] or 0), int(r[2] or 0), Decimal(r[3] or 0)) for r in cur.fetchall()}
+                    current = {
+                        r[0]: (int(r[1] or 0), int(r[2] or 0), Decimal(r[3] or 0), int(r[4] or 0))
+                        for r in cur.fetchall()
+                    }
 
+                # the fold is done and nothing below needs the read snapshot, so let
+                # that transaction go before taking any write locks
+                with storage.db_cursor() as cur:
                     updates = []
                     for addr, (open_t, basis, bought, sold, realized) in users.items():
                         cur_row = current.get(addr)
