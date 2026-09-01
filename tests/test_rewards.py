@@ -71,10 +71,13 @@ def _clean_rewards(db, clean):
     with storage.db_cursor() as cur:
         for t in REWARDS_TABLES:
             cur.execute(f"DELETE FROM {t}")
+        cur.execute("DELETE FROM crystal_rewards_predeposit_vaults")
         cur.execute("DELETE FROM launchpad_kv WHERE key LIKE 'rewards_%'")
         cur.execute("DELETE FROM crystal_markets WHERE market IN (%s, %s)", (MKT_VOL, MKT_STABLE))
         storage.ensure_rewards_tables(cur=cur)
     storage.set_meta("rewards_program_start", str(WEEK1))
+    storage.set_meta("rewards_vault_start", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "1")
     yield rewards
 
 
@@ -346,3 +349,49 @@ def test_denylist_excluded_from_close(_clean_rewards):
     assert wallets == {U1}
     with storage.db_cursor() as cur:
         assert storage.get_rewards_balance(cur, U1) == pytest.approx(1_000_000.0, rel=1e-6)
+
+
+def test_vault_predeposit_boost(_clean_rewards):
+    rewards = _clean_rewards
+    vault_start = WEEK1 - 7200
+    storage.set_meta("rewards_vault_start", str(vault_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xp1'), (2, 0, %s, %s, %s, 100, 0, 0, '0xp2')",
+            (vault_start, VAULT, U1, WEEK1 + 10, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+            "VALUES (%s, 10, %s, 0, 0, 4000)",
+            (VAULT, vault_start),
+        )
+    assert rewards.accrue_vaults(now_ts=WEEK1 - 3600 + 10) == 1
+    assert _contrib(U1)["points"] == pytest.approx(600.0)
+    assert _contrib(U1)["vault"] == pytest.approx(4000.0)
+    assert rewards.accrue_vaults(now_ts=WEEK1 + 10) == 1
+    assert _contrib(U1)["points"] == pytest.approx(1200.0)
+    assert rewards.accrue_vaults(now_ts=WEEK1 + 3610) == 1
+    assert _contrib(U1)["points"] == pytest.approx(1200.0 + 400.0)
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_withdrawals (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (3, 0, %s, %s, %s, 150, 0, 0, '0xpw')",
+            (WEEK1 + 3700, VAULT, U1),
+        )
+    assert rewards.accrue_vaults(now_ts=WEEK1 + 7210) == 1
+    assert _contrib(U1)["points"] == pytest.approx(1600.0 + 600.0)
+    assert _contrib(U1)["vault"] == pytest.approx(16000.0)
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT DISTINCT week_start FROM crystal_rewards_contrib WHERE wallet = %s", (U1,))
+        assert {int(r[0]) for r in cur.fetchall()} == {WEEK1}
+
+
+def test_bucket_clamps_premain_activity_into_week_one(_clean_rewards):
+    rewards = _clean_rewards
+    assert rewards.bucket_for(WEEK1 - 86400, WEEK1) == WEEK1
+    assert rewards.bucket_for(WEEK1 + 86400, WEEK1) == WEEK1
+    assert rewards.bucket_for(rewards.week_end_for(WEEK1) + 10, WEEK1) == rewards.week_end_for(WEEK1)
+    assert rewards.bucket_end(WEEK1) == rewards.week_end_for(WEEK1)

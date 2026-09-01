@@ -13,8 +13,19 @@ from core.storage.base import db_cursor
 
 router = APIRouter()
 
+PREFIX = "/" + os.getenv("REWARDS_PATH_PREFIX", "awejriopajfopiapow").strip("/")
 ADMIN_KEY = os.getenv("REWARDS_ADMIN_KEY", "")
 ZERO_ADDR = "0x" + "0" * 40
+
+VOLUME_COLS = (
+    ("pregrad_usd", "pregradUsd"),
+    ("grad_usd", "gradUsd"),
+    ("spot_taker_usd", "spotTakerUsd"),
+    ("spot_maker_usd", "spotMakerUsd"),
+    ("stable_taker_usd", "stableTakerUsd"),
+    ("stable_maker_usd", "stableMakerUsd"),
+    ("vault_usd_hours", "vaultUsdHours"),
+)
 
 
 def _require_admin(req: Request) -> None:
@@ -35,12 +46,11 @@ def _require_address(address: str) -> str:
     return addr
 
 
-@router.get("/rewards/status")
-def rewards_status(req: Request) -> dict[str, Any]:
-    _require_admin(req)
+@router.get(PREFIX + "/status")
+def rewards_status() -> dict[str, Any]:
     now = int(time.time())
     start = rewards.program_start_ts()
-    ws = rewards.week_start_for(max(now, start))
+    ws = rewards.bucket_for(max(now, start), start)
     with db_cursor() as cur:
         cur.execute("SELECT COUNT(*), COALESCE(SUM(crystals), 0) FROM crystal_rewards_balances")
         n_wallets, total_crystals = cur.fetchone()
@@ -55,8 +65,11 @@ def rewards_status(req: Request) -> dict[str, Any]:
         "ok": True,
         "now": now,
         "programStart": start,
+        "vaultStart": rewards.vault_start_ts(),
+        "predepositCutoff": rewards.predeposit_cutoff_ts(),
+        "predepositMultiplier": rewards.predeposit_multiplier(),
         "currentWeekStart": ws,
-        "currentWeekEnd": rewards.week_end_for(ws),
+        "currentWeekEnd": rewards.bucket_end(ws),
         "rates": rewards.rates(),
         "pool": rewards.pool_size(),
         "exponent": rewards.exponent(),
@@ -73,9 +86,8 @@ def rewards_status(req: Request) -> dict[str, Any]:
     }
 
 
-@router.get("/rewards/week/{week_start}")
-def rewards_week(week_start: int, req: Request, limit: int = 100) -> dict[str, Any]:
-    _require_admin(req)
+@router.get(PREFIX + "/week/{week_start}")
+def rewards_week(week_start: int, limit: int = 100) -> dict[str, Any]:
     with db_cursor() as cur:
         cur.execute(
             "SELECT week_end, pool, exponent, participants, total_raw, total_adjusted, finalized, finalized_at "
@@ -110,32 +122,59 @@ def rewards_week(week_start: int, req: Request, limit: int = 100) -> dict[str, A
     }
 
 
-@router.get("/rewards/{address}")
-def rewards_wallet(address: str, req: Request) -> dict[str, Any]:
-    _require_admin(req)
+@router.get(PREFIX + "/volumes/{address}")
+def rewards_volumes(address: str) -> dict[str, Any]:
+    addr = _require_address(address)
+    cols = ", ".join(c for c, _ in VOLUME_COLS)
+    sums = ", ".join(f"COALESCE(SUM({c}), 0)" for c, _ in VOLUME_COLS)
+    with db_cursor() as cur:
+        cur.execute(
+            f"SELECT week_start, {cols}, points FROM crystal_rewards_contrib "
+            "WHERE wallet = %s ORDER BY week_start DESC LIMIT 60",
+            (addr,),
+        )
+        weekly = [
+            {
+                "weekStart": int(row[0]),
+                **{name: float(row[i + 1]) for i, (_c, name) in enumerate(VOLUME_COLS)},
+                "points": float(row[-1]),
+            }
+            for row in cur.fetchall()
+        ]
+        cur.execute(
+            f"SELECT {sums}, COALESCE(SUM(points), 0) FROM crystal_rewards_contrib WHERE wallet = %s",
+            (addr,),
+        )
+        row = cur.fetchone()
+        lifetime = {name: float(row[i]) for i, (_c, name) in enumerate(VOLUME_COLS)}
+        lifetime["points"] = float(row[-1])
+    return {"ok": True, "address": addr, "lifetime": lifetime, "weekly": weekly}
+
+
+@router.get(PREFIX + "/wallet/{address}")
+def rewards_wallet(address: str) -> dict[str, Any]:
     addr = _require_address(address)
     now = int(time.time())
-    ws = rewards.week_start_for(max(now, rewards.program_start_ts()))
+    start = rewards.program_start_ts()
+    ws = rewards.bucket_for(max(now, start), start)
+    cols = ", ".join(c for c, _ in VOLUME_COLS)
     with db_cursor() as cur:
         cur.execute("SELECT crystals, updated_at FROM crystal_rewards_balances WHERE wallet = %s", (addr,))
         bal = cur.fetchone()
         cur.execute(
-            """
-            SELECT week_start, pregrad_usd, grad_usd, spot_taker_usd, spot_maker_usd,
-                   stable_taker_usd, stable_maker_usd, vault_usd_hours, bonus_points, points
-            FROM crystal_rewards_contrib WHERE wallet = %s ORDER BY week_start DESC LIMIT 16
-            """,
+            f"SELECT week_start, {cols}, bonus_points, points FROM crystal_rewards_contrib "
+            "WHERE wallet = %s ORDER BY week_start DESC LIMIT 16",
             (addr,),
         )
         contrib = [
             {
-                "weekStart": int(r[0]), "pregradUsd": float(r[1]), "gradUsd": float(r[2]),
-                "spotTakerUsd": float(r[3]), "spotMakerUsd": float(r[4]),
-                "stableTakerUsd": float(r[5]), "stableMakerUsd": float(r[6]),
-                "vaultUsdHours": float(r[7]), "bonusPoints": float(r[8]), "points": float(r[9]),
-                "current": int(r[0]) == ws,
+                "weekStart": int(row[0]),
+                **{name: float(row[i + 1]) for i, (_c, name) in enumerate(VOLUME_COLS)},
+                "bonusPoints": float(row[-2]),
+                "points": float(row[-1]),
+                "current": int(row[0]) == ws,
             }
-            for r in cur.fetchall()
+            for row in cur.fetchall()
         ]
         cur.execute(
             """
@@ -165,7 +204,7 @@ def rewards_wallet(address: str, req: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/rewards/run")
+@router.post(PREFIX + "/run")
 def rewards_run(req: Request) -> dict[str, Any]:
     _require_admin(req)
     return {"ok": True, "result": rewards.run_once()}

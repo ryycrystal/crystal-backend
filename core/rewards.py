@@ -82,14 +82,36 @@ def milestones() -> list[list[float]]:
     return sorted([[float(a), float(b), float(c)] for a, b, c in ms], key=lambda m: m[0])
 
 
-def program_start_ts() -> int:
-    raw = storage.get_meta("rewards_program_start")
+def _meta_ts(key: str, fallback: datetime) -> int:
+    raw = storage.get_meta(key)
     if raw:
         try:
             return int(float(raw))
         except Exception:
             pass
-    return int(datetime(2026, 9, 16, 0, 0, tzinfo=LA).timestamp())
+    return int(fallback.timestamp())
+
+
+def program_start_ts() -> int:
+    return _meta_ts("rewards_program_start", datetime(2026, 9, 16, 0, 0, tzinfo=LA))
+
+
+def vault_start_ts() -> int:
+    return _meta_ts("rewards_vault_start", datetime(2026, 9, 8, 7, 0, tzinfo=LA))
+
+
+def predeposit_cutoff_ts() -> int:
+    raw = storage.get_meta("rewards_predeposit_cutoff")
+    if raw:
+        try:
+            return int(float(raw))
+        except Exception:
+            pass
+    return program_start_ts()
+
+
+def predeposit_multiplier() -> float:
+    return _meta_float("rewards_predeposit_multiplier", 3.0)
 
 
 def week_start_for(ts: int) -> int:
@@ -102,6 +124,15 @@ def week_start_for(ts: int) -> int:
 def week_end_for(week_start: int) -> int:
     d = datetime.fromtimestamp(int(week_start), LA).date() + timedelta(days=7)
     return int(datetime(d.year, d.month, d.day, tzinfo=LA).timestamp())
+
+
+def bucket_for(ts: int, main_start: int) -> int:
+    ws = week_start_for(ts)
+    return ws if ws >= main_start else main_start
+
+
+def bucket_end(bucket: int) -> int:
+    return week_end_for(week_start_for(bucket))
 
 
 def _wm_get(key: str, default: str) -> str:
@@ -209,7 +240,7 @@ def accrue_launchpad() -> int:
                 rate = r["grad"] if graduated else r["pregrad"]
                 field = "grad_usd" if graduated else "pregrad_usd"
                 storage.add_rewards_contrib(
-                    cur, week_start_for(ts), user, now_ts,
+                    cur, bucket_for(ts, start_ts), user, now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             storage.set_meta("rewards_wm_launchpad", str(int(rows[-1][0])), cur=cur)
@@ -283,7 +314,7 @@ def accrue_spot_takers() -> int:
                 rate = r["stable_taker"] if stable else r["spot_taker"]
                 field = "stable_taker_usd" if stable else "spot_taker_usd"
                 storage.add_rewards_contrib(
-                    cur, week_start_for(ts), user, now_ts,
+                    cur, bucket_for(ts, start_ts), user, now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             last = rows[-1]
@@ -350,7 +381,7 @@ def accrue_spot_makers() -> int:
                 rate = r["stable_maker"] if stable else r["spot_maker"]
                 field = "stable_maker_usd" if stable else "spot_maker_usd"
                 storage.add_rewards_contrib(
-                    cur, week_start_for(ts), maker, now_ts,
+                    cur, bucket_for(ts, start_ts), maker, now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
                 )
             last = rows[-1]
@@ -369,7 +400,10 @@ def _campaign_multiplier(campaigns, vault: str, ts: int) -> Decimal:
 
 
 def accrue_vaults(now_ts: int | None = None) -> int:
-    start_ts = program_start_ts()
+    main_start = program_start_ts()
+    start_ts = min(vault_start_ts(), main_start)
+    cutoff = predeposit_cutoff_ts()
+    pd_mult = Decimal(str(predeposit_multiplier()))
     now_ts = int(now_ts if now_ts is not None else time.time())
     r = rates()
     rate = Decimal(str(r["vault_hour"]))
@@ -387,17 +421,22 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                 continue
             deny = storage.rewards_denylist(cur)
             campaigns = storage.rewards_campaigns(cur)
+            pd_vaults = storage.rewards_predeposit_vaults(cur)
             cur.execute(
                 """
-                SELECT vault, user_address, SUM(shares) FROM (
-                    SELECT vault, user_address, shares FROM crystal_vault_deposits WHERE timestamp <= %s
+                SELECT vault, user_address, SUM(delta),
+                       SUM(CASE WHEN delta > 0 AND ts <= %s THEN delta ELSE 0 END)
+                FROM (
+                    SELECT vault, user_address, shares AS delta, timestamp AS ts
+                    FROM crystal_vault_deposits WHERE timestamp <= %s
                     UNION ALL
-                    SELECT vault, user_address, -shares FROM crystal_vault_withdrawals WHERE timestamp <= %s
+                    SELECT vault, user_address, -shares, timestamp
+                    FROM crystal_vault_withdrawals WHERE timestamp <= %s
                 ) x
                 GROUP BY vault, user_address
-                HAVING SUM(shares) > 0
+                HAVING SUM(delta) > 0
                 """,
-                (hour, hour),
+                (min(hour, cutoff), hour, hour),
             )
             holdings = cur.fetchall()
             if holdings:
@@ -417,10 +456,10 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                     if int(sts) >= hour - VAULT_SAMPLE_STALENESS
                 }
                 supply: dict[str, Decimal] = {}
-                for v, _u, sh in holdings:
+                for v, _u, sh, _pd in holdings:
                     supply[str(v).lower()] = supply.get(str(v).lower(), Decimal(0)) + Decimal(int(sh))
-                ws = week_start_for(hour - 1)
-                for v, user, sh in holdings:
+                ws = bucket_for(hour - 1, main_start)
+                for v, user, sh, pre_dep in holdings:
                     v = str(v).lower()
                     user = str(user).lower()
                     if user in deny:
@@ -429,12 +468,17 @@ def accrue_vaults(now_ts: int | None = None) -> int:
                     sup = supply.get(v, Decimal(0))
                     if usd_total <= 0 or sup <= 0:
                         continue
-                    user_usd = usd_total * Decimal(int(sh)) / sup
+                    shares = Decimal(int(sh))
+                    boosted = min(shares, Decimal(int(pre_dep or 0)))
+                    if pd_vaults and v not in pd_vaults:
+                        boosted = Decimal(0)
+                    user_usd = usd_total * shares / sup
+                    weighted = usd_total * (boosted * pd_mult + (shares - boosted)) / sup
                     mult = _campaign_multiplier(campaigns, v, hour)
                     storage.add_rewards_contrib(
                         cur, ws, user, now_ts,
                         vault_usd_hours=user_usd,
-                        points=user_usd * rate * mult,
+                        points=weighted * rate * mult,
                     )
             storage.set_meta("rewards_wm_vault_hour", str(hour), cur=cur)
             hours_done += 1
@@ -546,19 +590,19 @@ def close_due_weeks(now_ts: int | None = None) -> list[int]:
     if now_ts <= start:
         return []
     closed: list[int] = []
-    ws = week_start_for(start)
-    while week_end_for(ws) <= now_ts:
+    ws = start
+    while bucket_end(ws) <= now_ts:
         closed_one = _close_week(ws, now_ts)
         if closed_one is None:
             break
         if closed_one:
             closed.append(ws)
-        ws = week_end_for(ws)
+        ws = bucket_end(ws)
     return closed
 
 
 def _close_week(week_start: int, now_ts: int) -> bool | None:
-    week_end = week_end_for(week_start)
+    week_end = bucket_end(week_start)
     with db_cursor() as cur:
         cur.execute("SELECT finalized FROM crystal_rewards_weeks WHERE week_start = %s", (week_start,))
         row = cur.fetchone()

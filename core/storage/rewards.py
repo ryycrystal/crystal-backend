@@ -136,6 +136,14 @@ def ensure_rewards_tables(cur=None) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS crystal_rewards_predeposit_vaults
+        (
+            vault TEXT PRIMARY KEY
+        );
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS crystal_rewards_denylist
         (
             wallet TEXT PRIMARY KEY
@@ -186,6 +194,11 @@ def claim_rewards_leader(holder: str, ttl_seconds: int = 90) -> bool:
 
 def rewards_stable_tokens(cur) -> set[str]:
     cur.execute("SELECT address FROM crystal_rewards_stable_tokens")
+    return {str(r[0]).lower() for r in cur.fetchall()}
+
+
+def rewards_predeposit_vaults(cur) -> set[str]:
+    cur.execute("SELECT vault FROM crystal_rewards_predeposit_vaults")
     return {str(r[0]).lower() for r in cur.fetchall()}
 
 
