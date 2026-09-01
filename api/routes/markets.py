@@ -84,8 +84,11 @@ def _crystal_market_dump_row_to_api(row: Sequence[Any]) -> dict[str, Any]:
 
 @router.get("/markets/list")
 def list_markets_dump() -> dict[str, Any]:
+    from api.api import _mon_price_usd
+
     rows = storage.list_crystal_markets_dump()
     stats = storage.crystal_market_stats_24h()
+    mon_price = _mon_price_usd()
     markets = []
     for row in rows:
         market = _crystal_market_dump_row_to_api(row)
@@ -100,5 +103,17 @@ def list_markets_dump() -> dict[str, Any]:
                 "trades": [],
             },
         )
+        if market["isCanonical"]:
+            market["klines"] = storage.market_klines(market["market"], 3600, 24)
+            market["trades"] = storage.list_market_recent_trades(market["market"], 50)
+        else:
+            market["klines"] = []
+            market["trades"] = []
+        qv = Decimal(market["stats24h"].get("quoteVolume") or 0)
+        if market["quote"]["ticker"] == "USDC":
+            usd = qv / Decimal(10) ** 6
+        else:
+            usd = qv / Decimal(10) ** int(market["quote"]["decimals"] or 18) * mon_price
+        market["usdVolume24h"] = str(usd)
         markets.append(market)
     return {"count": len(markets), "markets": markets}

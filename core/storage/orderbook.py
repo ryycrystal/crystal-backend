@@ -609,6 +609,34 @@ def market_klines(market: str, res: int, limit: int = 3000) -> list[dict[str, An
     ]
 
 
+def list_market_recent_trades(market: str, limit: int = 50) -> list[dict[str, Any]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT txhash, log_index, timestamp, is_buy, amount_in, amount_out, start_price, end_price
+            FROM crystal_market_trades
+            WHERE market = %(m)s
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC
+            LIMIT %(lim)s
+            """,
+            {"m": (market or "").lower(), "lim": int(limit)},
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "txhash": tx,
+            "logIndex": int(li),
+            "timestamp": int(ts),
+            "isBuy": bool(b),
+            "amountIn": str(int(ai or 0)),
+            "amountOut": str(int(ao or 0)),
+            "startPrice": str(int(sp or 0)),
+            "endPrice": str(int(ep or 0)),
+        }
+        for tx, li, ts, b, ai, ao, sp, ep in rows
+    ]
+
+
 def get_wallet_prefs(key: str) -> dict[str, Any] | None:
     with db_cursor() as cur:
         cur.execute("SELECT wallet_count, selected, updated_at FROM crystal_wallet_prefs WHERE key = %s", (key,))
