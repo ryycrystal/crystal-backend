@@ -263,3 +263,51 @@ def get_rewards_balance(cur, wallet: str) -> float:
     cur.execute("SELECT crystals FROM crystal_rewards_balances WHERE wallet = %s", (wallet.lower(),))
     row = cur.fetchone()
     return float(row[0]) if row else 0.0
+
+
+def add_rewards_denylist(addresses: list[str]) -> list[str]:
+    rows = sorted({str(a or "").lower() for a in addresses if str(a or "").strip()})
+    if not rows:
+        return []
+    with db_cursor() as cur:
+        cur.executemany(
+            "INSERT INTO crystal_rewards_denylist (wallet) VALUES (%s) ON CONFLICT (wallet) DO NOTHING",
+            [(a,) for a in rows],
+        )
+    return rows
+
+
+def remove_rewards_denylist(address: str) -> bool:
+    with db_cursor() as cur:
+        cur.execute("DELETE FROM crystal_rewards_denylist WHERE wallet = %s", (str(address or "").lower(),))
+        return cur.rowcount > 0
+
+
+def list_rewards_denylist() -> list[str]:
+    with db_cursor() as cur:
+        cur.execute("SELECT wallet FROM crystal_rewards_denylist ORDER BY wallet")
+        return [str(r[0]) for r in cur.fetchall()]
+
+
+def add_predeposit_vaults(vaults: list[str]) -> list[str]:
+    rows = sorted({str(v or "").lower() for v in vaults if str(v or "").strip()})
+    if not rows:
+        return []
+    with db_cursor() as cur:
+        cur.executemany(
+            "INSERT INTO crystal_rewards_predeposit_vaults (vault) VALUES (%s) ON CONFLICT (vault) DO NOTHING",
+            [(v,) for v in rows],
+        )
+    return rows
+
+
+def remove_predeposit_vault(vault: str) -> bool:
+    with db_cursor() as cur:
+        cur.execute("DELETE FROM crystal_rewards_predeposit_vaults WHERE vault = %s", (str(vault or "").lower(),))
+        return cur.rowcount > 0
+
+
+def list_predeposit_vaults() -> list[str]:
+    with db_cursor() as cur:
+        cur.execute("SELECT vault FROM crystal_rewards_predeposit_vaults ORDER BY vault")
+        return [str(r[0]) for r in cur.fetchall()]

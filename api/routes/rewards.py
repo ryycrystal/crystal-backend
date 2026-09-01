@@ -216,6 +216,71 @@ def rewards_wallet(address: str) -> dict[str, Any]:
     }
 
 
+def _addresses_from(payload: Any) -> list[str]:
+    if isinstance(payload, str):
+        raw = [payload]
+    elif isinstance(payload, list):
+        raw = payload
+    elif isinstance(payload, dict):
+        one = payload.get("address") or payload.get("vault") or payload.get("wallet") or ""
+        many = payload.get("addresses") or payload.get("vaults") or payload.get("wallets") or []
+        raw = ([one] if one else []) + (many if isinstance(many, list) else [])
+    else:
+        raw = []
+    out = [_require_address(str(a)) for a in raw if str(a or "").strip()]
+    if not out:
+        raise HTTPException(status_code=400, detail="provide an address")
+    return out
+
+
+@router.get(PREFIX + "/config")
+def rewards_config(req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    with db_cursor() as cur:
+        campaigns = [
+            {"vault": v, "multiplier": m, "startTs": s, "endTs": e} for v, m, s, e in storage.rewards_campaigns(cur)
+        ]
+    return {
+        "ok": True,
+        "denylist": storage.list_rewards_denylist(),
+        "predepositVaults": storage.list_predeposit_vaults(),
+        "predepositVaultsMeaning": "empty list means every vault earns the pre-deposit boost",
+        "predepositMultiplier": rewards.predeposit_multiplier(),
+        "predepositCutoff": rewards.predeposit_cutoff_ts(),
+        "vaultStart": rewards.vault_start_ts(),
+        "programStart": rewards.program_start_ts(),
+        "campaigns": campaigns,
+    }
+
+
+@router.post(PREFIX + "/denylist")
+async def rewards_denylist_add(req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    added = storage.add_rewards_denylist(_addresses_from(await req.json()))
+    return {"ok": True, "added": added, "denylist": storage.list_rewards_denylist()}
+
+
+@router.delete(PREFIX + "/denylist/{address}")
+def rewards_denylist_remove(address: str, req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    removed = storage.remove_rewards_denylist(_require_address(address))
+    return {"ok": True, "removed": removed, "denylist": storage.list_rewards_denylist()}
+
+
+@router.post(PREFIX + "/bonus-vaults")
+async def rewards_bonus_vaults_add(req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    added = storage.add_predeposit_vaults(_addresses_from(await req.json()))
+    return {"ok": True, "added": added, "bonusVaults": storage.list_predeposit_vaults()}
+
+
+@router.delete(PREFIX + "/bonus-vaults/{vault}")
+def rewards_bonus_vaults_remove(vault: str, req: Request) -> dict[str, Any]:
+    _require_admin(req)
+    removed = storage.remove_predeposit_vault(_require_address(vault))
+    return {"ok": True, "removed": removed, "bonusVaults": storage.list_predeposit_vaults()}
+
+
 @router.post(PREFIX + "/run")
 def rewards_run(req: Request) -> dict[str, Any]:
     _require_admin(req)

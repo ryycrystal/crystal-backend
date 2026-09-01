@@ -613,3 +613,61 @@ def test_concurrent_accrual_cannot_double_count(_clean_rewards):
     assert not errors, errors
     assert _contrib(U1)["points"] == pytest.approx(600.0)
     assert _contrib(U1)["pregrad"] == pytest.approx(600.0)
+
+
+def test_config_endpoints_manage_denylist_and_bonus_vaults(_clean_rewards):
+    addr = "0x" + "7c" * 20
+    vault = "0x" + "9d" * 20
+
+    assert storage.add_rewards_denylist([addr.upper()]) == [addr]
+    assert storage.list_rewards_denylist() == [addr]
+    assert storage.add_rewards_denylist([addr]) == [addr]
+    assert storage.list_rewards_denylist() == [addr]
+
+    assert storage.add_predeposit_vaults([vault.upper()]) == [vault]
+    assert storage.list_predeposit_vaults() == [vault]
+
+    with storage.db_cursor() as cur:
+        assert storage.rewards_denylist(cur) == {addr}
+        assert storage.rewards_predeposit_vaults(cur) == {vault}
+
+    assert storage.remove_rewards_denylist(addr) is True
+    assert storage.remove_rewards_denylist(addr) is False
+    assert storage.list_rewards_denylist() == []
+    assert storage.remove_predeposit_vault(vault) is True
+    assert storage.list_predeposit_vaults() == []
+
+
+def test_denylisted_wallet_never_accrues(_clean_rewards):
+    rewards = _clean_rewards
+    storage.add_rewards_denylist([U2])
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(700, TOK_A, U1, WEEK1 + 10, 50.0)
+    _seed_launchpad_trade(701, TOK_A, U2, WEEK1 + 20, 5000.0)
+    rewards.accrue_launchpad()
+    assert _contrib(U1)["points"] == pytest.approx(50.0)
+    assert _contrib(U2) is None
+
+
+def test_bonus_vault_scoping_limits_the_boost(_clean_rewards):
+    rewards = _clean_rewards
+    other = "0x" + "ce" * 20
+    vault_start = WEEK1 - 7200
+    storage.set_meta("rewards_vault_start", str(vault_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xs1'), (2, 0, %s, %s, %s, 100, 0, 0, '0xs2')",
+            (vault_start, VAULT, U1, vault_start, other, U2),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+            "VALUES (%s, 10, %s, 0, 0, 1000), (%s, 11, %s, 0, 0, 1000)",
+            (VAULT, vault_start, other, vault_start),
+        )
+    assert rewards.accrue_vaults(now_ts=vault_start + 3610) == 1
+    assert _contrib(U1)["points"] == pytest.approx(150.0)
+    assert _contrib(U2)["points"] == pytest.approx(50.0)
