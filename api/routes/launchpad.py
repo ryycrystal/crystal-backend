@@ -2308,19 +2308,23 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
         cur.execute(
             """
             SELECT
-                log_index,
-                timestamp,
-                user_address,
-                is_buy,
-                native_amount,
-                token_amount,
-                price_native,
-                txhash,
-                token
-            FROM launchpad_trades
-            WHERE user_address = ANY(%s)
+                tr.log_index,
+                tr.timestamp,
+                tr.user_address,
+                tr.is_buy,
+                tr.native_amount,
+                tr.token_amount,
+                tr.price_native,
+                tr.txhash,
+                tr.token,
+                t.symbol,
+                t.name,
+                t.metadata_cid
+            FROM launchpad_trades tr
+            JOIN launchpad_tokens t ON t.token = tr.token
+            WHERE tr.user_address = ANY(%s)
             -- log_index keeps same block trades in chain order, see above
-            ORDER BY timestamp DESC, log_index DESC, txhash DESC
+            ORDER BY tr.timestamp DESC, tr.log_index DESC, tr.txhash DESC
             LIMIT 50
             """,
             (list(addrs),),
@@ -2329,7 +2333,20 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
 
     out: list[dict[str, Any]] = []
 
-    for log_index, ts_tr, user_address, is_buy, native_amount, token_amount, price_native, txhash, token in rows:
+    for (
+        log_index,
+        ts_tr,
+        user_address,
+        is_buy,
+        native_amount,
+        token_amount,
+        price_native,
+        txhash,
+        token,
+        symbol,
+        name,
+        metadata_cid,
+    ) in rows:
         is_buy_flag = bool(is_buy)
         native_amount = int(native_amount or 0)
         token_amount = int(token_amount or 0)
@@ -2352,6 +2369,10 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                     "id": f"{txhash}-{log_index}",
                     "isBuy": is_buy_flag,
                     "priceNativePerTokenWad": _scaled_price(price_native),
+                    "symbol": symbol or "",
+                    "name": name or symbol or "",
+                    "metadataCid": metadata_cid or "",
+                    "time": str(int(ts_tr)),
                 }
             }
         )
