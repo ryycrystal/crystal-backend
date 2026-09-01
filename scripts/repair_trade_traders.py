@@ -83,6 +83,13 @@ def main() -> None:
     parser.add_argument("--table", default="launchpad_trades", choices=["launchpad_trades", "crystal_market_trades"])
     parser.add_argument("--token", default="", help="limit to one token")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--scan-top",
+        type=int,
+        default=300,
+        help="how many of the busiest traders to code check; a router forwards for many wallets so it ranks high",
+    )
+    parser.add_argument("--traders", default="", help="comma separated addresses to repair, skips discovery")
     args = parser.parse_args()
 
     storage.init_pool()
@@ -95,18 +102,25 @@ def main() -> None:
         params.append(args.token.lower())
     limit_sql = f"LIMIT {int(args.limit)}" if args.limit > 0 else ""
 
-    with db_cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT DISTINCT user_address FROM {args.table}
-            WHERE {where}
-            """,
-            params,
-        )
-        addrs = [r[0] for r in cur.fetchall() if r[0]]
+    if args.traders:
+        suspects = [a.strip().lower() for a in args.traders.split(",") if a.strip()]
+        print(f"[TRADERS] repairing {len(suspects)} supplied addresses", flush=True)
+    else:
+        with db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT user_address, COUNT(*) AS n FROM {args.table}
+                WHERE {where}
+                GROUP BY user_address
+                ORDER BY n DESC
+                LIMIT %s
+                """,
+                params + [int(args.scan_top)],
+            )
+            addrs = [r[0] for r in cur.fetchall() if r[0]]
 
-    suspects = [a for a in addrs if is_contract(a)]
-    print(f"[TRADERS] {len(addrs)} distinct traders, {len(suspects)} are contracts", flush=True)
+        suspects = [a for a in addrs if is_contract(a)]
+        print(f"[TRADERS] checked the {len(addrs)} busiest traders, {len(suspects)} are contracts", flush=True)
     if not suspects:
         print("[TRADERS] nothing to repair", flush=True)
         return
