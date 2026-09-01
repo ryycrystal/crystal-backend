@@ -28,7 +28,7 @@ RAW_URL = os.environ.get("TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(not RAW_URL, reason="set TEST_DATABASE_URL to run database integration tests")
 
-SCRATCH_DB = "crystal_lp_itest"
+SCRATCH_DB = os.environ.get("SCRATCH_DB_NAME", "crystal_lp_itest")
 
 ROUTER = None
 TOKEN = "0x1f5bb433d52b9e9219a4decb4e9abc87541c7777"
