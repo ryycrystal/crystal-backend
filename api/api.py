@@ -250,36 +250,43 @@ class TTLCache:
     def __init__(self, max_size: int = 1000):
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> tuple[Any, bool]:
-        if key not in self._cache:
-            return None, False
-        value, expires = self._cache[key]
-        if time.time() > expires:
-            del self._cache[key]
-            return None, False
-        self._cache.move_to_end(key)
-        return value, True
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None, False
+            value, expires = entry
+            if time.time() > expires:
+                self._cache.pop(key, None)
+                return None, False
+            self._cache.move_to_end(key)
+            return value, True
 
     def get_stale(self, key: str) -> tuple[Any, bool, float]:
-        if key not in self._cache:
-            return None, False, 0.0
-        value, expires = self._cache[key]
-        self._cache.move_to_end(key)
-        return value, time.time() <= expires, expires
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None, False, 0.0
+            value, expires = entry
+            self._cache.move_to_end(key)
+            return value, time.time() <= expires, expires
 
     def set(self, key: str, value: Any, ttl_seconds: float) -> None:
-        if key in self._cache:
-            del self._cache[key]
-        elif len(self._cache) >= self._max_size:
-            self._cache.popitem(last=False)
-        self._cache[key] = (value, time.time() + ttl_seconds)
+        with self._lock:
+            self._cache.pop(key, None)
+            while len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = (value, time.time() + ttl_seconds)
 
     def invalidate(self, key: str) -> None:
-        self._cache.pop(key, None)
+        with self._lock:
+            self._cache.pop(key, None)
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 _cache = TTLCache(max_size=2000)
@@ -927,7 +934,7 @@ def _serialize_token(token_addr: str) -> dict[str, Any]:
             """
             SELECT user_address
             FROM launchpad_snipers
-            WHERE LOWER(token) = %s
+            WHERE token = %s
             """,
             (token_addr,),
         )
@@ -1150,6 +1157,7 @@ app = FastAPI(title="backend", version="0.1.0")
 _EDGE_CACHEABLE = (
     "/tokens",
     "/token/",
+    "/fun/token/",
     "/chart/",
     "/stats/",
     "/holders/",

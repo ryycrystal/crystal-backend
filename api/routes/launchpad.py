@@ -72,7 +72,7 @@ def token_holders(
     token_addr = token_addr.lower()
     needle = (q or "").strip().lower()
 
-    where = ["token = %s", "balance_token > 0", "user_address <> ALL(%s)", _sql_not_internal("user_address")]
+    where = ["token = %s", "balance_token > 1", "user_address <> ALL(%s)", _sql_not_internal("user_address")]
     params: list[Any] = [token_addr, list(_static_internal_addrs())]
     if needle:
         where.append("user_address LIKE %s")
@@ -1216,7 +1216,7 @@ def token_overview_graph(
                 """
                 SELECT user_address
                 FROM launchpad_snipers
-                WHERE LOWER(token) = %s
+                WHERE token = %s
                 """,
                 (token_addr,),
             )

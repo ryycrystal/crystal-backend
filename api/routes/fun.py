@@ -160,7 +160,7 @@ def fun_token_overview(
         sniper_addresses: list[str] = []
         with db_cursor() as cur:
             cur.execute(
-                "SELECT user_address FROM launchpad_snipers WHERE LOWER(token) = %s",
+                "SELECT user_address FROM launchpad_snipers WHERE token = %s",
                 (token_addr,),
             )
             sniper_addresses = [a for (a,) in cur.fetchall() if a]
