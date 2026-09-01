@@ -404,12 +404,21 @@ async def backfill(start_block: int, batch: int) -> int:
 
 
 async def seed_referral_bindings(start_block: int) -> None:
-    if storage.get_meta("referral_seeded"):
-        return
     from modules.referrals import REFERRAL_TOPIC
 
-    head = await get_head_http()
     manager = h.CONTRACTS["REFERRALS"].lower()
+    if storage.get_meta("referral_seeded"):
+        if storage.get_meta("referral_seeded_address") == manager:
+            return
+        print(
+            f"[REF] Referral manager changed to {manager}, reseeding bindings from {start_block}",
+            flush=True,
+        )
+        storage.set_meta("referral_seeded", "")
+        storage.set_meta("referral_seed_progress", "")
+        storage.set_meta("referral_seed_skipped", "")
+
+    head = await get_head_http()
     initial_chunk = int(os.getenv("REFERRAL_SEED_CHUNK", "50000"))
     chunk = initial_chunk
     total = 0
@@ -509,6 +518,7 @@ async def seed_referral_bindings(start_block: int) -> None:
         return
     storage.set_meta("referral_seeded", str(head))
     storage.set_meta("referral_seed_progress", str(head))
+    storage.set_meta("referral_seeded_address", manager)
     print(f"[REF] Referral seed complete: {total} events through block {head}", flush=True)
 
 

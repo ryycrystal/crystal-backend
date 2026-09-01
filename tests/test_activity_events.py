@@ -18,6 +18,12 @@ def test_claim_events_are_not_accepted_from_the_referral_manager():
     assert h.accepts_log_for_indexing("REFCLAIM", h.CONTRACTS["REFERRALS"].lower()) is False
 
 
+def test_referral_manager_matches_the_contract_the_app_writes_to():
+    # the app binds referrals through this manager; indexing any other address
+    # silently produces an empty referral_bindings table and no referral activity
+    assert h.CONTRACTS["REFERRALS"].lower() == "0x1ab7ea187cee63cf01bbd8fa8837c748a769f8df"
+
+
 def test_referral_bindings_still_come_only_from_the_referral_manager():
     assert h.accepts_log_for_indexing("REF", h.CONTRACTS["REFERRALS"].lower()) is True
     if h.CONTRACTS["REFERRALS"].lower() != h.CONTRACTS["CRYSTAL"].lower():
