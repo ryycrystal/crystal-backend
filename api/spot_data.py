@@ -109,6 +109,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
             "liquidity": [],
             "summary": {
                 "totalAccountValue": None,
+                "firstActivityTs": None,
                 "walletValue": None,
                 "ordersValue": None,
                 "vaultsValue": None,
@@ -223,6 +224,7 @@ def spot_body(wallet, include_zero: bool = False) -> dict[str, Any]:
         ],
         "summary": {
             "totalAccountValue": _fmt_usd(total),
+            "firstActivityTs": storage.wallet_first_activity_ts(supported),
             "walletValue": _fmt_usd(wallet_total),
             "ordersValue": _fmt_usd(orders_total),
             "vaultsValue": _fmt_usd(vaults_total),

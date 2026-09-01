@@ -661,3 +661,63 @@ def put_wallet_prefs(key: str, count: int, selected: list[int], updated_at: int)
             """,
             (key, int(count), json.dumps([int(i) for i in selected]), int(updated_at)),
         )
+
+
+def orders_for_graph(user) -> list[dict[str, Any]]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT LOWER(CASE WHEN o.is_buy THEN m.quote_address ELSE m.base_address END) AS token,
+                   o.original_size, o.size, o.created_ts, o.updated_ts, o.status
+            FROM crystal_orderbook_orders o
+            JOIN crystal_markets m ON m.market = o.market
+            WHERE o.user_address = ANY(%s) AND o.created_ts > 0
+            """,
+            (_addr_list(user),),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "token": tok,
+            "original_size": int(orig or 0),
+            "size": int(size or 0),
+            "created_ts": int(created or 0),
+            "updated_ts": int(updated or 0),
+            "status": status or "",
+        }
+        for tok, orig, size, created, updated, status in rows
+        if tok
+    ]
+
+
+def locked_by_token_at(orders: list[dict[str, Any]], ts: int) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for o in orders:
+        if o["created_ts"] > ts:
+            continue
+        still_open = o["status"] == "open"
+        if not still_open and o["updated_ts"] <= ts:
+            continue
+        locked = o["size"] if ts >= o["updated_ts"] else o["original_size"]
+        if locked > 0:
+            out[o["token"]] = out.get(o["token"], 0) + locked
+    return out
+
+
+def wallet_first_activity_ts(user) -> int | None:
+    addrs = _addr_list(user)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT MIN(ts) FROM (
+                SELECT MIN(timestamp) AS ts FROM crystal_orderbook_events WHERE user_address = ANY(%(a)s)
+                UNION ALL
+                SELECT MIN(timestamp) FROM crystal_market_trades WHERE user_address = ANY(%(a)s)
+                UNION ALL
+                SELECT MIN(timestamp) FROM launchpad_trades WHERE user_address = ANY(%(a)s)
+            ) u
+            """,
+            {"a": addrs},
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] else None

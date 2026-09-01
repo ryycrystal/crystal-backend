@@ -27,7 +27,7 @@ FILL_PACE_SECONDS = float(os.getenv("SPOT_GRAPH_PACE", "0.2"))
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("SPOT_GRAPH_MAX_FAILURES", "5"))
 _WEI = Decimal(10) ** 18
 _MIN_PRICE_TRADE_WEI = 10**16
-VALUE_VERSION = 2
+VALUE_VERSION = 3
 _LP_BALANCE_PREFIX = "__lpBalance:"
 _LP_SUPPLY_PREFIX = "__lpSupply:"
 
@@ -220,7 +220,35 @@ def _lp_value_at(ts: int, balances: dict[str, int]) -> Decimal:
     )
 
 
-def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], tokens: list[dict[str, Any]]) -> None:
+def _locked_value_at(
+    orders: list[dict[str, Any]], ts: int, tokens: list[dict[str, Any]], mon_usd: Decimal, wmon: str
+) -> Decimal:
+    if not orders:
+        return Decimal(0)
+    locked = storage.locked_by_token_at(orders, ts)
+    if not locked:
+        return Decimal(0)
+    by_addr = {t["address"]: t for t in tokens}
+    total = Decimal(0)
+    for addr, raw in locked.items():
+        t = by_addr.get(addr)
+        if t is None or raw <= 0:
+            continue
+        whole = Decimal(raw) / Decimal(10) ** int(t.get("decimals") or 18)
+        price = _token_price_at(t, ts, mon_usd, wmon)
+        if price is not None:
+            total += whole * price
+    return total
+
+
+def _write_bucket(
+    wallet: str,
+    ts: int,
+    block: int,
+    balances: dict[str, int],
+    tokens: list[dict[str, Any]],
+    orders: list[dict[str, Any]] | None = None,
+) -> None:
     mon_usd = _mon_usd_at(ts)
     wmon = next((t["address"] for t in tokens if (t.get("ticker") or "").upper() == "WMON"), "")
     value_usd = Decimal(0)
@@ -245,6 +273,11 @@ def _write_bucket(wallet: str, ts: int, block: int, balances: dict[str, int], to
         value_usd += lp_usd
         if mon_usd > 0:
             value_native += lp_usd / mon_usd
+    locked_usd = _locked_value_at(orders or [], ts, tokens, mon_usd, wmon)
+    if locked_usd > 0:
+        value_usd += locked_usd
+        if mon_usd > 0:
+            value_native += locked_usd / mon_usd
     stored_balances = {k: str(v) for k, v in balances.items()}
     stored_balances["__valueVersion"] = VALUE_VERSION
     storage.write_spot_graph_bucket(wallet, ts, block, value_usd, value_native, stored_balances)
@@ -269,6 +302,7 @@ def _fill(wallet: str) -> None:
 
         tokens = spot_token_list()
         lp_markets = storage.list_lp_markets_for_graph(wallet)
+        orders = storage.orders_for_graph(wallet)
         wanted = _wanted_buckets(int(time.time()))
         if not wanted:
             return
@@ -300,7 +334,7 @@ def _fill(wallet: str) -> None:
             for ts, block in group:
                 balances = balances_by_ts.get(ts)
                 if balances is not None:
-                    _write_bucket(wallet, ts, block, balances, tokens)
+                    _write_bucket(wallet, ts, block, balances, tokens, orders)
                     wrote += 1
             if wrote == 0:
                 if empty_batches == 0:
