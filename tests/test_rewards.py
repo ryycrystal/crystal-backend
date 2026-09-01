@@ -671,3 +671,77 @@ def test_bonus_vault_scoping_limits_the_boost(_clean_rewards):
     assert rewards.accrue_vaults(now_ts=vault_start + 3610) == 1
     assert _contrib(U1)["points"] == pytest.approx(150.0)
     assert _contrib(U2)["points"] == pytest.approx(50.0)
+
+
+def test_boost_only_covers_deposits_inside_the_window(_clean_rewards):
+    rewards = _clean_rewards
+    pd_start = WEEK1 - 8 * 86400
+    storage.set_meta("rewards_vault_start", str(pd_start))
+    storage.set_meta("rewards_predeposit_start", str(pd_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+
+    early, inwin, late = U1, U2, U3
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address,"
+            " shares, quote_amount, base_amount, txhash) VALUES"
+            " (1, 0, %s, %s, %s, 100, 0, 0, '0xw1'),"
+            " (2, 0, %s, %s, %s, 100, 0, 0, '0xw2'),"
+            " (3, 0, %s, %s, %s, 100, 0, 0, '0xw3')",
+            (pd_start - 86400, VAULT, early, pd_start + 3600, VAULT, inwin, WEEK1 + 3600, VAULT, late),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance,"
+            " base_balance, usd_value) VALUES (%s, 5, %s, 0, 0, 300)",
+            (VAULT, WEEK1 + 3600),
+        )
+
+    hour = WEEK1 + 7200
+    storage.set_meta("rewards_wm_vault_hour", str(hour - 3600))
+    assert rewards.accrue_vaults(now_ts=hour + 10) == 1
+
+    def rate(w):
+        c = _contrib(w)
+        return c["points"] / c["vault"]
+
+    assert rate(early) == pytest.approx(0.05), "a deposit before the window opened must earn 1x"
+    assert rate(inwin) == pytest.approx(0.15), "a deposit inside the window must earn 3x"
+    assert rate(late) == pytest.approx(0.05), "a deposit after the cutoff must earn 1x"
+
+
+def test_boost_survives_trimming_but_burns_below_the_predeposit(_clean_rewards):
+    rewards = _clean_rewards
+    pd_start = WEEK1 - 8 * 86400
+    storage.set_meta("rewards_vault_start", str(pd_start))
+    storage.set_meta("rewards_predeposit_start", str(pd_start))
+    storage.set_meta("rewards_predeposit_cutoff", str(WEEK1))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address,"
+            " shares, quote_amount, base_amount, txhash) VALUES"
+            " (1, 0, %s, %s, %s, 100, 0, 0, '0xb1'),"
+            " (2, 0, %s, %s, %s, 100, 0, 0, '0xb2')",
+            (pd_start + 60, VAULT, U1, WEEK1 + 60, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_withdrawals (block_number, log_index, timestamp, vault, user_address,"
+            " shares, quote_amount, base_amount, txhash) VALUES (3, 0, %s, %s, %s, 150, 0, 0, '0xbw')",
+            (WEEK1 + 120, VAULT, U1),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance,"
+            " base_balance, usd_value) VALUES (%s, 5, %s, 0, 0, 50)",
+            (VAULT, WEEK1 + 3600),
+        )
+
+    hour = WEEK1 + 7200
+    storage.set_meta("rewards_wm_vault_hour", str(hour - 3600))
+    assert rewards.accrue_vaults(now_ts=hour + 10) == 1
+    c = _contrib(U1)
+    # 100 boosted + 100 plain, withdrew 150: the plain 100 goes first, then 50 of
+    # the boost is burned, leaving 50 boosted shares of a 50 share position
+    assert c["vault"] == pytest.approx(50.0)
+    assert c["points"] / c["vault"] == pytest.approx(0.15)

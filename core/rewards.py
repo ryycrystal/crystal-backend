@@ -509,11 +509,7 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
                     owed -= spend
                     if owed > 0:
                         book[0] = max(Decimal(0), book[0] - owed)
-            holdings = [
-                (v, u, b[0] + b[1], b[0])
-                for (v, u), b in books.items()
-                if b[0] + b[1] > 0
-            ]
+            holdings = [(v, u, b[0] + b[1], b[0]) for (v, u), b in books.items() if b[0] + b[1] > 0]
             allowance = {(v, u): boost for v, u, _total, boost in holdings}
 
             if holdings:

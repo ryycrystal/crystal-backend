@@ -66,6 +66,7 @@ class Universe:
         self.vaults = [_addr(rng) for _ in range(rng.randint(2, 3))]
         self.users = [_addr(rng) for _ in range(rng.randint(3, 6))]
         self.cutoff = WEEK1
+        self.pd_start = VAULT_START
         self.horizon = WEEK1 + rng.randint(12, 30) * 3600
         self.flows: list[tuple[int, str, str, int]] = []
         self.samples: dict[str, list[tuple[int, Decimal]]] = {v: [] for v in self.vaults}
@@ -152,20 +153,26 @@ class Universe:
                         break
                 if usd is None or usd <= 0:
                     continue
-                cutoff_eff = min(hour, self.cutoff)
-                bal = 0
-                allowance = None
+                # only deposits inside the announced window earn the boost, and a
+                # withdrawal spends unboosted shares before it burns boosted ones
+                boosted_bal = 0
+                plain_bal = 0
                 for ts, fv, fu, delta in flows:
                     if (fv, fu) != (v, u) or ts > hour:
                         continue
-                    bal += delta
-                    if ts <= cutoff_eff:
-                        allowance = max(0, bal)
+                    if delta >= 0:
+                        if self.pd_start <= ts <= self.cutoff:
+                            boosted_bal += delta
+                        else:
+                            plain_bal += delta
                     else:
-                        if allowance is None:
-                            allowance = 0
-                        allowance = min(allowance, max(0, bal))
-                boosted = Decimal(min(allowance or 0, n))
+                        owed = -delta
+                        spend = min(owed, plain_bal)
+                        plain_bal -= spend
+                        owed -= spend
+                        if owed > 0:
+                            boosted_bal = max(0, boosted_bal - owed)
+                boosted = Decimal(min(boosted_bal, n))
                 if self.pd_vaults and v not in self.pd_vaults:
                     boosted = Decimal(0)
                 mult = Decimal(1)
