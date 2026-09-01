@@ -580,6 +580,10 @@ async def vault_sampler(state):
                 await _reconcile_vault_users_multicall(state, blk_hex)
             if lp_markets:
                 await _reconcile_pool_supplies(state, lp_markets, blk_hex)
+                # sync events only fire when reserves move, so an untouched pool
+                # had a single point forever. this keeps the curve alive and lets
+                # it track the usd value of unchanged reserves as prices move
+                await asyncio.to_thread(state.record_pool_tvl_samples, blk_num, ts)
 
         except Exception as e:
             print(f"[SAMPLER] {e!r}", flush=True)

@@ -28,6 +28,10 @@ LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 POOL_FEE_RETRY_BLOCKS = 50_000
+
+# timer written pool tvl samples carry a negative log index so they share the
+# primary key space with sync events without ever colliding with a real one
+POOL_SAMPLER_LOG_INDEX = -1
 _ERC20_NAME_SELECTOR = "0x06fdde03"
 _ERC20_SYMBOL_SELECTOR = "0x95d89b41"
 _TOKEN_URI_SELECTOR = "0x3c130d90"
@@ -2825,6 +2829,36 @@ class State:
             return [
                 addr for addr, mi in self.addressToMarket.items() if addr and int(getattr(mi, "marketType", 0) or 0) > 1
             ]
+
+    def record_pool_tvl_samples(self, block: int, timestamp: int) -> int:
+        rows: list[tuple[str, int, int, Decimal]] = []
+        with self._lock:
+            for addr, mi in self.addressToMarket.items():
+                if not addr or int(getattr(mi, "marketType", 0) or 0) <= 1:
+                    continue
+                rq = int(getattr(mi, "reserveQuote", 0) or 0)
+                rb = int(getattr(mi, "reserveBase", 0) or 0)
+                if rq <= 0 and rb <= 0:
+                    continue
+                rows.append((addr, rq, rb, self._pool_tvl_usd_locked(mi, rq, rb)))
+
+        written = 0
+        for addr, rq, rb, tvl in rows:
+            try:
+                storage.insert_crystal_pool_tvl_sample(
+                    market=addr,
+                    block_number=int(block or 0),
+                    log_index=POOL_SAMPLER_LOG_INDEX,
+                    timestamp=int(timestamp or 0),
+                    reserve_quote=rq,
+                    reserve_base=rb,
+                    tvl_usd=tvl,
+                    txhash="",
+                )
+                written += 1
+            except Exception:
+                continue
+        return written
 
     def reconcile_pool_shares(self, market: str, chain_supply: int) -> None:
         maddr = (market or "").lower()
