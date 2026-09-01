@@ -88,10 +88,15 @@ def list_markets_dump() -> dict[str, Any]:
 
     rows = storage.list_crystal_markets_dump()
     stats = storage.crystal_market_stats_24h()
+    # a graduated launchpad token keeps its art on the launchpad row, and the
+    # market list is the only place the spot token picker learns about it
+    images = storage.token_images_by_address()
     mon_price = _mon_price_usd()
     markets = []
     for row in rows:
         market = _crystal_market_dump_row_to_api(row)
+        market["baseImage"] = images.get((market["base"]["address"] or "").lower(), "")
+        market["quoteImage"] = images.get((market["quote"]["address"] or "").lower(), "")
         market["stats24h"] = stats.get(
             market["market"],
             {

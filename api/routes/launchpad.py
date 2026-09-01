@@ -1480,6 +1480,8 @@ def _merged_portfolio(
             cur.execute(f"SELECT COUNT(*) FROM ({grouped}) g {page_filter}", tuple(params))
             total = int(cur.fetchone()[0] or 0)
 
+    last_trades = storage.last_trade_ts_by_token(addrs)
+
     positions: list[dict[str, Any]] = []
     for (
         token,
@@ -1538,6 +1540,7 @@ def _merged_portfolio(
                 "market": market or None,
                 "source": _api_source(source),
                 "nadfun_version": _nadfun_version(token, source),
+                "last_trade_ts": last_trades.get(token, 0),
             }
         )
 

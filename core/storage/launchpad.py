@@ -2912,3 +2912,30 @@ def force_pool_reserves(pool: str, reserve_token: int, reserve_native: int, blk:
             c.execute(sql, args)
     else:
         cur.execute(sql, args)
+
+
+def token_images_by_address() -> dict[str, str]:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token, metadata_cid FROM launchpad_tokens
+            WHERE COALESCE(metadata_cid, '') <> ''
+            """
+        )
+        return {t: c for t, c in cur.fetchall() if t and c}
+
+
+def last_trade_ts_by_token(wallets: list[str]) -> dict[str, int]:
+    addrs = [str(w or "").lower() for w in (wallets or []) if w]
+    if not addrs:
+        return {}
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token, MAX(timestamp) FROM launchpad_trades
+            WHERE user_address = ANY(%s)
+            GROUP BY token
+            """,
+            (addrs,),
+        )
+        return {t: int(ts) for t, ts in cur.fetchall() if t and ts}
