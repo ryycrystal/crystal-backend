@@ -128,17 +128,27 @@ def main() -> None:
     for a in suspects:
         print(f"[TRADERS]   contract trader: {a}", flush=True)
 
-    with db_cursor() as cur:
-        cur.execute(
-            f"""
+    # the spot table keys trades by market, so the traded token comes from the pair
+    if args.table == "crystal_market_trades":
+        select_sql = f"""
+            SELECT t.txhash, t.log_index, LOWER(m.base_address), t.user_address, t.is_buy
+            FROM {args.table} t
+            JOIN crystal_markets m ON m.market = t.market
+            WHERE t.user_address = ANY(%s) AND {where.replace("token", "m.base_address")}
+            ORDER BY t.block_number DESC
+            {limit_sql}
+        """
+    else:
+        select_sql = f"""
             SELECT txhash, log_index, token, user_address, is_buy
             FROM {args.table}
             WHERE user_address = ANY(%s) AND {where}
             ORDER BY block_number DESC
             {limit_sql}
-            """,
-            [suspects] + params,
-        )
+        """
+
+    with db_cursor() as cur:
+        cur.execute(select_sql, [suspects] + params)
         rows = cur.fetchall()
 
     print(f"[TRADERS] {len(rows)} rows credited to a contract", flush=True)
