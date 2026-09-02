@@ -1634,3 +1634,86 @@ from it to prod — a dev sample is what produced the wrong "every pool is V3" c
 burst of `psycopg2` errors and failures spread across unrelated test files, that is almost
 certainly another agent running pytest at the same moment, not your change. Re-run before
 you diagnose. The tell is that the same files pass cleanly when run on their own.
+
+---
+
+## The subgraph is never the first choice for anything
+
+There is a Goldsky subgraph, and it is **deliberately not the primary source for
+any surface**. This is a standing architectural decision, not an oversight:
+every surface that used to read the graph first — including the spot trades
+panel next to the orderbook — was converted to **backend-first**.
+
+Rules:
+
+- **Do not introduce a new subgraph-first read path.** If you need data, add or
+  extend a backend endpoint.
+- Limit-order fills must appear in trade history regardless of the graph.
+- Dead subgraph queries that no longer correspond to anything should be
+  **removed**, not left as fallbacks — a stale fallback that silently answers is
+  worse than an error.
+
+If you are debugging missing data and find the code querying a subgraph, that is
+very likely the bug rather than the fix.
+
+## Contract generations — check which one you are on
+
+The launchpad core has been migrated more than once, most recently to a
+**gen-3 core (Aug 2026)** with changed event topics and the `Migrated` event
+removed. There is also a gen-2 virtual-supply curve with type-4 markets, gated
+behind a `CRYSTAL_LAUNCHPAD_GEN` flag.
+
+The practical consequence: **decoding logic is generation-specific.** Code that
+correctly decodes one generation will silently produce nothing on another,
+because the topic simply never matches. When events "stop arriving" for a
+contract, verify the generation and topic before assuming an RPC or ingestion
+problem.
+
+## `--clean` on a reindex is a full derived wipe
+
+A reindex flag named `--clean` performed a **complete wipe of derived data** and
+required a **PITR restore** to recover — that restore is why the live database
+is `crystal-prod-db-r3` today.
+
+Treat every destructive-sounding flag as guilty until proven otherwise:
+**read the implementation, not the flag name**, and prefer running it against a
+scratch database first. There is no undo beyond point-in-time restore, and PITR
+means an outage.
+
+## The settler once drained cost basis on sells
+
+A 1CT sell routed through the settler executed a transfer leg in the **same
+transaction** as the swap. The transfer-basis logic treated that leg as a real
+wallet-to-wallet move and carried basis out of the position, so sells silently
+destroyed cost basis.
+
+The fix keys on same-transaction detection, and ~175K rows were repaired. Two
+things follow:
+
+- **A transfer that shares a transaction with a trade is part of that trade**,
+  not an independent move. Any new transfer-handling path must preserve this.
+- Balance-repair and basis-repair scripts must exclude those legs, or they will
+  reintroduce the bug at scale.
+
+## Sibling repos — what is live and what only looks live
+
+There are roughly a dozen `crystal *` folders on this machine. Most are dead
+ends and reading them will mislead you.
+
+**Live:**
+
+- `crystal backend` — this repo: indexer + API.
+- `crystal interface` — the app at `app.crystal.exchange`; auto-deploys from
+  `main` with **no approval gate**.
+- `crystal-fun` — the crystal.fun front end, also auto-deploying from `main`.
+- `crystal contracts` / `crystal contracts-dev` — the contract pair.
+- `crystal-mm` — market making. A hardened Rust rewrite exists on a branch and
+  has **never been pushed**; do not assume the deployed strategy matches it.
+
+**Dead ends that look live:** `crystal prod`, `crystal landing`, `crystal media`,
+`crystal graph`, `crystal tests`.
+
+**Never push:** the `nadfun backend` folder tracks
+`bhealthyfences/points-backend` and holds ~174 obsolete commits from
+2025-07 → 2025-12, **26 of which contain the leaked twitterapi key**. Pushing it
+anywhere would republish that credential.
