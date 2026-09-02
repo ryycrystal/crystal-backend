@@ -399,3 +399,199 @@ before anything else.
 and `/fun/user?addresses=`, `/user/{addr}?include_native=1`, `/holders/{token}`,
 `/stats/{token}`, `/tokens`, `/tokens/feeds?source=0&limit=100`, `/price/mon`, and the
 WS channels listed above. `/tokens?since_block=` is also the indexer-liveness probe.
+
+---
+
+## Working in a shared tree with other agents (read first)
+
+Several agent sessions edit these repos **at the same time**. This is the single
+easiest way to destroy work that is not yours:
+
+- **Never `git add -A` or `git add .`** — stage explicit paths only. Otherwise
+  you will commit another session's half-finished edits along with your own.
+- **Never `git stash`, and never switch branches.** A stash here once swept up
+  another session's uncommitted work; it had to be recovered by hand out of the
+  stash object. If you genuinely need a branch, use `git worktree add`.
+- **Check a file's mtime before assuming it is yours.** A file written seconds
+  ago belongs to somebody who is still typing. `stat -c '%y' <file>`.
+- Committing a file that another session is mid-edit in is *non-destructive*
+  (the bytes on disk are untouched), so when in doubt, commit rather than revert.
+  It is `checkout`, `stash`, and `reset --hard` that lose work.
+
+The frontend repo (`crystal interface`) is shared the same way, and there the
+stakes are higher: see the deploy note below.
+
+## The deploy approval gate, and why not to route around it
+
+`main` auto-deploys, but the deploy job **pauses for manual approval from
+`ryycrystal` and waits indefinitely**. That is deliberate: other people hold
+write access to this repo, and the gate is what stops them moving production.
+
+**The gate is enforced by Azure, not by the YAML.** The federated credential is
+bound to the `production` *environment*, so a job that drops the `environment:`
+line cannot obtain an Azure token at all. Editing the workflow does not bypass
+approval — it breaks authentication. Do not "temporarily" remove it.
+
+Two things that will confuse you:
+
+- **`AADSTS700213: No matching federated identity record found`.** GitHub
+  sometimes presents an **ID-based OIDC subject**
+  (`repo:ryycrystal@171206695/crystal-backend@972947090:environment:production`)
+  rather than the plain-name form. Credentials for both forms are registered
+  now. If it recurs, read the exact subject out of the job log under "Federated
+  token details" instead of guessing. It fails **closed** — there is never a
+  partial deploy.
+- **Re-runs need re-approval.** `gh run rerun --failed` returns the job to
+  `waiting`; the earlier approval is not inherited.
+
+A deploy can therefore sit unnoticed for hours. If production looks like it is
+missing a commit, **check for a run in `waiting` before debugging anything else.**
+
+## Production topology
+
+- **The live database is `crystal-prod-db-r3`.** An older `crystal-prod-db` host
+  still accepts connections but is **stale and will mislead you**. Confirm
+  `PGHOST` before trusting any number you pull.
+- The API sits behind Cloudflare at `api.crystal.exchange`, which requires an
+  **origin/SNI override to the Container Apps FQDN** — there is no ACA custom
+  domain configured. Getting this wrong produces a **522**, which reads like an
+  outage but is a routing misconfiguration.
+- Verify what is actually deployed rather than trusting the working tree; images
+  are tagged with the commit SHA precisely so this is checkable:
+
+```bash
+az containerapp revision list -n crystal-api -g crystal-prod-rg \
+  --query "[?properties.active] | [-1].properties.template.containers[0].image" -o tsv
+```
+
+## Lock cascades — the failure mode that takes the whole API down
+
+Postgres queues lock requests. **An `ACCESS EXCLUSIVE` request blocks every
+reader that arrives after it**, including readers that would not otherwise
+conflict. A long-running transaction plus one waiting `ALTER TABLE` is enough to
+park the entire API; this has happened, with 67 queries stacked behind a single
+migration.
+
+Consequences:
+
+- The app sets a **5s `lock_timeout` with retry** (commit `b5c603c`). A running
+  image older than that commit does not have this safety net — one of the two
+  causes of the outage above was exactly that.
+- **Compute outside the transaction.** Maintenance scripts must read, close the
+  transaction, do the Python work, then reopen to write. Holding a read open
+  keeps `ACCESS SHARE` on the table, which alone is enough to park a waiting
+  migration behind it.
+- Diagnose before blaming the DB — longest open transaction and blocked count:
+
+```bash
+psql -c "SELECT pid, state, now()-xact_start AS age, left(query,80) FROM pg_stat_activity WHERE state<>'idle' ORDER BY xact_start;"
+psql -c "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock';"
+```
+
+Zero blocked queries means the problem is somewhere else — go look elsewhere
+rather than re-fixing the database.
+
+## WebSocket frame kinds are per-channel — do not generalize
+
+Only the **per-subscriber wallet channels** (`user_positions`, `positions`)
+label their first frame `snapshot`. There, `prev is None` genuinely means "this
+subscriber's first frame".
+
+**Do not apply that to the other channels.** `trades`, `holders` and
+`top_traders` are **broadcast** and keyed `(token, channel)`, so `prev is None`
+fires once per server process per token — not per subscriber. Worse, the client
+explicitly **discards** `trades` frames labeled `snapshot`, so mislabeling that
+channel silently drops trade data with no error anywhere. **Read the client
+handler before changing any channel's `kind`.**
+
+The bug this originally fixed: the client only clears its map on a `snapshot`,
+so when every frame said `delta` the map could only grow, and anything that left
+the set while the client was disconnected was never removed.
+
+**Related trap:** `user_positions` rows carry live unrealized PnL recomputed
+from price, so an open position's row changes **on every price tick**. Anything
+that infers "a trade happened" from a row changing must fingerprint only
+trade-driven fields — `trade_count`, `balance_token`, `token_bought`,
+`token_sold`, `native_spent`, `native_received` — or it will mark every position
+as freshly traded on every tick.
+
+## Numbers that look wrong but are correct
+
+Before "fixing" any of these, confirm it is actually a bug. Each has been
+re-reported more than once.
+
+- **`fees_usd` is the bonding-curve fee, not Crystal's cut.** Crystal's ~1%
+  frontend fee is **not indexed at all**, so `fees_usd` will never equal 1% of
+  volume.
+- **Graduated pools are Uniswap V3, so `V2SYNC` never fires** for them and
+  reserve-derived prices do not update from sync events. A reconciler handles
+  this and is **already deployed**. Stale graduated prices are not a live
+  problem.
+- **~126K zero-balance positions still carry `cost_basis_native > 0`.** Benign:
+  `crystal_unrealized_pnl` zeroes the basis term when the holding is zero.
+- **Positions with `sold > bought`** are legitimate after the transfer-basis
+  repair — they are not corruption.
+
+## Cost basis: proportional release, and it travels with transfers
+
+Realized PnL releases basis **in proportion to the fraction sold**:
+`released = basis * sold / open`. Anything computing PnL as
+"native received − native spent" is wrong and produces absurd gains on
+partially-sold positions. **Every PnL surface in launchpad must use this
+method** — there is no carve-out for one widget or one endpoint.
+
+Basis also **carries across transfers**: moving tokens to another wallet moves
+the proportional basis with it instead of materializing a fake gain. A bug where
+a swap's transfer leg drained cost basis on sells was fixed and ~175K rows were
+repaired.
+
+## Vault ledger writes are two seams, not one
+
+Writing a flow row and updating the depositor counters are **separate
+operations**. A backfill that calls only the insert path leaves the counters
+stale, and the drift is **invisible** until somebody reads them. Always do both,
+and re-check the counters after any vault backfill.
+
+## nad.fun has two curve generations
+
+v1 and v2 use different emitters, different contracts and different sell paths
+(`sellToNative` vs `sell()`). As of Aug 2026, create activity **shifted back to
+the v1 emitter**, so "it must be v2 because it is recent" is a bad assumption —
+check the source column, which is now written correctly per generation.
+
+A small number of v2 tokens are **LVMON-quoted**. Those break the settler's WMON
+unwrap and need raw router actions composed by hand; a sell that reverts on such
+a token is not a self-match or a liquidity problem.
+
+## Dead integration: X / twitterapi.io
+
+The provider has returned **402 Payment Required since 2026-08-29**. Socials are
+frozen and Alerts are permanently empty. **This is not a code bug** — the
+account needs funding. Do not debug the poller.
+
+The key is also **hardcoded in this public repo** across dozens of commits, so
+it needs *rotating*, not merely deleting from HEAD; the history still carries it.
+
+## Frontend deploys are ungated — be more careful there than here
+
+`crystal interface` deploys to **`app.crystal.exchange`** (not
+`crystal.exchange`), and pushes to its `main` **auto-deploy with no approval
+step at all**. A push there is an immediate production release. Typecheck before
+pushing, and remember the tree is shared — confirm the diff is yours.
+
+## Verify that your change actually took effect
+
+Several fixes here were reported as shipped while the code path never ran. Real
+examples, all of which looked correct in the diff:
+
+- a REST payload that never arrived because a WebSocket freshness check returned
+  early before using it;
+- a sort that was silently overwritten by a pre-existing sort later in the same
+  chain;
+- a CSS rule that lost to an equal-specificity selector in another file;
+- a `title` tooltip on a `disabled` button, which never renders.
+
+Reproduce the symptom, apply the fix, then reproduce again. **Do not add a poll
+to paper over a data-flow bug** — find out why the data is not arriving. And
+prefer reading the database or the running container over trusting the local
+working tree: the deployed image has repeatedly been older than local `main`.
