@@ -1116,3 +1116,111 @@ source, not the presentation.
 - **1CT limit orders execute from an ERC-4337 smart account, not the user's EOA.** Funds
   sitting in the Rabby EOA are not spendable by it, and the failure surfaces as
   `TRANSFER_FROM_FAILED` — which reads like a backend or contract bug and is not one.
+
+---
+
+## Wallet data is scoped to a single address — never union wallet sets
+
+A user's EOA and their 1CT (one-click-trading) subwallets are **separate
+accounts for every read**. Positions, holders, trades, balances and PnL for an
+address must return **only that address's data**, never the union of the EOA and
+its subwallets.
+
+This is a product rule, not an optimization. Unioning produced a visible bug
+where a portfolio flickered between 11 and 17 positions as different code paths
+disagreed about which set they were showing. If you add a new wallet-scoped
+endpoint or WebSocket channel, scope it by the single address and resist the
+temptation to "helpfully" merge in subwallets.
+
+## 1CT limit orders execute from the smart account, not the EOA
+
+One-click trading uses an **ERC-4337 smart account**. Limit orders execute
+*from that smart account*, but users fund their **Rabby EOA** — so the smart
+account is frequently empty while the user is certain they have money.
+
+The symptom is a `TRANSFER_FROM_FAILED` revert, or a limit order that silently
+never fills. Before debugging matching logic, **check the smart account's
+balance, not the EOA's.**
+
+## Vault dry-run harness — revert the frontend before prod
+
+Dry runs against the test contracts use an **isolated dryrun database** plus a
+**local API on :8011**, with the frontend repointed at it.
+
+**`crystal interface/src/settings.ts` carries the repointing, and it must be
+reverted before anything ships to production.** A dry-run `settings.ts` pushed
+to the frontend's `main` would auto-deploy a production app pointed at a
+developer's laptop. When you see that file modified, read the diff before
+assuming it is a normal change — and confirm which it is rather than guessing.
+
+## Adjacent systems that live in or near this backend
+
+- **Volume fee tiers** — Basic / Bronze / Silver / Gold / Diamond, assigned by
+  launchpad USD volume, served from `/tiers`. The thresholds live in the
+  `volume_tiers` table and are **editable in SQL** — do not hardcode them in
+  application code.
+- **Rewards / points engine** — shipped backend-only and **deliberately has no
+  frontend**. Weekly scoring uses an exponent of `0.8` and the week **closes
+  Wednesday 00:00 PT**. Rates and campaigns are configured through kv/campaign
+  seams rather than code.
+
+  Known-open risks flagged in review and **not yet fixed**: two concurrency bugs
+  in the week-close/leader-election path, a pre-deposit boost that can be gamed,
+  and an **empty denylist that fails open**. Treat these as live before launch.
+
+## Mainland China cannot reach the RPC
+
+Chain-only reads render as `$0` for users in mainland China because the RPC
+endpoint is unreachable there — the data is fine, the fetch simply fails.
+
+The fix pattern is to **read from the backend first and fall back to chain**,
+which the LP surface now does via `/pools/positions`. Other chain-first paths
+remain exposed. If a Chinese user reports zeros, this is the first hypothesis,
+not a data bug.
+
+## The app is translated into 9 locales by an AST rewrite
+
+Translation is applied by an **AST rewrite pipeline**, not by hand. The trap:
+the rewrite can inject a translation hook into a position that **violates the
+rules of hooks**, producing a runtime error that looks nothing like an i18n
+problem. Some strings are deliberately left in English.
+
+## Performance: the exclusion-array pattern is the usual culprit
+
+Launchpad slowness traced to a **~30,000-address exclusion array** passed into
+queries, combined with a holder-stats sort. Rewriting it as an **anti-join** was
+**4–25x faster** in production.
+
+If a launchpad endpoint is slow, look for a large `NOT IN (...)` / `<> ANY(...)`
+array before optimizing anything else.
+
+## Log-cache holes silently vanish tokens
+
+A gap in the log cache (once **18.4M blocks** worth) does not raise an error —
+tokens simply **disappear** from listings, because the events that created them
+were never read. It was resolved with an overnight refill plus a clean reindex,
+and a guard now exists.
+
+The lesson generalizes: **missing rows here look like a product bug, not an
+ingestion bug.** If something is absent rather than wrong, suspect coverage
+before suspecting query logic.
+
+## Pre-launch gaps that are known and still open
+
+These are deliberate, documented, and not yet done. Do not treat them as
+discoveries:
+
+1. **Migrations run on indexer startup.** A bad migration takes the indexer down
+   with it. Splitting them into a separate step is the largest remaining gap.
+2. **Container apps run in single-revision mode** — no traffic splitting, so
+   there is **no instant rollback**. The only way back is redeploying an older
+   SHA, which must pass through the approval gate.
+3. **No staging environment.** `main` is the first place code meets real data.
+4. **No API authentication, open CORS, no rate limits.** The frontend also ships
+   provider keys to the browser.
+
+## 1CT key storage (frontend, but you will be asked about it)
+
+1CT private keys are **AES-GCM encrypted under a non-extractable IndexedDB
+key**. Two invariants: **never persist plaintext**, and **never write while the
+vault is locked**. If you touch that path, preserve both.
