@@ -144,6 +144,51 @@ baseline. Frontends gate on `price_ref_X > 0` before trusting `change_pct_X`.
 
 ## Caching and the pool
 
+### The ttl_cache rule that matters most: serve_stale must exceed the query runtime
+
+`ttl_cache(prefix, ttl_seconds, serve_stale_seconds)` (`api/routes/…`) serves a fresh
+value inside `ttl`, serves the **stale** value and spawns one background refresh while
+within `serve_stale` past expiry, and otherwise **blocks the request on a full
+recompute**. `_spawn_refresh` de-dupes per cache key, so concurrent callers cannot
+stampede — one refresh runs and everyone else gets the stale value instantly.
+
+**Therefore: if a query takes longer than `ttl + serve_stale`, the stale window closes
+before the background refresh ever lands, and every single request pays the full cold
+cost.** The cache stops working exactly when you need it most. Measured on
+`/tokens/feeds` (2026-09-02) with `ttl=3s, serve_stale=30s` against a query taking
+17–52s:
+
+| request | before (`serve_stale=30`) | after (`serve_stale=180`) |
+|---|---|---|
+| `source=1&limit=10` | 16.8s | — |
+| `source=1&limit=30` | **>60s (timed out)** | — |
+| `source=1&limit=100` | 52.1s | 6.7s / 10.1s / 2.9s |
+
+Raising only `serve_stale` fixes the blocking **without touching freshness** — `ttl`
+stays 3s, so the board's 5s poll still gets 3-second-fresh data. When you meet a slow
+cached endpoint, check this ratio before optimising anything else.
+
+### `/tokens/feeds` is query-bound, not serialization-bound
+
+`source=0` (crystal, what crystal.fun calls) is ~1.6s. `source=1` (`source <> 0`,
+nad.fun) was pathological. Note it was **16.8s even at `limit=10`** — cost barely moves
+with `limit`, so it is the queries, not the row serialization.
+
+Prime suspect, unconfirmed: `launchpad_trades` carries **only** `idx_launchpad_trades_block`
+— there is no index on `timestamp` — while the endpoint's `volume_24h` CTE does
+`WHERE timestamp >= cutoff GROUP BY token`. For the tiny `source = 0` driving set the
+planner can avoid materialising it; for `source <> 0` it cannot. **This was not verified
+with EXPLAIN against prod, and no index was added** — adding one runs at indexer startup
+against a large table, which is a bigger risk than the slow endpoint. Get an EXPLAIN
+first.
+
+### Do not "fix" the source filter
+
+`_normalize_source_filter` accepts **only** `0` or `1` and returns HTTP 400 for anything
+else, with a clear message. `source=2`/`source=3` returning 400 is **correct behaviour,
+not a bug** — `1` already means "everything that is not crystal" (`source <> 0`). This
+was mistakenly filed as a defect once.
+
 - `TTLCache` in `api/api.py` is lock-guarded (it once had a concurrent-expiry
   `KeyError` → 500 race — do not remove the lock).
 - Edge cache: the middleware in `api/api.py` sets
