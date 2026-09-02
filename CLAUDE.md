@@ -581,6 +581,30 @@ Traps that cost hours, all specific to running the pieces as separate processes:
   pricing is unavailable, so they are the signal to trust on a test stack with no price
   feed.
 
+### TIME-CRITICAL: the human is away 2026-09-02 to 09-15, and launch happens inside that window
+
+Vaults come up while nobody is around to make judgement calls. Three things take effect
+the moment deposits open and cannot be fixed retroactively without a repair:
+
+1. **`bonus-vaults` is empty, which means EVERY vault earns the 3x boost.** The moment
+   deposits open, anyone can create a junk vault and farm it. If you are working during
+   launch and this list is still empty, raise it loudly rather than assuming it is
+   intentional.
+2. **The new vault factory address must be in the indexer env before the first deposit.**
+   Nothing has yet proven the indexer ingests events from the new contracts. If it does
+   not, deposits accrue **nothing** and the failure is silent except for
+   `crystal_rewards_vault_gaps` filling with `no_sample` rows. Check `/results/gaps` and
+   `/results/volumes/{depositor}` on day one.
+3. **Deposits were expected to open 9/11-9/14, not 9/8, but `rewards_predeposit_cutoff`
+   still defaults to 9/16 00:00.** The cutoff bounds which deposits *qualify* for the
+   boost. If deposits open late and the cutoff is not pushed out by roughly the same
+   amount, the qualifying window collapses from ~8 days to ~2 and the incentive mostly
+   evaporates. This is a config change (`launchpad_kv`), no redeploy — but it is an
+   economics decision, so surface it to the human rather than picking a date yourself.
+
+First weekly close is 9/23, after the human is back, so a bad week can still be caught
+before distributions become permanent — but only if someone looks.
+
 ### Rewards engine in depth (`core/rewards.py`)
 
 Runs as a worker thread inside `crystal-api`, leader-elected via
