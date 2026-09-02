@@ -27,6 +27,41 @@ may still answer; it is stale and misleading, never use it.
 
 ---
 
+## Watched contract addresses — the failure mode that keeps recurring
+
+**A wrong or incomplete watched-contract address fails silently, and fixing the code does
+not repair history.** Blocks are processed exactly once. If the indexer was not watching an
+address when its events went by, those events are gone from the derived tables forever —
+no error, no gap, no retry. You find out when a number looks wrong downstream, often days
+later.
+
+It has caused at least four separate incidents:
+
+- The backend indexed the **wrong referral manager**, so `referral_bindings` sat empty.
+- Two vault withdrawals were dropped because they came from the **legacy factory** before
+  the acceptance rule included it. The ledger stayed permanently ahead of chain, surfacing
+  as a phantom **-$14,948** PnL on a vault that never held that much.
+- A local `.env` pinned a **stale** `VAULT_FACTORY_ADDRESS`, so a replay script silently
+  skipped every event from the current factory and reported a confident false mismatch.
+- The vault contract **closes a vault with no event at all**, so nothing was watching for a
+  state change that genuinely happens on-chain (see the vault section).
+
+Rules that follow:
+
+1. Set contract addresses **before** the contract's first block, never after.
+2. Prefer the **committed defaults** in `core/chain.py` over Azure env vars. Env
+   `VAULT_FACTORY_ADDRESSES` **replaces** the whole list — it does not append — so a
+   partial env value silently stops indexing older generations. Prod deliberately sets no
+   vault env at all and relies on the code defaults.
+3. `accepts_log_for_indexing(tag, addr)` in `core/chain.py` is the single gate every
+   dropped event passes through. Read it before changing any address or event tag.
+4. When you change an acceptance rule, ask "what history is now wrong?" and repair it
+   explicitly. The integrity sweep exists to make that damage visible; it does not fix it.
+5. Verify which addresses a process actually resolved before trusting its output:
+   `python -c "from core import chain as h; print(h.VAULT_FACTORY_ADDRS, h.CRYSTAL_ADDR)"`.
+
+---
+
 ## Deploying (and the traps)
 
 Day-to-day flow is in `README.md` §6. The short version: ruff check + format --check +
