@@ -170,6 +170,51 @@ token-overview/chart behavior, grep every route file**
 - Curve generations: `CRYSTAL_LAUNCHPAD_GEN` env (1 or 2) selects supplies in
   `core/adapters/native.py`. Gen 2 adds a virtual supply V=ceil(2e26/3):
   initial 1e27+V, graduated 2e26+V. The flag is set on both container apps.
+  Exact gen-2 values, worth having when you compare against a chain read:
+  `V = 66666666666666666666666667`, `initial_curve_supply = 1066666666666666666666666667`
+  (note the trailing **667**, not 666 — an off-by-one here produced a wrong root-cause
+  diagnosis once; see below), `CURVE_SUPPLY = 8e26`.
+
+### `curve_state()` returning None silently blanks reserves, permanently
+
+`NativeLaunchpadAdapter.curve_state(ev)` (and the nad.fun equivalent) returns `None` when
+the event has no usable reserves — including the `int(ev.get("token_reserve") or 0)` case
+where the field is simply **absent**, which lands in the `token_reserve <= 0` branch. When
+it returns `None`, `state.py` never assigns `lp.curve_native_reserve` /
+`lp.curve_token_reserve`, so the row keeps its `0` default. There is **no repair path and
+no log line** — the row stays blank until some later event for that token happens to carry
+reserves. A fully-traded token can therefore sit at `reserveQuote: 0, reserveBase: 0`
+indefinitely, which reads downstream as "never traded".
+
+Symptom to recognise: a token with `tx.total > 0` but both reserves `0` in
+`/tokens/feeds`. Verify against chain before theorising — the launchpad core answers
+`0x7b06271a(address)` returning `(native_reserve, token_reserve)`:
+
+```bash
+curl -s -X POST -H 'content-type: application/json' https://rpc.monad.xyz \
+ -d '{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x6eb2af5fc575689053ac9b413220cabfd01a2f9a","data":"0x7b06271a000000000000000000000000<TOKEN_NO_0x>"},"latest"]}'
+```
+
+Word 0 is native, word 1 is token. Cross-check the decode against a token whose DB row is
+already correct before trusting it.
+
+#### Correction: commit `d11e7b5`'s message is wrong
+
+That commit says it keeps reserves "when a fully sold back token overshoots its initial
+supply by a wei". **That is not what happened and the guard was not the cause.** The token
+in question (CHIRP) had an on-chain `token_reserve` of `1066666666666666666666666667`,
+which is *exactly* `initial_curve_supply` under gen 2 — the old guard `token_reserve >
+initial_curve_supply` evaluates false and **accepted** it. The "+1 wei" came from an agent
+hardcoding the constant as `…666` while checking. The real cause was almost certainly
+absent reserve fields on that token's events (the `<= 0` branch above); it was never
+proven. The row was fixed by a manual `UPDATE`, not by the code change.
+
+The code change in `d11e7b5` is still worth keeping — it widens the ceiling to `* 2` and
+clamps `tokens_sold` to `max(..., 0)` in the nad.fun adapter, which fixes a genuine
+negative-value path — but **do not cite it as the fix for blank reserves.** Four tests
+across `tests/test_launchpad_gen2.py` and `tests/test_lifecycle.py` had asserted
+`IC + 1 -> None`; they were updated to assert `tokens_sold == 0` for a small overshoot and
+`None` only for absurd values (`IC * 3`).
 
 ## Stats windows semantics
 
@@ -296,6 +341,30 @@ was mistakenly filed as a defect once.
   their signature to get isolation; many only take `db`.
 - ruff is the gate: `python -m ruff check .` and `format --check .`. CI pins the ruff
   version; keep local matching.
+
+### Set `SCRATCH_DB_NAME` or you WILL fight the other agents
+
+The integration harness creates and drops a scratch database. The name used to be a
+constant, so two agents running the suite at the same time **dropped each other's
+database mid-run** — which surfaces as `connection ... server closed unexpectedly`,
+`database "crystal_lp_itest" does not exist`, or a test that passes alone and fails in
+a full run. It looks exactly like a flaky test and it is not one.
+
+It now reads `SCRATCH_DB_NAME` (default `crystal_lp_itest`). Pick a name unique to you:
+
+```bash
+TEST_DATABASE_URL="postgresql://postgres:<pw>@localhost:5432/postgres?sslmode=disable" SCRATCH_DB_NAME="crystal_<yourname>_itest" REWARDS_WORKER=0 python -m pytest -q
+```
+
+Also set **`REWARDS_WORKER=0`** so the background rewards thread does not accrue
+underneath your assertions.
+
+Two known ordering flakes in `spot_graph`/`stats_shape` fail on an untouched baseline
+too — confirm against `git stash` before spending time on them.
+
+**When you add a guard, prove it has teeth:** disable it and watch the test fail. Both
+the rewards advisory lock and the vault-gap close guard were verified that way, and the
+gap-upsert bug was only found because the test refused to pass for the right reason.
 - **A large number of `s` (skipped) means you are not testing anything.** The
   rewards/vault suites are `pytest.mark.skipif` on `TEST_DATABASE_URL`; without it ~158
   tests silently no-op and the suite still looks green.
