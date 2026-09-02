@@ -1763,3 +1763,38 @@ ends and reading them will mislead you.
 `bhealthyfences/points-backend` and holds ~174 obsolete commits from
 2025-07 → 2025-12, **26 of which contain the leaked twitterapi key**. Pushing it
 anywhere would republish that credential.
+
+---
+
+## Judging whether the indexer is actually live
+
+Compare the newest indexed block to the chain head. At ~400ms blocks, 50 blocks
+behind is ~20 seconds — that is healthy, not lag.
+
+```sql
+SELECT max(block_number) FROM launchpad_trades;
+```
+
+**Use `launchpad_trades`, never `crystal_market_trades`, for this.** Spot/CLOB
+volume is genuinely sparse, so the spot table can sit *tens of thousands* of
+blocks behind while the indexer is perfectly current. On 2026-09-02 the gap was
+~59,000 blocks on spot versus 53 on launchpad, at the same instant, with nothing
+wrong. Reading the spot table as a health signal will send you chasing a
+non-existent outage.
+
+Same caution applies to the API: `/health` returns `{"ok":true}` and is a
+liveness check for the *API process only* — it says nothing about indexer
+progress. There is no `/status` endpoint. For real indexer progress use the
+`[SQ] <block>` log lines or the query above.
+
+To confirm nothing is mid-rewrite before starting your own:
+
+```sql
+SELECT pid, state, now() - query_start AS runtime, left(query, 120)
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+ORDER BY query_start;
+```
+
+Reads are normal background traffic. A long-running write means a repair is in
+flight — do not start a second one (see the repair-script section).
