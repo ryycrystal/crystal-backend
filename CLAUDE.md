@@ -1350,6 +1350,35 @@ discoveries:
 4. **No API authentication, open CORS, no rate limits.** The frontend also ships
    provider keys to the browser.
 
+### Vault launch readiness, as of 2026-09-02
+
+The vault system was audited against an 18-point readiness standard and verified on a live
+production-equivalent dry run (test factory `0xe52971AA…` on Monad mainnet, real signed
+transactions, isolated DB). Result: **12 conditions pass with evidence, 4 pass with a
+caveat, 2 blocked, 0 open defects.** Eighteen defects were found and fixed during that work.
+Full matrix with evidence:
+<https://claude.ai/code/artifact/9841ac87-8266-4030-8c7d-2d1b1f4e5a33>
+
+Two things genuinely block sign-off — neither is a code defect:
+
+1. **Market-maker accounting seam.** Quoting is verified (shadow mode: reads vault balances,
+   live mark price, 36-action ladder, zero orders placed). What is *not* verified is open
+   orders reducing available balance inside NAV, fills updating inventory, and MM PnL
+   flowing into NAV. That needs a few minutes of the bot running **live** against a funded
+   vault; the seam can then be checked entirely from the backend. Two config defects to fix
+   first: the MM does not checksum `ADDRESS` on load (web3 rejects the lowercase address and
+   it crashes on startup), and the configured quiknode RPC/WS endpoint has an **expired TLS
+   certificate**.
+2. **Production contract addresses** — expected 2026-09-10. They must be set **before the
+   factory's first block** (see the watched-address section); a late change does not repair
+   history.
+
+Also still open, needing a decision rather than code: seed
+`crystal_rewards_predeposit_vaults` (the 3x boost is off until it is), and seed
+`crystal_rewards_denylist` with the MM/house wallets. The vault owner in the dry run is a
+**test wallet**, so the standard's "no developer wallet retains unintended permissions" can
+only be satisfied by the production deployment.
+
 ## 1CT key storage (frontend, but you will be asked about it)
 
 1CT private keys are **AES-GCM encrypted under a non-extractable IndexedDB
