@@ -941,6 +941,43 @@ easiest way to destroy work that is not yours:
 The frontend repo (`crystal interface`) is shared the same way, and there the
 stakes are higher: see the deploy note below.
 
+### Staging only your own hunks from a shared file
+
+The common hard case: a file holds your change *and* another agent's in-flight
+work, and you need to commit only yours. Interactive `git add -p` is unavailable
+in this environment. Recipe that works:
+
+```bash
+git diff -U0 -- src/App.tsx > /tmp/full.patch
+# keep only hunks containing a string unique to your change, then:
+git apply --cached --unidiff-zero /tmp/mine.patch
+git diff --cached -U0 -- src/App.tsx   # ALWAYS verify before committing
+```
+
+**`-U0` and `--unidiff-zero` are both required.** A normal `-U3` patch fails with
+`patch does not apply`, because the surrounding context lines have already
+shifted under the other agent's edits. Zero context sidesteps that entirely.
+
+Used for real on 2026-09-02: `App.tsx` held 4 lines of mine against 93 of another
+session's vault work. Committing the file wholesale would have swept an
+unfinished refactor into an unrelated commit.
+
+Two things to watch:
+
+- Match your hunks case-sensitively on a string that appears in **every** one of
+  them. Filtering on `isWithdrawingOneCT` silently missed the two
+  `setIsWithdrawingOneCT(...)` call sites — capital `I` — and staged 2 hunks
+  instead of 4.
+- Your commit will contain `HEAD` + your hunks, *without* the other agent's
+  changes. Confirm that combination is coherent on its own. Self-contained
+  additions (a `useState`, a prop) are fine; anything depending on their work
+  is not.
+
+Corollary: your own edits can get swept into **their** commit the same way. After
+editing a shared file, verify your content actually landed —
+`git show HEAD:<file> | grep <marker>` — rather than assuming your commit is the
+one that carried it.
+
 ## The deploy approval gate, and why not to route around it
 
 `main` auto-deploys, but the deploy job **pauses for manual approval from
