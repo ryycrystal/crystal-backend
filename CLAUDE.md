@@ -266,7 +266,7 @@ baseline. Frontends gate on `price_ref_X > 0` before trusting `change_pct_X`.
 
 ---
 
-## 5. Indexer architecture
+## Indexer architecture
 
 `core/sequencer.py` pulls logs and dispatches them; `state.py` holds in-memory state and applies the effects.
 
@@ -296,13 +296,13 @@ Measured 2026-09-02: **0 orphan pools out of 30,515** (`launchpad_pools` rows wh
 
 ---
 
-## 6. Cost basis and PnL — the part that has been wrong most often
+## Cost basis and PnL — the part that has been wrong most often
 
 PnL here is **always cost-basis PnL**. `crystal_unrealized_pnl(hold, bought, sold, basis, price)` is a SQL function; unrealized and realized must agree with the position row's `cost_basis_native`.
 
 ### The chunk-boundary basis bug (fixed, commit `6b9fb7a`)
 
-`State._basis_reset_if_new_block` used to clear the cost-basis overlay on **every block** and re-seed it from `launchpad_positions`. Because the sequencer batches an entire chunk before flushing (section 5), a buy in block N and a sell in block N+k of the *same chunk* caused the sell to re-read a positions row that **did not yet contain the buy**. Zero basis was released, so the sell booked **the entire proceeds as realized profit**.
+`State._basis_reset_if_new_block` used to clear the cost-basis overlay on **every block** and re-seed it from `launchpad_positions`. Because the sequencer batches an entire chunk before flushing (see the chunking section above), a buy in block N and a sell in block N+k of the *same chunk* caused the sell to re-read a positions row that **did not yet contain the buy**. Zero basis was released, so the sell booked **the entire proceeds as realized profit**.
 
 The fix lets the overlay survive the chunk when a batch is carrying the writes, and has the sequencer clear it explicitly after the flush:
 
@@ -330,7 +330,7 @@ In `apply_token_transfer`, `in_trade_tx` gates only `move_tokens` / `released` �
 
 ---
 
-## 7. Repair scripts — dangerous, read before running
+## Repair scripts — dangerous, read before running
 
 These all write derived rows directly:
 
@@ -595,3 +595,77 @@ Reproduce the symptom, apply the fix, then reproduce again. **Do not add a poll
 to paper over a data-flow bug** — find out why the data is not arriving. And
 prefer reading the database or the running container over trusting the local
 working tree: the deployed image has repeatedly been older than local `main`.
+
+---
+
+## Writing to prod Postgres: the two lock rules
+
+The `init_db` deadlock above is one instance of a broader hazard. **Once an
+`ACCESS EXCLUSIVE` request is waiting, Postgres queues every later reader behind it.**
+The API then starts 500ing on plain selects while cached endpoints keep serving fine —
+that asymmetry is the tell for lock contention rather than a dead app.
+
+Two rules, both learned by taking the production API down, twice in one night:
+
+1. **Never hold a transaction open across slow work.** Read what you need, close the
+   transaction, do the slow in-Python work, then open a short write transaction. A
+   repair script once wrapped a multi-minute fold inside its read transaction (321s
+   idle-in-transaction) and parked a migration behind it.
+2. **Never fetch a huge result set in one read.** A single `SELECT` over 532k positions
+   sat idle-in-transaction for 131s and parked a migration. Use keyset pagination, a
+   few thousand rows per short transaction.
+
+**Killing the python process does not close the Postgres backend.** After stopping any
+long-running script — including via a tool-level task stop — check `pg_stat_activity`
+for `idle in transaction` and `pg_terminate_backend` your orphan. One was observed
+holding a transaction for 203s after its process was gone.
+
+First thing to run when prod looks weird:
+
+```sql
+SELECT COUNT(*) FROM pg_locks WHERE NOT granted;
+```
+
+Nonzero means something is queued behind a lock. Zero means look elsewhere.
+
+---
+
+## RPC limits that shape what you can debug
+
+- **`eth_getLogs` is capped at a 100-block range.** Replaying a wallet's or token's full
+  history over millions of blocks is therefore not possible with a naive scan. If you
+  need to explain a historical discrepancy, either drive it from stored rows, or detect
+  the problem in a *recent* window (sample, compare against chain at head) so the block
+  range you need logs for is small. Several investigations have dead-ended here.
+- Archive `eth_call` pinned to an old block does work, so `balanceOf`-at-block is a
+  viable truth source where `getLogs` is not. `reconcile_position_balances.py` relies on
+  this, batching through multicall3.
+- There is a client-side rate limiter (`RPC_MAX_RPS`, default 20). Bursty parallel read
+  scripts will be throttled rather than 429'd; budget wall-clock accordingly.
+
+---
+
+## `last_price_native` can be zeroed by a single bad trade (fixed 2026-09-02)
+
+A token's `last_price_native` is taken from its most recent trade. If that trade lands
+with `price_native = 0`, the token's price becomes 0 and **every position in it shows no
+value**, even though hundreds of earlier trades carry a real price.
+
+Found via 66 positions with `balance_token > 0` and no price. It was 3 graduated tokens
+(CHOG, MONGU, FLOKI): 200–420 trades each, all but the last correctly priced. They also
+have no `crystal_markets` row and no pool sync events, so the graduated-reserves
+reconciler structurally could never re-price them.
+
+Fixed by restoring `last_price_native` from the most recent trade with `price_native > 0`
+(66 → 0 verified). Scope check afterwards: **0** tokens remain in that state, only **6**
+such trades exist in all of history, and **none after block 101,000,000** — so this is
+historical, not live, and needed no code change. If it reappears, look at why a trade
+was written with a zero price rather than patching the token row again.
+
+---
+
+## Fee accounting: `fees_usd` is not Crystal's revenue
+
+`fees_usd` is the **bonding-curve fee**, not Crystal's 1% frontend cut. The frontend cut
+is unindexed, so `fees_usd` will never equal 1% of volume and should not be reported as
+Crystal's earnings. This has been misread before.
