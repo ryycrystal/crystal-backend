@@ -202,10 +202,21 @@ baseline. Frontends gate on `price_ref_X > 0` before trusting `change_pct_X`.
 
 ## Security (standing, unresolved)
 
-- **This repo (`ryycrystal/crystal-backend`) is PUBLIC.** So is the old
-  `bhealthyfences/points-backend` (a stale pre-migration copy — never push to it; a
-  local clone named `nadfun backend` has 170+ obsolete commits that must stay local).
-  A hardcoded twitterapi.io key existed in history. Flip these private.
+- **This repo (`ryycrystal/crystal-backend`) is PUBLIC.** A hardcoded twitterapi.io key
+  existed in history (no key literal remains in tracked source as of 2026-09-02 — it is
+  read from env now, but history still has it). Flip the repo private.
+- **`bhealthyfences/points-backend` is not a separate repo — it REDIRECTS to
+  `ryycrystal/crystal-backend`.** It was renamed/transferred, and GitHub still resolves
+  the old path. Verified 2026-09-02: `gh api repos/bhealthyfences/points-backend` returns
+  `full_name: ryycrystal/crystal-backend`.
+
+  This matters because the local folder **`nadfun backend`** still has that old URL as its
+  `origin`. It holds 174 commits of unrelated work, **none of them pushed**, and
+  `git ls-remote origin` from that folder returns *this* repo's branches (`main`, `dev`,
+  `block-scoped-clear`). So `git push` from `nadfun backend` aims 174 unrelated commits at
+  this public repo. A plain push is rejected as non-fast-forward; a forced one would be
+  destructive. **Repoint that remote before anyone pushes from it.** Do not describe it as
+  "a stale copy you shouldn't push to" — it is the same repo under an old name.
 - The API has no auth, open CORS, and no rate limits.
 - The R2 image uploader worker (`launchpad-api.bhealthyfences.workers.dev`, outside
   this repo) accepts unauthenticated PUTs from any origin with derivable keys
@@ -331,3 +342,60 @@ These all write derived rows directly:
 - **`rebuild_basis_with_transfers.py`** — re-folds a token's whole trade+transfer history. **Impractical at full scope: ~0.4 tokens/sec over ~32k tokens is roughly 24 hours.** Scope it with `--tokens-file`. Defaults to dry-run; `--apply` is opt-in. **Trap: its resume key `rebuild_basis_transfers_at` can hold a stale near-end-of-alphabet value from a previous run, in which case it silently skips almost everything — pass `--restart`.**
 
 Benchmark honestly: an early runtime estimate here was off by 16x because it was measured on reads without the writes.
+
+---
+
+## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
+
+### Contract generations and the migration history
+- Gen-3 core router is `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration).
+  Event topics changed at that migration and the `Migrated` event was REMOVED — old
+  topic assumptions silently match nothing.
+- nad.fun has two curve generations with different emitters (v1 `0xA728…/0x6F6B…`,
+  v2 `0x9f38…/0x8986…`); as of late Aug 2026 create activity shifted BACK to the v1
+  emitter. The `source` column is written correctly per generation — trust it.
+- **`--clean` on the indexer is a FULL derived-state wipe.** It once destroyed prod
+  derived data and required PITR into what is now crystal-prod-db-r3. Never run it
+  against prod casually; read STARTUP_MODES.md first.
+
+### Transfers carry cost basis
+Token transfers move basis with the tokens (live + history pipeline). Consequence:
+`token_sold > token_bought` on a position row is LEGITIMATE (tokens received by
+transfer then sold) — it was once "repaired" as corruption; it is not. The 8/30
+settler-transfer-leg bug that drained basis on 1ct sells is fixed and its 175K-row
+repair is done.
+
+### Fee accounting
+`fees_usd` on trades/tokens is the CURVE fee, not Crystal's 1% frontend cut — the
+frontend cut is not indexed at all. So fees will never reconcile to 1% of volume;
+that's expected, not data loss.
+
+### X (twitter) tracker
+Lives in the backend since 8/28: `/x/track`, `/x/tweets`, `/x/ws`, with a
+leader-elected poller across API replicas. The old localhost tracker is redundant.
+The twitterapi.io key it uses was once hardcoded in this public repo (see Security).
+
+### Volume fee tiers
+Basic/Bronze/Silver/Gold/Diamond by launchpad USD volume. The `volume_tiers` table is
+deliberately SQL-editable config; `/tiers` endpoints serve it; the referrals page
+renders it. Referrals otherwise: the CONTRACT fee mechanics exist, but there are zero
+live backend data services behind most of the referrals UI — known rebuild gap.
+
+### Rewards launch hardening (pre-9/8 review, since fixed in code)
+Week-close and leader election had two concurrency bugs (now locked), the predeposit
+boost fails CLOSED, and the rewards denylist + bonus-vault list are managed over
+authenticated-ish admin HTTP endpoints instead of SQL against prod. An EMPTY denylist
+is a trap: it silently includes internal wallets in rewards — seed it on any fresh
+environment.
+
+### DB capacity
+crystal-prod-db-r3 is the ONLY server. Storage grows ~831 bytes per cached block;
+autogrow is on. The log cache once had 18.4M holes which made tokens vanish from
+derived state — there is a guard now; if tokens "disappear", check log-cache coverage
+before anything else.
+
+### Endpoint inventory crystal.fun actually calls (break these, break prod)
+`/fun/token/{addr}/{res}` (+`?tracked=`, `?series=false` on polls), `/fun/user/{addr}`
+and `/fun/user?addresses=`, `/user/{addr}?include_native=1`, `/holders/{token}`,
+`/stats/{token}`, `/tokens`, `/tokens/feeds?source=0&limit=100`, `/price/mon`, and the
+WS channels listed above. `/tokens?since_block=` is also the indexer-liveness probe.
