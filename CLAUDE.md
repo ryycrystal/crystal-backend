@@ -7,6 +7,25 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ---
 
+## Current state snapshot (2026-09-02, update me when it changes)
+
+- Deployed: both container apps run the image tagged with origin/main's commit SHA via
+  the new CI pipeline (approval-gated). Verify with `az containerapp revision list`
+  vs `git rev-parse origin/main` rather than trusting this line.
+- Branches: `dev` == `main` (kept in sync by PR). `block-scoped-clear` is a stale
+  Aug-28-migration-era branch, 400+ commits behind — historical, don't build on it.
+- crystal.fun v1 shipped 9/1 (repo `crystal-fun`, auto-deploys from main). Vaults +
+  rewards launch was targeted for 9/8 07:00 with the interface work in
+  `crystal interface`.
+- Recent full audits (9/1–9/2) of crystal.fun + these fun/launchpad routes fixed:
+  reverted-trade-as-success, MAX-buy gas shortfall, edge-cache exclusion of
+  `/fun/token/`, the snipers LOWER() seq scan, TTLCache race, mon-usd window
+  caching, holders threshold mismatch, and the init_db restart deadlock. Known-open
+  items are listed in their own section below — they are reported, not forgotten.
+- A stale PUBLIC copy of old backend history lives at bhealthyfences/points-backend;
+  a local clone of it ("nadfun backend" folder) holds ~170 obsolete commits that must
+  never be pushed.
+
 ## What this is
 
 One Python codebase, two processes built from one Docker image:
