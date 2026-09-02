@@ -98,7 +98,8 @@ def test_native_adapter_rejects_unusable_events():
     a = NativeLaunchpadAdapter()
     assert a.curve_state({}) is None
     assert a.curve_state({"token_reserve": 0}) is None
-    assert a.curve_state({"token_reserve": INITIAL_TOKEN_SUPPLY + 1}) is None
+    assert a.curve_state({"token_reserve": INITIAL_TOKEN_SUPPLY + 1}).tokens_sold == 0
+    assert a.curve_state({"token_reserve": INITIAL_TOKEN_SUPPLY * 3}) is None
     assert a.curve_state({"token_reserve": "junk"}) is None
 
 
@@ -309,7 +310,8 @@ def test_nadfun_adapter_refuses_to_invent_a_curve_without_reserves():
     assert a.curve_state({"token_reserve": 0, "native_reserve": 0}) is None
     assert a.curve_state({"token_reserve": None}) is None
     assert a.curve_state({"token_reserve": "junk"}) is None
-    assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 + 1}) is None
+    assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 + 1}).tokens_sold == 0
+    assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 * 3}) is None
 
 
 def test_v1_adapter_reproduces_the_old_hardcoded_initial_price():

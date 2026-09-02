@@ -197,7 +197,7 @@ def _source_where(source: Any, alias: str = "") -> tuple[list[str], list]:
 
 
 @router.get("/tokens/feeds")
-@ttl_cache("tokens:feeds", ttl_seconds=3, serve_stale_seconds=30)
+@ttl_cache("tokens:feeds", ttl_seconds=3, serve_stale_seconds=180)
 def token_feeds(
     source: str = Query("", description="0 native/crystal, 1 nad.fun"),
     limit: int = Query(30, ge=1, le=100),

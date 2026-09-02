@@ -49,7 +49,7 @@ class NativeLaunchpadAdapter:
             return None
 
         initial_curve_supply, _ = self._supplies()
-        if token_reserve <= 0 or token_reserve > initial_curve_supply:
+        if token_reserve <= 0 or token_reserve > initial_curve_supply * 2:
             return None
 
         return CurveState(

@@ -84,11 +84,11 @@ class NadfunLaunchpadAdapter:
         except (TypeError, ValueError):
             return None
 
-        if token_reserve <= 0 or token_reserve > self.virtual_token_0:
+        if token_reserve <= 0 or token_reserve > self.virtual_token_0 * 2:
             return None
 
         return CurveState(
-            tokens_sold=self.virtual_token_0 - token_reserve,
+            tokens_sold=max(self.virtual_token_0 - token_reserve, 0),
             curve_supply=self.curve_supply,
             native_reserve=native_reserve,
             token_reserve=token_reserve,

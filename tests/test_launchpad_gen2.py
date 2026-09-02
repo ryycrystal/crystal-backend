@@ -43,7 +43,8 @@ def test_gen1_math_is_unchanged(monkeypatch):
     a = adapter()
     st = a.curve_state({"token_reserve": SUPPLY - 10**24, "native_reserve": N0})
     assert st.tokens_sold == 10**24
-    assert a.curve_state({"token_reserve": SUPPLY + 1, "native_reserve": N0}) is None
+    assert a.curve_state({"token_reserve": SUPPLY + 1, "native_reserve": N0}).tokens_sold == 0
+    assert a.curve_state({"token_reserve": SUPPLY * 3, "native_reserve": N0}) is None
     assert a.initial_price_native() == Decimal(N0) / Decimal(SUPPLY)
     k = N0 * SUPPLY
     assert native.NativeLaunchpadAdapter.graduation_native_reserve(k) == k // G
@@ -56,7 +57,8 @@ def test_gen2_accepts_the_virtual_reserve_range(monkeypatch):
     assert st is not None and st.tokens_sold == 0
     st = a.curve_state({"token_reserve": IC - 5 * 10**25, "native_reserve": N0})
     assert st.tokens_sold == 5 * 10**25
-    assert a.curve_state({"token_reserve": IC + 1, "native_reserve": N0}) is None
+    assert a.curve_state({"token_reserve": IC + 1, "native_reserve": N0}).tokens_sold == 0
+    assert a.curve_state({"token_reserve": IC * 3, "native_reserve": N0}) is None
 
 
 def test_gen2_graduation_progress_reaches_exactly_100_pct(monkeypatch):
@@ -79,3 +81,17 @@ def test_gen2_graduation_target_is_4x_initial_native(monkeypatch):
 def test_gen2_initial_price_uses_the_virtual_supply(monkeypatch):
     monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
     assert adapter().initial_price_native() == Decimal(N0) / Decimal(IC)
+
+
+def test_curve_state_survives_a_one_wei_reserve_overshoot(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    state = adapter().curve_state({"token_reserve": IC + 1, "native_reserve": N0})
+    assert state is not None
+    assert state.token_reserve == IC + 1
+    assert state.tokens_sold == 0
+
+
+def test_curve_state_still_rejects_an_absurd_reserve(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    assert adapter().curve_state({"token_reserve": IC * 3, "native_reserve": N0}) is None
+    assert adapter().curve_state({"token_reserve": 0, "native_reserve": N0}) is None
