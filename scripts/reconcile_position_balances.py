@@ -2,6 +2,7 @@ import argparse
 import json
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import core.storage as storage
 from core.multicall import MULTICALL3_ADDR, decode_multicall3_aggregate3_result, encode_multicall3_aggregate3
@@ -41,6 +42,7 @@ def main():
     ap.add_argument("--restart", action="store_true")
     ap.add_argument("--show", type=int, default=15)
     ap.add_argument("--rpc", default="")
+    ap.add_argument("--workers", type=int, default=6, help="parallel rpc readers; writes stay serial")
     args = ap.parse_args()
 
     import os
@@ -100,19 +102,24 @@ def main():
         if not page:
             break
         cursor_key = f"{page[-1][0]}:{page[-1][1]}"
-        for i in range(0, len(page), args.batch):
-            chunk = page[i : i + args.batch]
+        chunks = [page[i : i + args.batch] for i in range(0, len(page), args.batch)]
+
+        def read_chunk(chunk):
             pairs = [(t, w) for t, w, _ in chunk]
             for attempt in range(4):
                 try:
-                    got = chain_balances(url, pairs, block_hex)
-                    break
+                    return chain_balances(url, pairs, block_hex)
                 except Exception as e:
                     if attempt == 3:
                         print(f"[BAL] batch failed after retries: {str(e)[:100]}")
-                        got = [None] * len(pairs)
-                    else:
-                        time.sleep(2 * (attempt + 1))
+                        return [None] * len(pairs)
+                    time.sleep(2 * (attempt + 1))
+            return [None] * len(pairs)
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            results = list(pool.map(read_chunk, chunks))
+
+        for chunk, got in zip(chunks, results):
             updates = []
             for (tok, w, stored), actual in zip(chunk, got):
                 checked += 1
