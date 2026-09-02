@@ -296,6 +296,15 @@ was mistakenly filed as a defect once.
   their signature to get isolation; many only take `db`.
 - ruff is the gate: `python -m ruff check .` and `format --check .`. CI pins the ruff
   version; keep local matching.
+- **A large number of `s` (skipped) means you are not testing anything.** The
+  rewards/vault suites are `pytest.mark.skipif` on `TEST_DATABASE_URL`; without it ~158
+  tests silently no-op and the suite still looks green.
+- **Import order breaks scripts.** `api/api.py` and `api/routes/*.py` import each other,
+  so importing a route module first raises
+  `ImportError: cannot import name 'router' ... (most likely due to a circular import)`.
+  In any script, `import api.api` **before** `from api.routes import ...`, and call
+  `storage.init_pool()` or you get `RuntimeError: [DB] Uninitialized connection pool`.
+  This is why the test suite passes in-suite but a single module can fail standalone.
 
 ---
 
