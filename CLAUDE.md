@@ -1321,3 +1321,173 @@ discoveries:
 1CT private keys are **AES-GCM encrypted under a non-extractable IndexedDB
 key**. Two invariants: **never persist plaintext**, and **never write while the
 vault is locked**. If you touch that path, preserve both.
+
+---
+
+## Graduated pools are Uniswap V3 — reserves, quoting, and fees
+
+The least obvious thing in the launchpad code, and it broke sells for months.
+
+### V2SYNC can never fire for a graduated token
+
+`launchpad_pools.reserve_*` was originally advanced only by the `V2SYNC` handler. But a
+graduated nad.fun token lives in a **Uniswap V3 pool**, and a V3 pool emits no `Sync`
+event at all. So every graduated token's reserves were frozen at whatever a one-time
+backfill left, permanently.
+
+Symptom: reserves days stale while the token trades actively, and sells reverting with
+`CallExecutionError: Execution reverted for an unknown reason`, because the client's CPMM
+min-out was computed from wrong reserves. Before the fix, only 5 of 149 migrated pools
+were within 1% of chain, 80 were off by more than 5x, and the worst was 31,939x.
+
+**Do not infer the AMM shape from a dev-DB sample.** A dev sample said "60/60 V3". On
+prod's *migrated* set it is about **144 V3 and 5 V2 pairs**, and the V2 ones are exactly
+the `source = 2` (nad.fun v2) tokens.
+
+### The fix: core/pool_reserve_sync.py
+
+`pool_reserve_worker()` is a 120s loop registered in `indexer_main.py`. Each cycle it
+selects pools with recent trades whose `last_sync_at` is stale, then issues one
+Multicall3 `aggregate3` with **allowFailure=true** probing `getReserves` / `slot0` /
+`liquidity` per pool. If `getReserves` answers it is a V2 pair; otherwise `slot0` plus
+`liquidity` means V3. Kind detection and the data read happen in the same round trip, so
+there is no `pool_kind` column to keep in sync and it self-corrects.
+
+Two supporting details:
+
+- `core/multicall.py` now takes `encode_multicall3_aggregate3(calls, allow_failure=False)`.
+  allowFailure had been hardcoded `False`, which is why probing a reverting selector used
+  to make the whole batch revert.
+- `force_pool_reserves()` deliberately bypasses `update_pool_reserves`'s
+  `last_sync_block <= %s` guard. That guard is right for replayed logs but would also
+  reject a fresh read taken at chain head.
+
+### V3 virtual reserves
+
+At the current tick a V3 pool behaves exactly like a constant-product pair with:
+
+    x_virtual = L * 2^96 / sqrtPriceX96
+    y_virtual = L * sqrtPriceX96 / 2^96
+
+This is not an approximation. Replaying 24 real on-chain sells reproduced the actual
+output with ratio 1.00000, including a 1,945,528-token sell.
+
+**Never use balanceOf(pool) for a V3 pool.** It includes out-of-range liquidity: 3% off
+in the one case measured and arbitrarily wrong in general.
+
+**Orientation trap.** `sqrtPriceX96` encodes token1/token0. The native price is `p01`
+when `token_is_0` is true, otherwise `1/p01`. Getting this backwards makes every healthy
+token look catastrophically broken — it once "found" 144 of 145 tokens off by more than
+100x, all of it noise.
+
+### Pool fees are not all 1%
+
+- V3 launchpad pools report `fee() = 10000`, i.e. **1.00%**.
+- nad.fun **v2 pair** pools charge an effective **~1.607%** (factor 0.9832 to 0.9840),
+  solved from real trades. A client assuming 1% over-predicts output by ~0.6% and reverts
+  at low slippage.
+
+To solve a pool's real fee from a historical sell, read reserves at `block - 1` and use:
+
+    f = out * rTok / (amt * (rNat - out))
+
+### Drained pools
+
+Four migrated pools have `liquidity() == 0` (HAHA, MONGU, CHOG, FLOKI) — real V3
+contracts holding nothing. `_apply_live_pool_reserves` serves explicit `"0"` reserves for
+these rather than falling back to frozen curve numbers, so a client can distinguish "no
+liquidity" from "unknown". No swap can succeed on them regardless of the quote.
+
+**HAHA alone is the origin of the widely-quoted "59,478x wrong price".** It is one
+abandoned empty pool, not a systemic pricing problem. Do not let that number drive a
+rewrite.
+
+### `_api_source` hides the generation from clients
+
+`_api_source()` in `api/api.py` collapses **both** nad.fun generations to `1`, so a client
+reading `source` can never tell v1 from v2. The raw value ships separately as
+**`sourceRaw`**, present on `/meta` and on list rows. Use `sourceRaw`.
+
+Related: `/token/{addr}/meta` builds an **explicit response dict**. Mutating that dict
+inside `_apply_live_pool_reserves` is not enough — any new field must also be listed in
+the returned literal or it is silently dropped. The `pool` field was lost for an entire
+deploy cycle exactly this way.
+
+---
+
+## Which "PnL" is the user actually looking at
+
+Before debugging a wrong-PnL report, establish which number is on screen. Three different
+things get called "today's PnL":
+
+| Surface | Source | Nature |
+|---|---|---|
+| Realized PnL (24h) tile | `SUM(launchpad_trades.realized_native)` over the window | trades only, **summed** — no single trade need match the total |
+| Unrealized PnL (24h) tile | `SUM(balance * (last_price - hourly_close_24h_ago))`, `storage.pnl_24h` | **mark-to-market on holdings** — a user who made zero trades can still show a large number |
+| PnL calendar | `/portfolio/{addr}/daily?days=&tz=` | trades only, bucketed by **calendar day in the viewer's timezone** |
+
+The tiles are trailing 24h; the calendar is calendar-day. They are supposed to disagree —
+do not "fix" that.
+
+Minor known flaw in `pnl_24h`: it multiplies the *current* balance by a *24h* price delta,
+so a position opened an hour ago is credited with the whole day's move. Measured impact
+was negligible (0.3% of the total, 80 of 533k positions). Do not chase it without new
+evidence.
+
+The interface default slippage is **50%** (`DEFAULT_SELL_PRESETS` is 50/40/30). Sub-1%
+quoting errors therefore cannot revert a real user trade. If a sell reverted, look for an
+order-of-magnitude problem such as stale reserves, not fee rounding.
+
+### The trader-repair position-stranding bug
+
+`scripts/repair_trade_traders.py` reassigns trades credited to a router or settler back to
+the real wallet. It used to run only:
+
+    UPDATE launchpad_trades SET user_address = %s WHERE txhash = %s AND log_index = %s
+
+It moved the *trade* but never touched `launchpad_positions`. The buy's basis stayed
+stranded on the router while the real wallet got a trade row with no basis behind it, so
+the next sell subtracted nothing and **booked the entire proceeds as profit**. Then
+`repair_router_positions.py` deleted the orphaned router rows, destroying that basis for
+good. Every repair pass minted fresh phantom profit.
+
+Commit `89e7401` added `rebuild_positions_for_user()` so the repair refolds both sides.
+**Open caveat: that helper uses the trades-only `_fold`**, so it can itself clobber
+transfer-carried basis. It should be switched to the transfers-aware fold.
+
+### A second discriminator for the phantom-profit signal
+
+Complementing the tight-query guidance elsewhere in this file: on the loose
+`realized_native = native_amount` signal, a sell where the wallet **sold more than it
+ever bought** is a legitimate zero-basis sale (tokens arrived by transfer or airdrop).
+Splitting a 30-day window that way gave **8,437 legitimate versus 4 real defects**. Use
+both tests before believing any headline number.
+
+### Batch across wallets, never loop subprocesses
+
+Repairing 673 wallets by spawning one `rebuild_positions_pnl.py --user` subprocess each
+ran at **0.6 wallets/min** — a 17-hour projection — because every wallet paid Python
+startup plus an Azure SSL connect. The identical work in **one process with one
+connection**, using `WHERE user_address = ANY(%s)`, finished in **165 seconds**.
+
+---
+
+## Validating quoting math against reality
+
+The strongest check available is to replay **real historical trades**: read pool state at
+`block - 1`, apply the client's exact formula, and compare against the actual amounts on
+the trade row. Two traps produce false mismatches:
+
+1. **Two trades in the same block** — the `block-1` snapshot is stale for the second one.
+   Check `COUNT(*) FROM launchpad_trades WHERE token = ... AND block_number = X` before
+   calling any mismatch real.
+2. **A genuine V3 tick crossing** — if `liquidity()` differs between `blk-1` and `blk`,
+   the swap crossed into a different liquidity band and virtual-reserve CPMM legitimately
+   deviates. Structural, not a bug; the worst observed was 0.62%.
+
+Across 607 replayed trades on all migrated tokens, 599 were safe at zero slippage, and
+all 8 exceptions were explained by those two causes plus the v2 fee-range spread.
+
+**The public RPC is not a deep archive.** State reads fail beyond roughly a few hundred
+thousand blocks back, so replay only covers recent activity — 2,373 of those trades had to
+be skipped for that reason. Any claim about historical correctness is bounded by this.
