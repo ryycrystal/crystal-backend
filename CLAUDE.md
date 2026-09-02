@@ -97,11 +97,24 @@ tag to `git rev-parse origin/main`.
 
 Traps, all hit for real:
 
+- **`az acr build` ships your WORKING TREE, not your git HEAD.** It uploads the directory
+  as-is: uncommitted files are included, and commits you have not pulled are not. Several
+  agent sessions share one checkout, so **another agent's half-finished edit can be baked
+  into a production image** without appearing in any commit. Before building manually,
+  confirm `git status` is clean *and* `git rev-list --count origin/main..HEAD` is 0 — or
+  build from a fresh clone at the sha you intend to ship. (This is also why the CI path,
+  which checks out a specific sha, is safer than any manual build.)
 - `az acr build` on Windows reliably CRASHES with a `UnicodeEncodeError` while
-  streaming build logs. **The build itself still runs.** Never re-trigger blindly —
-  poll `az acr task list-runs --registry crystalprodacr --top 1` for status instead.
-  Prefix every `az` call with `PYTHONIOENCODING=utf-8`; it reduces but does not
-  eliminate the crashes.
+  streaming build logs. **The build itself still runs** — it dies in colorama writing to a
+  cp1252 console, after the image is built and pushed, and it **exits 1**. Never
+  re-trigger blindly and never trust that exit code — poll
+  `az acr task list-runs --registry crystalprodacr --top 1` for status instead.
+  Prefix every `az` call with `PYTHONIOENCODING=utf-8`; it reduces but does **not**
+  eliminate the crashes — observed still crashing with the prefix set, from Git Bash, on
+  2026-09-02.
+- When verifying a deploy, read the revision that is **actually taking traffic**, not the
+  newest one — during a rollout the old revision can still hold 100%:
+  `az containerapp revision list -n crystal-api -g crystal-prod-rg -o tsv --query "[?properties.trafficWeight>\`0\`].{n:name,h:properties.healthState,w:properties.trafficWeight,img:properties.template.containers[0].image}"`
 - Registry uploads can get connection-reset if another agent is building
   concurrently. Retry; check `list-runs` to see whose build is in the queue.
 - The `/tokens?since_block=1` `as_of_block` reads through
@@ -1093,6 +1106,37 @@ Reproduce the symptom, apply the fix, then reproduce again. **Do not add a poll
 to paper over a data-flow bug** — find out why the data is not arriving. And
 prefer reading the database or the running container over trusting the local
 working tree: the deployed image has repeatedly been older than local `main`.
+
+### `api.crystal.exchange` is unreachable from the agent sandbox — this is NOT an outage
+
+Curling the public domain from an agent session returns `HTTP 000` on **every**
+endpoint, including `/health`. It is tempting to report production down. It is not:
+`example.com` and `cloudflare.com` fail the same way, so it is the sandbox's egress,
+not Cloudflare and not the API. TCP connects and then TLS times out.
+
+Verify against the Azure Container Apps origin instead, which is reachable:
+
+```bash
+curl -s https://crystal-api.yellowfield-3f176fc9.japaneast.azurecontainerapps.io/results/status
+```
+
+Get the FQDN with `az containerapp show -n crystal-api -g crystal-prod-rg --query
+properties.configuration.ingress.fqdn -o tsv`. Hit it several times — ingress balances
+across revisions, so a single 200 does not prove every replica has your code. If you
+genuinely need to confirm the Cloudflare path, ask the human to load it in a browser.
+
+(Separately, `api.crystal.exchange` does need a Cloudflare origin/SNI override pointing
+at the ACA FQDN; there is no ACA custom domain. That misconfiguration caused a real 522
+once — but a sandbox `HTTP 000` is not evidence of it.)
+
+### `az acr build --no-logs` avoids the Windows crash entirely
+
+The `UnicodeEncodeError` happens in the **log streamer**, not the build.
+`PYTHONIOENCODING=utf-8` does not reliably prevent it because the `az` wrapper spawns
+its own Python. Passing `--no-logs` sidesteps it completely and the build still runs;
+confirm with `az acr repository show-tags -n crystalprodacr --repository crystal-backend
+--orderby time_desc --top 3`. Note the registry **name** is `crystalprodacr` — passing
+the full login server to `--registry` fails validation.
 
 ---
 
