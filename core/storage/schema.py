@@ -6,7 +6,7 @@ import time
 
 import psycopg2
 
-from .base import db_cursor
+from .base import db_autocommit_cursor, db_cursor
 
 _SCHEMA_LOCK_TIMEOUT = "5s"
 _SCHEMA_MAX_ATTEMPTS = 20
@@ -37,8 +37,8 @@ def init_db() -> None:
 def _init_db_once() -> None:
     from .rewards import ensure_rewards_tables
 
-    with db_cursor() as cur:
-        cur.execute(f"SET LOCAL lock_timeout = '{_SCHEMA_LOCK_TIMEOUT}'")
+    with db_autocommit_cursor() as cur:
+        cur.execute(f"SET lock_timeout = '{_SCHEMA_LOCK_TIMEOUT}'")
         cur.execute(
             """
             CREATE EXTENSION IF NOT EXISTS pg_trgm;

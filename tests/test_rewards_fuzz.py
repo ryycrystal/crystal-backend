@@ -173,7 +173,7 @@ class Universe:
                         if owed > 0:
                             boosted_bal = max(0, boosted_bal - owed)
                 boosted = Decimal(min(boosted_bal, n))
-                if self.pd_vaults and v not in self.pd_vaults:
+                if v not in self.pd_vaults:
                     boosted = Decimal(0)
                 mult = Decimal(1)
                 for cv, cm, cs, ce in self.campaigns:

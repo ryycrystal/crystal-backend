@@ -132,9 +132,13 @@ def main():
             try:
                 with storage.db_cursor() as cur:
                     events = events_for_token(cur, token)
-                    if not events:
-                        break
-                    users, sell_realized = fold(events, venues)
+                if not events:
+                    break
+                # fold OUTSIDE any transaction: it is minutes of pure python on a
+                # heavy token, and holding the read open keeps ACCESS SHARE on
+                # launchpad_trades, which is enough to park a waiting migration
+                users, sell_realized = fold(events, venues)
+                with storage.db_cursor() as cur:
                     cur.execute(
                         "SELECT user_address, token_bought, cost_basis_native, realized_pnl_native, token_sold "
                         "FROM launchpad_positions WHERE token = %s",
