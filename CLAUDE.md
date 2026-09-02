@@ -525,6 +525,40 @@ downstream is broken.
 - The **denylist** (`crystal_rewards_denylist`) excludes wallets from accrual *and* the
   close. House/MM/test wallets belong there or they compete with users for the pool.
 
+### Verifying vaults against a production-equivalent deployment
+
+The vault system was signed off by running the **real** backend against a fresh factory on
+mainnet, with real signed transactions, into an isolated database. Repeat this whenever the
+contracts change — it is the only way to exercise the accounting end to end.
+
+Shape of the harness:
+
+1. A separate local Postgres DB (`crystal_dryrun`), schema via `schema.init_db()`.
+2. Seed `crystal_markets` for the test markets from chain, or vault creation cannot resolve
+   `market`/decimals in `apply_vault_deployed`.
+3. Run the indexer pointed at the test factory by exporting `DATABASE_URL`,
+   `CRYSTAL_ADDRESS`, `VAULT_FACTORY_ADDRESS(ES)`. **Always export `DATABASE_URL`
+   explicitly** — the repo `.env` points at prod, and `env_loader` uses `setdefault`, so
+   shell env wins, but PG* vars would otherwise fall through to prod.
+4. Run the API locally against that DB and point the frontend's `settings.backend` at it.
+5. After each user action: `python scripts/vault_reconcile.py <vault>` and a full log-cache
+   replay diff.
+
+Traps that cost hours, all specific to running the pieces as separate processes:
+
+- **`apply_vault_deposit` writes a balance sample using `state.tokenToPrice`.** If only the
+  sampler seeds prices, deposits land with a bogus `usd_value` — a position showed **$3.93
+  instead of $9.29** because USDC priced at ~$0.82 and WMON at $0. Seed prices in **every**
+  process that can write samples.
+- **The sampler must rebuild its vault list each pass**, or vaults created after it started
+  are never sampled and their TVL stays empty.
+- **Check which DB a script resolves before trusting it.** One replay script *forced* the
+  prod `DATABASE_URL`, overriding the environment, and produced a confident cross-database
+  diff that looked like real corruption.
+- Reconciliation is the arbiter, not the UI. Share invariants (I1–I4) hold even when USD
+  pricing is unavailable, so they are the signal to trust on a test stack with no price
+  feed.
+
 ### Rewards engine in depth (`core/rewards.py`)
 
 Runs as a worker thread inside `crystal-api`, leader-elected via
