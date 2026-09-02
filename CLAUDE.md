@@ -1554,3 +1554,39 @@ all 8 exceptions were explained by those two causes plus the v2 fee-range spread
 **The public RPC is not a deep archive.** State reads fail beyond roughly a few hundred
 thousand blocks back, so replay only covers recent activity — 2,373 of those trades had to
 be skipped for that reason. Any claim about historical correctness is bounded by this.
+
+---
+
+## Practical habits when poking at prod
+
+**Scripts need `PYTHONPATH=.`.** Anything under `scripts/` fails immediately with
+`ModuleNotFoundError: No module named 'core'` unless you run it from the repo root with
+`PYTHONPATH` set. From PowerShell:
+
+    $env:PYTHONPATH='.'; python scripts/rebuild_positions_pnl.py --user 0x... 
+
+**Open prod read-only unless you intend to write.** One line prevents a whole class of
+accident, and it also makes the intent obvious to whoever reads the script later:
+
+    conn.set_session(readonly=True, autocommit=True)
+
+**Snapshot before any bulk write.** Before a multi-row correction, dump the current values
+to a JSON file in the scratchpad and say in the output where it went. A reserve merge of
+149 rows did this and it cost nothing; a 673-wallet position rebuild did not, and there is
+now no way to reconstruct what those rows held beforehand. Gate the write behind an
+explicit `--apply` and make dry-run the default.
+
+**Validate a bulk correction against an independent source before applying it.** For the
+149-row reserve merge the check was: does the reserve-implied price agree with the
+trade-derived `last_price_native`? It went from 7/149 to 144/149 within 5% with zero rows
+made worse, which is what justified applying it. Without a second source you are only
+checking that your own arithmetic is self-consistent.
+
+**The local dev DB is a stale snapshot**, hundreds of days behind prod. It is fine for
+schema and logic work and useless for any question about current data. Never generalise
+from it to prod — a dev sample is what produced the wrong "every pool is V3" conclusion.
+
+**Two parallel pytest runs drop each other's scratch database mid-suite.** If you see a
+burst of `psycopg2` errors and failures spread across unrelated test files, that is almost
+certainly another agent running pytest at the same moment, not your change. Re-run before
+you diagnose. The tell is that the same files pass cleanly when run on their own.
