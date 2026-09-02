@@ -540,6 +540,98 @@ Benchmark honestly: an early runtime estimate here was off by 16x because it was
 
 ---
 
+## 8. Trade attribution — who gets credited for a trade
+
+A trade event names **whoever called the core**. For a routed trade that is a router,
+an aggregator, or the 0x Settler — not the trader. Everything below exists to fix that.
+
+### `_resolve_trade_user` (core/sequencer.py)
+
+Walks the transaction's ERC-20 transfer graph to find the real wallet. Called from
+three places: the `TR` (spot) branch and both launchpad branches (`LT`/`NFB`/`NFS`
+and the graduated-pool path).
+
+- **Buy**: address with the largest positive net token retention, preferring leaf
+  nodes, then deepest-from-pool.
+- **Sell**: first sender that is not the pool, the zero address, or a known passthrough.
+- Falls back to the event's original `user` when it cannot do better.
+
+### `PASSTHROUGH_ADDRS` — the router list (core/chain.py)
+
+Stateless execution contracts that forward someone else's trade and never hold a
+position of their own. Currently the 0x Settler, the 0x AllowanceHolder, and the
+referral manager.
+
+```python
+PASSTHROUGH_ADDRS = _addrs_from_env([...], "PASSTHROUGH_ADDRESSES")
+```
+
+**To add a router:** append to the list, or set the `PASSTHROUGH_ADDRESSES` env var
+(comma-separated) — the env route needs no code change and no redeploy. Then clean
+history with `python scripts/repair_router_positions.py --apply --force` (with no
+`--traders` it defaults to this same list).
+
+Two enforcement points, and the second is the important one:
+
+1. `_resolve_trade_user` treats them like `pool`/`zero_addr` and walks *past* them.
+2. **`BatchAccumulator.add_position_delta` early-returns for them.** Every position
+   write in the codebase funnels through that single method — launchpad trades,
+   graduated trades, and `apply_token_transfer` — so guarding there covers all three
+   paths and any future one automatically. Do not scatter equivalent checks at call
+   sites.
+
+### The limitation you cannot fix — do not try
+
+Arbitrage bots trade through **their own contracts**. The EOA that signed the
+transaction never touches the token, so it is not in the transfer graph at all.
+
+Verified on-chain 2026-09-01 (tx `0x0b93489149a2…`, token LAST): tokens flowed
+curve → settler → bot contract → back to curve, with the signer
+`0x256efafe…` absent from every transfer. No graph walk can recover a human here.
+
+The only thing naming a person is `tx.from`, which (a) costs an extra RPC per trade
+in the indexer hot path and (b) is **wrong for ERC-4337**, where it returns the
+bundler. Leave these attributed to the bot's own contract. That is the honest answer
+and it is strictly better than crediting shared 0x infrastructure, because the bot
+contract is a real distinct actor while the Settler is shared by every user.
+
+If a bot contract gets big enough to pollute a leaderboard, add *it* to
+`PASSTHROUGH_ADDRS` and `--force` clears its history. That is the intended escape
+hatch. `tests/test_passthrough_positions.py` covers this mechanism.
+
+### EIP-7702 delegated wallets break `eth_getCode` contract checks
+
+A 7702-delegated EOA **has code**, so `getCode(addr) != "0x"` is not a valid
+"is this a contract" test — it misclassifies ordinary user wallets. This silently
+made a repair script fix **zero** rows.
+
+A designator is exactly `0xef0100` + 20-byte address = **48 hex chars**. Exclude that
+shape explicitly:
+
+```python
+code.startswith("0xef0100") and len(code) == 48   # this is a WALLET, not a contract
+```
+
+Gas follows the same trap: a plain MON transfer to a delegated EOA needs ~**21,212**
+gas, not 21,000. Hardcoding 21,000 produces out-of-gas. Estimate per destination.
+
+### `crystal_market_trades` has no `token` column
+
+It keys off `market`. Join `crystal_markets` to reach the base token. A repair script
+crashed on this. `launchpad_trades` *does* have `token`, so code that works on one
+table does not transfer to the other.
+
+---
+
+## 9. A note on the two knowledge files
+
+`CLAUDE.md` (this file) is the one Claude Code auto-loads into context — treat it as
+the primary. `SUMMARY.md` was started in parallel by another session and overlaps
+heavily; it has a fuller operational runbook and incident history. If they disagree,
+verify against the code rather than trusting either. Ideally they get merged.
+
+---
+
 ## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
 
 ### Contract generations and the migration history
@@ -864,3 +956,83 @@ was written with a zero price rather than patching the token row again.
 `fees_usd` is the **bonding-curve fee**, not Crystal's 1% frontend cut. The frontend cut
 is unindexed, so `fees_usd` will never equal 1% of volume and should not be reported as
 Crystal's earnings. This has been misread before.
+
+---
+
+## OPEN: outbound transfers and stale `balance_token`
+
+**Status as of 2026-09-02: root cause NOT identified.** A full reconciler sweep found
+**17,889 positions with a wrong `balance_token` and 12,085 that had to be zeroed** —
+wallets that had transferred tokens away while the position row kept the old balance.
+The reconciler fixes the symptom to chain truth at its pinned block; the underlying
+indexing path is still unexplained, so **drift will recur.**
+
+Eliminated — do **not** re-investigate these:
+
+- **Transfer logs are fetched.** Tag `TF`, standard `0xddf252ad…b3ef` topic, present in
+  `h.TOPICS`, and `fetch_logs_http` applies no address filter.
+- **`in_trade_tx` is not the cause.** It gates only cost basis, never the balance delta.
+- **The sequencer/state filter mismatch is not the cause.** 0 orphan pools of 30,515.
+- **Do not measure this with `launchpad_transfers`.** That table is written only by
+  `scripts/extract_transfers.py`, never by the indexer's transfer handler, so comparing
+  balances against it measures that script's coverage too. This wasted real time.
+
+Empirical: of the top 300 positions by balance, **40 disagree** with the DB's own event
+history — 31 where the chain balance *exceeds* what recorded events explain (missing
+inbound credits), 9 the other way.
+
+**Next step, and why the obvious approach fails:** full historical replay is impossible
+because `eth_getLogs` is capped at 100 blocks. Instead detect drift in a *recent* window
+— sample positions, multicall `balanceOf` at head, diff against `balance_token` — which
+yields cases whose blocks are recent enough to actually pull logs for, then trace those.
+
+**Interim remedy:** re-run `scripts/reconcile_position_balances.py` (~38 min, resumable
+via `launchpad_kv` key `reconcile_balances_at`).
+
+---
+
+## Spot graph pricing: use the in-window median, not the boundary sync
+
+`api/spot_graph.py` used to price a bucket from the **last sync before the bucket
+boundary**, which let a single transient reserve reading define a whole bucket and put
+visible spikes in the portfolio value series. It now takes the **median of the syncs that
+fall inside the bucket window**, falling back to the last known sync only for a quiet
+token that had none:
+
+```sql
+WHERE LOWER(m.base_address)=%s AND LOWER(m.quote_address)=%s
+  AND e.timestamp > %s AND e.timestamp <= %s
+```
+
+Bump `VALUE_VERSION` whenever you change how a bucket's value is computed — it is the
+cache-invalidation key for stored buckets. It went 3 → 4 with this change. Forgetting to
+bump it means old, differently-computed buckets are served alongside new ones.
+
+The portfolio graph and the spot portfolio graph **must agree**; they had diverged, and
+the fix was this pricing change plus pinning the series tail to the live total rather
+than patching one graph to match the other. If they disagree again, fix the shared
+source, not the presentation.
+
+---
+
+## Query shapes that have taken the launchpad down
+
+- A **~30,000-address exclusion array** passed as a literal `NOT IN (...)`, combined with
+  a holder-stats sort, was the cause of general launchpad slowness. Rewriting it as an
+  **anti-join** was verified in prod at **4–25x** faster. If you find yourself
+  interpolating a large address list into SQL, make it a join instead.
+- The vault summary endpoint ran **6.7–12.1s**; reducing the number of balance samples
+  taken in SQL brought it to **~0.9s**. The statistics were proven equivalent — the
+  series differs only in which of several equal-valued samples represents a bucket.
+
+---
+
+## Two client-side facts that explain "the backend is wrong" reports
+
+- **Mainland China cannot reach the RPC.** Any surface that reads only from chain renders
+  as `$0` there. This is why LP reads `/pools/positions` from the backend first and only
+  then falls back to chain. When someone reports zeros that nobody else can reproduce,
+  ask where they are before debugging the backend.
+- **1CT limit orders execute from an ERC-4337 smart account, not the user's EOA.** Funds
+  sitting in the Rabby EOA are not spendable by it, and the failure surfaces as
+  `TRANSFER_FROM_FAILED` — which reads like a backend or contract bug and is not one.
