@@ -253,6 +253,201 @@ baseline. Frontends gate on `price_ref_X > 0` before trusting `change_pct_X`.
 - Graduated (V3) pools never emit V2 Sync — live reserves come from a virtual-reserve
   reconciler, `reservesFrom: "crystal_pool"` in payloads.
 
+### Vault contract semantics that are not obvious from the ABI
+
+Source: `crystal contracts-dev/contracts/vaults/CrystalVault.sol` + `CrystalVaultFactory.sol`.
+
+- **Deposits are ratio-matched and refund the excess.** The vault takes the optimal
+  amounts for its current reserve ratio, so a user depositing into a differently-weighted
+  vault may have only part accepted. Shares are
+  `min(quote·supply/quoteBal, base·supply/baseBal)`; the first deposit is `sqrt(quote·base)`.
+- **The owner must hold > 1/20 of supply**, enforced on deposit *and* on partial owner
+  withdrawal (`require(balanceOf[owner] * 20 > totalSupply)`). An owner can always exit
+  **fully**, but cannot sit below 5% while the vault is open.
+- **A full owner exit closes the vault and emits NOTHING.** Inside `withdraw()`, when the
+  owner's balance hits 0 the contract calls `cancelAll()` and sets `closed = true,
+  locked = true` with no event — the factory's `Closed` event only fires for the explicit
+  `close()` path. The indexer therefore *derives* this in `state.apply_vault_withdraw`.
+  Keep that derivation if you touch the function; without it a dead vault lists as Active
+  forever with a deposit button that always reverts.
+- **A closed vault is still fully withdrawable.** `withdraw()` gates only on shares and
+  lockup — there is **no** `closed`/`locked` check. Closing stops deposits and trading;
+  depositors exit whenever. Never treat closed as "funds gone", and never hide a closed
+  vault from a user holding shares in it (that made a depositor's funds unreachable in the
+  UI while perfectly withdrawable on-chain).
+- **`lockup = 0` means the factory maximum**, not "no lockup" — `_createVault` turns 0 into
+  `maxLockup()`. Any caller passing 0 silently gets the harshest lockup available.
+- **`unlockTimestamp[user]` is stamped at deposit time** with the lockup then in force.
+  Recomputing `last_deposit + current_lockup` diverges the moment an owner calls
+  `changeLockup` — measured **three days** off on prod. Read `unlockTimestamp(address)`
+  (`0x28f0e093`) from chain for anything gating a withdrawal.
+- **`getBalances()` returns `(quote, base, availableQuote, availableBase)`** — the total
+  includes capital in resting orders. NAV uses totals; the difference is deployed capital.
+- **NAV never reads `token.balanceOf(vault)`**, it reads accounted balances — which is what
+  makes the vault immune to donation/direct-transfer manipulation. Keep it that way.
+
+### Writing vault data is TWO seams, not one
+
+```
+insert_crystal_vault_deposit / insert_crystal_vault_withdrawal   # ledger row only
+upsert_crystal_vault_user_delta                                  # shares + counters
+```
+
+The live indexer calls both. **A backfill that calls only the first leaves
+`crystal_vault_users` behind and nothing notices** — `shares` self-heals against
+`balanceOf` in the sampler, so the row looks fine while `withdraws`/`last_withdraw` stay 0
+and the UI renders an exited depositor as one who never withdrew. Recompute deltas *from
+the ledger* so re-runs are idempotent; use `shares_delta=0` when shares are already
+chain-correct.
+
+### Vault invariants — `scripts/vault_reconcile.py`
+
+Asserts five invariants and exits non-zero on failure, so it can gate a deploy:
+
+| # | Invariant |
+| --- | --- |
+| I1 | chain `totalSupply` == Σ `balanceOf(holder)` |
+| I2 | chain `totalSupply` == stored `circulating_shares` |
+| I3 | stored `circulating_shares` == Σ deposits − Σ withdrawals |
+| I4 | Σ `crystal_vault_users.shares` == chain Σ `balanceOf` |
+| I5 | net assets − net contributed == MM PnL (value conservation) |
+
+```bash
+python scripts/vault_reconcile.py [0xVAULT] [--json]
+```
+
+**Trap — reconciliation that heals to zero.** `state.reconcile_vault_user_shares` sets a
+holder's stored shares to whatever a multicall `balanceOf` returns, *including a transient
+0*, and then skips that user (they look empty) so it never self-corrects. A real holder can
+be silently zeroed. Do not heal a non-zero holder **down** to 0 unless the flow ledger also
+nets 0. I4 catches it after the fact; nothing prevents it yet.
+
+### Integrity sweep also watches the vaults
+
+`core/integrity.py` runs in the **indexer** every `INTEGRITY_INTERVAL` (300s) and writes
+`integrity_last` to `launchpad_kv`. Beyond lag/gaps/holes it reports
+`vault_ledger_divergences` (dropped events), `vault_user_counter_drift` (the two-seam bug
+above) and `vault_status_drift` (a vault still open whose owner holds nothing — the silent
+close). Healthy is `ok: true` with all three at 0. Check it before concluding anything
+downstream is broken.
+
+### Rewards config lives in kv, and the boost is fail-closed
+
+- Timing is **config, not code**: `rewards_vault_start`, `rewards_program_start`,
+  `rewards_predeposit_start`, `rewards_predeposit_cutoff`,
+  `rewards_predeposit_multiplier` are `launchpad_kv` metas with code defaults. Shifting
+  launch dates needs no deploy.
+- **The pre-deposit boost applies only to vaults listed in
+  `crystal_rewards_predeposit_vaults`.** It used to be fail-*open* — an empty table meant
+  every vault qualified, so forgetting to seed it would have handed 3× to the whole
+  programme. Seeding the table is now what *enables* the boost.
+- `_close_week` takes the same advisory lock the accrual paths take; its `finalized` check
+  is check-then-act and would otherwise let two nodes interleave a permanent distribution.
+- A week **refuses to close** if vault hours were unvalued by a sampling outage, unless the
+  gap is acknowledged. Deliberate: distributions are permanent.
+- The **denylist** (`crystal_rewards_denylist`) excludes wallets from accrual *and* the
+  close. House/MM/test wallets belong there or they compete with users for the pool.
+
+### Rewards engine in depth (`core/rewards.py`)
+
+Runs as a worker thread inside `crystal-api`, leader-elected via
+`crystal_rewards_leader` so only one replica accrues. Raw USD per category is stored
+**separately from points** in `crystal_rewards_contrib`, so the inputs stay auditable
+after the fact.
+
+Rates are points per USD, or per USD-hour for vaults:
+
+| category | rate | | category | rate |
+|---|---|---|---|---|
+| `pregrad` | 1.0 | | `stable_taker` | 0.01 |
+| `grad` | 0.10 | | `stable_maker` | 0.002 |
+| `spot_taker` | 0.05 | | `vault_hour` | 0.05 |
+| `spot_maker` | 0.01 | | | |
+
+Weekly close: `adjusted = raw ** 0.8`, then `crystals = pool * adjusted / sum(adjusted)`.
+The 1,000,000 pool is **fully distributed by construction** — the exponent redistributes
+shares between wallets, it does not shrink the payout. Competition ranking (ties share a
+rank), percentile badges off `STATUS_LADDER`, self-cross earns zero.
+
+**The schedule is entirely kv/meta driven — moving a date needs NO redeploy:**
+
+| meta key | default | meaning |
+|---|---|---|
+| `rewards_program_start` | 9/16 00:00 LA | main accrual begins |
+| `rewards_vault_start` | 9/8 07:00 LA | vault accrual may begin |
+| `rewards_predeposit_start` | falls back to vault_start | boost window **opens** |
+| `rewards_predeposit_cutoff` | falls back to program_start | boost window **closes** |
+| `rewards_predeposit_multiplier` | 3.0 | the boost |
+| `rewards_max_gap_hours` | 6 | vault-gap close tolerance |
+
+**The cutoff bounds which deposits QUALIFY, not how long the boost lasts** — qualifying
+shares keep the multiplier for the whole season. If the open date slips, push the cutoff
+out by the same amount or the qualifying window collapses and the incentive evaporates.
+
+**Boost accounting is an ordered replay, not a net-at-cutoff snapshot.** Deposits inside
+the window go in a boosted book, deposits outside in an unboosted one, and a withdrawal
+spends **unboosted shares first** — so ordinary trimming preserves the boost, but dipping
+below what you pre-deposited burns it permanently. Pre-window deposits earning 3x was a
+real bug; it is now pinned by tests.
+
+**Concurrency, the subtle one.** Every accrual transaction takes
+`pg_advisory_xact_lock(782301944117)` before reading its watermark **through its own
+cursor**. `storage.get_meta()` reads on a *separate connection*, so without the lock the
+read-modify-write spans two transactions and concurrent workers double-count even with
+leader election. `test_concurrent_accrual_cannot_double_count` fails if you remove it.
+
+**Admin surface** — prefix is `REWARDS_PATH_PREFIX` (default `results`), key is env
+`REWARDS_ADMIN_KEY` sent as header `x-admin-key`. Reads are deliberately unauthenticated
+and nothing in the frontend fetches them.
+
+```
+GET  /results/status            schedule, watermarks, vault gaps
+GET  /results/gaps              unvalued vault-hours
+GET  /results/wallet/{addr}     balances, contrib, grants, badges
+GET  /results/volumes/{addr}    raw USD per category
+POST /results/denylist          {"address":"0x.."}         admin
+POST /results/bonus-vaults      {"vault":"0x.."}           admin
+POST /results/acknowledge-gaps  {"weekStart": N}           admin
+POST /results/run               force a cycle              admin
+```
+
+Two standing decisions people keep trying to reverse:
+- **`bonus-vaults` empty means EVERY vault earns the boost.** Anyone can spin up a junk
+  vault and farm it. Scoping it is the main outstanding pre-launch config action.
+- **The team depositor is deliberately NOT denylisted** (decided 9/1) — the team locks
+  its own capital and earns like anyone else. Do not "helpfully" add it. Note it ranks
+  #1 in every modelled scenario and rank/status are publicly readable.
+
+### The silent-zero vault guard
+
+If a vault holds shares but cannot be valued for an hour, **everyone in it earns nothing
+and nothing downstream says so.** Every other failure mode here is loud — a stalled
+indexer just makes the week close *wait*, which is safe. This one pays out quietly wrong,
+and a finalized week is permanent.
+
+So: each unvalued vault-hour is recorded in `crystal_rewards_vault_gaps` with a reason
+(`no_sample`, `stale_sample`, `zero_value`, `no_supply`) and logged as
+`[REWARDS] vault ... unvalued`. A successfully valued hour deletes its own gap row, so a
+backfill self-heals. `_close_week` then **refuses to finalize** (returns `None`, week
+stays open and retries) if any single vault exceeds `rewards_max_gap_hours` of
+`no_sample`/`stale_sample`.
+
+**Only missing/stale samples block.** A fresh sample reading `$0` is a genuinely empty
+vault — real data, correctly earning nothing — and must never hold up a payout, which is
+why `zero_value` is recorded but not counted. Escape hatch when a gap is real and
+accepted: `POST /results/acknowledge-gaps {"weekStart": N}`, scoped per week.
+
+### Vault accounting traps
+
+- TVL comes from `crystal_vault_balance_samples`; a sample older than
+  `VAULT_SAMPLE_STALENESS` (24h) does not count.
+- **Value a flow from one sample**, never by dividing USD by a rebuilt supply — that
+  inflated NAV 28x across a withdraw/redeposit and invented a $15k realized loss.
+- The flow ledger and the depositor counters are **two separate write seams**. A backfill
+  that calls only `insert_*` leaves counters stale and the drift is invisible. Write both.
+- PnL series, list snapshot and APY must share one constant-price basis, or a falling
+  base asset reads as strategy performance.
+
 ## Working conventions
 
 - Commit style: lowercase, one descriptive sentence, no co-author trailers. Commit and
