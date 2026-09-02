@@ -428,8 +428,17 @@ gap-upsert bug was only found because the test refused to pass for the right rea
 
 - **crystal.fun** (repo `crystal-fun`, github CrystalExch/Crystal-Fun, PRIVATE,
   auto-deploys from main): only `source == 0` tokens, calls `/fun/*`, `/holders`,
-  `/stats`, `/user`, `/tokens/feeds?source=0`. Chart = eight pure resolutions
-  1m…1w, MON/USD toggle converts per-candle via the `monUsd` window.
+  `/stats`, `/user`, `/tokens/feeds?source=0`. MON/USD toggle converts per-candle via
+  the `monUsd` window.
+  **Chart ladder is FIVE resolutions — `1m, 5m, 15m, 1h, 4h`** (`DETAIL_CHART_RESOLUTIONS`
+  in `src/components/DegenToken/TokenDetail.tsx`). 12h, 1d and 1w were deliberately
+  removed on 2026-09-01 as meaningless for memecoin lifespans. An earlier note here said
+  "eight pure resolutions 1m…1w" — that is stale. Practical consequence: the read-time
+  12h/1w aggregation in `_build_ohlcv_from_db` is **no longer exercised by crystal.fun**,
+  only by the main interface, so a regression there will not show up on the fun board.
+  Also note crystal.fun now shows a pre-trade size quote by calling `quoteBuy`/`quoteSell`
+  on-chain (debounced) rather than asking the backend — do not add a quote endpoint for it
+  without checking with the frontend first.
 - Main interface (repo `crystal interface`, app.crystal.exchange, auto-deploys):
   calls `/token/*`, `/chart/*`, plus vaults/pools/orderbook/rewards surfaces.
 
