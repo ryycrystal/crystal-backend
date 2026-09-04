@@ -2293,6 +2293,11 @@ def record_chain_tip(number: int, block_hash: str, cur=None) -> None:
     set_meta("tip_hash", (block_hash or "").lower(), cur=cur)
 
 
+def record_dex_tip(number: int, block_timestamp: int, cur=None) -> None:
+    set_meta("dex_tip_block", str(int(number)), cur=cur)
+    set_meta("dex_tip_ts", str(int(block_timestamp)), cur=cur)
+
+
 def wallet_has_crystal_activity(wallet: str) -> bool:
     addr = (wallet or "").lower()
     if not addr:
