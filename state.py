@@ -1542,7 +1542,52 @@ class State:
             lp.volume_usd += usd_amount
 
             if batch is None:
-                return False
+                storage.insert_trade(
+                    block_number=blk,
+                    log_index=log_idx,
+                    timestamp=ts,
+                    token=token,
+                    user_address=user,
+                    is_buy=is_buy,
+                    native_amount=native_amt,
+                    token_amount=token_amt,
+                    usd_amount=usd_amount,
+                    price_native=lp.last_price_native,
+                    txhash=txh,
+                    native_reserve=int(lp.curve_native_reserve),
+                    token_reserve=int(lp.curve_token_reserve),
+                    realized_native=int(realized_delta),
+                    cur=cur,
+                )
+                storage.update_user_on_trade(
+                    address=user,
+                    native_amount=native_amt,
+                    realized_delta=realized_delta,
+                    trade_count_delta=0,
+                    cur=cur,
+                )
+                storage.upsert_position(
+                    user_address=user,
+                    token=token,
+                    token_bought_delta=token_bought_delta,
+                    token_sold_delta=token_sold_delta,
+                    native_spent_delta=native_spent_delta,
+                    native_received_delta=native_received_delta,
+                    balance_token_delta=0,
+                    realized_pnl_delta=realized_delta,
+                    trade_count_delta=0,
+                    buy_count_delta=0,
+                    sell_count_delta=0,
+                    last_price_native=lp.last_price_native,
+                    cost_basis_delta=cost_basis_delta,
+                    cur=cur,
+                )
+                print(
+                    f"[State] reconciled {token[:12]} {user[:12]} tx={str(txh)[:12]} "
+                    f"{'buy' if is_buy else 'sell'} tokens={token_amt} native={native_amt}",
+                    flush=True,
+                )
+                return True
 
             batch.add_trade(
                 block_number=blk,

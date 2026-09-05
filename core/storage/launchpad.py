@@ -334,7 +334,12 @@ def update_token_after_trade(
 
 
 def update_user_on_trade(
-    *, address: str, native_amount: int, realized_delta, cur: psycopg2.extensions.cursor | None = None
+    *,
+    address: str,
+    native_amount: int,
+    realized_delta,
+    trade_count_delta: int = 1,
+    cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     addr = address.lower()
     if not addr:
@@ -350,7 +355,7 @@ def update_user_on_trade(
                     total_realized_pnl_native,
                     total_trades
                 )
-                VALUES (%s, %s, %s, 1)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (address) DO UPDATE
                 SET
                     total_native_volume = launchpad_users.total_native_volume + EXCLUDED.total_native_volume,
@@ -361,6 +366,7 @@ def update_user_on_trade(
                     addr,
                     int(abs(native_amount)),
                     realized_delta,
+                    int(trade_count_delta),
                 ),
             )
     else:
@@ -372,7 +378,7 @@ def update_user_on_trade(
                 total_realized_pnl_native,
                 total_trades
             )
-            VALUES (%s, %s, %s, 1)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (address) DO UPDATE
             SET
                 total_native_volume = launchpad_users.total_native_volume + EXCLUDED.total_native_volume,
@@ -383,6 +389,7 @@ def update_user_on_trade(
                 addr,
                 int(abs(native_amount)),
                 realized_delta,
+                int(trade_count_delta),
             ),
         )
 
