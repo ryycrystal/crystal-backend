@@ -617,6 +617,9 @@ class Sequencer:
             if not record_processed:
                 return
             storage.record_block_processed(blk, cur=c)
+            bts = self._timestamp_for_block_log(blk, logs[0] if logs else {})
+            if bts:
+                storage.record_dex_tip(blk, bts, cur=c)
             bh = (logs[0].get("blockHash") or "") if logs else ""
             if bh:
                 storage.record_chain_tip(blk, bh, cur=c)
@@ -1000,9 +1003,14 @@ class Sequencer:
 
         batch = BatchAccumulator()
         processed_blocks: list[int] = []
+        tip_block = 0
+        tip_ts = 0
 
         for blk in range(chunk_start, chunk_end + 1):
             logs = logs_by_block.get(blk, [])
+            bts = self._timestamp_for_block_log(blk, logs[0] if logs else {})
+            if bts:
+                tip_block, tip_ts = blk, bts
             self._process_block(blk, logs, cur=cur, counts_out=counts, batch=batch, record_processed=False)
             processed_blocks.append(blk)
 
@@ -1015,6 +1023,8 @@ class Sequencer:
         # from the table again on the next chunk
         self._state.basis_clear_overlay()
         storage.record_blocks_processed_batch(processed_blocks, cur=cur)
+        if tip_ts:
+            storage.record_dex_tip(tip_block, tip_ts, cur=cur)
 
         if self._on_block:
             for blk in processed_blocks:
