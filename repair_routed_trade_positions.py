@@ -40,7 +40,6 @@ load_env()
 
 import core.chain as h  # noqa: E402
 import modules.univ4 as univ4  # noqa: E402
-from core.storage.base import db_cursor  # noqa: E402
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
@@ -84,6 +83,20 @@ def rpc(method: str, params: list) -> Any:
     raise RuntimeError(f"{method}: gave up after {RPC_ATTEMPTS} attempts: {last!r}")
 
 
+def fresh_conn():
+    import psycopg2
+
+    return psycopg2.connect(
+        host=h.os.environ["PGHOST"],
+        port=int(h.os.getenv("PGPORT", "5432")),
+        user=h.os.environ["PGUSER"],
+        password=h.os.environ["PGPASSWORD"],
+        dbname=h.os.environ["PGDATABASE"],
+        sslmode=h.os.getenv("PGSSLMODE", "require"),
+        connect_timeout=30,
+    )
+
+
 def resolved_pghost() -> str:
     url = h.os.getenv("DATABASE_URL", "")
     if url:
@@ -119,18 +132,26 @@ def flagged_positions(band: str, limit: int | None, order: str = "stable") -> li
         sql += " ORDER BY user_address, token"
     if limit:
         sql += f" LIMIT {int(limit)}"
-    with db_cursor() as cur:
-        cur.execute(sql)
-        return cur.fetchall()
+    conn = fresh_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
 def position_txhashes(user: str, token: str) -> list[str]:
-    with db_cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT txhash FROM launchpad_trades WHERE user_address = %s AND token = %s",
-            (user, token),
-        )
-        return [r[0] for r in cur.fetchall()]
+    conn = fresh_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT txhash FROM launchpad_trades WHERE user_address = %s AND token = %s",
+                (user, token),
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 def derive_from_tx(txh: str, token: str, user: str) -> tuple[int, int, int]:
@@ -252,20 +273,6 @@ def snapshot_row(row: dict) -> None:
         fh.write(json.dumps(row) + chr(10))
 
 
-def fresh_conn():
-    import psycopg2
-
-    return psycopg2.connect(
-        host=h.os.environ["PGHOST"],
-        port=int(h.os.getenv("PGPORT", "5432")),
-        user=h.os.environ["PGUSER"],
-        password=h.os.environ["PGPASSWORD"],
-        dbname=h.os.environ["PGDATABASE"],
-        sslmode=h.os.getenv("PGSSLMODE", "require"),
-        connect_timeout=30,
-    )
-
-
 def write_correction(user: str, token: str, bought: int, native: int) -> bool:
     conn = fresh_conn()
     try:
@@ -324,7 +331,6 @@ def main() -> int:
     args = ap.parse_args()
 
     preflight(args.apply, args.i_know_the_host)
-    init_pool()
 
     rows = flagged_positions(args.band, args.sample or None, args.order)
     print(f"band={args.band}  positions={len(rows)}\n")
