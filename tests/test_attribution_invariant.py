@@ -89,11 +89,19 @@ def test_a_sell_reconciles_with_a_negative_delta():
     assert stub._state.reconciled[0]["token_delta"] == -(DELIVERED - CANONICAL_LEG_ONLY)
 
 
-def test_without_a_batch_it_falls_back_to_logging():
+def test_the_live_path_reconciles_even_without_a_batch():
     stub = _Stub({(TXH, TOKEN, USER): (CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
     Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=None)
+    assert stub.attribution_mismatches == 0
+    assert len(stub._state.reconciled) == 1
+    assert stub._state.reconciled[0]["batch"] is None
+
+
+def test_a_refused_reconciliation_still_logs():
+    stub = _Stub({(TXH, TOKEN, USER): (CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
+    stub._state.apply_reconciliation_trade = lambda **kw: False
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=None)
     assert stub.attribution_mismatches == 1
-    assert stub._state.reconciled == []
 
 
 def test_nothing_attributed_means_nothing_to_check():

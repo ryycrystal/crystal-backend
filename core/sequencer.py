@@ -297,7 +297,7 @@ class Sequencer:
 
             missing = net - amount
             reconciled = False
-            if amount != 0 and native_total > 0 and batch is not None:
+            if amount != 0 and native_total > 0:
                 imputed_native = abs(missing) * native_total // abs(amount)
                 reconciled = self._state.apply_reconciliation_trade(
                     token=token,
