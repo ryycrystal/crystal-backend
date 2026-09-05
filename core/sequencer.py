@@ -219,6 +219,7 @@ class Sequencer:
 
     def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
         transfer_maps: dict[tuple[str, str], dict] = {}
+        seen_logs: set[tuple[str, int]] = set()
 
         for log in logs:
             topics = log.get("topics") or []
@@ -243,6 +244,10 @@ class Sequencer:
 
             if not token or not from_addr or not to_addr or not txh:
                 continue
+
+            if (txh, log_idx) in seen_logs:
+                continue
+            seen_logs.add((txh, log_idx))
 
             key = (txh, token)
             maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}, "ordered": []})

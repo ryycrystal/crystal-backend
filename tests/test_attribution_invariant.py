@@ -71,3 +71,23 @@ def test_nothing_attributed_means_nothing_to_check():
     stub = _Stub({})
     Sequencer._verify_attribution(stub, 1, _maps())
     assert stub.attribution_mismatches == 0
+
+
+def test_transfer_maps_ignore_a_log_delivered_twice():
+    from core.sequencer import Sequencer
+
+    log = {
+        "address": TOKEN,
+        "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x" + "0" * 24 + PERMIT2[2:],
+            "0x" + "0" * 24 + USER[2:],
+        ],
+        "data": "0x" + f"{DELIVERED:064x}",
+        "transactionHash": TXH,
+        "logIndex": hex(128),
+    }
+    maps = Sequencer._build_transfer_maps(_Stub({}), [log, dict(log)])
+    ordered = maps[(TXH, TOKEN)]["ordered"]
+    assert len(ordered) == 1
+    assert ordered[0]["amount"] == DELIVERED
