@@ -11,6 +11,15 @@ from core import oracle
 from core.storage import db_cursor
 from modules import nadfun
 
+ATTRIBUTION_TOLERANCE_BPS = 10
+
+UNIV4_QUOTE_TOKENS = {
+    "0x3bd359c1119da7da1d913d1c4d2b7c461115433a",
+    "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56",
+    "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+    "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+}
+
 
 class BatchAccumulator:
     def __init__(self):
@@ -120,9 +129,11 @@ class BatchAccumulator:
         p["cost_basis_delta"] += int(cost_basis_delta)
         p["last_price_native"] = last_price_native
 
-    def add_ohlcv(self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int):
+    def add_ohlcv(
+        self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int, mon_usd=0
+    ):
         self.ohlcv_data.append(
-            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount))
+            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount), mon_usd or 0)
         )
 
     def add_sniper(self, token: str, user: str):
@@ -153,6 +164,7 @@ class Sequencer:
         self._on_block: Callable[[int], None] | None = None
         self._block_timestamps: dict[int, int] = {}
         self._missing_ts_warned: set[int] = set()
+        self.attribution_mismatches = 0
 
     def set_on_block(self, fn: Callable[[int], None]) -> None:
         self._on_block = fn
@@ -207,6 +219,7 @@ class Sequencer:
 
     def _build_transfer_maps(self, logs: list[dict]) -> dict[tuple[str, str], dict]:
         transfer_maps: dict[tuple[str, str], dict] = {}
+        seen_logs: set[tuple[str, int]] = set()
 
         for log in logs:
             topics = log.get("topics") or []
@@ -232,6 +245,10 @@ class Sequencer:
             if not token or not from_addr or not to_addr or not txh:
                 continue
 
+            if (txh, log_idx) in seen_logs:
+                continue
+            seen_logs.add((txh, log_idx))
+
             key = (txh, token)
             maps = transfer_maps.setdefault(key, {"next": {}, "prev": {}, "ordered": []})
             next_map: dict[str, set[str]] = maps["next"]
@@ -253,6 +270,99 @@ class Sequencer:
             maps["ordered"].sort(key=lambda x: x["log_idx"])
 
         return transfer_maps
+
+    def _verify_attribution(self, blk: int, transfer_maps: dict) -> None:
+        attributed = self._state.take_attributed_token_deltas()
+        if not attributed:
+            return
+
+        for (txh, token, user), amount in attributed.items():
+            maps = transfer_maps.get((txh, token))
+            if not maps:
+                continue
+            net = 0
+            for t in maps.get("ordered", []):
+                if t["to"] == user:
+                    net += int(t["amount"] or 0)
+                if t["from"] == user:
+                    net -= int(t["amount"] or 0)
+            if net == 0:
+                continue
+            diff = amount - net
+            if diff and abs(diff) * 10000 > abs(net) * ATTRIBUTION_TOLERANCE_BPS:
+                self.attribution_mismatches += 1
+                print(
+                    f"[SQ] attribution mismatch blk={blk} tx={txh[:12]} token={token[:12]} "
+                    f"user={user[:12]} attributed={amount} transfers={net} missing={net - amount}",
+                    flush=True,
+                )
+
+    def _register_univ4_from_currencies(self, pool_id, currency0, currency1, cur=None, learned_from="swap"):
+        c0 = (currency0 or "").lower()
+        c1 = (currency1 or "").lower()
+        if not pool_id or (not c0 and not c1):
+            return None
+        tokens = self._state.launchpad_tokens
+        if c0 in tokens and c1 and c1 not in tokens:
+            token, quote, token_is_0 = c0, c1, True
+        elif c1 in tokens and c0 and c0 not in tokens:
+            token, quote, token_is_0 = c1, c0, False
+        elif c0 in tokens and not c1:
+            token, quote, token_is_0 = c0, "", True
+        elif c1 in tokens and not c0:
+            token, quote, token_is_0 = c1, "", False
+        else:
+            return None
+        if not quote:
+            lp = tokens.get(token)
+            quote = (getattr(lp, "quote_token", "") or "").lower()
+        if quote not in UNIV4_QUOTE_TOKENS:
+            return None
+        return self._state.register_univ4_pool(pool_id, token, quote, token_is_0, cur=cur, learned_from=learned_from)
+
+    def _univ4_currencies_from_transfers(self, txh, amount0, amount1, transfer_maps):
+        pm = h.UNIV4_POOL_MANAGER_ADDR
+        txl = (txh or "").lower()
+        found = {}
+        for (key_tx, token), maps in transfer_maps.items():
+            if key_tx != txl:
+                continue
+            for t in maps.get("ordered", []):
+                if pm not in (t["from"], t["to"]):
+                    continue
+                amt = int(t["amount"] or 0)
+                if amount0 and amt == abs(amount0):
+                    found.setdefault(0, token)
+                if amount1 and amt == abs(amount1):
+                    found.setdefault(1, token)
+        return found.get(0, ""), found.get(1, "")
+
+    def _apply_univ4_swap(self, parsed, blk, blk_ts, txh, lii, transfer_maps, cur=None, batch=None):
+        pool_id = (parsed.get("pool_id") or "").lower()
+        amount0 = int(parsed.get("amount0") or 0)
+        amount1 = int(parsed.get("amount1") or 0)
+        if not pool_id or amount0 == 0 or amount1 == 0:
+            return
+
+        pi = self._state.v4_pools.get(pool_id)
+        if pi is None:
+            c0, c1 = self._univ4_currencies_from_transfers(txh, amount0, amount1, transfer_maps)
+            pi = self._register_univ4_from_currencies(pool_id, c0, c1, cur=cur)
+            if pi is None:
+                return
+
+        ev = {
+            "pool": pool_id,
+            "amount0": -amount0,
+            "amount1": -amount1,
+            "sqrt_price_x96": int(parsed.get("sqrt_price_x96") or 0),
+            "user": parsed.get("sender", ""),
+        }
+        real_user = self._resolve_trade_user(txh, {**ev, "token": pi.token_addr}, pool_id, transfer_maps)
+        if real_user:
+            ev["user"] = real_user
+
+        self._state.apply_launchpad_trade(ev, blk, blk_ts, txh, lii, h.UNIV4_POOL_MANAGER_ADDR, cur=cur, batch=batch)
 
     def _resolve_trade_user(
         self,
@@ -543,7 +653,7 @@ class Sequencer:
             if not topics:
                 continue
             tag = h.EVENT_SIGS.get(topics[0].lower())
-            if tag in ("LT", "TR", "NFB", "NFS", "V2SWAP", "V3SWAP"):
+            if tag in ("LT", "TR", "NFB", "NFS", "V2SWAP", "V3SWAP", "V4SWAP"):
                 txh = (log.get("transactionHash") or "").lower()
                 if txh:
                     txs.add(txh)
@@ -562,6 +672,7 @@ class Sequencer:
     ):
         self._preload_missing_v2_tokens(blk, logs, cur)
         transfer_maps = self._build_transfer_maps(logs) if has_trades else {}
+        self._state.take_attributed_token_deltas()
 
         for idx, log in enumerate(logs):
             blk_ts = self._timestamp_for_block_log(blk, log)
@@ -623,7 +734,14 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
                 self._state.apply_market_trade(
-                    blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx
+                    blk,
+                    blk_ts,
+                    parsed,
+                    log.get("address", "").lower(),
+                    cur=cur,
+                    batch=batch,
+                    txh=txh,
+                    log_idx=lii,
                 )
 
             elif tag == "OBU":
@@ -801,6 +919,20 @@ class Sequencer:
                 if sync_r0 or sync_r1:
                     storage.update_pool_reserves(pool_addr, sync_r0, sync_r1, blk, blk_ts, cur=cur)
 
+            elif tag == "V4INIT":
+                if parsed:
+                    self._register_univ4_from_currencies(
+                        parsed.get("pool_id", ""),
+                        parsed.get("currency0", ""),
+                        parsed.get("currency1", ""),
+                        cur=cur,
+                        learned_from="initialize",
+                    )
+
+            elif tag == "V4SWAP":
+                if parsed:
+                    self._apply_univ4_swap(parsed, blk, blk_ts, txh, lii, transfer_maps, cur=cur, batch=batch)
+
             elif tag in ("V2SWAP", "V3SWAP"):
                 pool_addr = (log.get("address") or "").lower()
                 if tag == "V3SWAP" and pool_addr == oracle.MON_USD_POOL:
@@ -825,6 +957,8 @@ class Sequencer:
                 self._state.apply_launchpad_trade(
                     parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
                 )
+
+        self._verify_attribution(blk, transfer_maps)
 
     def process_chunk(
         self,

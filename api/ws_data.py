@@ -40,7 +40,7 @@ def recent_trades(token: str) -> list[dict[str, Any]]:
                    is_buy, native_amount, token_amount, usd_amount, price_native
             FROM launchpad_trades
             WHERE token = %s
-            ORDER BY timestamp DESC, log_index DESC
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC
             LIMIT %s
             """,
             (token, TRADES_LIMIT),

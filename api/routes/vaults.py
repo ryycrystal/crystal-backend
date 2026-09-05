@@ -761,11 +761,13 @@ def vault_refresh_balance(
         ur = storage.get_crystal_vault_user(vaddr, uaddr)
         u_shares = int(ur[0] or 0) if ur else 0
         share_pct = (u_shares / circ) if circ > 0 and u_shares > 0 else 0.0
+        chain_unlock = _chain_unlock_timestamp(vaddr, uaddr) if u_shares > 0 else None
         lock_fields = _vault_user_lockup_fields(
             now_ts=int(ts),
             lockup_seconds=int(lockup or 0),
             user_row=ur,
             user_shares=u_shares,
+            chain_unlock_at=chain_unlock,
         )
         user_summary = {
             "address": uaddr,

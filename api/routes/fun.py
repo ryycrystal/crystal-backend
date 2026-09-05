@@ -38,6 +38,7 @@ def _trade_rows_out(rows: list) -> list[dict[str, Any]]:
         token_amount,
         price_native,
         txhash,
+        block_number,
     ) in rows:
         is_buy_flag = bool(is_buy)
         native_amount = int(native_amount or 0)
@@ -51,6 +52,10 @@ def _trade_rows_out(rows: list) -> list[dict[str, Any]]:
                     "amountIn": str(amount_in),
                     "amountOut": str(amount_out),
                     "block": str(int(ts_tr)),
+                    "timestamp": str(int(ts_tr)),
+                    "blockNumber": str(int(block_number or 0)),
+                    "logIndex": int(log_index),
+                    "txhash": txhash,
                     "id": f"{txhash}-{log_index}",
                     "isBuy": is_buy_flag,
                     "priceNativePerTokenWad": _scaled_price(price_native),
@@ -129,10 +134,10 @@ def fun_token_overview(
             cur.execute(
                 """
                 SELECT log_index, timestamp, user_address, is_buy,
-                       native_amount, token_amount, price_native, txhash
+                       native_amount, token_amount, price_native, txhash, block_number
                 FROM launchpad_trades
                 WHERE token = %s
-                ORDER BY timestamp DESC, log_index DESC, txhash DESC
+                ORDER BY timestamp DESC, block_number DESC, log_index DESC
                 LIMIT 50
                 """,
                 (token_addr,),
@@ -147,10 +152,10 @@ def fun_token_overview(
                 cur.execute(
                     """
                     SELECT log_index, timestamp, user_address, is_buy,
-                           native_amount, token_amount, price_native, txhash
+                           native_amount, token_amount, price_native, txhash, block_number
                     FROM launchpad_trades
                     WHERE token = %s AND user_address = ANY(%s)
-                    ORDER BY timestamp DESC, log_index DESC, txhash DESC
+                    ORDER BY timestamp DESC, block_number DESC, log_index DESC
                     LIMIT 500
                     """,
                     (token_addr, tracked_addrs),

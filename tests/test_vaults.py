@@ -911,6 +911,7 @@ def test_vault_refresh_balance_success_and_user_projection():
         _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": hex(123)}),
         _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": {"timestamp": hex(456)}}),
         _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": call_hex}),
+        _HttpxResp({"jsonrpc": "2.0", "id": 1, "result": hex(900)}),
     ]
     fake_state = MagicMock()
     with ExitStack() as st:
@@ -941,12 +942,12 @@ def test_vault_refresh_balance_success_and_user_projection():
     assert out["userBalance"]["baseBalance"] == 1250
     assert out["userBalance"]["lastDeposit"] == 400
     assert out["userBalance"]["withdrawLocked"] is True
-    assert out["userBalance"]["withdrawUnlockAt"] == 500
-    assert out["userBalance"]["withdrawLockupRemaining"] == 44
+    assert out["userBalance"]["withdrawUnlockAt"] == 900
+    assert out["userBalance"]["withdrawLockupRemaining"] == 444
     assert out["status"] == {"locked": True, "closed": False}
     assert out["samplePersisted"] is False
     assert out["source"] == "rpc"
-    assert post.call_count == 3
+    assert post.call_count == 4
     fake_state.record_vault_balance_sample.assert_not_called()
 
 

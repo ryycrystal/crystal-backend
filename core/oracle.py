@@ -17,18 +17,46 @@ USDC_DECIMALS = 6
 
 _Q96 = Decimal(2) ** 96
 
+_MON_USD_DECIMAL_SCALE = Decimal(10) ** (WMON_DECIMALS - USDC_DECIMALS)
+_MIN_MON_WEI_FOR_SWAP_RATIO = 10**17
+_MIN_PLAUSIBLE_MON_USD = Decimal("0.0001")
+_MAX_PLAUSIBLE_MON_USD = Decimal("10000")
+
+
+def _mon_usd_from_sqrt_price(sqrt_price_x96: int) -> Decimal | None:
+    if sqrt_price_x96 <= 0:
+        return None
+
+    ratio = (Decimal(sqrt_price_x96) / _Q96) ** 2
+    if ratio <= 0:
+        return None
+
+    return ratio * _MON_USD_DECIMAL_SCALE
+
+
+def _mon_usd_from_swap_amounts(mon_amount: int, usd_amount: int) -> Decimal | None:
+    if mon_amount == 0 or abs(mon_amount) < _MIN_MON_WEI_FOR_SWAP_RATIO:
+        return None
+
+    return Decimal(-usd_amount * 10**18) / Decimal(mon_amount * 10**6)
+
 
 def mon_price_from_v3swap(ev: dict[str, Any]) -> Decimal | None:
     try:
         mon_amount = int(ev.get("amount0") or 0)
         usd_amount = int(ev.get("amount1") or 0)
+        sqrt_price_x96 = int(ev.get("sqrt_price_x96") or 0)
     except (TypeError, ValueError):
         return None
 
-    if mon_amount == 0:
+    price = _mon_usd_from_sqrt_price(sqrt_price_x96)
+    if price is None:
+        price = _mon_usd_from_swap_amounts(mon_amount, usd_amount)
+
+    if price is None or not (_MIN_PLAUSIBLE_MON_USD <= price <= _MAX_PLAUSIBLE_MON_USD):
         return None
 
-    return Decimal(-usd_amount * 10**18) / Decimal(mon_amount * 10**6)
+    return price
 
 
 def lvmon_rate_from_v3swap(ev: dict[str, Any]) -> Decimal | None:
