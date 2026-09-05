@@ -16,6 +16,7 @@ class DbBackedBasis(state_mod.State):
     def __init__(self, committed):
         self._basis_overlay = {}
         self._basis_block = -1
+        self._counted_trade_keys = set()
         self.committed = committed
 
     def _basis_for(self, user, token, cur=None):

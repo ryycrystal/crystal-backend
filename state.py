@@ -194,6 +194,9 @@ class State:
         self.launchpad_tokens: dict[str, models.LaunchpadToken] = {}
         self.launchpad_market_to_token: dict[str, str] = {}
         self.v3_pools: dict[str, models.PoolInfo] = {}
+        self.v4_pools: dict[str, models.PoolInfo] = {}
+        self._counted_trade_keys: set[tuple[str, str, str]] = set()
+        self._attributed_token_deltas: dict[tuple[str, str, str], int] = {}
         self.token_to_v3_pool: dict[str, str] = {}
 
         self.addressToMarket: dict[str, models.MarketInfo] = {}
@@ -265,6 +268,7 @@ class State:
             self.launchpad_tokens.clear()
             self.launchpad_market_to_token.clear()
             self.v3_pools.clear()
+            self.v4_pools.clear()
             self.token_to_v3_pool.clear()
             self._reset_aux_locked()
 
@@ -359,6 +363,14 @@ class State:
 
                 if pool.lower() not in h.ADDRS:
                     h.ADDRS.append(pool.lower())
+
+            for pool_id, token_addr, native_addr, token_is_0 in storage.load_univ4_pools_for_state():
+                self.v4_pools[pool_id.lower()] = models.PoolInfo(
+                    pool=pool_id.lower(),
+                    token_addr=token_addr.lower(),
+                    native_addr=native_addr.lower(),
+                    token_is_0=bool(token_is_0),
+                )
 
             try:
                 stored = storage.get_mon_price_usd()
@@ -540,9 +552,43 @@ class State:
             self.launchpad_tokens.clear()
             self.launchpad_market_to_token.clear()
             self.v3_pools.clear()
+            self.v4_pools.clear()
             self.token_to_v3_pool.clear()
             self._reset_aux_locked()
             print("[State] Reset for reindex: cleared all in-memory state")
+
+    def register_univ4_pool(
+        self,
+        pool_id: str,
+        token_addr: str,
+        native_addr: str,
+        token_is_0: bool,
+        cur=None,
+        learned_from: str = "swap",
+    ):
+        pid = (pool_id or "").lower()
+        token = (token_addr or "").lower()
+        quote = (native_addr or "").lower()
+        if not pid or not token or not quote or token == quote:
+            return None
+        existing = self.v4_pools.get(pid)
+        if existing is not None:
+            return existing
+        pi = models.PoolInfo(pool=pid, token_addr=token, native_addr=quote, token_is_0=bool(token_is_0))
+        self.v4_pools[pid] = pi
+        try:
+            storage.upsert_univ4_pool(
+                pool_id=pid,
+                token_addr=token,
+                native_addr=quote,
+                token_is_0=bool(token_is_0),
+                learned_from=learned_from,
+                cur=cur,
+            )
+        except Exception as e:
+            print(f"[State] failed to persist univ4 pool {pid}: {e!r}", flush=True)
+        print(f"[State] learned univ4 pool {pid} token={token} quote={quote} via {learned_from}", flush=True)
+        return pi
 
     def ensure_v2_launchpad_token(
         self,
@@ -877,7 +923,7 @@ class State:
                         price_native = Decimal(0)
             else:
                 pool_addr = (ev.get("pool") or "").lower()
-                pi = self.v3_pools.get(pool_addr)
+                pi = self.v3_pools.get(pool_addr) or self.v4_pools.get(pool_addr)
                 if pi is None:
                     return
 
@@ -1048,7 +1094,18 @@ class State:
                 realized_delta = Decimal(native_amt) - Decimal(released)
                 cost_basis_delta = -int(released)
 
-            trade_count_delta = 1
+            counted_key = ((txh or "").lower(), token, user)
+            signed_token_delta = int(token_amt) if is_buy else -int(token_amt)
+            self._attributed_token_deltas[counted_key] = (
+                self._attributed_token_deltas.get(counted_key, 0) + signed_token_delta
+            )
+            if counted_key in self._counted_trade_keys:
+                trade_count_delta = 0
+                buy_count_delta = 0
+                sell_count_delta = 0
+            else:
+                self._counted_trade_keys.add(counted_key)
+                trade_count_delta = 1
 
             usd_amount = volume_usd_trade
 
@@ -1089,7 +1146,7 @@ class State:
                         "curve_token_reserve": int(lp.curve_token_reserve),
                     },
                 )
-                batch.add_user_delta(user, int(native_amt), realized_delta)
+                batch.add_user_delta(user, int(native_amt), realized_delta, trade_count_delta)
                 batch.add_position_delta(
                     user_address=user,
                     token=token,
@@ -1425,9 +1482,15 @@ class State:
             self._basis_block = blk
             self._basis_overlay.clear()
 
+    def take_attributed_token_deltas(self) -> dict[tuple[str, str, str], int]:
+        taken = self._attributed_token_deltas
+        self._attributed_token_deltas = {}
+        return taken
+
     def basis_clear_overlay(self) -> None:
         self._basis_overlay.clear()
         self._basis_block = -1
+        self._counted_trade_keys.clear()
 
     def _basis_apply_buy(self, user: str, token: str, token_amt: int, native_amt: int, cur=None) -> None:
         entry = self._basis_for(user, token, cur=cur)

@@ -1026,6 +1026,34 @@ def increment_user_tokens_graduated(address: str, cur: psycopg2.extensions.curso
         )
 
 
+def upsert_univ4_pool(
+    *,
+    pool_id: str,
+    token_addr: str,
+    native_addr: str,
+    token_is_0: bool,
+    learned_from: str = "swap",
+    cur: psycopg2.extensions.cursor | None = None,
+) -> None:
+    sql = """
+        INSERT INTO univ4_pools (pool_id, token_addr, native_addr, token_is_0, learned_from)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (pool_id) DO NOTHING;
+    """
+    args = (pool_id.lower(), token_addr.lower(), native_addr.lower(), bool(token_is_0), learned_from)
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, args)
+    else:
+        cur.execute(sql, args)
+
+
+def load_univ4_pools_for_state() -> list[tuple]:
+    with db_cursor() as cur:
+        cur.execute("SELECT pool_id, token_addr, native_addr, token_is_0 FROM univ4_pools")
+        return cur.fetchall()
+
+
 def upsert_pool(
     *,
     pool: str,
