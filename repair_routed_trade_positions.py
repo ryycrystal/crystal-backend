@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+import os
+import pathlib
 import sys
 import urllib.request
 from typing import Any
@@ -54,20 +57,31 @@ BANDS = {
 _rpc_id = 0
 
 
+RPC_ATTEMPTS = 6
+
+
 def rpc(method: str, params: list) -> Any:
     global _rpc_id
-    _rpc_id += 1
-    body = json.dumps({"jsonrpc": "2.0", "id": _rpc_id, "method": method, "params": params}).encode()
-    req = urllib.request.Request(
-        h.os.getenv("RPC_HTTP", "https://rpc.monad.xyz"),
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        out = json.loads(resp.read())
-    if "error" in out:
-        raise RuntimeError(f"{method}: {out['error']}")
-    return out["result"]
+    last = None
+    for attempt in range(RPC_ATTEMPTS):
+        _rpc_id += 1
+        body = json.dumps({"jsonrpc": "2.0", "id": _rpc_id, "method": method, "params": params}).encode()
+        req = urllib.request.Request(
+            h.os.getenv("RPC_HTTP", "https://rpc.monad.xyz"),
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                out = json.loads(resp.read())
+        except Exception as exc:
+            last = exc
+            time.sleep(min(2**attempt, 30))
+            continue
+        if "error" in out:
+            raise RuntimeError(f"{method}: {out['error']}")
+        return out["result"]
+    raise RuntimeError(f"{method}: gave up after {RPC_ATTEMPTS} attempts: {last!r}")
 
 
 def resolved_pghost() -> str:
@@ -91,15 +105,18 @@ def signed(word: str) -> int:
     return int.from_bytes(bytes.fromhex(word), "big", signed=True)
 
 
-def flagged_positions(band: str, limit: int | None) -> list[tuple[str, str, int, int, int, int]]:
+def flagged_positions(band: str, limit: int | None, order: str = "stable") -> list[tuple[str, str, int, int, int, int]]:
     sql = f"""
         SELECT user_address, token, balance_token, token_bought, native_spent, cost_basis_native
         FROM launchpad_positions
         WHERE balance_token > 0 AND token_sold = 0 AND trade_count > 0
           AND balance_token > token_bought * 1.001
           {BANDS[band]}
-        ORDER BY user_address, token
     """
+    if order == "random":
+        sql += " ORDER BY md5(user_address || token)"
+    else:
+        sql += " ORDER BY user_address, token"
     if limit:
         sql += f" LIMIT {int(limit)}"
     with db_cursor() as cur:
@@ -212,25 +229,94 @@ def analyse(user: str, token: str, max_txs: int) -> dict:
     }
 
 
+SNAPSHOT_PATH = os.environ.get("REPAIR_SNAPSHOT", "repair_routed_snapshot.jsonl")
+PROGRESS_PATH = os.environ.get("REPAIR_PROGRESS", "repair_routed_progress.json")
+
+
+def load_progress() -> set:
+    try:
+        return set(tuple(x) for x in json.loads(pathlib.Path(PROGRESS_PATH).read_text()))
+    except Exception:
+        return set()
+
+
+def save_progress(done: set) -> None:
+    try:
+        pathlib.Path(PROGRESS_PATH).write_text(json.dumps(sorted(done)))
+    except Exception:
+        pass
+
+
+def snapshot_row(row: dict) -> None:
+    with open(SNAPSHOT_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + chr(10))
+
+
+def write_correction(user: str, token: str, bought: int, native: int) -> bool:
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT token_bought, native_spent, cost_basis_native, token_sold, balance_token
+            FROM launchpad_positions
+            WHERE user_address = %s AND token = %s
+            """,
+            (user, token),
+        )
+        before = cur.fetchone()
+        if not before:
+            return False
+        if int(before[3]) != 0:
+            return False
+        snapshot_row(
+            {
+                "user_address": user,
+                "token": token,
+                "token_bought": str(before[0]),
+                "native_spent": str(before[1]),
+                "cost_basis_native": str(before[2]),
+                "balance_token": str(before[4]),
+                "new_token_bought": str(bought),
+                "new_native_spent": str(native),
+            }
+        )
+        cur.execute(
+            """
+            UPDATE launchpad_positions
+            SET token_bought = %s, native_spent = %s, cost_basis_native = %s
+            WHERE user_address = %s AND token = %s AND token_sold = 0
+            """,
+            (bought, native, native, user, token),
+        )
+        return cur.rowcount == 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--band", choices=sorted(BANDS), default="all")
     ap.add_argument("--sample", type=int, default=0, help="only look at N positions")
     ap.add_argument("--max-txs", type=int, default=60, help="cap transactions re-derived per position")
+    ap.add_argument("--order", choices=("stable", "random"), default="random")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--i-know-the-host", action="store_true")
     args = ap.parse_args()
 
     preflight(args.apply, args.i_know_the_host)
     init_pool()
-    if args.apply:
-        raise SystemExit("--apply is not implemented yet: run dry, review, then wire the write step")
 
-    rows = flagged_positions(args.band, args.sample or None)
+    rows = flagged_positions(args.band, args.sample or None, args.order)
     print(f"band={args.band}  positions={len(rows)}\n")
 
-    missing_legs = airdrops = clean = 0
+    done = load_progress() if args.apply else set()
+    if done:
+        print(f"resuming: {len(done)} positions already processed" + chr(10))
+    if args.apply:
+        init_pool()
+
+    missing_legs = airdrops = clean = written = skipped = 0
     for user, token, balance, bought, native_spent, basis in rows:
+        if (user, token) in done:
+            skipped += 1
+            continue
         r = analyse(user, token, args.max_txs)
         bought = int(bought)
         derived = r["derived_tokens"]
@@ -244,8 +330,27 @@ def main() -> int:
             missing_legs += 1
         else:
             clean += 1
+        bal_int = int(balance)
+        explains_holding = bal_int > 0 and abs(derived - bal_int) * 1000 <= bal_int
+        if (
+            args.apply
+            and kind == "MISSING LEGS"
+            and not r["truncated"]
+            and r["derived_native"] > 0
+            and explains_holding
+        ):
+            try:
+                if write_correction(user, token, derived, r["derived_native"]):
+                    written += 1
+            except Exception as exc:
+                print(f"  ! write failed {user[:12]} {token[:12]}: {exc}")
+            done.add((user, token))
+            save_progress(done)
+        elif args.apply:
+            done.add((user, token))
+
         print(
-            f"{user[:12]} {token[:12]} {kind:<13} "
+            f"{user[:12]} {token[:12]} {kind:<13}{'' if explains_holding or kind != 'MISSING LEGS' else '[skip:holding]'} "
             f"bal={int(balance) / 1e18:>14,.0f} bought={bought / 1e18:>14,.0f} "
             f"derived={derived / 1e18:>14,.0f} transfer_in={r['transfer_in'] / 1e18:>14,.0f} "
             f"native={int(native_spent) / 1e18:>12,.0f}->{r['derived_native'] / 1e18:>12,.0f} "
@@ -256,6 +361,10 @@ def main() -> int:
     print(f"\nmissing legs : {missing_legs} ({missing_legs * 100 / total:.0f}%)")
     print(f"airdrops     : {airdrops} ({airdrops * 100 / total:.0f}%)")
     print(f"clean        : {clean} ({clean * 100 / total:.0f}%)")
+    if args.apply:
+        save_progress(done)
+        print(f"rows written : {written}   resumed-skipped: {skipped}")
+        print(f"snapshot     : {SNAPSHOT_PATH}")
     print(f"\nDecimal check unused: {Decimal(0)}" if False else "")
     return 0
 
