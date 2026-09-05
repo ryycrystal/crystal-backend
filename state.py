@@ -364,7 +364,13 @@ class State:
                 if pool.lower() not in h.ADDRS:
                     h.ADDRS.append(pool.lower())
 
-            for pool_id, token_addr, native_addr, token_is_0 in storage.load_univ4_pools_for_state():
+            try:
+                univ4_rows = storage.load_univ4_pools_for_state()
+            except Exception as e:
+                univ4_rows = []
+                print(f"[State] univ4 pools unavailable, continuing without them: {e!r}", flush=True)
+
+            for pool_id, token_addr, native_addr, token_is_0 in univ4_rows:
                 self.v4_pools[pool_id.lower()] = models.PoolInfo(
                     pool=pool_id.lower(),
                     token_addr=token_addr.lower(),
