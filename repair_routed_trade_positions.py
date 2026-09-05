@@ -86,6 +86,19 @@ def rpc(method: str, params: list) -> Any:
 def fresh_conn():
     import psycopg2
 
+    last = None
+    for attempt in range(6):
+        try:
+            return _connect_once()
+        except Exception as exc:
+            last = exc
+            time.sleep(min(2**attempt, 30))
+    raise RuntimeError(f"database unreachable after 6 attempts: {last!r}")
+
+
+def _connect_once():
+    import psycopg2
+
     return psycopg2.connect(
         host=h.os.environ["PGHOST"],
         port=int(h.os.getenv("PGPORT", "5432")),
