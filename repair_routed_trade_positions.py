@@ -331,7 +331,7 @@ def main() -> int:
         else:
             clean += 1
         bal_int = int(balance)
-        explains_holding = bal_int > 0 and abs(derived - bal_int) * 1000 <= bal_int
+        explains_holding = bal_int > 0 and derived == bal_int
         if (
             args.apply
             and kind == "MISSING LEGS"
