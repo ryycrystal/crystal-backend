@@ -271,29 +271,52 @@ class Sequencer:
 
         return transfer_maps
 
-    def _verify_attribution(self, blk: int, transfer_maps: dict) -> None:
+    def _verify_attribution(self, blk: int, transfer_maps: dict, cur=None, batch=None) -> None:
         attributed = self._state.take_attributed_token_deltas()
         if not attributed:
             return
 
-        for (txh, token, user), amount in attributed.items():
+        for (txh, token, user), (amount, native_total) in attributed.items():
             maps = transfer_maps.get((txh, token))
             if not maps:
                 continue
             net = 0
+            deliver_idx = 0
             for t in maps.get("ordered", []):
                 if t["to"] == user:
                     net += int(t["amount"] or 0)
+                    deliver_idx = max(deliver_idx, int(t["log_idx"] or 0))
                 if t["from"] == user:
                     net -= int(t["amount"] or 0)
+                    deliver_idx = max(deliver_idx, int(t["log_idx"] or 0))
             if net == 0:
                 continue
             diff = amount - net
-            if diff and abs(diff) * 10000 > abs(net) * ATTRIBUTION_TOLERANCE_BPS:
+            if not diff or abs(diff) * 10000 <= abs(net) * ATTRIBUTION_TOLERANCE_BPS:
+                continue
+
+            missing = net - amount
+            reconciled = False
+            if amount != 0 and native_total > 0 and batch is not None:
+                imputed_native = abs(missing) * native_total // abs(amount)
+                reconciled = self._state.apply_reconciliation_trade(
+                    token=token,
+                    user=user,
+                    token_delta=missing,
+                    native_amount=imputed_native,
+                    blk=blk,
+                    ts=int(self._block_timestamps.get(blk, 0)),
+                    txh=txh,
+                    log_idx=deliver_idx,
+                    cur=cur,
+                    batch=batch,
+                )
+
+            if not reconciled:
                 self.attribution_mismatches += 1
                 print(
                     f"[SQ] attribution mismatch blk={blk} tx={txh[:12]} token={token[:12]} "
-                    f"user={user[:12]} attributed={amount} transfers={net} missing={net - amount}",
+                    f"user={user[:12]} attributed={amount} transfers={net} missing={missing}",
                     flush=True,
                 )
 
@@ -958,7 +981,7 @@ class Sequencer:
                     parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
                 )
 
-        self._verify_attribution(blk, transfer_maps)
+        self._verify_attribution(blk, transfer_maps, cur=cur, batch=batch)
 
     def process_chunk(
         self,

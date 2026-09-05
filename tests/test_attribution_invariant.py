@@ -7,22 +7,29 @@ PERMIT2 = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"
 
 DELIVERED = 7038992716474790000000000
 CANONICAL_LEG_ONLY = 3939541450000000000000000
+CANONICAL_NATIVE = 88936900000000000000000
 
 
 class _FakeState:
     def __init__(self, attributed):
         self._attributed = attributed
+        self.reconciled = []
 
     def take_attributed_token_deltas(self):
         taken = self._attributed
         self._attributed = {}
         return taken
 
+    def apply_reconciliation_trade(self, **kw):
+        self.reconciled.append(kw)
+        return True
+
 
 class _Stub:
     def __init__(self, attributed):
         self._state = _FakeState(attributed)
         self.attribution_mismatches = 0
+        self._block_timestamps = {101979140: 1788400000}
 
 
 def _maps():
@@ -35,47 +42,67 @@ def _maps():
     }
 
 
-def test_fires_when_only_one_leg_of_a_routed_buy_was_attributed(capsys):
-    stub = _Stub({(TXH, TOKEN, USER): CANONICAL_LEG_ONLY})
-    Sequencer._verify_attribution(stub, 101979140, _maps())
-    assert stub.attribution_mismatches == 1
-    out = capsys.readouterr().out
-    assert "attribution mismatch" in out
-    assert str(DELIVERED - CANONICAL_LEG_ONLY) in out
+def _sell_maps():
+    return {(TXH, TOKEN): {"ordered": [{"log_idx": 5, "from": USER, "to": PERMIT2, "amount": DELIVERED}]}}
+
+
+def test_a_gap_is_reconciled_rather_than_only_logged():
+    stub = _Stub({(TXH, TOKEN, USER): (CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=object())
+    assert stub.attribution_mismatches == 0
+    assert len(stub._state.reconciled) == 1
+    r = stub._state.reconciled[0]
+    assert r["token_delta"] == DELIVERED - CANONICAL_LEG_ONLY
+    assert r["log_idx"] == 128
+    assert r["txh"] == TXH
+
+
+def test_the_reconciled_leg_is_priced_at_the_observed_legs_vwap():
+    stub = _Stub({(TXH, TOKEN, USER): (CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=object())
+    r = stub._state.reconciled[0]
+    missing = DELIVERED - CANONICAL_LEG_ONLY
+    assert r["native_amount"] == missing * CANONICAL_NATIVE // CANONICAL_LEG_ONLY
+    observed_price = CANONICAL_NATIVE / CANONICAL_LEG_ONLY
+    imputed_price = r["native_amount"] / r["token_delta"]
+    assert abs(imputed_price - observed_price) / observed_price < 1e-6
 
 
 def test_silent_once_every_leg_is_attributed():
-    stub = _Stub({(TXH, TOKEN, USER): DELIVERED})
-    Sequencer._verify_attribution(stub, 101979140, _maps())
+    stub = _Stub({(TXH, TOKEN, USER): (DELIVERED, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=object())
+    assert stub.attribution_mismatches == 0
+    assert stub._state.reconciled == []
+
+
+def test_dust_rounding_below_tolerance_does_not_reconcile():
+    stub = _Stub({(TXH, TOKEN, USER): (DELIVERED - 1, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=object())
+    assert stub._state.reconciled == []
     assert stub.attribution_mismatches == 0
 
 
-def test_dust_rounding_below_tolerance_does_not_fire():
-    stub = _Stub({(TXH, TOKEN, USER): DELIVERED - 1})
-    Sequencer._verify_attribution(stub, 101979140, _maps())
-    assert stub.attribution_mismatches == 0
+def test_a_sell_reconciles_with_a_negative_delta():
+    stub = _Stub({(TXH, TOKEN, USER): (-CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _sell_maps(), cur=None, batch=object())
+    assert len(stub._state.reconciled) == 1
+    assert stub._state.reconciled[0]["token_delta"] == -(DELIVERED - CANONICAL_LEG_ONLY)
 
 
-def test_a_sell_is_compared_with_the_right_sign():
-    maps = {(TXH, TOKEN): {"ordered": [{"log_idx": 5, "from": USER, "to": PERMIT2, "amount": DELIVERED}]}}
-    stub = _Stub({(TXH, TOKEN, USER): -DELIVERED})
-    Sequencer._verify_attribution(stub, 1, maps)
-    assert stub.attribution_mismatches == 0
-
-    stub = _Stub({(TXH, TOKEN, USER): -CANONICAL_LEG_ONLY})
-    Sequencer._verify_attribution(stub, 1, maps)
+def test_without_a_batch_it_falls_back_to_logging():
+    stub = _Stub({(TXH, TOKEN, USER): (CANONICAL_LEG_ONLY, CANONICAL_NATIVE)})
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=None)
     assert stub.attribution_mismatches == 1
+    assert stub._state.reconciled == []
 
 
 def test_nothing_attributed_means_nothing_to_check():
     stub = _Stub({})
-    Sequencer._verify_attribution(stub, 1, _maps())
+    Sequencer._verify_attribution(stub, 101979140, _maps(), cur=None, batch=object())
     assert stub.attribution_mismatches == 0
 
 
 def test_transfer_maps_ignore_a_log_delivered_twice():
-    from core.sequencer import Sequencer
-
     log = {
         "address": TOKEN,
         "topics": [

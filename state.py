@@ -197,6 +197,7 @@ class State:
         self.v4_pools: dict[str, models.PoolInfo] = {}
         self._counted_trade_keys: set[tuple[str, str, str]] = set()
         self._attributed_token_deltas: dict[tuple[str, str, str], int] = {}
+        self._attributed_native_amounts: dict[tuple[str, str, str], int] = {}
         self.token_to_v3_pool: dict[str, str] = {}
 
         self.addressToMarket: dict[str, models.MarketInfo] = {}
@@ -1105,6 +1106,9 @@ class State:
             self._attributed_token_deltas[counted_key] = (
                 self._attributed_token_deltas.get(counted_key, 0) + signed_token_delta
             )
+            self._attributed_native_amounts[counted_key] = self._attributed_native_amounts.get(counted_key, 0) + int(
+                native_amt
+            )
             if counted_key in self._counted_trade_keys:
                 trade_count_delta = 0
                 buy_count_delta = 0
@@ -1488,10 +1492,103 @@ class State:
             self._basis_block = blk
             self._basis_overlay.clear()
 
-    def take_attributed_token_deltas(self) -> dict[tuple[str, str, str], int]:
-        taken = self._attributed_token_deltas
+    def apply_reconciliation_trade(
+        self, token, user, token_delta, native_amount, blk, ts, txh, log_idx, cur=None, batch=None
+    ):
+        with self._lock:
+            token = (token or "").lower()
+            user = (user or "").lower()
+            token_amt = abs(int(token_delta or 0))
+            native_amt = int(native_amount or 0)
+            if not token or not user or token_amt <= 0 or native_amt <= 0:
+                return False
+
+            lp = self.launchpad_tokens.get(token)
+            if lp is None:
+                return False
+            if txh and storage.trade_exists(txh, log_idx, cur=cur):
+                return False
+
+            is_buy = int(token_delta) > 0
+            self._basis_reset_if_new_block(blk, batched=batch is not None)
+
+            if is_buy:
+                token_bought_delta = token_amt
+                token_sold_delta = 0
+                native_spent_delta = native_amt
+                native_received_delta = 0
+                realized_delta = Decimal(0)
+                cost_basis_delta = native_amt
+                self._basis_apply_buy(user, token, token_amt, native_amt, cur=cur)
+            else:
+                token_bought_delta = 0
+                token_sold_delta = token_amt
+                native_spent_delta = 0
+                native_received_delta = native_amt
+                released = self._basis_apply_sell(user, token, token_amt, cur=cur)
+                realized_delta = Decimal(native_amt) - Decimal(released)
+                cost_basis_delta = -int(released)
+
+            counted_key = ((txh or "").lower(), token, user)
+            self._attributed_token_deltas[counted_key] = self._attributed_token_deltas.get(counted_key, 0) + int(
+                token_delta
+            )
+
+            quote_price = self._quote_price_usd(lp.quote_token)
+            usd_amount = (Decimal(native_amt) / (Decimal(10) ** 18)) * quote_price if quote_price > 0 else Decimal(0)
+
+            lp.native_volume += native_amt
+            lp.token_volume += token_amt
+            lp.volume_usd += usd_amount
+
+            if batch is None:
+                return False
+
+            batch.add_trade(
+                block_number=blk,
+                log_index=log_idx,
+                timestamp=ts,
+                token=token,
+                user_address=user,
+                is_buy=is_buy,
+                native_amount=native_amt,
+                token_amount=token_amt,
+                usd_amount=usd_amount,
+                price_native=lp.last_price_native,
+                txhash=txh,
+                native_reserve=int(lp.curve_native_reserve),
+                token_reserve=int(lp.curve_token_reserve),
+                realized_native=int(realized_delta),
+            )
+            batch.add_user_delta(user, native_amt, realized_delta, 0)
+            batch.add_position_delta(
+                user_address=user,
+                token=token,
+                token_bought_delta=token_bought_delta,
+                token_sold_delta=token_sold_delta,
+                native_spent_delta=native_spent_delta,
+                native_received_delta=native_received_delta,
+                balance_token_delta=0,
+                realized_pnl_delta=realized_delta,
+                trade_count_delta=0,
+                buy_count_delta=0,
+                sell_count_delta=0,
+                last_price_native=lp.last_price_native,
+                cost_basis_delta=cost_basis_delta,
+            )
+            print(
+                f"[State] reconciled {token[:12]} {user[:12]} tx={str(txh)[:12]} "
+                f"{'buy' if is_buy else 'sell'} tokens={token_amt} native={native_amt}",
+                flush=True,
+            )
+            return True
+
+    def take_attributed_token_deltas(self) -> dict[tuple[str, str, str], tuple[int, int]]:
+        tokens = self._attributed_token_deltas
+        natives = self._attributed_native_amounts
         self._attributed_token_deltas = {}
-        return taken
+        self._attributed_native_amounts = {}
+        return {k: (v, natives.get(k, 0)) for k, v in tokens.items()}
 
     def basis_clear_overlay(self) -> None:
         self._basis_overlay.clear()
