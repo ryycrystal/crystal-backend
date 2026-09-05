@@ -1107,7 +1107,14 @@ class State:
                 )
                 for bucket_seconds in INTERVALS:
                     bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
-                    batch.add_ohlcv(token, bucket_seconds, bucket_start, lp.last_price_native, int(native_amt))
+                    batch.add_ohlcv(
+                        token,
+                        bucket_seconds,
+                        bucket_start,
+                        lp.last_price_native,
+                        int(native_amt),
+                        self.mon_price_usd,
+                    )
             else:
                 storage.insert_trade(
                     block_number=blk,
@@ -1177,6 +1184,7 @@ class State:
                         bucket_start=bucket_start,
                         price_native=lp.last_price_native,
                         native_amount=int(native_amt),
+                        mon_usd=self.mon_price_usd,
                         cur=cur,
                     )
 
@@ -1841,7 +1849,14 @@ class State:
             for bucket_seconds in INTERVALS:
                 bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
                 if batch is not None:
-                    batch.add_ohlcv(lp_addr, bucket_seconds, bucket_start, lp.last_price_native, int(native_amt))
+                    batch.add_ohlcv(
+                        lp_addr,
+                        bucket_seconds,
+                        bucket_start,
+                        lp.last_price_native,
+                        int(native_amt),
+                        self.mon_price_usd,
+                    )
                 else:
                     try:
                         storage.upsert_ohlcv(
@@ -1850,6 +1865,7 @@ class State:
                             bucket_start=bucket_start,
                             price_native=lp.last_price_native,
                             native_amount=int(native_amt),
+                            mon_usd=self.mon_price_usd,
                             cur=cur,
                         )
                     except Exception:
