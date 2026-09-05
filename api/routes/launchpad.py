@@ -1008,7 +1008,8 @@ def token_overview_graph(
                     native_amount,
                     token_amount,
                     price_native,
-                    txhash
+                    txhash,
+                    block_number
                 FROM launchpad_trades
                 WHERE token = %s
                 -- several trades share one block, and one transaction can carry
@@ -1034,6 +1035,7 @@ def token_overview_graph(
             token_amount,
             price_native,
             txhash,
+            block_number,
         ) in recent_trades_raw:
             is_buy_flag = bool(is_buy)
             native_amount = int(native_amount or 0)
@@ -1053,6 +1055,10 @@ def token_overview_graph(
                         "amountIn": str(amount_in),
                         "amountOut": str(amount_out),
                         "block": str(int(ts_tr)),
+                        "timestamp": str(int(ts_tr)),
+                        "blockNumber": str(int(block_number or 0)),
+                        "logIndex": int(log_index),
+                        "txhash": txhash,
                         "id": f"{txhash}-{log_index}",
                         "isBuy": is_buy_flag,
                         "priceNativePerTokenWad": _scaled_price(price_native),
@@ -1082,7 +1088,8 @@ def token_overview_graph(
                         native_amount,
                         token_amount,
                         price_native,
-                        txhash
+                        txhash,
+                        block_number
                     FROM launchpad_trades
                     WHERE token = %s AND user_address = ANY(%s)
                     ORDER BY timestamp DESC, block_number DESC, log_index DESC
@@ -1102,6 +1109,7 @@ def token_overview_graph(
                 token_amount,
                 price_native,
                 txhash,
+                block_number,
             ) in tracked_rows:
                 is_buy_flag = bool(is_buy)
                 native_amount = int(native_amount or 0)
@@ -1121,6 +1129,10 @@ def token_overview_graph(
                             "amountIn": str(amount_in),
                             "amountOut": str(amount_out),
                             "block": str(int(ts_tr)),
+                            "timestamp": str(int(ts_tr)),
+                            "blockNumber": str(int(block_number or 0)),
+                            "logIndex": int(log_index),
+                            "txhash": txhash,
                             "id": f"{txhash}-{log_index}",
                             "isBuy": is_buy_flag,
                             "priceNativePerTokenWad": _scaled_price(price_native),
@@ -2399,6 +2411,9 @@ def trades_for_addresses(addresses: str) -> dict[str, Any]:
                     "amountIn": str(amount_in),
                     "amountOut": str(amount_out),
                     "block": str(int(ts_tr)),
+                    "timestamp": str(int(ts_tr)),
+                    "logIndex": int(log_index),
+                    "txhash": txhash,
                     "id": f"{txhash}-{log_index}",
                     "isBuy": is_buy_flag,
                     "openedPosition": is_buy_flag and before_amt <= 0,
