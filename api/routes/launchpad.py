@@ -600,7 +600,7 @@ def token_trades_range(
                    native_amount, token_amount, usd_amount, price_native, txhash
             FROM launchpad_trades
             WHERE {" AND ".join(where)}
-            ORDER BY timestamp DESC, log_index DESC
+            ORDER BY timestamp DESC, block_number DESC, log_index DESC
             LIMIT %s
             """,
             tuple(params),
@@ -1015,7 +1015,7 @@ def token_overview_graph(
                 -- several of them, so log_index is what puts them in chain order.
                 -- without it equal timestamps come back arbitrarily ordered, and
                 -- the LIMIT can even return a different set between calls
-                ORDER BY timestamp DESC, log_index DESC, txhash DESC
+                ORDER BY timestamp DESC, block_number DESC, log_index DESC
                 LIMIT 50
                 """,
                 (token_addr,),
@@ -1085,7 +1085,7 @@ def token_overview_graph(
                         txhash
                     FROM launchpad_trades
                     WHERE token = %s AND user_address = ANY(%s)
-                    ORDER BY timestamp DESC, log_index DESC, txhash DESC
+                    ORDER BY timestamp DESC, block_number DESC, log_index DESC
                     LIMIT %s
                     """,
                     (token_addr, sorted(tracked_addrs), TRACKED_HISTORY_LIMIT),
@@ -1952,37 +1952,37 @@ def portfolio_history(
         raise HTTPException(400, "limit must be between 1 and 200")
 
     cursor_ts: int | None = None
+    cursor_block: int | None = None
     cursor_li: int | None = None
     cursor_tx: str | None = None
     if cursor:
-        cursor_ts, cursor_li, cursor_tx = _parse_history_cursor(cursor)
+        cursor_ts, cursor_block, cursor_li, cursor_tx = _parse_history_cursor(cursor)
 
+    clauses = ["tr.user_address = %s"]
+    params_list: list[Any] = [user_addr]
     if token:
         token = token.lower()
-        if cursor_ts is not None:
-            where_clause = (
-                "tr.user_address = %s AND tr.token = %s AND (tr.timestamp, tr.log_index, tr.txhash) < (%s, %s, %s)"
-            )
-            params: tuple = (user_addr, token, cursor_ts, cursor_li, cursor_tx)
-        else:
-            where_clause = "tr.user_address = %s AND tr.token = %s"
-            params = (user_addr, token)
-    else:
-        if cursor_ts is not None:
-            where_clause = "tr.user_address = %s AND (tr.timestamp, tr.log_index, tr.txhash) < (%s, %s, %s)"
-            params = (user_addr, cursor_ts, cursor_li, cursor_tx)
-        else:
-            where_clause = "tr.user_address = %s"
-            params = (user_addr,)
+        clauses.append("tr.token = %s")
+        params_list.append(token)
+
+    if cursor_ts is not None and cursor_block is not None:
+        clauses.append("(tr.timestamp, tr.block_number, tr.log_index) < (%s, %s, %s)")
+        params_list.extend([cursor_ts, cursor_block, cursor_li])
+    elif cursor_ts is not None:
+        clauses.append("(tr.timestamp, tr.log_index, tr.txhash) < (%s, %s, %s)")
+        params_list.extend([cursor_ts, cursor_li, cursor_tx])
+
+    where_clause = " AND ".join(clauses)
+    params: tuple = tuple(params_list)
 
     query = f"""
         SELECT tr.txhash, tr.timestamp, tr.log_index, tr.token, tr.is_buy,
                tr.native_amount, tr.token_amount, tr.price_native, tr.usd_amount,
-               t.symbol, t.name
+               t.symbol, t.name, tr.block_number
         FROM launchpad_trades tr
         JOIN launchpad_tokens t ON t.token = tr.token
         WHERE {where_clause}
-        ORDER BY tr.timestamp DESC, tr.log_index DESC, tr.txhash DESC
+        ORDER BY tr.timestamp DESC, tr.block_number DESC, tr.log_index DESC
         LIMIT %s
     """
 
@@ -2008,6 +2008,7 @@ def portfolio_history(
             usd_amount,
             symbol,
             name,
+            block_number,
         ) = row
 
         native_amount = int(native_amount or 0)
@@ -2018,6 +2019,7 @@ def portfolio_history(
             {
                 "txhash": txhash,
                 "timestamp": int(timestamp),
+                "block_number": int(block_number or 0),
                 "log_index": int(log_index),
                 "token": trade_token,
                 "symbol": symbol,
@@ -2036,8 +2038,8 @@ def portfolio_history(
         next_cursor = _encode_cursor(
             {
                 "ts": int(last_row[1]),
+                "b": int(last_row[11]),
                 "li": int(last_row[2]),
-                "tx": last_row[0],
             }
         )
 
@@ -2233,26 +2235,26 @@ def token_stats(token_addr: str) -> dict[str, Any]:
         SELECT
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s
-              ORDER BY timestamp ASC, log_index ASC LIMIT 1),
+              ORDER BY timestamp ASC, block_number ASC, log_index ASC LIMIT 1),
             (SELECT timestamp FROM launchpad_trades
               WHERE token = %(tok)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1),
             (SELECT MAX(number) FROM launchpad_blocks),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s AND timestamp <= %(t5m)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s AND timestamp <= %(t1h)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s AND timestamp <= %(t6h)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1),
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1),
             (SELECT price_native FROM launchpad_trades
               WHERE token = %(tok)s AND timestamp <= %(t24h)s
-              ORDER BY timestamp DESC, log_index DESC LIMIT 1)
+              ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1)
     """
 
     params = {

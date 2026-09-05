@@ -120,9 +120,11 @@ class BatchAccumulator:
         p["cost_basis_delta"] += int(cost_basis_delta)
         p["last_price_native"] = last_price_native
 
-    def add_ohlcv(self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int):
+    def add_ohlcv(
+        self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int, mon_usd=0
+    ):
         self.ohlcv_data.append(
-            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount))
+            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount), mon_usd or 0)
         )
 
     def add_sniper(self, token: str, user: str):
@@ -620,7 +622,14 @@ class Sequencer:
                     parsed = dict(parsed)
                     parsed["user"] = real_user
                 self._state.apply_market_trade(
-                    blk, blk_ts, parsed, log.get("address", "").lower(), cur=cur, batch=batch, txh=txh, log_idx=idx
+                    blk,
+                    blk_ts,
+                    parsed,
+                    log.get("address", "").lower(),
+                    cur=cur,
+                    batch=batch,
+                    txh=txh,
+                    log_idx=lii,
                 )
 
             elif tag == "OBU":

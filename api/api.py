@@ -66,6 +66,9 @@ log.propagate = False
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
+USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+STABLE_USD_QUOTES = {USDC, AUSD}
 
 
 def _fmt(value) -> str:
@@ -384,12 +387,15 @@ def _parse_positions_cursor(cursor: str):
 def _parse_history_cursor(cursor: str):
     obj = _decode_cursor(cursor)
     try:
-        ts = int(obj.get("ts"))
         li = int(obj.get("li"))
+        ts = int(obj.get("ts"))
+        raw_block = obj.get("b")
+        if raw_block is not None:
+            return ts, int(raw_block), li, None
         tx = str(obj.get("tx") or "").lower()
         if not tx:
             raise ValueError("missing tx")
-        return ts, li, tx
+        return ts, None, li, tx
     except HTTPException:
         raise
     except Exception:
@@ -520,7 +526,7 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
                 SELECT price_native
                 FROM launchpad_trades
                 WHERE token = t.token AND timestamp <= %s
-                ORDER BY timestamp DESC, log_index DESC
+                ORDER BY timestamp DESC, block_number DESC, log_index DESC
                 LIMIT 1
             ) r ON TRUE
             LEFT JOIN LATERAL (
@@ -529,7 +535,7 @@ def _batch_get_price_changes(token_addrs: list[str]) -> dict[str, dict[str, str]
                 SELECT price_native
                 FROM launchpad_trades
                 WHERE token = t.token
-                ORDER BY timestamp ASC, log_index ASC
+                ORDER BY timestamp ASC, block_number ASC, log_index ASC
                 LIMIT 1
             ) f ON TRUE
             WHERE t.token = ANY(%s)
@@ -1092,7 +1098,7 @@ def _build_ohlcv_from_db(
     with db_cursor() as cur:
         cur.execute(
             f"""
-            SELECT bucket_start, open_price, high_price, low_price, close_price, quote_volume
+            SELECT bucket_start, open_price, high_price, low_price, close_price, quote_volume, mon_usd
             FROM launchpad_ohlcv
             WHERE {where}
             ORDER BY bucket_start DESC LIMIT %s
@@ -1105,11 +1111,11 @@ def _build_ohlcv_from_db(
 
     if base_res != bucket_seconds:
         grouped: dict[int, list] = {}
-        for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
+        for bucket_start, open_p, high_p, low_p, close_p, qv, mon_usd in rows:
             gb = (int(bucket_start) // bucket_seconds) * bucket_seconds
             slot = grouped.get(gb)
             if slot is None:
-                grouped[gb] = [gb, open_p, high_p, low_p, close_p, int(qv or 0)]
+                grouped[gb] = [gb, open_p, high_p, low_p, close_p, int(qv or 0), mon_usd]
             else:
                 slot[2] = max(Decimal(slot[2] or 0), Decimal(high_p or 0))
                 lo_new = Decimal(low_p or 0)
@@ -1117,6 +1123,7 @@ def _build_ohlcv_from_db(
                 slot[3] = lo_new if lo_old <= 0 else (min(lo_old, lo_new) if lo_new > 0 else lo_old)
                 slot[4] = close_p
                 slot[5] += int(qv or 0)
+                slot[6] = mon_usd
         rows = [tuple(v) for _, v in sorted(grouped.items())][-(limit + 1) :]
 
     seeded = len(rows) > limit
@@ -1127,7 +1134,7 @@ def _build_ohlcv_from_db(
     prev_close: Decimal | None = None
     if seed_rows:
         prev_close = Decimal(seed_rows[0][4] or 0)
-    for bucket_start, open_p, high_p, low_p, close_p, qv in rows:
+    for bucket_start, open_p, high_p, low_p, close_p, qv, mon_usd in rows:
         o = Decimal(open_p or 0)
         hi = Decimal(high_p or 0)
         lo = Decimal(low_p or 0)
@@ -1144,6 +1151,7 @@ def _build_ohlcv_from_db(
                 "low": _scaled_price(lo),
                 "close": _scaled_price(cl),
                 "quoteVolume": str(int(qv or 0)),
+                "monUsd": format(Decimal(mon_usd or 0), "f"),
             }
         )
         if cl > 0:
@@ -1239,6 +1247,8 @@ def _quote_price_usd(quote_token: str | None) -> Decimal:
         return _mon_price_usd() * _lvmon_rate()
     if quote in NATIVE_EQUIV_QUOTES:
         return _mon_price_usd()
+    if quote in STABLE_USD_QUOTES:
+        return Decimal(1)
     return Decimal(0)
 
 

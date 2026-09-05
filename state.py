@@ -25,6 +25,9 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
+USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+STABLE_USD_TOKENS = (USDC, AUSD)
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 POOL_FEE_RETRY_BLOCKS = 50_000
@@ -1191,7 +1194,9 @@ class State:
 
             lp = self.launchpad_tokens.get(token)
             if lp is None:
-                return None
+                lp = self._ensure_launchpad_token_locked(token, blk, ts, log_addr=src, cur=cur)
+                if lp is None:
+                    return None
 
             lp.migrated = True
             lp.migrated_block = blk
@@ -1340,6 +1345,8 @@ class State:
 
     def _seed_aux_prices_locked(self) -> None:
         self.tokenToPrice.clear()
+        for stable in STABLE_USD_TOKENS:
+            self.tokenToPrice[stable] = Decimal(1)
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
@@ -1712,6 +1719,24 @@ class State:
                 cur=cur,
             )
 
+    def _graduated_mid_price_locked(self, mi):
+        try:
+            reserve_quote = Decimal(int(getattr(mi, "reserveQuote", 0) or 0))
+            reserve_base = Decimal(int(getattr(mi, "reserveBase", 0) or 0))
+        except (TypeError, ValueError):
+            return None
+
+        if reserve_quote <= 0 or reserve_base <= 0:
+            return None
+
+        try:
+            base_decimals = int(getattr(mi, "baseDecimals", 18) or 18)
+            quote_decimals = int(getattr(mi, "quoteDecimals", 18) or 18)
+        except (TypeError, ValueError):
+            return None
+
+        return reserve_quote / reserve_base * (Decimal(10) ** (base_decimals - quote_decimals))
+
     def _record_graduated_launchpad_trade_locked(
         self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
     ) -> None:
@@ -1719,7 +1744,9 @@ class State:
         if lp is None:
             return
 
-        price = getattr(mi, "price", None)
+        price = self._graduated_mid_price_locked(mi)
+        if price is None or price <= 0:
+            price = getattr(mi, "price", None)
         if price and price > 0:
             lp.last_price_native = price
             try:

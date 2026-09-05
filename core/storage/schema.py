@@ -470,6 +470,7 @@ def _init_db_once() -> None:
                 low_price      NUMERIC(50, 18) NOT NULL,
                 close_price    NUMERIC(50, 18) NOT NULL,
                 quote_volume   NUMERIC(50, 0) NOT NULL,
+                mon_usd        NUMERIC(50, 18) NOT NULL DEFAULT 0,
                 PRIMARY KEY (token, resolution_sec, bucket_start)
             );
             """
@@ -478,6 +479,12 @@ def _init_db_once() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_ohlcv_token_res_time
             ON launchpad_ohlcv (token, resolution_sec, bucket_start DESC);
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_ohlcv
+            ADD COLUMN IF NOT EXISTS mon_usd NUMERIC(50, 18) NOT NULL DEFAULT 0;
             """
         )
 

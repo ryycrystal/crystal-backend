@@ -592,6 +592,7 @@ def upsert_ohlcv(
     bucket_start: int,
     price_native,
     native_amount: int,
+    mon_usd=0,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     if cur is None:
@@ -606,15 +607,17 @@ def upsert_ohlcv(
                     high_price,
                     low_price,
                     close_price,
-                    quote_volume
+                    quote_volume,
+                    mon_usd
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE
                 SET
                     high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
                     low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
                     close_price = EXCLUDED.close_price,
-                    quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume;
+                    quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume,
+                    mon_usd = EXCLUDED.mon_usd;
                 """,
                 (
                     token.lower(),
@@ -625,6 +628,7 @@ def upsert_ohlcv(
                     price_native,
                     price_native,
                     int(abs(native_amount)),
+                    mon_usd or 0,
                 ),
             )
     else:
@@ -638,15 +642,17 @@ def upsert_ohlcv(
                 high_price,
                 low_price,
                 close_price,
-                quote_volume
+                quote_volume,
+                mon_usd
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE
             SET
                 high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
                 low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
                 close_price = EXCLUDED.close_price,
-                quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume;
+                quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume,
+                mon_usd = EXCLUDED.mon_usd;
             """,
             (
                 token.lower(),
@@ -657,6 +663,7 @@ def upsert_ohlcv(
                 price_native,
                 price_native,
                 int(abs(native_amount)),
+                mon_usd or 0,
             ),
         )
 
@@ -1830,7 +1837,7 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
     if not ohlcv_data:
         return
     aggregated: dict[tuple, dict] = {}
-    for token, resolution_sec, bucket_start, price_native, native_amount in ohlcv_data:
+    for token, resolution_sec, bucket_start, price_native, native_amount, mon_usd in ohlcv_data:
         key = (token.lower(), int(resolution_sec), int(bucket_start))
         if key not in aggregated:
             aggregated[key] = {
@@ -1839,6 +1846,7 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
                 "low": price_native,
                 "close": price_native,
                 "volume": int(abs(native_amount)),
+                "mon_usd": mon_usd or 0,
             }
         else:
             agg = aggregated[key]
@@ -1846,20 +1854,26 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
             agg["low"] = min(agg["low"], price_native)
             agg["close"] = price_native
             agg["volume"] += int(abs(native_amount))
+            agg["mon_usd"] = mon_usd or 0
 
-    data = [(k[0], k[1], k[2], v["open"], v["high"], v["low"], v["close"], v["volume"]) for k, v in aggregated.items()]
+    data = [
+        (k[0], k[1], k[2], v["open"], v["high"], v["low"], v["close"], v["volume"], v["mon_usd"])
+        for k, v in aggregated.items()
+    ]
     execute_values(
         cur,
         """
         INSERT INTO launchpad_ohlcv (
-            token, resolution_sec, bucket_start, open_price, high_price, low_price, close_price, quote_volume
+            token, resolution_sec, bucket_start, open_price, high_price, low_price, close_price, quote_volume,
+            mon_usd
         )
         VALUES %s
         ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE SET
             high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
             low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
             close_price = EXCLUDED.close_price,
-            quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume
+            quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume,
+            mon_usd = EXCLUDED.mon_usd
         """,
         data,
         page_size=1000,
@@ -2459,7 +2473,7 @@ def mon_usd_series(start_ts: int, end_ts: int, resolution: int, min_wei: int) ->
                 WHERE timestamp >= g AND timestamp < g + %s
                   AND native_amount >= %s
                   AND usd_amount > 0
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, block_number DESC, log_index DESC
                 LIMIT 1
             ) lt ON true
             WHERE lt.rate IS NOT NULL
