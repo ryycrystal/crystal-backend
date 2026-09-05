@@ -40,7 +40,7 @@ load_env()
 
 import core.chain as h  # noqa: E402
 import modules.univ4 as univ4  # noqa: E402
-from core.storage.base import db_cursor, init_pool  # noqa: E402
+from core.storage.base import db_cursor  # noqa: E402
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
@@ -252,8 +252,31 @@ def snapshot_row(row: dict) -> None:
         fh.write(json.dumps(row) + chr(10))
 
 
+def fresh_conn():
+    import psycopg2
+
+    return psycopg2.connect(
+        host=h.os.environ["PGHOST"],
+        port=int(h.os.getenv("PGPORT", "5432")),
+        user=h.os.environ["PGUSER"],
+        password=h.os.environ["PGPASSWORD"],
+        dbname=h.os.environ["PGDATABASE"],
+        sslmode=h.os.getenv("PGSSLMODE", "require"),
+        connect_timeout=30,
+    )
+
+
 def write_correction(user: str, token: str, bought: int, native: int) -> bool:
-    with db_cursor() as cur:
+    conn = fresh_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            return _write_correction_inner(cur, user, token, bought, native)
+    finally:
+        conn.close()
+
+
+def _write_correction_inner(cur, user: str, token: str, bought: int, native: int) -> bool:
+    if True:
         cur.execute(
             """
             SELECT token_bought, native_spent, cost_basis_native, token_sold, balance_token
@@ -309,8 +332,6 @@ def main() -> int:
     done = load_progress() if args.apply else set()
     if done:
         print(f"resuming: {len(done)} positions already processed" + chr(10))
-    if args.apply:
-        init_pool()
 
     missing_legs = airdrops = clean = written = skipped = 0
     for user, token, balance, bought, native_spent, basis in rows:
