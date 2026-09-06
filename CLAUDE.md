@@ -827,6 +827,20 @@ side from the token-side amount's sign); `tests/test_univ4_attribution.py` pins 
 A V4-routed buy on moncock replays to 477,000.57 MON spent against a hand-derived
 477,018.49 with the fix, versus 474,059.15 without it.
 
+### Order-book fills routed through the Settler need the market's base token
+
+`_resolve_trade_user` finds the transfer graph by `(txhash, token)`. The `TR` (spot
+fill) event carries a `market`, not a token, and the emitter is the core contract, not a
+pool, so the resolver had no token, found no graph, and returned the event's user: the
+0x Settler. Every routed order-book fill of a launchpad token was therefore credited to
+the Settler (whose position writes are dropped) and the wallet got nothing, and the
+attribution invariant could not see it because it only checks wallets that were
+credited with something. Fixed 2026-09-07 by passing `addressToMarket[market].baseAddress`
+as the token (`_market_base_token`); `tests/test_market_fill_attribution.py` pins it.
+CHIPOTLE wallet `0x25afd360…f0f3` replays to 21 trades / 13,787 MON realized with the fix
+against 15 / 7,527 without (the plan's fixture says 20 / 13,850; the residual is one
+pre-existing double-booked reconciliation leg).
+
 ### `PASSTHROUGH_ADDRS` — the router list (core/chain.py)
 
 Stateless execution contracts that forward someone else's trade and never hold a
