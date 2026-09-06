@@ -700,6 +700,30 @@ def test_json_rpc_gives_up_after_the_attempt_budget(monkeypatch):
         client.batch([("eth_getCode", [WALLET, "latest"])])
 
 
+def test_json_rpc_returns_empty_data_for_a_reverted_call_without_retrying(monkeypatch):
+    attempts: list[list[dict]] = []
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data)
+        attempts.append(payload)
+        replies = []
+        for item in payload:
+            if item["method"] == "eth_call":
+                replies.append({"id": item["id"], "error": {"code": 3, "message": "execution reverted", "data": "0x"}})
+            else:
+                replies.append({"id": item["id"], "result": "0x6001"})
+        return FakeResponse(json.dumps(replies).encode())
+
+    monkeypatch.setattr(kinds_mod, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(kinds_mod.time, "sleep", lambda s: None)
+    client = JsonRpc("http://rpc.test", max_rps=1000, attempts=3)
+    results = client.batch(
+        [("eth_call", [{"to": POOL, "data": "0x0dfe1681"}, "latest"]), ("eth_getCode", [POOL, "latest"])]
+    )
+    assert results == ["0x", "0x6001"]
+    assert len(attempts) == 1
+
+
 def test_json_rpc_honours_the_rate_limit(monkeypatch):
     clock = {"now": 0.0}
     sleeps: list[float] = []

@@ -93,6 +93,16 @@ _KNOWN_QUERIES = {
 }
 
 
+def _is_execution_error(error) -> bool:
+    """True for a JSON-RPC error that means the call executed and reverted (code 3, or a revert message)."""
+    if not isinstance(error, dict):
+        return False
+    if error.get("code") == 3:
+        return True
+    message = str(error.get("message") or "").lower()
+    return "revert" in message or "execution error" in message
+
+
 class JsonRpc:
     def __init__(self, url: str, max_rps: float | None = None, attempts: int = 5, timeout: float = 30.0):
         self.url = url
@@ -139,7 +149,11 @@ class JsonRpc:
             for i in pending:
                 reply = by_id.get(i)
                 if reply is None or "result" not in reply:
-                    last_error = reply.get("error") if reply else "missing reply"
+                    error = reply.get("error") if reply else None
+                    if calls[i][0] == "eth_call" and _is_execution_error(error):
+                        results[i] = "0x"  # the call ran and reverted: a definitive answer, not a transport failure
+                        continue
+                    last_error = error if reply else "missing reply"
                     retry.append(i)
                 else:
                     results[i] = reply["result"]
