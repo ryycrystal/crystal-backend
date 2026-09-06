@@ -443,8 +443,12 @@ def _price_by_reference(leg: _Leg, reference_price: PriceFn | None) -> None:
     if price is None or price <= 0:
         leg.basis_state = BASIS_UNRESOLVED
         return
+    quote = -int(Decimal(leg.token_delta) * price)
+    if quote == 0:
+        leg.basis_state = BASIS_UNRESOLVED
+        return
     leg.quote_asset = NATIVE
-    leg.quote_delta = -int(Decimal(leg.token_delta) * price)
+    leg.quote_delta = quote
     leg.source = SOURCE_RECONCILE
     leg.basis_state = BASIS_ESTIMATED
     leg.hint_price = price

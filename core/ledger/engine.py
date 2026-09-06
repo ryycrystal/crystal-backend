@@ -33,6 +33,10 @@ TOKEN_SOURCES = {0: "crystal", 1: "nadfun_v1", 2: "nadfun_v2"}
 REGISTERING_TAGS = {"TC", "NFC", "MC"}
 TRACEABLE_KINDS = {"buy", "sell", "transfer_in", "transfer_out", "swap_leg"}
 CORE_FILL_TAG = "TR"
+REFERENCE_SAMPLE = 5
+REFERENCE_MIN_TOKENS = 10**15
+REFERENCE_MIN_MON_WEI = 10**15
+REFERENCE_MIN_MON = Decimal("0.001")
 CURVE_TRADE_TAG = "LT"
 
 
@@ -363,22 +367,24 @@ class LedgerEngine:
             """
             SELECT price_native FROM wallet_flows
             WHERE token = %s AND block_number < %s AND price_native IS NOT NULL AND price_native > 0
+              AND basis_state = 'observed' AND kind IN ('buy', 'sell')
+              AND abs(token_delta) >= %s AND mon_value >= %s
             ORDER BY block_number DESC, tx_index DESC, log_index DESC, sub_index DESC
-            LIMIT 1
+            LIMIT %s
             """,
-            (token, int(blk)),
+            (token, int(blk), REFERENCE_MIN_TOKENS, REFERENCE_MIN_MON, REFERENCE_SAMPLE),
         )
-        row = cur.fetchone()
-        price = Decimal(str(row[0])) if row and row[0] is not None else None
+        prices = sorted(Decimal(str(r[0])) for r in cur.fetchall() if r and r[0] is not None)
+        price = prices[len(prices) // 2] if prices else None
         if price is None and ts:
             cur.execute(
                 """
                 SELECT native_amount, token_amount FROM launchpad_trades
-                WHERE token = %s AND timestamp <= %s AND token_amount > 0 AND native_amount > 0
+                WHERE token = %s AND timestamp <= %s AND token_amount >= %s AND native_amount >= %s
                 ORDER BY timestamp DESC, block_number DESC, log_index DESC
                 LIMIT 1
                 """,
-                (token, int(ts)),
+                (token, int(ts), REFERENCE_MIN_TOKENS, REFERENCE_MIN_MON_WEI),
             )
             row = cur.fetchone()
             if row:

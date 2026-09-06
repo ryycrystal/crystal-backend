@@ -885,3 +885,10 @@ def test_v4_wmon_pool_quote_asset_follows_the_matching_transfer():
     assert f.quote_asset == WMON
     assert f.quote_delta == -wmon
     assert f.basis_state == BASIS_OBSERVED
+
+
+def test_an_estimate_that_rounds_to_nothing_is_unresolved_not_a_free_trade():
+    b = bundle([tf(1, TOKEN, POOL, WALLET, 5)], [], meta(WALLET, ROUTER, 0))
+    f = only(run(b, reference_price=lambda token: Decimal("0.000000001")))
+    assert f.basis_state == BASIS_UNRESOLVED
+    assert f.quote_delta is None

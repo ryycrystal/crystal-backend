@@ -641,3 +641,34 @@ def test_pool_shaped_contracts_of_the_transaction_are_netted_as_venues(seeded):
         assert engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur) == 1
         cur.execute("SELECT DISTINCT wallet FROM wallet_flows")
         assert {r[0] for r in cur.fetchall()} == {WALLET}
+
+
+def test_reference_price_is_the_median_of_recent_sized_observed_trades_only():
+    from decimal import Decimal
+
+    from core.ledger.engine import LedgerEngine
+
+    class Cur:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql, params=None):
+            self.sql.append(sql)
+
+        def fetchall(self):
+            return [
+                (Decimal("0.021"),),
+                (Decimal("0.019"),),
+                (Decimal("0.020"),),
+                (Decimal("5"),),
+                (Decimal("0.0201"),),
+            ]
+
+        def fetchone(self):
+            return None
+
+    engine = LedgerEngine(cur_factory=None, enabled=True)
+    cur = Cur()
+    assert engine._reference_price("0xtoken", 100, 1_700_000_000, cur) == Decimal("0.0201")
+    assert "basis_state = 'observed'" in cur.sql[0]
+    assert "abs(token_delta) >= %s" in cur.sql[0]
