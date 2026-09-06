@@ -41,6 +41,7 @@ import time
 from decimal import Decimal
 
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,6 +51,8 @@ from env_loader import load_env  # noqa: E402
 load_env()
 
 EXPECTED_PGHOST_MARKER = "crystal-prod-db-r3"
+MERGE_LOCK_KEY = 782301944118
+WRITE_ATTEMPTS = 8
 WAD = Decimal(10) ** 18
 
 POSITION_COLS = (
@@ -274,9 +277,69 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh, hot=None):
             )
     pc.commit()
 
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            write_token(
+                pc,
+                token,
+                cutoff,
+                cutoff_ts,
+                fh,
+                trade_cols,
+                ohlcv_cols,
+                pos_cols,
+                prod_le,
+                prod_positions,
+                prod_candles_replaced,
+                late_users,
+                side_keep,
+                pos_update,
+                pos_insert,
+                agg,
+                fees_usd,
+                candles,
+            )
+            break
+        except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected, psycopg2.OperationalError) as e:
+            pc.rollback()
+            wait = 5 + 7 * attempt
+            print(f"   write attempt {attempt + 1} failed ({type(e).__name__}); retrying in {wait}s", flush=True)
+            time.sleep(wait)
+    else:
+        print("   GAVE UP on this token after repeated lock timeouts", flush=True)
+        return
+    with pc.cursor() as p:
+        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
+        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
+    pc.commit()
+    print("   committed", flush=True)
+
+
+def write_token(
+    pc,
+    token,
+    cutoff,
+    cutoff_ts,
+    fh,
+    trade_cols,
+    ohlcv_cols,
+    pos_cols,
+    prod_le,
+    prod_positions,
+    prod_candles_replaced,
+    late_users,
+    side_keep,
+    pos_update,
+    pos_insert,
+    agg,
+    fees_usd,
+    candles,
+):
     with pc:
         with pc.cursor() as p:
-            p.execute("SET lock_timeout = '5s'")
+            p.execute("SET LOCAL lock_timeout = 0")
+            p.execute("SELECT pg_advisory_xact_lock(%s)", (MERGE_LOCK_KEY,))
+            p.execute("SET LOCAL lock_timeout = '5s'")
             fh.write(
                 json.dumps(
                     {
@@ -373,11 +436,6 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh, hot=None):
                 """,
                 (token,),
             )
-    with pc.cursor() as p:
-        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
-        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
-    pc.commit()
-    print("   committed", flush=True)
 
 
 def main():
