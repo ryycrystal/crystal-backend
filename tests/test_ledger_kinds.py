@@ -780,3 +780,55 @@ def test_side_database_round_trip():
     finally:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
         conn.close()
+
+
+def test_observe_tx_writes_through_the_callers_cursor_and_never_opens_a_second_connection():
+    from core.ledger.kinds import AddressKinds
+    from core.ledger.types import TokenReg, TransferLeg, TxBundle, TxMeta
+
+    executed = []
+
+    class Cur:
+        def execute(self, sql, params=None):
+            executed.append(sql)
+
+        def fetchall(self):
+            return []
+
+    def boom():
+        raise AssertionError("a second connection was opened inside the caller's transaction")
+
+    def rpc(calls):
+        return ["0x6001" for _ in calls]
+
+    token = "0x" + "aa" * 20
+    pool = "0x" + "b0" * 20
+    wallet = "0x" + "11" * 20
+    router = "0x" + "70" * 20
+    wmon = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+    registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
+    kinds = AddressKinds(boom, rpc=rpc, min_txs=2)
+    cur = Cur()
+    for i in (1, 2):
+        txh = f"0x{i:064x}"
+        bundle = TxBundle(
+            txhash=txh,
+            block_number=100 + i,
+            tx_index=1,
+            timestamp=1_700_000_000,
+            transfers=[
+                TransferLeg(log_index=1, token=wmon, from_addr=router, to_addr=pool, amount=10**18),
+                TransferLeg(log_index=2, token=token, from_addr=pool, to_addr=router, amount=10**18),
+                TransferLeg(log_index=3, token=token, from_addr=router, to_addr=wallet, amount=10**18),
+            ],
+            venue_events=[],
+            meta=TxMeta(
+                txhash=txh, block_number=100 + i, tx_index=1, from_addr=wallet, to_addr=router, value=0, selector="0x"
+            ),
+            trace=None,
+            userop_sender=None,
+        )
+        newly = kinds.observe_tx(bundle, registry, cur)
+    assert newly == [pool]
+    assert any("INSERT INTO address_kinds" in sql for sql in executed)
+    assert any("INSERT INTO venues" in sql for sql in executed)

@@ -329,10 +329,10 @@ class LedgerEngine:
         flows: list[Flow] = []
         for bundle in bundles:
             bundle = replace(bundle, meta=metas.get(bundle.txhash))
-            sender = kinds.userop_sender(bundle) or bundle.userop_sender
+            sender = kinds.userop_sender(bundle, cur) or bundle.userop_sender
             if sender != bundle.userop_sender:
                 bundle = replace(bundle, userop_sender=sender)
-            kinds.observe_tx(bundle, registry)
+            kinds.observe_tx(bundle, registry, cur)
             tx_flows = net(bundle)
             if self._needs_trace(tx_flows) and self._within_trace_window(blk):
                 trace = self._trace_for().native_transfers(bundle.txhash)

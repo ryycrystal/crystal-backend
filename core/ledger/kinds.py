@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 
 from core import chain as h
 from core.ledger.types import (
@@ -341,11 +342,19 @@ class AddressKinds:
         for addr, kind in cur.fetchall():
             self._kinds.setdefault(addr.lower(), kind)
 
-    def userop_sender(self, bundle: TxBundle) -> str | None:
-        senders = self.userop_senders(bundle)
+    @contextmanager
+    def _cursor(self, cur):
+        if cur is not None:
+            yield cur
+            return
+        with self._cur_factory() as own:
+            yield own
+
+    def userop_sender(self, bundle: TxBundle, cur=None) -> str | None:
+        senders = self.userop_senders(bundle, cur)
         return senders[0] if senders else None
 
-    def userop_senders(self, bundle: TxBundle) -> list[str]:
+    def userop_senders(self, bundle: TxBundle, cur=None) -> list[str]:
         found: list[str] = []
         entrypoint_of: dict[str, str] = {}
         prefilled = (getattr(bundle, "userop_sender", None) or "").lower()
@@ -364,10 +373,10 @@ class AddressKinds:
                 found.append(sender)
         block = getattr(bundle, "block_number", None)
         for sender in found:
-            self._mark_wallet_4337(sender, block, entrypoint_of.get(sender))
+            self._mark_wallet_4337(sender, block, entrypoint_of.get(sender), cur)
         return found
 
-    def observe_tx(self, bundle: TxBundle, registry) -> list[str]:
+    def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]:
         meta = getattr(bundle, "meta", None)
         if meta is None:
             return []
@@ -376,7 +385,7 @@ class AddressKinds:
         if origin:
             self._origins.add(origin)
             self._sightings.pop(origin, None)
-        for sender in self.userop_senders(bundle):
+        for sender in self.userop_senders(bundle, cur):
             self._origins.add(sender)
             self._sightings.pop(sender, None)
 
@@ -423,7 +432,7 @@ class AddressKinds:
         if not candidates:
             return []
 
-        kinds = self._resolve_kinds(candidates, bundle.block_number)
+        kinds = self._resolve_kinds(candidates, bundle.block_number, cur)
         newly: list[str] = []
         promote: list[tuple[str, dict]] = []
         for addr in sorted(candidates):
@@ -459,30 +468,30 @@ class AddressKinds:
             self._kinds[addr] = KIND_VENUE_POOL
             self._sightings.pop(addr, None)
             newly.append(addr)
-        with self._cur_factory() as cur:
-            self._put_kinds(cur, kind_rows)
-            self._put_venues(cur, venue_rows)
+        with self._cursor(cur) as c:
+            self._put_kinds(c, kind_rows)
+            self._put_venues(c, venue_rows)
         return newly
 
-    def _resolve_kinds(self, addrs: list[str], block: int | None) -> dict[str, str]:
+    def _resolve_kinds(self, addrs: list[str], block: int | None, cur=None) -> dict[str, str]:
         cached = {a: self._kinds[a] for a in addrs if a in self._kinds}
         missing = [a for a in addrs if a not in cached]
-        if not missing or self._cur_factory is None:
+        if not missing or (cur is None and self._cur_factory is None):
             return cached
-        with self._cur_factory() as cur:
-            cached.update(self.kinds_for(missing, cur, block))
+        with self._cursor(cur) as c:
+            cached.update(self.kinds_for(missing, c, block))
         return cached
 
-    def _mark_wallet_4337(self, sender: str, block: int | None, entrypoint: str | None) -> None:
+    def _mark_wallet_4337(self, sender: str, block: int | None, entrypoint: str | None, cur=None) -> None:
         current = self._kinds.get(sender)
         if current == KIND_WALLET_4337 or (current is not None and current not in (KIND_CONTRACT_UNKNOWN, KIND_EOA)):
             return
         self._kinds[sender] = KIND_WALLET_4337
-        if self._cur_factory is None:
+        if cur is None and self._cur_factory is None:
             return
         evidence = {"event": "UserOperationEvent", "entrypoint": entrypoint}
-        with self._cur_factory() as cur:
-            self._put_kinds(cur, [(sender, KIND_WALLET_4337, SOURCE_USEROP, block, evidence)])
+        with self._cursor(cur) as c:
+            self._put_kinds(c, [(sender, KIND_WALLET_4337, SOURCE_USEROP, block, evidence)])
 
     def _put_kinds(self, cur, rows: list[tuple]) -> None:
         by_source: dict[str, list[tuple]] = {}
