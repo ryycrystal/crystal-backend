@@ -66,7 +66,7 @@ MON_USD_MIN_TRADE_WEI = 10**16
 SIDE_DB_MARKERS = ("crystal_ledger", "crystal_replay")
 PROD_QUERY_TIMEOUT = 300
 PREFETCH_WORKERS = 4
-RPC_BATCH_CALLS = 10
+RPC_BATCH_CALLS = 25
 CHUNK_ATTEMPTS = 4
 CHUNK_RETRY_SECONDS = 20
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -353,12 +353,21 @@ def prepare_chunk(
 ) -> tuple[dict[int, list[dict]], int]:
     relevant = {blk: relevant_logs(cached.get(blk, []), watched) for blk in blocks}
     relevant = {blk: logs for blk, logs in relevant.items() if logs}
-    with storage.db_cursor() as cur:
-        added = receipts.complete(relevant, cur)
+    ordered_blocks = sorted(relevant)
     hashes = sorted({(lg.get("transactionHash") or "").lower() for logs in relevant.values() for lg in logs} - {""})
-    parts = [hashes[i::PREFETCH_WORKERS] for i in range(PREFETCH_WORKERS)]
-    with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as pool:
-        list(pool.map(tx_meta.get_many, [p for p in parts if p]))
+
+    def complete_receipts(part: list[int]) -> int:
+        with storage.db_cursor() as cur:
+            return receipts.complete({blk: relevant[blk] for blk in part}, cur)
+
+    with ThreadPoolExecutor(max_workers=2 * PREFETCH_WORKERS) as pool:
+        receipt_parts = [ordered_blocks[i::PREFETCH_WORKERS] for i in range(PREFETCH_WORKERS)]
+        receipt_futures = [pool.submit(complete_receipts, part) for part in receipt_parts if part]
+        meta_parts = [hashes[i::PREFETCH_WORKERS] for i in range(PREFETCH_WORKERS)]
+        meta_futures = [pool.submit(tx_meta.get_many, part) for part in meta_parts if part]
+        added = sum(f.result() for f in receipt_futures)
+        for f in meta_futures:
+            f.result()
     return relevant, added
 
 
