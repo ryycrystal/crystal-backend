@@ -530,3 +530,25 @@ def test_ledger_meta_round_trip(cur):
     assert store.get_ledger_meta(cur, "head") == "12346"
     store.set_ledger_meta(cur, "head", None)
     assert store.get_ledger_meta(cur, "head") is None
+
+
+def test_purge_wallets_removes_flows_and_positions_of_the_named_wallets_only(cur):
+    from core.ledger import store
+
+    store.insert_flows(
+        cur,
+        [
+            _flow(wallet=WALLET_A, log_index=1),
+            _flow(wallet=WALLET_A, log_index=2, token=TOKEN_Y),
+            _flow(wallet=WALLET_B, log_index=3),
+        ],
+    )
+    store.upsert_positions(cur, [_position(wallet=WALLET_A), _position(wallet=WALLET_B)])
+
+    assert store.purge_wallets(cur, [WALLET_A.upper(), WALLET_A]) == 2
+    assert store.purge_wallets(cur, []) == 0
+
+    cur.execute("SELECT DISTINCT wallet FROM wallet_flows")
+    assert {r[0] for r in cur.fetchall()} == {WALLET_B}
+    cur.execute("SELECT wallet FROM positions_v2")
+    assert [r[0] for r in cur.fetchall()] == [WALLET_B]

@@ -45,8 +45,9 @@ import core.chain as h  # noqa: E402
 import core.storage as storage  # noqa: E402
 from core.ledger.engine import LedgerEngine, Rates  # noqa: E402
 from core.ledger.kinds import AddressKinds  # noqa: E402
+from core.ledger.receipts import RECEIPT_LOG_DDL, ReceiptLogs  # noqa: E402
 from core.ledger.schema import LEDGER_TABLES, init_ledger_schema  # noqa: E402
-from core.ledger.txmeta import TxMetaStore  # noqa: E402
+from core.ledger.txmeta import RpcClient, TxMetaStore  # noqa: E402
 from core.storage import schema  # noqa: E402
 
 SEED_TABLES = (
@@ -88,6 +89,7 @@ def init_side_schema() -> None:
             )
             """
         )
+        cur.execute(RECEIPT_LOG_DDL)
 
 
 def wipe_ledger() -> None:
@@ -368,6 +370,7 @@ def process_chunk(
     engine: LedgerEngine,
     tx_meta: TxMetaStore,
     kinds: AddressKinds,
+    receipts: ReceiptLogs,
     blocks: list[int],
     cached: dict[int, list[dict]],
     timestamps: dict[int, int],
@@ -377,6 +380,7 @@ def process_chunk(
     relevant = {blk: logs for blk, logs in relevant.items() if logs}
     flows = 0
     with storage.db_cursor() as cur:
+        engine.stats["receipt_logs"] += receipts.complete(relevant, cur)
         prefetch_chunk(tx_meta, kinds, relevant, cur)
         for blk, logs in relevant.items():
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
@@ -441,6 +445,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
 
     tx_meta = TxMetaStore(storage.db_cursor, args.rpc)
     kinds = AddressKinds(storage.db_cursor, args.rpc)
+    receipts = ReceiptLogs(RpcClient(args.rpc))
     engine = LedgerEngine(
         storage.db_cursor, rpc_url=args.rpc, enabled=True, tx_meta_store=tx_meta, kinds=kinds, rates_fn=SideRates()
     )
@@ -462,7 +467,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             pending = pool.submit(fetcher.fetch, groups[gi + 1])
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        flows, refolded = process_chunk(engine, tx_meta, kinds, group, cached, timestamps, watched)
+        flows, refolded = process_chunk(engine, tx_meta, kinds, receipts, group, cached, timestamps, watched)
         total_flows += flows
         total_refolds += refolded
         done += len(group)

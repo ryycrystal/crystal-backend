@@ -739,3 +739,98 @@ def test_own_quote_far_from_the_venue_amount_is_kept():
     assert f.quote_delta == -6 * E18
     assert f.source == SOURCE_TRANSFER_NET
     assert f.venue == CORE
+
+
+def test_pool_event_orientation_needs_a_matching_transfer_at_the_venue():
+    tokens, wmon = 400 * E18, 4 * E18
+    hedge_native, hedge_usdc = 5 * E18, 1
+    swap = VenueEvent(
+        "V3SWAP", 12, {"pool": POOL, "sender": ROUTER, "user": ROUTER, "amount0": -tokens, "amount1": wmon}, POOL
+    )
+    hedge = VenueEvent(
+        "V4SWAP",
+        14,
+        {"pool_id": "0x02", "sender": ROUTER, "amount0": -hedge_native, "amount1": hedge_usdc},
+        POOL_MANAGER,
+    )
+    b = bundle(
+        [tf(10, WMON, ROUTER, POOL, wmon), tf(11, TOKEN, POOL, ROUTER, tokens), tf(13, TOKEN, ROUTER, WALLET, tokens)],
+        [swap, hedge],
+        meta(WALLET, ROUTER),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_BUY
+    assert f.quote_asset == WMON
+    assert f.quote_delta == -wmon
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == POOL
+
+
+def test_partially_covered_single_leg_is_scaled_at_the_venue_price():
+    from_pool, otc, wmon = 600 * E18, 200 * E18, 6 * E18
+    swap = VenueEvent(
+        "V3SWAP", 5, {"pool": POOL, "sender": ROUTER, "user": ROUTER, "amount0": -from_pool, "amount1": wmon}, POOL
+    )
+    b = bundle(
+        [
+            tf(1, WMON, ROUTER, POOL, wmon),
+            tf(2, TOKEN, POOL, ROUTER, from_pool),
+            tf(3, TOKEN, WALLET2, ROUTER, otc),
+            tf(4, TOKEN, ROUTER, WALLET, from_pool + otc),
+        ],
+        [swap],
+        meta(BUNDLER, ROUTER),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_BUY
+    assert f.token_delta == from_pool + otc
+    assert f.quote_asset == WMON
+    assert f.quote_delta == -8 * E18
+    assert f.basis_state == BASIS_ESTIMATED
+    assert f.source == SOURCE_VENUE_EVENT
+    assert f.price_native == Decimal(wmon) / Decimal(from_pool)
+    assert f.venue == POOL
+
+
+def test_routed_buy_sourced_from_two_pools_and_an_otc_seller_sums_to_an_observed_cost():
+    seller = WALLET2
+    executor = BATCHER
+    pool_tokens, pool_wmon = 3_939_541 * E18, 88_936 * E18
+    v4_tokens, v4_wmon = 2_917_301 * E18, 68_724 * E18
+    otc_tokens, otc_wmon = 182_149 * E18, 4_042 * E18
+    total = pool_tokens + v4_tokens + otc_tokens
+    v3 = VenueEvent(
+        tag="V3SWAP",
+        log_index=10,
+        parsed={"pool": POOL, "sender": executor, "user": executor, "amount0": -pool_tokens, "amount1": pool_wmon},
+        address=POOL,
+    )
+    v4 = VenueEvent(
+        tag="V4SWAP",
+        log_index=11,
+        parsed={"pool_id": "0x01", "sender": executor, "amount0": v4_tokens, "amount1": -v4_wmon},
+        address=POOL_MANAGER,
+    )
+    b = bundle(
+        [
+            tf(1, WMON, executor, POOL, pool_wmon),
+            tf(2, TOKEN, POOL, executor, pool_tokens),
+            tf(3, TOKEN, POOL_MANAGER, executor, v4_tokens),
+            tf(4, TOKEN, seller, executor, otc_tokens),
+            tf(5, WMON, executor, seller, otc_wmon),
+            tf(6, TOKEN, executor, ROUTER, total),
+            tf(7, TOKEN, ROUTER, WALLET, total),
+        ],
+        [v3, v4],
+        meta(BUNDLER, executor, 0),
+    )
+    flows = run(b)
+    buyer = only(flows)
+    assert buyer.kind == KIND_BUY
+    assert buyer.token_delta == total
+    assert buyer.quote_delta == -(pool_wmon + v4_wmon + otc_wmon)
+    assert buyer.basis_state == BASIS_OBSERVED
+    seller_flow = only(flows, wallet=seller)
+    assert seller_flow.kind == KIND_SELL
+    assert seller_flow.quote_delta == otc_wmon
+    assert seller_flow.basis_state == BASIS_OBSERVED

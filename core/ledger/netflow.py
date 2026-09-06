@@ -188,9 +188,19 @@ def _hints(
             user = (parsed.get("user") or parsed.get("sender") or "").lower() or None
             asset = _venue_quote_asset(bundle, venue, quote_assets)
             for token in sorted(tx_tokens):
+                moved = _venue_token_amounts(bundle, venue, token)
                 for token_delta, quote_delta in ((w0, w1), (w1, w0)):
-                    out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
+                    if any(_within_fee_tolerance(amount, abs(token_delta)) for amount in moved):
+                        out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
     return out
+
+
+def _venue_token_amounts(bundle: TxBundle, venue: str, token: str) -> set[int]:
+    return {
+        leg.amount
+        for leg in bundle.transfers
+        if leg.token == token and leg.amount > 0 and venue in (leg.from_addr, leg.to_addr)
+    }
 
 
 def _own_quote(raw: dict[str, int], rates: Rates) -> tuple[str, int] | None:
@@ -271,6 +281,21 @@ def _assign_hints(leg: _Leg, hints: list[_Hint], rates: Rates, basis_state: str,
     leg.quote_delta = quote
     leg.source = SOURCE_VENUE_EVENT
     leg.basis_state = basis_state
+    leg.hint_price = _hint_price(hints, rates)
+    if single and leg.venue is None:
+        leg.venue = hints[0].venue
+
+
+def _assign_scaled(leg: _Leg, hints: list[_Hint], rates: Rates, single: bool) -> None:
+    asset, quote = _sum_hints(hints, rates)
+    hint_tokens = sum(abs(h.token_delta) for h in hints)
+    if quote == 0 or hint_tokens == 0 or _same_sign(quote, leg.token_delta):
+        return
+    scaled = abs(quote) * abs(leg.token_delta) // hint_tokens
+    leg.quote_asset = asset
+    leg.quote_delta = scaled if quote > 0 else -scaled
+    leg.source = SOURCE_VENUE_EVENT
+    leg.basis_state = BASIS_ESTIMATED
     leg.hint_price = _hint_price(hints, rates)
     if single and leg.venue is None:
         leg.venue = hints[0].venue
@@ -569,8 +594,10 @@ def _resolve_across_wallets(legs: list[_Leg], hints: list[_Hint], used: set[int]
                 _within_fee_tolerance(abs(leg.token_delta), hint_tokens)
                 and abs(leg.token_delta) <= hint_tokens + AMOUNT_TOLERANCE_WEI
             )
-            basis = BASIS_OBSERVED if covered else BASIS_ESTIMATED
-            _assign_hints(leg, picked, rates, basis, single=len(picked) == 1)
+            if covered:
+                _assign_hints(leg, picked, rates, BASIS_OBSERVED, single=len(picked) == 1)
+            else:
+                _assign_scaled(leg, picked, rates, single=len(picked) == 1)
             continue
         asset, total_quote = _sum_hints(picked, rates)
         total_tokens = sum(abs(leg.token_delta) for leg in members)
@@ -634,6 +661,25 @@ def _flow(bundle: TxBundle, leg: _Leg, sub_index: int, origin: str | None, rates
     )
 
 
+def _seller_hints(
+    token_deltas: dict[str, dict[str, int]],
+    quote_raw: dict[str, dict[str, int]],
+    tx_tokens: set[str],
+    kinds: _Kinds,
+    rates: Rates,
+) -> list[_Hint]:
+    out: list[_Hint] = []
+    for token in sorted(tx_tokens):
+        for addr, delta in sorted(token_deltas.get(token, {}).items()):
+            if delta >= 0 or not kinds.is_wallet(addr):
+                continue
+            own = _own_quote(quote_raw.get(addr, {}), rates)
+            if own is None or own[1] <= 0:
+                continue
+            out.append(_Hint(-(len(out) + 1), addr, token, -delta, -own[1], own[0], None))
+    return out
+
+
 def net_transaction(
     bundle: TxBundle,
     registry: dict[str, TokenReg],
@@ -661,6 +707,7 @@ def net_transaction(
 
     tx_tokens = {leg.token for legs in legs_by_wallet.values() for leg in legs}
     hints = _hints(bundle, tx_tokens, registry, quote_assets, markets)
+    hints += _seller_hints(token_deltas, quote_raw, tx_tokens, kinds, rates)
     used: set[int] = set()
     all_legs = [leg for legs in legs_by_wallet.values() for leg in legs]
     for leg in all_legs:

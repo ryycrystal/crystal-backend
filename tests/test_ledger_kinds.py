@@ -832,3 +832,25 @@ def test_observe_tx_writes_through_the_callers_cursor_and_never_opens_a_second_c
     assert newly == [pool]
     assert any("INSERT INTO address_kinds" in sql for sql in executed)
     assert any("INSERT INTO venues" in sql for sql in executed)
+
+
+def test_pool_shaped_contract_is_a_venue_for_its_transaction_before_promotion():
+    rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE})
+    cur = FakeCursor()
+    kinds = AddressKinds(cur.factory, rpc=rpc)
+    registry = {TOKEN: object()}
+
+    assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry, cur) == []
+    assert kinds.tx_venues == {POOL}
+    assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
+
+    plain = bundle("0x02", 11, transfers=[leg(1, TOKEN, WALLET, WALLET2)], tx_meta=meta("0x02", WALLET, WALLET2))
+    assert kinds.observe_tx(plain, registry, cur) == []
+    assert kinds.tx_venues == frozenset()
+
+    assert kinds.observe_tx(bundle("0x03", 12, transfers=[leg(1, TOKEN, POOL, WALLET)]), registry, cur) == []
+    assert kinds.tx_venues == frozenset()
+
+    assert kinds.observe_tx(swap_buy_tx("0x04", 13, POOL, WALLET2, ROUTER), registry, cur) == [POOL]
+    assert kinds.tx_venues == {POOL}
+    assert kinds.kind(POOL, cur) == KIND_VENUE_POOL

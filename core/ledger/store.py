@@ -233,6 +233,15 @@ def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
     return len(rows)
 
 
+def purge_wallets(cur, wallets) -> int:
+    addrs = sorted({_lower(wallet) for wallet in wallets if wallet})
+    if not addrs:
+        return 0
+    cur.execute("DELETE FROM positions_v2 WHERE wallet = ANY(%s)", (addrs,))
+    cur.execute("DELETE FROM wallet_flows WHERE wallet = ANY(%s)", (addrs,))
+    return cur.rowcount
+
+
 def get_tx_meta(cur, txhashes) -> dict[str, TxMeta]:
     hashes = sorted({_lower(txhash) for txhash in txhashes})
     if not hashes:

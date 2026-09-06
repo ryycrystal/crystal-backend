@@ -11,8 +11,7 @@ from contextlib import contextmanager
 from core import chain as h
 from core.ledger.types import (
     AUSD,
-    ENTRYPOINT_V06,
-    ENTRYPOINT_V07,
+    ENTRYPOINTS,
     KIND_CONTRACT_UNKNOWN,
     KIND_EOA,
     KIND_EOA_7702,
@@ -39,7 +38,6 @@ SOURCE_GETCODE = "getcode"
 SOURCE_HEURISTIC = "heuristic"
 SOURCE_USEROP = "userop_event"
 USEROP_TAG = "USEROP"
-ENTRYPOINTS = frozenset({ENTRYPOINT_V06, ENTRYPOINT_V07})
 QUOTE_TOKENS = frozenset({WMON, LVMON, USDC, AUSD})
 DELEGATION_PREFIX = "0xef0100"
 DELEGATION_CODE_LEN = 48
@@ -228,6 +226,7 @@ class AddressKinds:
         self._origins: set[str] = set()
         self._sightings: dict[str, dict[str, dict]] = {}
         self._min_txs = min_txs
+        self.tx_venues: frozenset[str] = frozenset()
 
     def is_wallet(self, kind: str) -> bool:
         return kind in WALLET_KINDS
@@ -377,6 +376,7 @@ class AddressKinds:
         return found
 
     def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]:
+        self.tx_venues = frozenset()
         meta = getattr(bundle, "meta", None)
         if meta is None:
             return []
@@ -433,6 +433,7 @@ class AddressKinds:
             return []
 
         kinds = self._resolve_kinds(candidates, bundle.block_number, cur)
+        self.tx_venues = frozenset(addr for addr in candidates if kinds.get(addr) == KIND_CONTRACT_UNKNOWN)
         newly: list[str] = []
         promote: list[tuple[str, dict]] = []
         for addr in sorted(candidates):

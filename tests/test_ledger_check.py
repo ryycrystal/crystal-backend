@@ -115,3 +115,57 @@ def test_dust_limit_is_one_billionth_of_the_bought_amount_but_never_below_dust_w
     assert dust_limit(3_173_915_918 * WEI) == 3_173_915_918 * 10**9
     assert check_le("f", "balance_token", 1_147_748_982_595_449, dust_limit(3_173_915_918 * WEI)).ok
     assert not check_le("f", "balance_token", 1_147_748_982_595_449, dust_limit(0)).ok
+
+
+class _PositionCursor:
+    def __init__(self, row: tuple | None):
+        self._row = row
+
+    def execute(self, sql, params=None):
+        assert "FROM positions_v2" in sql
+
+    def fetchone(self):
+        return self._row
+
+
+def _moncock_row(realized_confirmed: int, realized_estimated: int) -> tuple:
+    from scripts.ledger_check import MONCOCK_WALLET, POSITION_COLUMNS
+
+    values = {
+        "wallet": MONCOCK_WALLET,
+        "token": MONCOCK,
+        "balance_token": 5,
+        "custody_balance": 0,
+        "token_bought": 25_719_120_300_077_260_030_074_648,
+        "token_sold": 25_719_120_300_077_260_030_074_648,
+        "native_spent": 477_019 * WEI,
+        "native_received": 282_154 * WEI,
+        "cost_basis_native": 0,
+        "realized_pnl_native": realized_confirmed,
+        "basis_estimated_native": 0,
+        "realized_estimated_native": realized_estimated,
+        "unresolved_tokens": 0,
+        "unresolved_proceeds_native": 0,
+        "trade_count": 5,
+        "buy_count": 4,
+        "sell_count": 1,
+    }
+    return tuple(values[column] for column in POSITION_COLUMNS)
+
+
+def test_moncock_realized_counts_the_estimated_legs_and_reports_the_split():
+    from scripts.ledger_check import moncock_checks
+
+    checks = moncock_checks(_PositionCursor(_moncock_row(-40_084 * WEI, -154_780 * WEI)))
+    by_name = {c.name: c for c in checks}
+    assert all_pass(checks), render_table(checks)
+    assert by_name["realized (confirmed + estimated)"].actual.startswith("-194864")
+    assert by_name["realized split confirmed / estimated"].actual == "-40084.000 / -154780.000"
+
+    checks = moncock_checks(_PositionCursor(_moncock_row(-40_084 * WEI, 0)))
+    assert not by_name_ok(checks, "realized (confirmed + estimated)")
+    assert moncock_checks(_PositionCursor(None))[0].actual == "missing"
+
+
+def by_name_ok(checks, name: str) -> bool:
+    return next(c for c in checks if c.name == name).ok

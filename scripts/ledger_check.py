@@ -210,10 +210,18 @@ def moncock_checks(cur) -> list[Check]:
     pos = position(cur, MONCOCK_WALLET, MONCOCK)
     if pos is None:
         return [check_missing(name, "position row")]
+    realized = int(pos["realized_pnl_native"] or 0) + int(pos["realized_estimated_native"] or 0)
     return [
         check_abs(name, "token_bought", pos["token_bought"], "25719120.30", "0.01"),
-        check_pct(name, "native_spent", pos["native_spent"], "477018", "0.5"),
-        check_pct(name, "realized_pnl_native", pos["realized_pnl_native"], "-193957", "0.5"),
+        check_pct(name, "native_spent (confirmed + estimated)", pos["native_spent"], "477018", "0.5"),
+        check_pct(name, "realized (confirmed + estimated)", realized, "-193957", "0.5"),
+        Check(
+            name,
+            "realized split confirmed / estimated",
+            "reported",
+            f"{from_wei(pos['realized_pnl_native']):.3f} / {from_wei(pos['realized_estimated_native']):.3f}",
+            True,
+        ),
         check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(pos["token_bought"])),
     ]
 

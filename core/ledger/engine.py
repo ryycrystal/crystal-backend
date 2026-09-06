@@ -11,8 +11,8 @@ from decimal import Decimal
 from core import chain as h
 from core.ledger.types import (
     BASIS_OBSERVED,
-    ENTRYPOINT_V06,
-    ENTRYPOINT_V07,
+    ENTRYPOINTS,
+    KIND_VENUE_POOL,
     QUOTE_ASSETS,
     USEROP_EVENT_TOPIC,
     WMON,
@@ -25,8 +25,6 @@ from core.ledger.types import (
 )
 
 __all__ = ["LedgerEngine", "Rates"]
-
-ENTRYPOINTS = {ENTRYPOINT_V06, ENTRYPOINT_V07}
 TRACE_WINDOW_BLOCKS = 500_000
 HEAD_TTL_SECONDS = 30.0
 RATE_BUCKET_SECONDS = 300
@@ -305,6 +303,8 @@ class LedgerEngine:
         kinds = self._kinds_for(cur)
 
         def kind_of(addr: str) -> str:
+            if addr in getattr(kinds, "tx_venues", ()):
+                return KIND_VENUE_POOL
             return kinds.kind(addr, cur)
 
         metas = self._tx_meta_for().get_many([b.txhash for b in bundles])
@@ -332,7 +332,12 @@ class LedgerEngine:
             sender = kinds.userop_sender(bundle, cur) or bundle.userop_sender
             if sender != bundle.userop_sender:
                 bundle = replace(bundle, userop_sender=sender)
-            kinds.observe_tx(bundle, registry, cur)
+            discovered = set(kinds.observe_tx(bundle, registry, cur))
+            if discovered:
+                store.purge_wallets(cur, discovered)
+                flows = [f for f in flows if f.wallet not in discovered]
+                self._affected = {key for key in self._affected if key[0] not in discovered}
+                self.stats["purged"] += len(discovered)
             tx_flows = net(bundle)
             if self._needs_trace(tx_flows) and self._within_trace_window(blk):
                 trace = self._trace_for().native_transfers(bundle.txhash)

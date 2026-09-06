@@ -127,6 +127,8 @@ class FakeKinds:
     def __init__(self, kinds: dict[str, str]):
         self.kinds = kinds
         self.loaded = 0
+        self.tx_venues: frozenset[str] = frozenset()
+        self.discover: dict[str, list[str]] = {}
 
     def load_known(self, cur):
         self.loaded += 1
@@ -137,10 +139,10 @@ class FakeKinds:
     def is_wallet(self, kind):
         return kind in {"eoa", "eoa_7702", "wallet_4337", "contract_unknown"}
 
-    def observe_tx(self, bundle, registry):
-        return []
+    def observe_tx(self, bundle, registry, cur=None):
+        return list(self.discover.get(bundle.txhash, []))
 
-    def userop_sender(self, bundle):
+    def userop_sender(self, bundle, cur=None):
         return None
 
 
@@ -585,3 +587,57 @@ def test_trace_is_requested_only_inside_the_archive_window(seeded):
 
     assert traces_near.requested == [BUY_TX]
     assert traces_far.requested == []
+
+
+@pytestmark_db
+def test_discovering_a_venue_purges_the_rows_it_earned_as_a_wallet(seeded):
+    from core.storage import db_cursor
+
+    kinds = fixture_kinds()
+    kinds.discover = {SELL_TX: [WALLET]}
+    engine = LedgerEngine(
+        cur_factory=db_cursor,
+        enabled=True,
+        tx_meta_store=FakeTxMeta(fixture_metas()),
+        trace_store=FakeTrace(),
+        kinds=kinds,
+        rates_fn=fixed_rates,
+        head_fn=lambda: SELL_BLOCK + 1_000_000,
+    )
+
+    with db_cursor() as cur:
+        assert engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur) == 1
+        engine.flush(cur)
+        cur.execute("SELECT count(*) FROM positions_v2")
+        assert cur.fetchone()[0] == 1
+        kinds.kinds[WALLET] = "venue_pool"
+        assert engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur) == 0
+        assert engine.affected_keys() == []
+        engine.flush(cur)
+        cur.execute("SELECT count(*) FROM wallet_flows")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM positions_v2")
+        assert cur.fetchone()[0] == 0
+    assert engine.stats["purged"] == 1
+
+
+@pytestmark_db
+def test_pool_shaped_contracts_of_the_transaction_are_netted_as_venues(seeded):
+    from core.storage import db_cursor
+
+    kinds = fixture_kinds()
+    kinds.kinds[SETTLER_EXECUTOR] = "contract_unknown"
+    kinds.tx_venues = frozenset({SETTLER_EXECUTOR})
+    engine = LedgerEngine(
+        cur_factory=db_cursor,
+        enabled=True,
+        tx_meta_store=FakeTxMeta(fixture_metas()),
+        trace_store=FakeTrace(),
+        kinds=kinds,
+        rates_fn=fixed_rates,
+        head_fn=lambda: SELL_BLOCK + 1_000_000,
+    )
+    with db_cursor() as cur:
+        assert engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur) == 1
+        cur.execute("SELECT DISTINCT wallet FROM wallet_flows")
+        assert {r[0] for r in cur.fetchall()} == {WALLET}
