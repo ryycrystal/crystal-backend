@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib
 import json
 import os
@@ -123,7 +124,7 @@ class RpcClient:
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     data = json.loads(response.read())
-            except (urllib.error.URLError, OSError, ValueError) as exc:
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                 last_error = exc
                 continue
             if isinstance(data, list):

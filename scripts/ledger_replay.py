@@ -465,6 +465,13 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     for addrs in venues.values():
         watched |= addrs
     from_block = args.from_block if args.from_block is not None else min(created.values())
+    if args.resume:
+        with storage.db_cursor() as cur:
+            cur.execute("SELECT MAX(block_number) FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
+            last = cur.fetchone()[0]
+        if last:
+            from_block = max(from_block, int(last))
+            print(f"[RESUME] continuing from block {from_block:,} (last ledger block for these tokens)", flush=True)
     for token in tokens:
         print(f"[SCOPE] {token}: created {created[token]:,}, venues {sorted(venues[token])}", flush=True)
 
@@ -553,6 +560,11 @@ def main() -> None:
     ap.add_argument("--limit-blocks", type=int, default=0, help="process only the first N hot blocks")
     ap.add_argument("--rpc", default=os.environ.get("RPC_HTTP", "https://rpc.monad.xyz"))
     ap.add_argument("--wipe", action="store_true", help="truncate the ledger tables before replaying")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue from the highest block already in wallet_flows for these tokens; implies no wipe",
+    )
     ap.add_argument(
         "--wipe-token",
         action="store_true",
