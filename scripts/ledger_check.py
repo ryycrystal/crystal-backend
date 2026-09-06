@@ -24,6 +24,7 @@ WEI = Decimal(10**18)
 DUST_WEI = 10**15
 VENUE_KINDS = {"venue_pool", "venue_router", "venue_curve", "venue_custody", "token", "zero"}
 BALANCE_OF_SELECTOR = "0x70a08231"
+CHAIN_BATCH = 20
 RPC_INTERVAL = 0.06
 
 CHIPOTLE = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
@@ -250,11 +251,52 @@ def rpc_call(rpc_url: str, method: str, params: list):
     return payload["result"]
 
 
-def chain_balance(rpc_url: str, token: str, wallet: str) -> int:
+def chain_balance(rpc_url: str, token: str, wallet: str, block: int | None = None) -> int:
     data = BALANCE_OF_SELECTOR + wallet.lower().removeprefix("0x").rjust(64, "0")
     time.sleep(RPC_INTERVAL)
-    raw = rpc_call(rpc_url, "eth_call", [{"to": token, "data": data}, "latest"])
+    tag = hex(int(block)) if block else "latest"
+    raw = rpc_call(rpc_url, "eth_call", [{"to": token, "data": data}, tag])
     return int(raw, 16) if raw and raw != "0x" else 0
+
+
+def chain_balances(rpc_url: str, token: str, wallets: list[str], block: int | None) -> tuple[dict[str, int], list[str]]:
+    tag = hex(int(block)) if block else "latest"
+    out: dict[str, int] = {}
+    pending = list(wallets)
+    for attempt in range(6):
+        if not pending:
+            break
+        if attempt:
+            time.sleep(3 * attempt)
+        retry: list[str] = []
+        for start in range(0, len(pending), CHAIN_BATCH):
+            chunk = pending[start : start + CHAIN_BATCH]
+            payload = [
+                {
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "method": "eth_call",
+                    "params": [{"to": token, "data": BALANCE_OF_SELECTOR + w.removeprefix("0x").rjust(64, "0")}, tag],
+                }
+                for i, w in enumerate(chunk)
+            ]
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(rpc_url, data=body, headers={"content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    items = json.loads(resp.read())
+            except Exception:
+                items = []
+            got = {it["id"]: it.get("result") for it in items if isinstance(it, dict) and "result" in it}
+            for i, w in enumerate(chunk):
+                raw = got.get(i)
+                if raw is None:
+                    retry.append(w)
+                else:
+                    out[w] = int(raw, 16) if raw and raw != "0x" else 0
+            time.sleep(RPC_INTERVAL * len(chunk))
+        pending = retry
+    return out, pending
 
 
 def wallet_kinds(cur, wallets: list[str]) -> dict[str, str]:
@@ -278,7 +320,7 @@ def prod_holders(cur, token: str) -> list[str]:
     return sorted({(r[0] or "").lower() for r in cur.fetchall()})
 
 
-def james_checks(cur, rpc_url: str | None) -> list[Check]:
+def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Check]:
     name = "JAMES"
     ledger = ledger_balances(cur, JAMES)
     kinds = wallet_kinds(cur, list(ledger))
@@ -300,18 +342,21 @@ def james_checks(cur, rpc_url: str | None) -> list[Check]:
         checks.append(Check(name, "chain balanceOf", "skipped", "skipped", True))
         return checks
 
-    mismatched = [w for w in wallets if chain_balance(rpc_url, JAMES, w) != ledger[w]]
-    if mismatched:
-        ledger = ledger_balances(cur, JAMES)
-        mismatched = [w for w in mismatched if chain_balance(rpc_url, JAMES, w) != ledger.get(w, 0)]
+    targets = sorted(set(wallets) | set(missing))
+    balances, unreachable = chain_balances(rpc_url, JAMES, targets, head)
+    mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
+    where = f"at block {head:,}" if head else "at latest"
     checks.append(
         Check(
             name,
-            f"chain balanceOf == balance + custody ({len(wallets)} wallets)",
+            f"chain balanceOf == balance + custody ({len(targets)} wallets {where})",
             "0 mismatches",
             f"{len(mismatched)} mismatches {mismatched[:5]}",
             not mismatched,
         )
+    )
+    checks.append(
+        Check(name, "chain reads that never answered", "0", f"{len(unreachable)} {unreachable[:3]}", not unreachable)
     )
     return checks
 
@@ -353,7 +398,10 @@ def run_checks(cur, rpc_url: str | None, tokens: list[str]) -> list[Check]:
     if MONCOCK in tokens:
         checks += moncock_checks(cur)
     if JAMES in tokens:
-        checks += james_checks(cur, rpc_url)
+        cur.execute("SELECT value FROM ledger_meta WHERE key = 'replay_head_block'")
+        row = cur.fetchone()
+        head = int(row[0]) if row and str(row[0]).isdigit() else None
+        checks += james_checks(cur, rpc_url, head)
     checks += invariant_checks(cur, tokens)
     return checks
 

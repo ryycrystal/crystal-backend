@@ -37,6 +37,8 @@ SOURCE_KNOWN_LIST = "known_list"
 SOURCE_GETCODE = "getcode"
 SOURCE_HEURISTIC = "heuristic"
 SOURCE_USEROP = "userop_event"
+SOURCE_VENUE_EVENT = "venue_event"
+VENUE_EMITTER_TAGS = frozenset({"V2SWAP", "V3SWAP", "V2SYNC", "PSYNC", "NFSYNC"})
 USEROP_TAG = "USEROP"
 QUOTE_TOKENS = frozenset({WMON, LVMON, USDC, AUSD})
 DELEGATION_PREFIX = "0xef0100"
@@ -45,7 +47,7 @@ DEFAULT_RPC_URL = "https://rpc.monad.xyz"
 DEFAULT_MAX_RPS = 20.0
 GETCODE_BATCH = 50
 INSERT_BATCH = 500
-DISCOVERY_MIN_TXS = 2
+DISCOVERY_MIN_TXS = 3
 
 _urlopen = urllib.request.urlopen
 
@@ -64,6 +66,7 @@ _KIND_GUARDS = {
     SOURCE_GETCODE: None,
     SOURCE_HEURISTIC: "WHERE address_kinds.source = 'getcode'",
     SOURCE_USEROP: "WHERE address_kinds.source = 'getcode'",
+    SOURCE_VENUE_EVENT: "WHERE address_kinds.source IN ('getcode', 'heuristic')",
 }
 _VENUE_UPSERT = """
 INSERT INTO venues (address, kind, token0, token1, discovered, evidence)
@@ -233,6 +236,8 @@ class AddressKinds:
         self._sightings: dict[str, dict[str, dict]] = {}
         self._min_txs = min_txs
         self.tx_venues: frozenset[str] = frozenset()
+        self._targets: set[str] = set()
+        self._history_loaded = False
 
     def is_wallet(self, kind: str) -> bool:
         return kind in WALLET_KINDS
@@ -381,7 +386,25 @@ class AddressKinds:
             self._mark_wallet_4337(sender, block, entrypoint_of.get(sender), cur)
         return found
 
+    def _load_history(self, cur=None) -> None:
+        self._history_loaded = True
+        if cur is None and self._cur_factory is None:
+            return
+        try:
+            with self._cursor(cur) as c:
+                c.execute("SELECT DISTINCT from_addr, to_addr FROM tx_meta")
+                rows = c.fetchall() or []
+        except Exception:
+            return
+        for sender, target in rows:
+            if sender:
+                self._origins.add(sender.lower())
+            if target:
+                self._targets.add(target.lower())
+
     def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]:
+        if not self._history_loaded:
+            self._load_history(cur)
         self.tx_venues = frozenset()
         meta = getattr(bundle, "meta", None)
         if meta is None:
@@ -391,6 +414,14 @@ class AddressKinds:
         if origin:
             self._origins.add(origin)
             self._sightings.pop(origin, None)
+        if target:
+            self._targets.add(target)
+            self._sightings.pop(target, None)
+        emitters = {
+            (ev.address or "").lower()
+            for ev in getattr(bundle, "venue_events", None) or []
+            if ev.tag in VENUE_EMITTER_TAGS and ev.address
+        }
         for sender in self.userop_senders(bundle, cur):
             self._origins.add(sender)
             self._sightings.pop(sender, None)
@@ -426,7 +457,7 @@ class AddressKinds:
 
         candidates = []
         for addr in set(token_in) | set(token_out):
-            if addr in (origin, target) or addr in self._origins:
+            if addr in (origin, target) or addr in self._origins or addr in self._targets:
                 continue
             pool_shape = (
                 (addr in token_in and addr in token_out)
@@ -439,11 +470,25 @@ class AddressKinds:
             return []
 
         kinds = self._resolve_kinds(candidates, bundle.block_number, cur)
-        self.tx_venues = frozenset(addr for addr in candidates if kinds.get(addr) == KIND_CONTRACT_UNKNOWN)
+        emitting = sorted(a for a in candidates if a in emitters and kinds.get(a) == KIND_CONTRACT_UNKNOWN)
+        self.tx_venues = frozenset(emitting)
         newly: list[str] = []
         promote: list[tuple[str, dict]] = []
+        if emitting:
+            rows = []
+            venue_rows = []
+            for addr in emitting:
+                evidence = {"rule": "emits_venue_event", "tx": bundle.txhash}
+                rows.append((addr, KIND_VENUE_POOL, SOURCE_VENUE_EVENT, bundle.block_number, evidence))
+                venue_rows.append((addr, KIND_VENUE_POOL, None, None, True, evidence))
+                self._kinds[addr] = KIND_VENUE_POOL
+                self._sightings.pop(addr, None)
+                newly.append(addr)
+            with self._cursor(cur) as c:
+                self._put_kinds(c, rows)
+                self._put_venues(c, venue_rows)
         for addr in sorted(candidates):
-            if kinds.get(addr) != KIND_CONTRACT_UNKNOWN:
+            if kinds.get(addr) != KIND_CONTRACT_UNKNOWN or addr in emitters:
                 continue
             sightings = self._sightings.setdefault(addr, {})
             sightings[bundle.txhash] = {
@@ -454,7 +499,7 @@ class AddressKinds:
             if len(sightings) >= self._min_txs:
                 promote.append((addr, sightings))
         if not promote:
-            return []
+            return newly
 
         kind_rows = []
         venue_rows = []
@@ -478,6 +523,7 @@ class AddressKinds:
         with self._cursor(cur) as c:
             self._put_kinds(c, kind_rows)
             self._put_venues(c, venue_rows)
+        self.tx_venues = self.tx_venues | frozenset(newly)
         return newly
 
     def _resolve_kinds(self, addrs: list[str], block: int | None, cur=None) -> dict[str, str]:

@@ -373,7 +373,7 @@ def swap_buy_tx(txhash: str, block: int, pool: str, wallet: str, target: str) ->
     )
 
 
-def test_discovery_promotes_a_pool_shaped_contract_after_two_transactions():
+def test_discovery_promotes_a_pool_shaped_contract_after_three_transactions():
     rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
@@ -385,7 +385,10 @@ def test_discovery_promotes_a_pool_shaped_contract_after_two_transactions():
 
     assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry) == []
 
-    assert kinds.observe_tx(swap_buy_tx("0x02", 11, POOL, WALLET2, ROUTER), registry) == [POOL]
+    assert kinds.observe_tx(swap_buy_tx("0x02", 11, POOL, WALLET2, ROUTER), registry) == []
+    assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
+
+    assert kinds.observe_tx(swap_buy_tx("0x03", 12, POOL, WALLET2, ROUTER), registry) == [POOL]
     assert kinds.kind(POOL, cur) == KIND_VENUE_POOL
     assert not kinds.is_wallet(kinds.kind(POOL, cur))
 
@@ -393,7 +396,7 @@ def test_discovery_promotes_a_pool_shaped_contract_after_two_transactions():
     assert row["kind"] == KIND_VENUE_POOL
     assert row["source"] == SOURCE_HEURISTIC
     assert row["first_seen_block"] == 10
-    assert row["evidence"]["txs"] == ["0x01", "0x02"]
+    assert row["evidence"]["txs"] == ["0x01", "0x02", "0x03"]
     assert row["evidence"]["tokens"] == [TOKEN]
     assert row["evidence"]["quotes"] == [WMON]
 
@@ -404,7 +407,7 @@ def test_discovery_promotes_a_pool_shaped_contract_after_two_transactions():
     assert venue["token1"] == WMON
     assert venue["evidence"]["rule"] == "pool_shape_across_txs"
 
-    assert kinds.observe_tx(swap_buy_tx("0x03", 12, POOL, WALLET2, ROUTER), registry) == []
+    assert kinds.observe_tx(swap_buy_tx("0x04", 13, POOL, WALLET2, ROUTER), registry) == []
 
 
 def test_discovery_counts_native_value_and_trace_as_quote_legs():
@@ -428,7 +431,15 @@ def test_discovery_counts_native_value_and_trace_as_quote_legs():
         tx_meta=meta("0x12", WALLET, ROUTER),
         trace=TraceResult(available=True, transfers=[(POOL, ROUTER, 5 * 10**17), (ROUTER, WALLET, 5 * 10**17)]),
     )
-    assert kinds.observe_tx(curve_sell, registry) == [POOL]
+    assert kinds.observe_tx(curve_sell, registry) == []
+    curve_buy_again = bundle(
+        "0x13",
+        22,
+        transfers=[leg(1, TOKEN, POOL, WALLET)],
+        tx_meta=meta("0x13", WALLET, ROUTER, value=10**18),
+        trace=TraceResult(available=True, transfers=[(ROUTER, POOL, 10**18)]),
+    )
+    assert kinds.observe_tx(curve_buy_again, registry) == [POOL]
     assert cur.venues[POOL]["token1"] == "native"
 
 
@@ -450,8 +461,15 @@ def test_discovery_ignores_transaction_targets_and_origins():
         transfers=[leg(1, TOKEN, BOT, POOL), leg(2, WMON, POOL, BOT)],
         tx_meta=meta("0x22", WALLET, BOT),
     )
+    bot_buy_again = bundle(
+        "0x2a",
+        32,
+        transfers=[leg(1, WMON, BOT, POOL), leg(2, TOKEN, POOL, BOT)],
+        tx_meta=meta("0x2a", WALLET, BOT),
+    )
     assert kinds.observe_tx(bot_buy, registry) == []
-    assert kinds.observe_tx(bot_sell, registry) == [POOL]
+    assert kinds.observe_tx(bot_sell, registry) == []
+    assert kinds.observe_tx(bot_buy_again, registry) == [POOL]
     assert kinds.kind(BOT, cur) == KIND_CONTRACT_UNKNOWN
     assert kinds.is_wallet(kinds.kind(BOT, cur))
     assert BOT not in cur.venues
@@ -835,14 +853,14 @@ def test_observe_tx_writes_through_the_callers_cursor_and_never_opens_a_second_c
     assert any("INSERT INTO venues" in sql for sql in executed)
 
 
-def test_pool_shaped_contract_is_a_venue_for_its_transaction_before_promotion():
+def test_pool_shaped_contract_without_venue_events_keeps_its_position_before_promotion():
     rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
     registry = {TOKEN: object()}
 
     assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry, cur) == []
-    assert kinds.tx_venues == {POOL}
+    assert kinds.tx_venues == frozenset()
     assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
 
     plain = bundle("0x02", 11, transfers=[leg(1, TOKEN, WALLET, WALLET2)], tx_meta=meta("0x02", WALLET, WALLET2))
@@ -852,6 +870,87 @@ def test_pool_shaped_contract_is_a_venue_for_its_transaction_before_promotion():
     assert kinds.observe_tx(bundle("0x03", 12, transfers=[leg(1, TOKEN, POOL, WALLET)]), registry, cur) == []
     assert kinds.tx_venues == frozenset()
 
+    assert kinds.observe_tx(swap_sell_tx("0x05", 12, POOL, WALLET, ROUTER), registry, cur) == []
+    assert kinds.tx_venues == frozenset()
+
     assert kinds.observe_tx(swap_buy_tx("0x04", 13, POOL, WALLET2, ROUTER), registry, cur) == [POOL]
     assert kinds.tx_venues == {POOL}
     assert kinds.kind(POOL, cur) == KIND_VENUE_POOL
+
+
+def _bundle_for(txh, block, transfers, events, sender, target):
+    from core.ledger.types import TxBundle, TxMeta
+
+    return TxBundle(
+        txhash=txh,
+        block_number=block,
+        tx_index=1,
+        timestamp=1_700_000_000,
+        transfers=transfers,
+        venue_events=events,
+        meta=TxMeta(
+            txhash=txh, block_number=block, tx_index=1, from_addr=sender, to_addr=target, value=0, selector="0x"
+        ),
+        trace=None,
+        userop_sender=None,
+    )
+
+
+class _Cur:
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return []
+
+
+def test_a_contract_that_is_ever_called_directly_is_a_trader_not_a_pool():
+    from core.ledger.kinds import AddressKinds
+    from core.ledger.types import TokenReg, TransferLeg
+
+    token = "0x" + "aa" * 20
+    wmon = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+    bot = "0x" + "b0" * 20
+    user = "0x" + "11" * 20
+    router = "0x" + "70" * 20
+    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls], min_txs=2)
+    registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
+    cur = _Cur()
+    kinds.observe_tx(_bundle_for("0x01", 100, [TransferLeg(1, token, router, bot, 10)], [], user, bot), registry, cur)
+    for i in range(2, 6):
+        b = _bundle_for(
+            f"0x0{i}",
+            100 + i,
+            [TransferLeg(1, wmon, router, bot, 5), TransferLeg(2, token, bot, router, 5)],
+            [],
+            user,
+            router,
+        )
+        assert kinds.observe_tx(b, registry, cur) == []
+    assert kinds.kind(bot, cur) == "contract_unknown"
+    assert bot not in kinds.tx_venues
+
+
+def test_a_contract_that_emits_a_swap_event_is_a_venue_on_first_sight():
+    from core.ledger.kinds import AddressKinds
+    from core.ledger.types import TokenReg, TransferLeg, VenueEvent
+
+    token = "0x" + "aa" * 20
+    wmon = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+    pool = "0x" + "b0" * 20
+    user = "0x" + "11" * 20
+    router = "0x" + "70" * 20
+    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls], min_txs=3)
+    registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
+    swap = VenueEvent(tag="V3SWAP", log_index=3, parsed={"pool": pool, "amount0": 5, "amount1": -5}, address=pool)
+    b = _bundle_for(
+        "0x01",
+        100,
+        [TransferLeg(1, wmon, router, pool, 5), TransferLeg(2, token, pool, router, 5)],
+        [swap],
+        user,
+        router,
+    )
+    assert kinds.observe_tx(b, registry, _Cur()) == [pool]
+    assert pool in kinds.tx_venues
+    assert kinds.kind(pool, _Cur()) == "venue_pool"
