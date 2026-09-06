@@ -99,6 +99,20 @@ class LogSource:
         raise RuntimeError("prod log fetch kept failing")
 
 
+class ParallelFetcher:
+    def __init__(self, streams: int) -> None:
+        self._sources = [LogSource() for _ in range(streams)]
+        self._pool = ThreadPoolExecutor(max_workers=streams)
+
+    def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
+        n = len(self._sources)
+        parts = [numbers[i::n] for i in range(n)]
+        merged: dict[int, list[dict]] = {}
+        for part in self._pool.map(lambda sp: sp[0].fetch(sp[1]) if sp[1] else {}, zip(self._sources, parts)):
+            merged.update(part)
+        return merged
+
+
 def wipe_side() -> None:
     with storage.db_cursor() as cur:
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
@@ -165,7 +179,7 @@ def process_hot_blocks(blocks: list[int], logs_by_block: dict[int, list[dict]], 
     return counts
 
 
-async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe: bool) -> None:
+async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe: bool, streams: int) -> None:
     src = LogSource()
     if wipe:
         wipe_side()
@@ -187,7 +201,7 @@ async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe
     SEQUENCER.reset_pending(blocks[0])
 
     groups = [blocks[i : i + batch] for i in range(0, len(blocks), batch)]
-    prefetch = LogSource()
+    prefetch = ParallelFetcher(streams)
     pool = ThreadPoolExecutor(max_workers=1)
     pending = pool.submit(prefetch.fetch, groups[0])
 
@@ -222,6 +236,7 @@ def main() -> None:
     ap.add_argument("--addresses-file")
     ap.add_argument("--blocks-file")
     ap.add_argument("--batch", type=int, default=500)
+    ap.add_argument("--streams", type=int, default=4, help="parallel prod connections per chunk fetch")
     ap.add_argument("--wipe", action="store_true", help="truncate every table in the side db before seeding")
     ap.add_argument("--fresh", action="store_true", help="side db starts empty: skip per-trade existence checks")
     args = ap.parse_args()
@@ -244,7 +259,7 @@ def main() -> None:
         raise SystemExit(f"DATABASE_URL must point at the side database, got {url[:40]!r}")
 
     storage.init_pool()
-    asyncio.run(replay(addresses, args.batch, args.blocks_file, args.wipe))
+    asyncio.run(replay(addresses, args.batch, args.blocks_file, args.wipe, args.streams))
 
 
 if __name__ == "__main__":

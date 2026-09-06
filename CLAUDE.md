@@ -1913,6 +1913,14 @@ Facts that cost hours, in order of how much they cost:
   actually paid through an OTC or V4 leg: moncock's headline wallet replayed to
   474,059 MON spent against a hand-derived 477,018 (0.6%), with token quantities exact.
 
+- **Through the tunnel, one connection tops out near 1 MB/s** (latency-bound, not
+  CPU: eight workers together used one core while prod's fetch backends sat in
+  ClientWrite), and a dense 500-block chunk is ~19 MB. Four connections in parallel
+  gave 3.2 MB/s aggregate, so each worker fetches a chunk over several connections
+  (`--streams`). Server-side filtering does not help: the cache is already
+  topic-filtered at ingest, so dropping untracked-token transfers saves only 16%.
+  Sampled hot blocks average 9 KB, so the whole cohort is ~34 GB of log JSON.
+
 Throughput and scale on 2026-09-06: 162 affected tokens, 3.41M distinct hot blocks,
 split by token across 8 workers (`crystal_replay_w0..7`, ~465k hot blocks each) on a
 12-core laptop with prod reached through a tunnel. Each worker prefetches the next
