@@ -191,8 +191,10 @@ def main() -> None:
         found = reconciliation_blocks(url, args.before)
         print(f"[V4] {len(found):,} reconciliation blocks from {url.rsplit('/', 1)[1].split('?')[0]}", flush=True)
         blocks |= found
+    all_blocks: set[int] = set()
     if args.blocks_file:
-        blocks |= {int(b) for b in json.load(open(args.blocks_file)) if int(b) < args.before}
+        all_blocks = {int(b) for b in json.load(open(args.blocks_file))}
+        blocks |= {b for b in all_blocks if b < args.before}
     if not blocks:
         raise SystemExit("no blocks selected")
 
@@ -208,6 +210,13 @@ def main() -> None:
         cur.execute("CREATE TABLE IF NOT EXISTS v4_done (number BIGINT PRIMARY KEY)")
     store.commit()
 
+    with store.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO v4_done (number) VALUES %s ON CONFLICT DO NOTHING",
+            [(b,) for b in all_blocks if b >= args.before],
+        )
+    store.commit()
     pending = sorted(blocks - already_done(store, blocks))
     work = ranges(pending)
     print(
