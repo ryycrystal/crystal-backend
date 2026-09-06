@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from decimal import Decimal
+
+from psycopg2.extras import Json, execute_values
+
+from core.ledger.types import Flow, PositionRow, TokenReg, TraceResult, TxMeta
+
+FLOW_COLUMNS = (
+    "block_number",
+    "tx_index",
+    "log_index",
+    "sub_index",
+    "txhash",
+    "timestamp",
+    "wallet",
+    "token",
+    "token_delta",
+    "quote_asset",
+    "quote_delta",
+    "mon_value",
+    "usd_value",
+    "kind",
+    "venue",
+    "counterparty",
+    "origin",
+    "source",
+    "basis_state",
+    "price_native",
+    "basis_delta",
+    "realized_delta",
+)
+POSITION_COLUMNS = (
+    "wallet",
+    "token",
+    "balance_token",
+    "custody_balance",
+    "token_bought",
+    "token_sold",
+    "native_spent",
+    "native_received",
+    "cost_basis_native",
+    "realized_pnl_native",
+    "basis_estimated_native",
+    "realized_estimated_native",
+    "unresolved_tokens",
+    "unresolved_proceeds_native",
+    "trade_count",
+    "buy_count",
+    "sell_count",
+    "first_flow_ts",
+    "last_flow_ts",
+    "last_flow_block",
+    "flow_count",
+)
+TX_META_COLUMNS = ("txhash", "block_number", "tx_index", "from_addr", "to_addr", "value", "selector")
+REGISTRY_COLUMNS = ("token", "source", "registered_block", "quote_token", "decimals", "active")
+
+_FLOW_WEI = {"token_delta", "quote_delta", "basis_delta", "realized_delta"}
+_FLOW_DECIMAL = {"mon_value", "usd_value", "price_native"}
+_FLOW_ADDRESS = {"txhash", "wallet", "token", "quote_asset", "venue", "counterparty", "origin"}
+_POSITION_WEI = set(POSITION_COLUMNS[2:14])
+_KEY_CHUNK = 500
+_PAGE_SIZE = 1000
+
+_INSERT_FLOWS_SQL = (
+    f"INSERT INTO wallet_flows ({', '.join(FLOW_COLUMNS)}) VALUES %s "
+    "ON CONFLICT (block_number, tx_index, log_index, sub_index) DO NOTHING RETURNING 1"
+)
+_SELECT_FLOWS_SQL = (
+    f"SELECT {', '.join(FLOW_COLUMNS)} FROM wallet_flows "
+    "WHERE (wallet, token) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
+    "ORDER BY block_number, tx_index, log_index, sub_index"
+)
+_UPSERT_POSITIONS_SQL = (
+    f"INSERT INTO positions_v2 ({', '.join(POSITION_COLUMNS)}) VALUES %s "
+    "ON CONFLICT (wallet, token) DO UPDATE SET " + ", ".join(f"{col} = EXCLUDED.{col}" for col in POSITION_COLUMNS[2:])
+)
+_UPDATE_FOLD_DELTAS_SQL = (
+    "UPDATE wallet_flows AS f SET basis_delta = v.basis_delta, realized_delta = v.realized_delta "
+    "FROM (VALUES %s) AS v(block_number, tx_index, log_index, sub_index, basis_delta, realized_delta) "
+    "WHERE f.block_number = v.block_number AND f.tx_index = v.tx_index "
+    "AND f.log_index = v.log_index AND f.sub_index = v.sub_index"
+)
+_UPDATE_FOLD_DELTAS_TEMPLATE = "(%s::bigint, %s::int, %s::int, %s::int, %s::numeric, %s::numeric)"
+_SELECT_TX_META_SQL = f"SELECT {', '.join(TX_META_COLUMNS)} FROM tx_meta WHERE txhash = ANY(%s)"
+_UPSERT_TX_META_SQL = (
+    f"INSERT INTO tx_meta ({', '.join(TX_META_COLUMNS)}) VALUES %s "
+    "ON CONFLICT (txhash) DO UPDATE SET " + ", ".join(f"{col} = EXCLUDED.{col}" for col in TX_META_COLUMNS[1:])
+)
+_SELECT_REGISTRY_SQL = f"SELECT {', '.join(REGISTRY_COLUMNS)} FROM token_registry"
+_UPSERT_REGISTRY_SQL = (
+    "INSERT INTO token_registry (token, source, registered_block, quote_token, decimals, active) "
+    "VALUES (%s, %s, %s, %s, COALESCE(%s, 18), TRUE) "
+    "ON CONFLICT (token) DO UPDATE SET "
+    "source = EXCLUDED.source, "
+    "registered_block = LEAST(token_registry.registered_block, EXCLUDED.registered_block), "
+    "quote_token = COALESCE(EXCLUDED.quote_token, token_registry.quote_token), "
+    "decimals = EXCLUDED.decimals, active = TRUE "
+    f"RETURNING {', '.join(REGISTRY_COLUMNS)}"
+)
+
+_REGISTRY: dict[str, TokenReg] | None = None
+
+
+def _lower(value):
+    if isinstance(value, str):
+        return value.lower()
+    return value
+
+
+def _wei(value):
+    if value is None:
+        return None
+    return int(value)
+
+
+def _decimal(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return Decimal(value)
+
+
+def _flow_value(flow: Flow, column: str):
+    value = getattr(flow, column)
+    if column in _FLOW_WEI:
+        return _wei(value)
+    if column in _FLOW_DECIMAL:
+        return _decimal(value)
+    if column in _FLOW_ADDRESS:
+        return _lower(value)
+    return value
+
+
+def _flow_from_row(row) -> Flow:
+    values = {}
+    for column, value in zip(FLOW_COLUMNS, row):
+        if column in _FLOW_WEI:
+            value = _wei(value)
+        elif column in _FLOW_DECIMAL:
+            value = _decimal(value)
+        values[column] = value
+    return Flow(**values)
+
+
+def _flow_pk(flow: Flow) -> tuple[int, int, int, int]:
+    return (int(flow.block_number), int(flow.tx_index), int(flow.log_index), int(flow.sub_index))
+
+
+def insert_flows(cur, flows: list[Flow]) -> int:
+    if not flows:
+        return 0
+    rows = [tuple(_flow_value(flow, column) for column in FLOW_COLUMNS) for flow in flows]
+    inserted = execute_values(cur, _INSERT_FLOWS_SQL, rows, page_size=_PAGE_SIZE, fetch=True)
+    return len(inserted)
+
+
+def load_flows(cur, keys: list[tuple[str, str]]) -> dict[tuple[str, str], list[Flow]]:
+    out: dict[tuple[str, str], list[Flow]] = {(_lower(wallet), _lower(token)): [] for wallet, token in keys}
+    pairs = list(out)
+    for start in range(0, len(pairs), _KEY_CHUNK):
+        chunk = pairs[start : start + _KEY_CHUNK]
+        cur.execute(_SELECT_FLOWS_SQL, ([wallet for wallet, _ in chunk], [token for _, token in chunk]))
+        for row in cur.fetchall():
+            flow = _flow_from_row(row)
+            out[(flow.wallet, flow.token)].append(flow)
+    return out
+
+
+def _position_value(row: PositionRow, column: str):
+    value = getattr(row, column)
+    if column in ("wallet", "token"):
+        return _lower(value)
+    if column in _POSITION_WEI:
+        return _wei(value)
+    if value is None:
+        return None
+    return int(value)
+
+
+def upsert_positions(cur, rows: list[PositionRow]) -> None:
+    if not rows:
+        return
+    by_key = {(_lower(row.wallet), _lower(row.token)): row for row in rows}
+    values = [tuple(_position_value(row, column) for column in POSITION_COLUMNS) for row in by_key.values()]
+    execute_values(cur, _UPSERT_POSITIONS_SQL, values, page_size=_PAGE_SIZE)
+
+
+def _position_row(state, wallet: str, token: str) -> PositionRow:
+    if isinstance(state, PositionRow):
+        row = state
+    elif hasattr(state, "to_row"):
+        row = state.to_row()
+    else:
+        row = PositionRow(**{column: getattr(state, column, None) for column in POSITION_COLUMNS})
+    return replace(row, wallet=wallet, token=token)
+
+
+def _fold_result(result):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, []
+
+
+def _write_fold_deltas(cur, updates: list[tuple]) -> None:
+    if not updates:
+        return
+    execute_values(cur, _UPDATE_FOLD_DELTAS_SQL, updates, template=_UPDATE_FOLD_DELTAS_TEMPLATE, page_size=_PAGE_SIZE)
+
+
+def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
+    rows: list[PositionRow] = []
+    updates: list[tuple] = []
+    for (wallet, token), flows in load_flows(cur, keys).items():
+        if not flows:
+            continue
+        state, folded = _fold_result(fold_fn(None, flows))
+        rows.append(_position_row(state, wallet, token))
+        stored = {_flow_pk(flow): flow for flow in flows}
+        for flow in folded:
+            before = stored.get(_flow_pk(flow))
+            basis_delta = _wei(flow.basis_delta) or 0
+            realized_delta = _wei(flow.realized_delta) or 0
+            if before is None or (before.basis_delta, before.realized_delta) != (basis_delta, realized_delta):
+                updates.append((*_flow_pk(flow), basis_delta, realized_delta))
+    upsert_positions(cur, rows)
+    _write_fold_deltas(cur, updates)
+    return len(rows)
+
+
+def get_tx_meta(cur, txhashes) -> dict[str, TxMeta]:
+    hashes = sorted({_lower(txhash) for txhash in txhashes})
+    if not hashes:
+        return {}
+    cur.execute(_SELECT_TX_META_SQL, (hashes,))
+    out: dict[str, TxMeta] = {}
+    for row in cur.fetchall():
+        values = dict(zip(TX_META_COLUMNS, row))
+        values["value"] = _wei(values["value"])
+        out[values["txhash"]] = TxMeta(**values)
+    return out
+
+
+def put_tx_meta(cur, metas) -> None:
+    by_hash = {}
+    for meta in metas:
+        txhash = _lower(meta.txhash)
+        by_hash[txhash] = (
+            txhash,
+            meta.block_number,
+            meta.tx_index,
+            _lower(meta.from_addr),
+            _lower(meta.to_addr),
+            _wei(meta.value),
+            _lower(meta.selector),
+        )
+    if not by_hash:
+        return
+    execute_values(cur, _UPSERT_TX_META_SQL, list(by_hash.values()), page_size=_PAGE_SIZE)
+
+
+def get_trace(cur, txhash: str) -> TraceResult | None:
+    cur.execute("SELECT available, transfers FROM tx_traces WHERE txhash = %s", (_lower(txhash),))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    transfers = [(str(src), str(dst), int(value)) for src, dst, value in (row[1] or [])]
+    return TraceResult(available=bool(row[0]), transfers=transfers)
+
+
+def put_trace(cur, txhash: str, result: TraceResult) -> None:
+    transfers = [[_lower(src), _lower(dst), int(value)] for src, dst, value in (result.transfers or [])]
+    cur.execute(
+        """
+        INSERT INTO tx_traces (txhash, available, transfers) VALUES (%s, %s, %s)
+        ON CONFLICT (txhash) DO UPDATE SET available = EXCLUDED.available, transfers = EXCLUDED.transfers
+        """,
+        (_lower(txhash), bool(result.available), Json(transfers)),
+    )
+
+
+def get_kinds(cur, addrs) -> dict[str, str]:
+    addresses = sorted({_lower(addr) for addr in addrs})
+    if not addresses:
+        return {}
+    cur.execute("SELECT address, kind FROM address_kinds WHERE address = ANY(%s)", (addresses,))
+    return {address: kind for address, kind in cur.fetchall()}
+
+
+def put_kind(cur, addr: str, kind: str, source: str, block, evidence) -> None:
+    cur.execute(
+        """
+        INSERT INTO address_kinds (address, kind, source, first_seen_block, evidence) VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (address) DO UPDATE SET
+            kind = EXCLUDED.kind,
+            source = EXCLUDED.source,
+            first_seen_block = LEAST(address_kinds.first_seen_block, EXCLUDED.first_seen_block),
+            evidence = COALESCE(EXCLUDED.evidence, address_kinds.evidence)
+        """,
+        (_lower(addr), kind, source, block, Json(evidence) if evidence is not None else None),
+    )
+
+
+def upsert_venue(cur, addr: str, kind: str, token0=None, token1=None, discovered=False, evidence=None) -> None:
+    cur.execute(
+        """
+        INSERT INTO venues (address, kind, token0, token1, discovered, evidence) VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (address) DO UPDATE SET
+            kind = EXCLUDED.kind,
+            token0 = COALESCE(EXCLUDED.token0, venues.token0),
+            token1 = COALESCE(EXCLUDED.token1, venues.token1),
+            discovered = venues.discovered AND EXCLUDED.discovered,
+            evidence = COALESCE(EXCLUDED.evidence, venues.evidence)
+        """,
+        (
+            _lower(addr),
+            kind,
+            _lower(token0),
+            _lower(token1),
+            bool(discovered),
+            Json(evidence) if evidence is not None else None,
+        ),
+    )
+
+
+def _token_reg(row) -> TokenReg:
+    return TokenReg(**dict(zip(REGISTRY_COLUMNS, row)))
+
+
+def registry(cur, refresh: bool = False) -> dict[str, TokenReg]:
+    global _REGISTRY
+    if _REGISTRY is None or refresh:
+        cur.execute(_SELECT_REGISTRY_SQL)
+        _REGISTRY = {row[0]: _token_reg(row) for row in cur.fetchall()}
+    return _REGISTRY
+
+
+def refresh_registry(cur) -> dict[str, TokenReg]:
+    return registry(cur, refresh=True)
+
+
+def invalidate_registry() -> None:
+    global _REGISTRY
+    _REGISTRY = None
+
+
+def register_token(cur, token: str, source: str, block, quote_token, decimals) -> TokenReg:
+    cur.execute(_UPSERT_REGISTRY_SQL, (_lower(token), source, block, _lower(quote_token), decimals))
+    reg = _token_reg(cur.fetchone())
+    if _REGISTRY is not None:
+        _REGISTRY[reg.token] = reg
+    return reg
+
+
+def get_ledger_meta(cur, key: str) -> str | None:
+    cur.execute("SELECT value FROM ledger_meta WHERE key = %s", (key,))
+    row = cur.fetchone()
+    return None if row is None else row[0]
+
+
+def set_ledger_meta(cur, key: str, value) -> None:
+    cur.execute(
+        "INSERT INTO ledger_meta (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (key, None if value is None else str(value)),
+    )
