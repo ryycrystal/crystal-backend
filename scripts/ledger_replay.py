@@ -47,7 +47,7 @@ from core.ledger.engine import LedgerEngine, Rates  # noqa: E402
 from core.ledger.kinds import AddressKinds  # noqa: E402
 from core.ledger.receipts import RECEIPT_LOG_DDL, ReceiptLogs  # noqa: E402
 from core.ledger.schema import LEDGER_TABLES, init_ledger_schema  # noqa: E402
-from core.ledger.txmeta import RpcClient, TxMetaStore  # noqa: E402
+from core.ledger.txmeta import RpcClient, RpcError, TxMetaStore  # noqa: E402
 from core.ledger.types import QUOTE_ASSETS  # noqa: E402
 from core.storage import schema  # noqa: E402
 
@@ -67,6 +67,8 @@ SIDE_DB_MARKERS = ("crystal_ledger", "crystal_replay")
 PROD_QUERY_TIMEOUT = 300
 PREFETCH_WORKERS = 4
 RPC_BATCH_CALLS = 10
+CHUNK_ATTEMPTS = 4
+CHUNK_RETRY_SECONDS = 20
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 PROD_PAGE_ROWS = 2000
 
@@ -392,6 +394,24 @@ def process_chunk(
     return flows, refolded
 
 
+def process_chunk_with_retries(
+    engine: LedgerEngine,
+    kinds: AddressKinds,
+    relevant: dict[int, list[dict]],
+    timestamps: dict[int, int],
+    receipt_logs_added: int,
+) -> tuple[int, int]:
+    for attempt in range(CHUNK_ATTEMPTS):
+        try:
+            return process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added)
+        except (RuntimeError, RpcError, psycopg2.OperationalError, psycopg2.errors.DeadlockDetected) as exc:
+            if attempt + 1 == CHUNK_ATTEMPTS:
+                raise
+            print(f"[CHUNK] attempt {attempt + 1}/{CHUNK_ATTEMPTS} failed: {exc!r}"[:200], flush=True)
+            time.sleep(CHUNK_RETRY_SECONDS * (attempt + 1))
+    raise RuntimeError("unreachable")
+
+
 def summary(tokens: list[str]) -> None:
     from ledger_check import token_shares
 
@@ -482,7 +502,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        flows, refolded = process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added)
+        flows, refolded = process_chunk_with_retries(engine, kinds, relevant, timestamps, receipt_logs_added)
         total_flows += flows
         total_refolds += refolded
         done += len(group)

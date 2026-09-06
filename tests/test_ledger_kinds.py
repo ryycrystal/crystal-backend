@@ -661,10 +661,11 @@ def test_json_rpc_batches_retries_and_orders_results(monkeypatch):
     monkeypatch.setattr(kinds_mod.time, "sleep", lambda s: sleeps.append(s))
     client = JsonRpc("http://rpc.test", max_rps=1000, attempts=4)
     results = client.batch([("eth_getCode", [WALLET, "latest"]), ("eth_getCode", [POOL, "latest"])])
-    assert results == [WALLET[-2:], POOL[-2:]]
+    assert results == ["0x", POOL[-2:]]
     assert len(attempts) == 3
     assert attempts[0][0]["method"] == "eth_getCode"
     assert attempts[0][1]["id"] == 1
+    assert [item["id"] for item in attempts[2]] == [1]
     assert [s for s in sleeps if s >= 0.5] == [0.5, 1.0]
     assert client.batch([]) == []
 

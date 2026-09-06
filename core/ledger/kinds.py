@@ -91,50 +91,56 @@ class JsonRpc:
     def __init__(self, url: str, max_rps: float | None = None, attempts: int = 5, timeout: float = 30.0):
         self.url = url
         env_rps = os.getenv("RPC_MAX_RPS")
-        self.min_interval = 1.0 / float(max_rps or env_rps or DEFAULT_MAX_RPS)
+        self.max_rps = float(max_rps or env_rps or DEFAULT_MAX_RPS)
         self.attempts = attempts
         self.timeout = timeout
-        self._last_call = float("-inf")
+        self._next_slot = float("-inf")
 
-    def _gate(self) -> None:
-        wait = self.min_interval - (time.monotonic() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call = time.monotonic()
+    def _gate(self, count: int) -> None:
+        now = time.monotonic()
+        start = max(now, self._next_slot)
+        self._next_slot = start + max(count, 1) / self.max_rps
+        if start > now:
+            time.sleep(start - now)
 
     def batch(self, calls: list[tuple[str, list]]) -> list:
         if not calls:
             return []
-        payload = [{"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, (m, p) in enumerate(calls)]
-        body = json.dumps(payload).encode()
+        results: list = [None] * len(calls)
+        pending = list(range(len(calls)))
         delay = 0.5
         last_error: object = None
-        for _ in range(self.attempts):
-            self._gate()
+        for attempt in range(self.attempts):
+            if not pending:
+                break
+            if attempt:
+                time.sleep(delay)
+                delay *= 2
+            payload = [{"jsonrpc": "2.0", "id": i, "method": calls[i][0], "params": calls[i][1]} for i in pending]
+            body = json.dumps(payload).encode()
+            self._gate(len(payload))
             try:
                 request = urllib.request.Request(self.url, data=body, headers={"Content-Type": "application/json"})
                 with _urlopen(request, timeout=self.timeout) as response:
                     replies = json.loads(response.read())
             except (urllib.error.URLError, OSError, ValueError) as exc:
                 last_error = exc
-                time.sleep(delay)
-                delay *= 2
                 continue
             if isinstance(replies, dict):
                 replies = [replies]
             by_id = {r.get("id"): r for r in replies if isinstance(r, dict)}
-            results = []
-            for i in range(len(calls)):
+            retry: list[int] = []
+            for i in pending:
                 reply = by_id.get(i)
                 if reply is None or "result" not in reply:
                     last_error = reply.get("error") if reply else "missing reply"
-                    break
-                results.append(reply["result"])
-            if len(results) == len(calls):
-                return results
-            time.sleep(delay)
-            delay *= 2
-        raise RuntimeError(f"rpc batch failed after {self.attempts} attempts: {str(last_error)[:200]}")
+                    retry.append(i)
+                else:
+                    results[i] = reply["result"]
+            pending = retry
+        if pending:
+            raise RuntimeError(f"rpc batch failed after {self.attempts} attempts: {str(last_error)[:200]}")
+        return results
 
 
 def known_address_kinds() -> dict[str, str]:
