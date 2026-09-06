@@ -55,20 +55,27 @@ FETCH_TIMEOUT = 600
 
 
 def prod_conn():
-    return psycopg2.connect(
-        host=os.environ["PROD_PGHOST"],
-        hostaddr=os.environ.get("PROD_PGHOSTADDR") or None,
-        port=int(os.environ.get("PROD_PGPORT", "5432")),
-        user=os.environ["PROD_PGUSER"],
-        password=os.environ["PROD_PGPASSWORD"],
-        dbname=os.environ["PROD_PGDATABASE"],
-        sslmode="require",
-        connect_timeout=30,
-        keepalives=1,
-        keepalives_idle=20,
-        keepalives_interval=10,
-        keepalives_count=3,
-    )
+    last = None
+    for attempt in range(6):
+        try:
+            return psycopg2.connect(
+                host=os.environ["PROD_PGHOST"],
+                hostaddr=os.environ.get("PROD_PGHOSTADDR") or None,
+                port=int(os.environ.get("PROD_PGPORT", "5432")),
+                user=os.environ["PROD_PGUSER"],
+                password=os.environ["PROD_PGPASSWORD"],
+                dbname=os.environ["PROD_PGDATABASE"],
+                sslmode="require",
+                connect_timeout=30,
+                keepalives=1,
+                keepalives_idle=20,
+                keepalives_interval=10,
+                keepalives_count=3,
+            )
+        except psycopg2.OperationalError as exc:
+            last = exc
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"prod connection failed after retries: {last}")
 
 
 class LogSource:
