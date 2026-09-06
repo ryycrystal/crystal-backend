@@ -69,6 +69,40 @@ Consequences, all observed in production this week:
   and mid-chunk reads see stale rows (commit `6b9fb7a`). A ledger fold within the batch
   removes the class.
 
+
+### Edge cases the fold must reproduce (all observed on prod, 2026-09-05/06)
+
+- **Routed buy split across venues in one transaction**: a tracked V3 pool, the V4
+  PoolManager and an untracked V3 pool, delivered through two hops (executor, router).
+  Moncock wallet `0xb9e37df1…35d2`, tx `0x09131fec…`: 7,038,992.72 tokens for 161,704 MON
+  across three legs, one wallet row expected.
+- **V4 singleton**: every V4 pool's tokens leave one address (the PoolManager) and the pool
+  is a bytes32 id, not a graph node. Resolving through the id credited the executor
+  (fixed in `31f9d9d`).
+- **Untracked pools**: a swap on a V3 pool the indexer never registered is ignored today and
+  the leg imputed at another pool's price (4,042.60 MON actual vs 4,188.22 imputed on the
+  transaction above).
+- **OTC fills**: quantity exact from transfers, native never observable without a trace.
+- **ERC-4337**: `tx.from` is the bundler; the smart account is the trader and its own
+  wallet (product rule: never union an EOA with its subwallets).
+- **Arbitrage contracts**: the signer never touches the token; the contract is the holder.
+- **Passthrough executors** (0x Settler, AllowanceHolder, executors such as
+  `0xfb78fc…`): net delta zero within the transaction, must never hold a position.
+- **Transfers carry basis**: `token_sold > token_bought` is legitimate; a settler's
+  same-transaction transfer leg once drained basis on 1CT sells (175k rows repaired).
+- **Same-block ordering**: 2–3 Monad blocks share a timestamp; order is (block, tx index,
+  log index), never timestamp.
+- **Cache topic set**: the log cache stores only topics indexed at ingest, so a new event
+  type has no history (V4 logs before 2026-09-05 had to be backfilled by RPC for 130k
+  blocks); the fold must not depend on any venue log existing for old blocks.
+- **Counting**: a routed trade counts once per (tx, token, wallet) however many legs it has.
+- **USD**: every flow is priced at the MON/USD rate of its block; a replay must carry
+  prod's series or history is priced at today's rate.
+- **Prod keeps trading during any rebuild**: merging a refold needs a cutoff block per
+  token and defers wallets that traded after it.
+- **Known answers beyond §0**: the 841 never-sold positions repaired on 2026-09-05 must be
+  unchanged and the 8,584 sold-cohort positions must move to the ledger answer.
+
 ---
 
 ## 2. How the reference products do it
@@ -322,6 +356,9 @@ means replaying its history through the same fold, which the side-database repla
 | OTC / EOA-to-EOA | `TF` | trace if native, estimated otherwise | flagged |
 | our order book | `TR`/`OBF` events | in the event | custody via `IBD`/`IBW`; USDC-quoted markets carry `usd_value = quote` |
 | vaults, LP pools | `VD`/`VDP`/`VWD`, `PMINT`/`PBURN` | in the event | basis parked, not sold |
+| multi-venue routed buy (V3 + V4 + untracked V3 in one tx) | `TF` per leg | WMON `TF` per leg, or the venue event matched by amount | the moncock fixture: legs net to one wallet row per token, `venue` = the largest leg, per-leg price from the events |
+| ERC-4337 bundles (EntryPoint) | `TF` | the account's WMON `TF`, or native via trace | `origin` = the UserOperation sender, never the bundler |
+| tracked token on a pool from another factory | `TF` | WMON `TF` | today ignored and imputed; must be discovered into `venues` on first sight |
 
 ---
 
@@ -356,6 +393,13 @@ means replaying its history through the same fold, which the side-database repla
 **Phase 0 — spikes (1 day).** Measure full-block fetch cost at 400 ms blocks; measure trace
 latency and how often a trace is actually needed on a day of real blocks; run the
 classification heuristic over the last week and eyeball the discovered venues.
+Two more measurements, whose numbers decide the estimated-quote strategy and the §13
+threshold: **trace availability by block age** (sample transactions at 10k, 100k, 300k,
+600k, 1M and 5M blocks back and record which return a `callTracer` result; the archive
+edge was met around 600k–800k blocks back on 2026-09-06) and **log-only resolvability of
+routed legs** (over the 162-token cohort's routed transactions, the share whose quote leg
+resolves from `tx.value`, WMON transfers or a venue event, by user or by amount, without a
+trace).
 
 **Phase 1 — build behind a flag (3 days).** New tables; netting + classification module;
 the fold; the write seam gate. Shadow mode: the indexer writes `wallet_flows` and
