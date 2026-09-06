@@ -6,7 +6,7 @@ reference tables and the MON/USD sample series, then runs LedgerEngine.process_b
 flush per chunk of hot blocks. The old position engine is never invoked.
 
     DATABASE_URL=postgresql://...@localhost/crystal_ledger \\
-      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe | --wipe-token] [--reset-discovered]
+      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe | --wipe-token] [--reset-discovered] [--chain-logs-file f]
 """
 
 from __future__ import annotations
@@ -314,6 +314,32 @@ def hot_blocks(src: LogSource, addresses: list[str], from_block: int, to_block: 
     return [int(r[0]) for r in rows]
 
 
+def load_chain_logs(path: str | None) -> dict[int, list[dict]]:
+    """Logs fetched straight from the chain by scripts/ledger_chain_logs.py, keyed by block."""
+    if not path:
+        return {}
+    raw = json.load(open(path))
+    out = {int(blk): logs for blk, logs in raw.items() if logs}
+    total = sum(len(v) for v in out.values())
+    print(f"[CHAIN] {total:,} chain-fetched logs in {len(out):,} blocks from {path}", flush=True)
+    return out
+
+
+def merge_chain_logs(cached: dict[int, list[dict]], chain: dict[int, list[dict]], blocks: list[int]) -> None:
+    """Add chain-fetched logs to the cached rows of these blocks, skipping logs the cache already has."""
+    for blk in blocks:
+        extra = chain.get(blk)
+        if not extra:
+            continue
+        have = cached.setdefault(blk, [])
+        seen = {(str(lg.get("transactionHash")).lower(), str(lg.get("logIndex")).lower()) for lg in have}
+        for lg in extra:
+            key = (str(lg.get("transactionHash")).lower(), str(lg.get("logIndex")).lower())
+            if key not in seen:
+                seen.add(key)
+                have.append(lg)
+
+
 def load_or_find_blocks(
     src: LogSource, addresses: list[str], from_block: int, to_block: int | None, blocks_file: str | None
 ) -> list[int]:
@@ -489,6 +515,16 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         print(f"[SCOPE] {token}: created {created[token]:,}, venues {sorted(venues[token])}", flush=True)
 
     blocks = load_or_find_blocks(src, sorted(watched), from_block, args.to_block, args.blocks_file)
+    chain_logs = load_chain_logs(args.chain_logs_file)
+    if chain_logs:
+        blocks = sorted(set(blocks) | set(chain_logs))
+        earliest = min(chain_logs)
+        with storage.db_cursor() as cur:
+            cur.execute(
+                "UPDATE launchpad_tokens SET created_block = LEAST(created_block, %s) WHERE token = ANY(%s)",
+                (earliest, tokens),
+            )
+        print(f"[CHAIN] hot blocks now {len(blocks):,}; registration lowered to {earliest:,} where later", flush=True)
     if args.limit_blocks:
         blocks = blocks[: args.limit_blocks]
         print(f"[BLOCKS] limited to the first {len(blocks):,}", flush=True)
@@ -510,7 +546,13 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     fetcher = ParallelFetcher(args.streams)
     fetch_pool = ThreadPoolExecutor(max_workers=1)
     prepare_pool = ThreadPoolExecutor(max_workers=1)
-    fetched = {gi: fetch_pool.submit(fetcher.fetch, groups[gi]) for gi in range(min(2, len(groups)))}
+
+    def fetch_group(group: list[int]) -> dict[int, list[dict]]:
+        rows = fetcher.fetch(group)
+        merge_chain_logs(rows, chain_logs, group)
+        return rows
+
+    fetched = {gi: fetch_pool.submit(fetch_group, groups[gi]) for gi in range(min(2, len(groups)))}
     cached_logs: dict[int, dict[int, list[dict]]] = {}
 
     def prepared_for(gi: int):
@@ -526,7 +568,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         relevant, receipt_logs_added = prepared.pop(gi).result()
         cached = cached_logs.pop(gi)
         if gi + 2 < len(groups):
-            fetched[gi + 2] = fetch_pool.submit(fetcher.fetch, groups[gi + 2])
+            fetched[gi + 2] = fetch_pool.submit(fetch_group, groups[gi + 2])
         if gi + 1 < len(groups):
             prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
@@ -582,6 +624,10 @@ def main() -> None:
         "--wipe-token",
         action="store_true",
         help="delete only the replayed tokens' flows and positions, keeping other tokens' ledger data",
+    )
+    ap.add_argument(
+        "--chain-logs-file",
+        help="JSON of {block: [logs]} from scripts/ledger_chain_logs.py; merged into the replay for history prod's cache lacks",
     )
     ap.add_argument(
         "--reset-discovered",
