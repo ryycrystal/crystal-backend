@@ -50,8 +50,9 @@ SEED_TABLES = (
     "crystal_markets",
     "holder_denylist",
 )
-FETCH_ATTEMPTS = 40
+FETCH_ATTEMPTS = 100000
 FETCH_TIMEOUT = 600
+FETCH_SLICE = 25
 
 
 def prod_conn():
@@ -103,7 +104,8 @@ class LogSource:
                     )
                     return {int(n): (json.loads(v) if isinstance(v, str) else v) for n, v in cur.fetchall()}
             except psycopg2.Error as e:
-                print(f"[FETCH] attempt {attempt + 1}/{FETCH_ATTEMPTS} failed: {e!r}"[:200], flush=True)
+                if attempt < 5 or attempt % 20 == 0:
+                    print(f"[FETCH] attempt {attempt + 1} failed: {e!r}"[:200], flush=True)
                 self._drop()
                 time.sleep(min(2**attempt, 30))
             finally:
@@ -117,10 +119,6 @@ class LogSource:
             conn.cancel()
         except Exception:
             pass
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 class ParallelFetcher:
@@ -130,9 +128,16 @@ class ParallelFetcher:
 
     def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
         n = len(self._sources)
-        parts = [numbers[i::n] for i in range(n)]
+        slices = [numbers[i : i + FETCH_SLICE] for i in range(0, len(numbers), FETCH_SLICE)]
+
+        def run(k: int) -> dict[int, list[dict]]:
+            out: dict[int, list[dict]] = {}
+            for part in slices[k::n]:
+                out.update(self._sources[k].fetch(part))
+            return out
+
         merged: dict[int, list[dict]] = {}
-        for part in self._pool.map(lambda sp: sp[0].fetch(sp[1]) if sp[1] else {}, zip(self._sources, parts)):
+        for part in self._pool.map(run, range(n)):
             merged.update(part)
         return merged
 
