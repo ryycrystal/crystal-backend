@@ -1047,10 +1047,10 @@ missing a commit, **check for a run in `waiting` before debugging anything else.
 - **The live database is `crystal-prod-db-r3`.** An older `crystal-prod-db` host
   still accepts connections but is **stale and will mislead you**. Confirm
   `PGHOST` before trusting any number you pull.
-- The API sits behind Cloudflare at `api.crystal.exchange`, which requires an
-  **origin/SNI override to the Container Apps FQDN** — there is no ACA custom
-  domain configured. Getting this wrong produces a **522**, which reads like an
-  outage but is a routing misconfiguration.
+- `api.crystal.exchange` is a **DNS-only CNAME** to the container app's FQDN, bound
+  on `crystal-api` with an Azure **managed certificate** (since 2026-09-07). It is
+  deliberately NOT proxied through Cloudflare — see the section on this hostname
+  near the end of this file before touching the record.
 - Verify what is actually deployed rather than trusting the working tree; images
   are tagged with the commit SHA precisely so this is checkable:
 
@@ -1209,9 +1209,10 @@ properties.configuration.ingress.fqdn -o tsv`. Hit it several times — ingress 
 across revisions, so a single 200 does not prove every replica has your code. If you
 genuinely need to confirm the Cloudflare path, ask the human to load it in a browser.
 
-(Separately, `api.crystal.exchange` does need a Cloudflare origin/SNI override pointing
-at the ACA FQDN; there is no ACA custom domain. That misconfiguration caused a real 522
-once — but a sandbox `HTTP 000` is not evidence of it.)
+(Separately, `api.crystal.exchange` is now a DNS-only CNAME with an Azure managed
+certificate; the 522 and the redirect loop it produced while proxied are explained in
+the hostname section near the end of this file — a sandbox `HTTP 000` is not evidence
+of either.)
 
 ### `az acr build --no-logs` avoids the Windows crash entirely
 
@@ -1988,3 +1989,38 @@ vault and pool inherited it. `tests/test_price_anchors.py` covers both the sweep
 The graph change was shipped **without** bumping `VALUE_VERSION` on purpose: buckets stored
 before 2026-09-06 still value AUSD and USDC-quoted tokens at nothing, newer ones value them.
 Bump it if that step in old history ever matters enough to pay for a recompute.
+
+---
+
+## `api.crystal.exchange` — why it is DNS-only and must stay that way
+
+Fixed 2026-09-07 after the hostname had been a Cloudflare 301 loop. Both frontends call
+the ACA FQDN directly, so the vanity host only matters to third parties (DEX Screener).
+
+What Azure's ingress does for a custom hostname with **no certificate bound**:
+port 80 answers `301 Location: https://<same host>/<path>` (host preserved), and port
+443 **resets the TLS handshake** for any SNI it has no certificate for. So with the
+record orange-clouded, Cloudflare *Flexible* mode produced the self-redirect loop and
+*Full* mode produced the 522 — both symptoms of one cause, no certificate for the name.
+
+Fix applied: the `api` record is a **DNS-only CNAME** to
+`crystal-api.yellowfield-3f176fc9.japaneast.azurecontainerapps.io`, the `asuid.api` TXT
+holds the app's `customDomainVerificationId`, and a managed certificate is bound
+(`az containerapp hostname bind --validation-method CNAME`, state `SniEnabled`).
+
+Traps:
+- **Re-enabling the Cloudflare proxy on `api` breaks certificate renewal** (Azure
+  requires the CNAME to map *directly* to the app "at all times"; it names Cloudflare
+  as the blocking case) and reintroduces the loop/522. If Cloudflare must front the
+  API, the only correct shape is a Cloudflare Origin CA certificate uploaded and bound
+  on the app plus SSL mode Full (strict).
+- `az containerapp hostname bind` with `--validation-method TXT` while the record was
+  proxied created a Pending cert that Azure later withdrew with
+  `FailedARecordValidation`; the CLI then deleted and retried on its own. Check
+  `az containerapp env certificate list --managed-certificates-only` and the activity
+  log before assuming a bind "hung".
+- Testing the origin from behind the local CONNECT proxy is misleading: the proxy
+  rewrites the `Host` header on plain-HTTP requests and ignores `--resolve`. Use
+  `curl --noproxy '*' --resolve <host>:443:4.189.50.206` to talk to the ingress itself.
+- Indexer revisions report `trafficWeight` 0 (no ingress); poll `crystal-indexer` on
+  `healthState`/`runningState`, not traffic weight.
