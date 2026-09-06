@@ -834,3 +834,54 @@ def test_routed_buy_sourced_from_two_pools_and_an_otc_seller_sums_to_an_observed
     assert seller_flow.kind == KIND_SELL
     assert seller_flow.quote_delta == otc_wmon
     assert seller_flow.basis_state == BASIS_OBSERVED
+
+
+def test_v4_singleton_quote_asset_is_matched_per_pool_not_per_manager():
+    tokens, native = 300 * E18, 7 * E18
+    hedge_native, hedge_usdc = 5 * E18, 120_000_000
+    token_swap = VenueEvent(
+        "V4SWAP", 5, {"pool_id": "0x01", "sender": ROUTER, "amount0": tokens, "amount1": -native}, POOL_MANAGER
+    )
+    hedge = VenueEvent(
+        "V4SWAP",
+        7,
+        {"pool_id": "0x02", "sender": ROUTER, "amount0": -hedge_native, "amount1": hedge_usdc},
+        POOL_MANAGER,
+    )
+    b = bundle(
+        [
+            tf(4, TOKEN, POOL_MANAGER, ROUTER, tokens),
+            tf(6, TOKEN, ROUTER, WALLET, tokens),
+            tf(8, USDC, POOL_MANAGER, ROUTER, hedge_usdc),
+        ],
+        [token_swap, hedge],
+        meta(BUNDLER, ROUTER),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_BUY
+    assert f.quote_asset == NATIVE
+    assert f.quote_delta == -native
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.source == SOURCE_VENUE_EVENT
+    assert f.venue == POOL_MANAGER
+
+
+def test_v4_wmon_pool_quote_asset_follows_the_matching_transfer():
+    tokens, wmon = 300 * E18, 7 * E18
+    swap = VenueEvent(
+        "V4SWAP", 5, {"pool_id": "0x01", "sender": ROUTER, "amount0": tokens, "amount1": -wmon}, POOL_MANAGER
+    )
+    b = bundle(
+        [
+            tf(3, WMON, ROUTER, POOL_MANAGER, wmon),
+            tf(4, TOKEN, POOL_MANAGER, ROUTER, tokens),
+            tf(6, TOKEN, ROUTER, WALLET, tokens),
+            tf(8, USDC, POOL_MANAGER, ROUTER, 5_000_000),
+        ],
+        [swap],
+        meta(BUNDLER, ROUTER),
+    )
+    f = only(run(b))
+    assert f.quote_asset == WMON
+    assert f.quote_delta == -wmon
+    assert f.basis_state == BASIS_OBSERVED

@@ -186,12 +186,14 @@ def _hints(
             if w0 == 0 or w1 == 0 or _same_sign(w0, w1):
                 continue
             user = (parsed.get("user") or parsed.get("sender") or "").lower() or None
-            asset = _venue_quote_asset(bundle, venue, quote_assets)
+            singleton = ev.tag == "V4SWAP"
             for token in sorted(tx_tokens):
                 moved = _venue_token_amounts(bundle, venue, token)
                 for token_delta, quote_delta in ((w0, w1), (w1, w0)):
-                    if any(_within_fee_tolerance(amount, abs(token_delta)) for amount in moved):
-                        out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
+                    if not any(_within_fee_tolerance(amount, abs(token_delta)) for amount in moved):
+                        continue
+                    asset = _hint_quote_asset(bundle, venue, abs(quote_delta), quote_assets, singleton)
+                    out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
     return out
 
 
@@ -201,6 +203,20 @@ def _venue_token_amounts(bundle: TxBundle, venue: str, token: str) -> set[int]:
         for leg in bundle.transfers
         if leg.token == token and leg.amount > 0 and venue in (leg.from_addr, leg.to_addr)
     }
+
+
+def _hint_quote_asset(bundle: TxBundle, venue: str, quote: int, quote_assets: frozenset[str], singleton: bool) -> str:
+    matching: dict[str, int] = defaultdict(int)
+    for leg in bundle.transfers:
+        if leg.token not in quote_assets or venue not in (leg.from_addr, leg.to_addr):
+            continue
+        if _within_fee_tolerance(leg.amount, quote):
+            matching[leg.token] += leg.amount
+    if matching:
+        return max(matching.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    if singleton:
+        return NATIVE
+    return _venue_quote_asset(bundle, venue, quote_assets)
 
 
 def _own_quote(raw: dict[str, int], rates: Rates) -> tuple[str, int] | None:
