@@ -117,7 +117,7 @@ def reset_discovered() -> tuple[int, int]:
     with storage.db_cursor() as cur:
         cur.execute("DELETE FROM venues WHERE discovered")
         venues = cur.rowcount
-        cur.execute("DELETE FROM address_kinds WHERE source IN ('heuristic', 'venue_event')")
+        cur.execute("DELETE FROM address_kinds WHERE source IN ('heuristic', 'venue_event', 'pair_probe')")
         kinds = cur.rowcount
     print(f"[RESET] {venues:,} discovered venues and {kinds:,} derived kinds forgotten", flush=True)
     return venues, kinds

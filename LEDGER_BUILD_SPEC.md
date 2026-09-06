@@ -189,7 +189,7 @@ class AddressKinds:
     def load_known(self, cur) -> None            # constants, launchpad_pools, univ4_pools, crystal_markets, vaults, nadfun pairs → venues + kinds
     def kind(self, addr: str, cur) -> str        # cached; getCode on first sight; 7702 designator (0xef0100 + 40 hex) → eoa_7702
     def is_wallet(self, kind: str) -> bool
-    def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]   # venue discovery: an unknown contract emitting V2/V3 Swap, Sync or launchpad sync events is venue_pool on sight (emits_venue_event); a silent contract that both receives and sends a registered token (or takes token / gives quote) in one tx, is never tx.from nor tx.to, across ≥3 txs → venue_pool (pool_shape_across_txs); persists to venues with discovered=True; tx_venues holds this transaction's venues; returns newly discovered addresses
+    def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]   # venue discovery, deterministic: an unknown contract emitting V2/V3 Swap, Sync or launchpad sync events is venue_pool on sight (emits_venue_event); any other unknown contract a registered token touches is probed once for token0()/token1() and is venue_pool when both answer with distinct addresses (pair_interface); negatives are remembered in address_kinds (source pair_probe); persists to venues with discovered=True; tx_venues holds this transaction's new venues; returns newly discovered addresses
     def userop_sender(self, bundle: TxBundle) -> str | None         # EntryPoint UserOperationEvent → sender (topic[2] is sender for v0.6/v0.7: verify the ABI and document which topic)
 ```
 Known lists (see core/chain.py) are `venue_*`/`token`/`zero` kinds; the crystal core and nad.fun

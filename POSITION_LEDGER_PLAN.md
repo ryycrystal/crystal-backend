@@ -366,21 +366,24 @@ Order of evidence, first match wins, all cached in `address_kinds`:
 5. **Pool events**: an unknown contract that emits a pool event we already decode (V2/V3
    `Swap`, `Sync`, nad.fun / PancakeSwap sync) is `venue_pool` on first sight
    (`emits_venue_event`), for that transaction and from then on.
-6. **Shape heuristic for silent contracts**: a contract that, within a single transaction,
-   both receives and sends a registered token (or receives token and sends quote), is never
-   `tx.from` and never `tx.to` in any observed transaction, across three or more
-   transactions → `venue_pool` (`pool_shape_across_txs`), written to `venues` with
-   `discovered = true`. Until promoted it keeps its flows as a `contract_unknown` holder;
-   it is not treated as a venue on sight. The 09-07 JAMES replay is why: of 396 addresses
-   the earlier two-sighting rule promoted, 259 were trading bots with real positions on
-   prod, and being the direct target of a transaction is the tell a pool never shows.
-   The direct-target and origin history is seeded from `tx_meta`, so a bot called directly
-   while trading one token is not promoted while another token replays.
-7. **Bot contracts** (a contract that is ever `tx.to`, or trades without emitting pool
-   events) keep positions as `contract_unknown` holders, matching the CLAUDE.md decision
-   that a bot's own contract is a real distinct actor.
+6. **Pair interface probe for silent contracts**: every other unknown contract that a
+   registered token touches is asked once, in the same batched RPC path as `eth_getCode`,
+   for `token0()` and `token1()`. Two distinct addresses back means a pair: `venue_pool`
+   (`pair_interface`), with the pair's tokens recorded on the `venues` row. A contract that
+   answers neither is remembered as probed (`address_kinds.source = 'pair_probe'`) and never
+   asked again; a call that never answered is not remembered, so a throttled RPC cannot
+   hide a pool. There is no shape heuristic any more. The 09-07 JAMES replay is why: of the
+   addresses the old "pool shaped across transactions" rule promoted, roughly nine in ten
+   were relayed arbitrage bots or zero-balance pass-throughs (an arbitrage bot receives and
+   sends the token inside one transaction, which is exactly the shape a pool has), while
+   every contract that emitted a swap event, and only six of the silent ones, answered
+   `token0()`. Silent pools that are not pairs (a custom AMM with undecoded events) stay
+   holders and surface through the `venue_leak` integrity count for manual listing.
+7. **Bot contracts** (a contract that trades without emitting pool events and is not a
+   pair) keep positions as `contract_unknown` holders, matching the CLAUDE.md decision
+   that a bot's own contract is a real distinct actor, whether or not it is called directly.
 
-The write seam checks `kind ∈ {eoa, eoa_7702, wallet_4337, contract_unknown}`; every other
+The write seam checksThe write seam checks `kind ∈ {eoa, eoa_7702, wallet_4337, contract_unknown}`; every other
 kind is refused. `integrity` reports `venue_leak` = number of position rows whose address
 is classified as a venue; the healthy value is zero.
 

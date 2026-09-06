@@ -23,7 +23,6 @@ from core.ledger.types import (
     KIND_WALLET_4337,
     KIND_ZERO,
     LVMON,
-    NATIVE,
     USDC,
     USEROP_EVENT_TOPIC,
     VENUE_KINDS,
@@ -38,6 +37,10 @@ SOURCE_GETCODE = "getcode"
 SOURCE_HEURISTIC = "heuristic"
 SOURCE_USEROP = "userop_event"
 SOURCE_VENUE_EVENT = "venue_event"
+SOURCE_PAIR_PROBE = "pair_probe"
+PAIR_TOKEN0_SELECTOR = "0x0dfe1681"
+PAIR_TOKEN1_SELECTOR = "0xd21220a7"
+PROBE_BATCH = 25
 VENUE_EMITTER_TAGS = frozenset({"V2SWAP", "V3SWAP", "V2SYNC", "PSYNC", "NFSYNC"})
 USEROP_TAG = "USEROP"
 QUOTE_TOKENS = frozenset({WMON, LVMON, USDC, AUSD})
@@ -47,7 +50,6 @@ DEFAULT_RPC_URL = "https://rpc.monad.xyz"
 DEFAULT_MAX_RPS = 20.0
 GETCODE_BATCH = 50
 INSERT_BATCH = 500
-DISCOVERY_MIN_TXS = 3
 
 _urlopen = urllib.request.urlopen
 
@@ -67,6 +69,7 @@ _KIND_GUARDS = {
     SOURCE_HEURISTIC: "WHERE address_kinds.source = 'getcode'",
     SOURCE_USEROP: "WHERE address_kinds.source = 'getcode'",
     SOURCE_VENUE_EVENT: "WHERE address_kinds.source IN ('getcode', 'heuristic')",
+    SOURCE_PAIR_PROBE: "WHERE address_kinds.source IN ('getcode', 'heuristic')",
 }
 _VENUE_UPSERT = """
 INSERT INTO venues (address, kind, token0, token1, discovered, evidence)
@@ -216,6 +219,19 @@ def userop_senders_from_logs(logs: Iterable[dict]) -> list[str]:
     return found
 
 
+def _address_word(word) -> str | None:
+    """Decode a 32-byte ABI word holding an address; None for anything else or the zero address."""
+    if not isinstance(word, str) or len(word) != 66 or not word.startswith("0x"):
+        return None
+    try:
+        value = int(word, 16)
+    except ValueError:
+        return None
+    if value == 0 or value >> 160:
+        return None
+    return "0x" + word[-40:].lower()
+
+
 def _chunks(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
@@ -227,17 +243,14 @@ class AddressKinds:
         cur_factory,
         rpc_url: str | None = None,
         rpc: Callable[[list[tuple[str, list]]], list] | None = None,
-        min_txs: int = DISCOVERY_MIN_TXS,
     ):
         self._cur_factory = cur_factory
         self._rpc = rpc or JsonRpc(rpc_url or os.getenv("RPC_HTTP") or DEFAULT_RPC_URL).batch
         self._kinds: dict[str, str] = known_address_kinds()
         self._origins: set[str] = set()
-        self._sightings: dict[str, dict[str, dict]] = {}
-        self._min_txs = min_txs
+        self._not_pairs: set[str] = set()
+        self._probed_loaded = False
         self.tx_venues: frozenset[str] = frozenset()
-        self._targets: set[str] = set()
-        self._history_loaded = False
 
     def is_wallet(self, kind: str) -> bool:
         return kind in WALLET_KINDS
@@ -386,144 +399,113 @@ class AddressKinds:
             self._mark_wallet_4337(sender, block, entrypoint_of.get(sender), cur)
         return found
 
-    def _load_history(self, cur=None) -> None:
-        self._history_loaded = True
+    def _load_probed(self, cur=None) -> None:
+        """Contracts that already failed the pair probe in an earlier run are not asked again."""
+        self._probed_loaded = True
         if cur is None and self._cur_factory is None:
             return
         try:
             with self._cursor(cur) as c:
-                c.execute("SELECT DISTINCT from_addr, to_addr FROM tx_meta")
+                c.execute(
+                    "SELECT address FROM address_kinds WHERE source = %s AND kind = %s",
+                    (SOURCE_PAIR_PROBE, KIND_CONTRACT_UNKNOWN),
+                )
                 rows = c.fetchall() or []
         except Exception:
             return
-        for sender, target in rows:
-            if sender:
-                self._origins.add(sender.lower())
-            if target:
-                self._targets.add(target.lower())
+        self._not_pairs.update((row[0] or "").lower() for row in rows if row and row[0])
+
+    def probe_pairs(self, addrs: list[str], block: int | None, cur=None) -> dict[str, tuple[str, str]]:
+        """Ask each contract for token0() and token1(); answering both with distinct addresses makes it a pair.
+
+        Negative answers are remembered (in memory and in address_kinds) so a contract is probed once;
+        a call that never answered is not remembered, so a transient RPC failure cannot hide a pool.
+        """
+        todo = [a for a in dict.fromkeys(addrs) if a not in self._not_pairs]
+        found: dict[str, tuple[str, str]] = {}
+        negatives = []
+        for chunk in _chunks(todo, PROBE_BATCH):
+            calls = []
+            for addr in chunk:
+                calls.append(("eth_call", [{"to": addr, "data": PAIR_TOKEN0_SELECTOR}, "latest"]))
+                calls.append(("eth_call", [{"to": addr, "data": PAIR_TOKEN1_SELECTOR}, "latest"]))
+            replies = list(self._rpc(calls) or [])
+            replies += [None] * (len(calls) - len(replies))
+            for i, addr in enumerate(chunk):
+                raw0, raw1 = replies[2 * i], replies[2 * i + 1]
+                token0, token1 = _address_word(raw0), _address_word(raw1)
+                if token0 and token1 and token0 != token1:
+                    found[addr] = (token0, token1)
+                elif isinstance(raw0, str) and isinstance(raw1, str):
+                    self._not_pairs.add(addr)
+                    negatives.append((addr, KIND_CONTRACT_UNKNOWN, SOURCE_PAIR_PROBE, block, {"pair": False}))
+        if negatives:
+            with self._cursor(cur) as c:
+                self._put_kinds(c, negatives)
+        return found
 
     def observe_tx(self, bundle: TxBundle, registry, cur=None) -> list[str]:
-        if not self._history_loaded:
-            self._load_history(cur)
+        """Discover venues among the unknown contracts a registered token touched in this transaction.
+
+        Two rules, both deterministic: a contract that emitted a swap or sync event we decode is a
+        pool (`emits_venue_event`); a silent contract that answers the pair interface is a pool
+        (`pair_interface`). Everything else stays a `contract_unknown` holder, which is what a
+        trading bot is. Returns the newly discovered addresses; `tx_venues` holds them for the
+        transaction that revealed them.
+        """
+        if not self._probed_loaded:
+            self._load_probed(cur)
         self.tx_venues = frozenset()
         meta = getattr(bundle, "meta", None)
         if meta is None:
             return []
         origin = (meta.from_addr or "").lower()
-        target = (meta.to_addr or "").lower()
         if origin:
             self._origins.add(origin)
-            self._sightings.pop(origin, None)
-        if target:
-            self._targets.add(target)
-            self._sightings.pop(target, None)
+        for sender in self.userop_senders(bundle, cur):
+            self._origins.add(sender)
         emitters = {
             (ev.address or "").lower()
             for ev in getattr(bundle, "venue_events", None) or []
             if ev.tag in VENUE_EMITTER_TAGS and ev.address
         }
-        for sender in self.userop_senders(bundle, cur):
-            self._origins.add(sender)
-            self._sightings.pop(sender, None)
 
-        token_in: dict[str, set[str]] = {}
-        token_out: dict[str, set[str]] = {}
-        quote_in: dict[str, set[str]] = {}
-        quote_out: dict[str, set[str]] = {}
-
-        def note(table: dict[str, set[str]], addr: str, asset: str) -> None:
-            if addr and addr != ZERO:
-                table.setdefault(addr, set()).add(asset)
-
+        touched: set[str] = set()
         for leg in bundle.transfers:
-            token = (leg.token or "").lower()
-            sender = (leg.from_addr or "").lower()
-            receiver = (leg.to_addr or "").lower()
-            if token in registry:
-                note(token_out, sender, token)
-                note(token_in, receiver, token)
-            elif token in QUOTE_TOKENS:
-                note(quote_out, sender, token)
-                note(quote_in, receiver, token)
-        if meta.value and meta.value > 0:
-            note(quote_out, origin, NATIVE)
-            note(quote_in, target, NATIVE)
-        trace = getattr(bundle, "trace", None)
-        if trace is not None and trace.available:
-            for sender, receiver, value in trace.transfers:
-                if value > 0:
-                    note(quote_out, (sender or "").lower(), NATIVE)
-                    note(quote_in, (receiver or "").lower(), NATIVE)
-
-        candidates = []
-        for addr in set(token_in) | set(token_out):
-            if addr in (origin, target) or addr in self._origins or addr in self._targets:
+            if (leg.token or "").lower() not in registry:
                 continue
-            pool_shape = (
-                (addr in token_in and addr in token_out)
-                or (addr in token_in and addr in quote_out)
-                or (addr in token_out and addr in quote_in)
-            )
-            if pool_shape:
-                candidates.append(addr)
-        if not candidates:
+            for raw in (leg.from_addr, leg.to_addr):
+                addr = (raw or "").lower()
+                if addr and addr != ZERO and addr not in self._origins:
+                    touched.add(addr)
+        if not touched:
             return []
-
-        kinds = self._resolve_kinds(candidates, bundle.block_number, cur)
-        emitting = sorted(a for a in candidates if a in emitters and kinds.get(a) == KIND_CONTRACT_UNKNOWN)
-        self.tx_venues = frozenset(emitting)
-        newly: list[str] = []
-        promote: list[tuple[str, dict]] = []
-        if emitting:
-            rows = []
-            venue_rows = []
-            for addr in emitting:
-                evidence = {"rule": "emits_venue_event", "tx": bundle.txhash}
-                rows.append((addr, KIND_VENUE_POOL, SOURCE_VENUE_EVENT, bundle.block_number, evidence))
-                venue_rows.append((addr, KIND_VENUE_POOL, None, None, True, evidence))
-                self._kinds[addr] = KIND_VENUE_POOL
-                self._sightings.pop(addr, None)
-                newly.append(addr)
-            with self._cursor(cur) as c:
-                self._put_kinds(c, rows)
-                self._put_venues(c, venue_rows)
-        for addr in sorted(candidates):
-            if kinds.get(addr) != KIND_CONTRACT_UNKNOWN or addr in emitters:
-                continue
-            sightings = self._sightings.setdefault(addr, {})
-            sightings[bundle.txhash] = {
-                "block": bundle.block_number,
-                "tokens": sorted(token_in.get(addr, set()) | token_out.get(addr, set())),
-                "quotes": sorted(quote_in.get(addr, set()) | quote_out.get(addr, set())),
-            }
-            if len(sightings) >= self._min_txs:
-                promote.append((addr, sightings))
-        if not promote:
-            return newly
+        kinds = self._resolve_kinds(sorted(touched), bundle.block_number, cur)
+        unknown = [a for a in sorted(touched) if kinds.get(a) == KIND_CONTRACT_UNKNOWN]
+        if not unknown:
+            return []
 
         kind_rows = []
         venue_rows = []
-        for addr, sightings in promote:
-            tokens = sorted({t for s in sightings.values() for t in s["tokens"]})
-            quotes = sorted({q for s in sightings.values() for q in s["quotes"]})
-            evidence = {
-                "rule": "pool_shape_across_txs",
-                "txs": sorted(sightings),
-                "tokens": tokens,
-                "quotes": quotes,
-            }
-            first_block = min(s["block"] for s in sightings.values())
-            token0 = tokens[0] if tokens else None
-            token1 = quotes[0] if quotes else (tokens[1] if len(tokens) > 1 else None)
-            kind_rows.append((addr, KIND_VENUE_POOL, SOURCE_HEURISTIC, first_block, evidence))
+        for addr in unknown:
+            if addr in emitters:
+                evidence = {"rule": "emits_venue_event", "tx": bundle.txhash}
+                kind_rows.append((addr, KIND_VENUE_POOL, SOURCE_VENUE_EVENT, bundle.block_number, evidence))
+                venue_rows.append((addr, KIND_VENUE_POOL, None, None, True, evidence))
+        pairs = self.probe_pairs([a for a in unknown if a not in emitters], bundle.block_number, cur)
+        for addr, (token0, token1) in sorted(pairs.items()):
+            evidence = {"rule": "pair_interface", "token0": token0, "token1": token1, "tx": bundle.txhash}
+            kind_rows.append((addr, KIND_VENUE_POOL, SOURCE_PAIR_PROBE, bundle.block_number, evidence))
             venue_rows.append((addr, KIND_VENUE_POOL, token0, token1, True, evidence))
+        if not kind_rows:
+            return []
+        newly = sorted(row[0] for row in kind_rows)
+        for addr in newly:
             self._kinds[addr] = KIND_VENUE_POOL
-            self._sightings.pop(addr, None)
-            newly.append(addr)
         with self._cursor(cur) as c:
             self._put_kinds(c, kind_rows)
             self._put_venues(c, venue_rows)
-        self.tx_venues = self.tx_venues | frozenset(newly)
+        self.tx_venues = frozenset(newly)
         return newly
 
     def _resolve_kinds(self, addrs: list[str], block: int | None, cur=None) -> dict[str, str]:

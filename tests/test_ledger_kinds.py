@@ -12,6 +12,7 @@ from core.ledger.kinds import (
     SOURCE_GETCODE,
     SOURCE_HEURISTIC,
     SOURCE_KNOWN_LIST,
+    SOURCE_PAIR_PROBE,
     SOURCE_USEROP,
     USEROP_TAG,
     AddressKinds,
@@ -148,19 +149,35 @@ class FakeCursor:
 
 
 class FakeRpc:
-    def __init__(self, codes=None):
+    def __init__(self, codes=None, pairs=None):
         self.codes = dict(codes or {})
+        self.pairs = dict(pairs or {})
         self.calls: list[list] = []
 
     def __call__(self, calls):
         self.calls.append(calls)
-        for method, _params in calls:
-            assert method == "eth_getCode"
-        return [self.codes.get(params[0], "0x") for _method, params in calls]
+        out = []
+        for method, params in calls:
+            if method == "eth_getCode":
+                out.append(self.codes.get(params[0], "0x"))
+                continue
+            assert method == "eth_call"
+            pair = self.pairs.get(params[0]["to"])
+            selector = params[0]["data"]
+            if pair and selector in ("0x0dfe1681", "0xd21220a7"):
+                token = pair[0] if selector == "0x0dfe1681" else pair[1]
+                out.append("0x" + token[2:].rjust(64, "0"))
+            else:
+                out.append("0x")
+        return out
 
     @property
     def addresses_queried(self) -> list[str]:
-        return [params[0] for batch in self.calls for _method, params in batch]
+        return [params[0] for batch in self.calls for method, params in batch if method == "eth_getCode"]
+
+    @property
+    def probed(self) -> list[str]:
+        return sorted({params[0]["to"] for batch in self.calls for method, params in batch if method == "eth_call"})
 
 
 def leg(i: int, token: str, frm: str, to: str, amount: int = 10**18) -> TransferLeg:
@@ -373,45 +390,38 @@ def swap_buy_tx(txhash: str, block: int, pool: str, wallet: str, target: str) ->
     )
 
 
-def test_discovery_promotes_a_pool_shaped_contract_after_three_transactions():
-    rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE})
+def test_discovery_promotes_a_contract_that_answers_the_pair_interface_on_first_sight():
+    rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE}, pairs={POOL: (TOKEN, WMON)})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
     registry = {TOKEN: object()}
 
-    assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry) == []
-    assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
-    assert POOL not in cur.venues
-
-    assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry) == []
-
-    assert kinds.observe_tx(swap_buy_tx("0x02", 11, POOL, WALLET2, ROUTER), registry) == []
-    assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
-
-    assert kinds.observe_tx(swap_buy_tx("0x03", 12, POOL, WALLET2, ROUTER), registry) == [POOL]
+    assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry) == [POOL]
+    assert kinds.tx_venues == {POOL}
     assert kinds.kind(POOL, cur) == KIND_VENUE_POOL
     assert not kinds.is_wallet(kinds.kind(POOL, cur))
+    assert rpc.probed == [POOL]
 
     row = cur.address_kinds[POOL]
     assert row["kind"] == KIND_VENUE_POOL
-    assert row["source"] == SOURCE_HEURISTIC
+    assert row["source"] == SOURCE_PAIR_PROBE
     assert row["first_seen_block"] == 10
-    assert row["evidence"]["txs"] == ["0x01", "0x02", "0x03"]
-    assert row["evidence"]["tokens"] == [TOKEN]
-    assert row["evidence"]["quotes"] == [WMON]
+    assert row["evidence"] == {"rule": "pair_interface", "token0": TOKEN, "token1": WMON, "tx": "0x01"}
 
     venue = cur.venues[POOL]
     assert venue["kind"] == KIND_VENUE_POOL
     assert venue["discovered"] is True
     assert venue["token0"] == TOKEN
     assert venue["token1"] == WMON
-    assert venue["evidence"]["rule"] == "pool_shape_across_txs"
+    assert venue["evidence"]["rule"] == "pair_interface"
 
-    assert kinds.observe_tx(swap_buy_tx("0x04", 13, POOL, WALLET2, ROUTER), registry) == []
+    assert kinds.observe_tx(swap_buy_tx("0x02", 11, POOL, WALLET2, ROUTER), registry) == []
+    assert kinds.tx_venues == frozenset()
+    assert rpc.probed == [POOL]
 
 
-def test_discovery_counts_native_value_and_trace_as_quote_legs():
-    rpc = FakeRpc({POOL: CONTRACT_CODE})
+def test_discovery_probes_contracts_reached_through_native_value_and_trace_legs():
+    rpc = FakeRpc({POOL: CONTRACT_CODE}, pairs={POOL: (TOKEN, WMON)})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
     registry = {TOKEN}
@@ -423,28 +433,12 @@ def test_discovery_counts_native_value_and_trace_as_quote_legs():
         tx_meta=meta("0x11", WALLET, ROUTER, value=10**18),
         trace=TraceResult(available=True, transfers=[(ROUTER, POOL, 10**18)]),
     )
-    assert kinds.observe_tx(curve_buy, registry) == []
-    curve_sell = bundle(
-        "0x12",
-        21,
-        transfers=[leg(1, TOKEN, WALLET, POOL)],
-        tx_meta=meta("0x12", WALLET, ROUTER),
-        trace=TraceResult(available=True, transfers=[(POOL, ROUTER, 5 * 10**17), (ROUTER, WALLET, 5 * 10**17)]),
-    )
-    assert kinds.observe_tx(curve_sell, registry) == []
-    curve_buy_again = bundle(
-        "0x13",
-        22,
-        transfers=[leg(1, TOKEN, POOL, WALLET)],
-        tx_meta=meta("0x13", WALLET, ROUTER, value=10**18),
-        trace=TraceResult(available=True, transfers=[(ROUTER, POOL, 10**18)]),
-    )
-    assert kinds.observe_tx(curve_buy_again, registry) == [POOL]
-    assert cur.venues[POOL]["token1"] == "native"
+    assert kinds.observe_tx(curve_buy, registry) == [POOL]
+    assert cur.venues[POOL]["token1"] == WMON
 
 
-def test_discovery_ignores_transaction_targets_and_origins():
-    rpc = FakeRpc({BOT: CONTRACT_CODE, POOL: CONTRACT_CODE})
+def test_discovery_keeps_bots_as_holders_and_finds_pairs_even_when_called_directly():
+    rpc = FakeRpc({BOT: CONTRACT_CODE, POOL: CONTRACT_CODE}, pairs={POOL: (TOKEN, WMON)})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
     registry = {TOKEN}
@@ -461,25 +455,32 @@ def test_discovery_ignores_transaction_targets_and_origins():
         transfers=[leg(1, TOKEN, BOT, POOL), leg(2, WMON, POOL, BOT)],
         tx_meta=meta("0x22", WALLET, BOT),
     )
-    bot_buy_again = bundle(
-        "0x2a",
-        32,
-        transfers=[leg(1, WMON, BOT, POOL), leg(2, TOKEN, POOL, BOT)],
-        tx_meta=meta("0x2a", WALLET, BOT),
-    )
-    assert kinds.observe_tx(bot_buy, registry) == []
+    assert kinds.observe_tx(bot_buy, registry) == [POOL]
     assert kinds.observe_tx(bot_sell, registry) == []
-    assert kinds.observe_tx(bot_buy_again, registry) == [POOL]
     assert kinds.kind(BOT, cur) == KIND_CONTRACT_UNKNOWN
     assert kinds.is_wallet(kinds.kind(BOT, cur))
     assert BOT not in cur.venues
+    assert cur.address_kinds[BOT]["source"] == SOURCE_PAIR_PROBE
+    assert cur.address_kinds[BOT]["evidence"] == {"pair": False}
+    assert rpc.probed == sorted([BOT, POOL])
+
+    direct = bundle(
+        "0x23",
+        32,
+        transfers=[leg(1, TOKEN, WALLET, addr(0xB7)), leg(2, WMON, addr(0xB7), WALLET)],
+        tx_meta=meta("0x23", WALLET, addr(0xB7)),
+    )
+    rpc.codes[addr(0xB7)] = CONTRACT_CODE
+    rpc.pairs[addr(0xB7)] = (WMON, TOKEN)
+    assert kinds.observe_tx(direct, registry) == [addr(0xB7)]
+    assert cur.venues[addr(0xB7)]["token0"] == WMON
 
     seen_as_origin = addr(0xB9)
     rpc.codes[seen_as_origin] = CONTRACT_CODE
-    kinds.observe_tx(bundle("0x23", 32, transfers=[], tx_meta=meta("0x23", seen_as_origin, ROUTER)), registry)
-    assert kinds.observe_tx(swap_sell_tx("0x24", 33, seen_as_origin, WALLET, ROUTER), registry) == []
-    assert kinds.observe_tx(swap_buy_tx("0x25", 34, seen_as_origin, WALLET, ROUTER), registry) == []
-    assert kinds.kind(seen_as_origin, cur) == KIND_CONTRACT_UNKNOWN
+    rpc.pairs[seen_as_origin] = (TOKEN, WMON)
+    kinds.observe_tx(bundle("0x24", 33, transfers=[], tx_meta=meta("0x24", seen_as_origin, ROUTER)), registry)
+    assert kinds.observe_tx(swap_sell_tx("0x25", 34, seen_as_origin, WALLET, ROUTER), registry) == []
+    assert seen_as_origin not in rpc.probed
 
 
 def test_discovery_needs_metadata_and_skips_wallets_and_known_kinds():
@@ -492,7 +493,6 @@ def test_discovery_needs_metadata_and_skips_wallets_and_known_kinds():
     assert kinds.observe_tx(without_meta, registry) == []
     assert kinds.observe_tx(without_meta, registry) == []
     assert rpc.calls == []
-    assert kinds._sightings == {}
 
     otc = bundle(
         "0x32",
@@ -519,7 +519,8 @@ def test_discovery_needs_metadata_and_skips_wallets_and_known_kinds():
     )
     assert kinds.observe_tx(unregistered, registry) == []
     assert kinds.observe_tx(unregistered, registry) == []
-    assert POOL not in kinds._sightings
+    assert POOL not in cur.venues
+    assert POOL not in rpc.probed
 
     assert kinds.observe_tx(swap_sell_tx("0x35", 44, h.CRYSTAL_ADDR, WALLET, ROUTER), registry) == []
     assert kinds.observe_tx(swap_buy_tx("0x36", 45, h.CRYSTAL_ADDR, WALLET, ROUTER), registry) == []
@@ -753,7 +754,10 @@ def test_side_database_round_trip():
         def factory():
             yield cur
 
-        rpc = FakeRpc({POOL: CONTRACT_CODE, DELEGATED: DELEGATION_CODE, addr(0xB5): CONTRACT_CODE})
+        rpc = FakeRpc(
+            {POOL: CONTRACT_CODE, DELEGATED: DELEGATION_CODE, addr(0xB5): CONTRACT_CODE},
+            pairs={addr(0xB5): (TOKEN, WMON)},
+        )
         kinds = AddressKinds(factory, rpc=rpc)
         kinds.load_known(cur)
         kinds.load_known(cur)
@@ -766,8 +770,8 @@ def test_side_database_round_trip():
 
         unknown = addr(0xB5)
         registry = {TOKEN}
-        assert kinds.observe_tx(swap_sell_tx("0x91", 90, unknown, WALLET, ROUTER), registry) == []
-        assert kinds.observe_tx(swap_buy_tx("0x92", 91, unknown, WALLET2, ROUTER), registry) == [unknown]
+        assert kinds.observe_tx(swap_sell_tx("0x91", 90, unknown, WALLET, ROUTER), registry) == [unknown]
+        assert kinds.observe_tx(swap_buy_tx("0x92", 91, unknown, WALLET2, ROUTER), registry) == []
 
         event = VenueEvent(tag=USEROP_TAG, log_index=1, parsed={"sender": ACCOUNT}, address=ENTRYPOINT_V07)
         assert kinds.userop_sender(bundle("0x93", 92, events=[event])) == ACCOUNT
@@ -778,8 +782,8 @@ def test_side_database_round_trip():
         assert rows[TOKEN][3] == 400
         assert rows[DELEGATED][1:4] == (KIND_EOA_7702, SOURCE_GETCODE, 77)
         assert rows[DELEGATED][4] == {"code_len": 23}
-        assert rows[unknown][1:4] == (KIND_VENUE_POOL, SOURCE_HEURISTIC, 90)
-        assert rows[unknown][4]["txs"] == ["0x91", "0x92"]
+        assert rows[unknown][1:4] == (KIND_VENUE_POOL, SOURCE_PAIR_PROBE, 90)
+        assert rows[unknown][4]["rule"] == "pair_interface"
         assert rows[ACCOUNT][1:3] == (KIND_WALLET_4337, SOURCE_USEROP)
         assert rows[h.CRYSTAL_ADDR][1] == KIND_VENUE_CUSTODY
 
@@ -817,17 +821,28 @@ def test_observe_tx_writes_through_the_callers_cursor_and_never_opens_a_second_c
     def boom():
         raise AssertionError("a second connection was opened inside the caller's transaction")
 
-    def rpc(calls):
-        return ["0x6001" for _ in calls]
-
     token = "0x" + "aa" * 20
     pool = "0x" + "b0" * 20
     wallet = "0x" + "11" * 20
     router = "0x" + "70" * 20
     wmon = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+
+    def rpc(calls):
+        out = []
+        for method, params in calls:
+            if method == "eth_getCode":
+                out.append("0x6001")
+            elif params[0]["to"] == pool:
+                answer = token if params[0]["data"] == "0x0dfe1681" else wmon
+                out.append("0x" + answer[2:].rjust(64, "0"))
+            else:
+                out.append("0x")
+        return out
+
     registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
-    kinds = AddressKinds(boom, rpc=rpc, min_txs=2)
+    kinds = AddressKinds(boom, rpc=rpc)
     cur = Cur()
+    found: list[str] = []
     for i in (1, 2):
         txh = f"0x{i:064x}"
         bundle = TxBundle(
@@ -847,13 +862,13 @@ def test_observe_tx_writes_through_the_callers_cursor_and_never_opens_a_second_c
             trace=None,
             userop_sender=None,
         )
-        newly = kinds.observe_tx(bundle, registry, cur)
-    assert newly == [pool]
+        found += kinds.observe_tx(bundle, registry, cur)
+    assert found == [pool]
     assert any("INSERT INTO address_kinds" in sql for sql in executed)
     assert any("INSERT INTO venues" in sql for sql in executed)
 
 
-def test_pool_shaped_contract_without_venue_events_keeps_its_position_before_promotion():
+def test_a_silent_contract_that_is_not_a_pair_keeps_its_position_however_often_it_trades():
     rpc = FakeRpc({POOL: CONTRACT_CODE, ROUTER: CONTRACT_CODE})
     cur = FakeCursor()
     kinds = AddressKinds(cur.factory, rpc=rpc)
@@ -862,20 +877,18 @@ def test_pool_shaped_contract_without_venue_events_keeps_its_position_before_pro
     assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry, cur) == []
     assert kinds.tx_venues == frozenset()
     assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
+    assert rpc.probed == [POOL]
 
     plain = bundle("0x02", 11, transfers=[leg(1, TOKEN, WALLET, WALLET2)], tx_meta=meta("0x02", WALLET, WALLET2))
     assert kinds.observe_tx(plain, registry, cur) == []
     assert kinds.tx_venues == frozenset()
 
-    assert kinds.observe_tx(bundle("0x03", 12, transfers=[leg(1, TOKEN, POOL, WALLET)]), registry, cur) == []
+    for i in range(3, 8):
+        assert kinds.observe_tx(swap_buy_tx(f"0x0{i}", 10 + i, POOL, WALLET2, ROUTER), registry, cur) == []
     assert kinds.tx_venues == frozenset()
-
-    assert kinds.observe_tx(swap_sell_tx("0x05", 12, POOL, WALLET, ROUTER), registry, cur) == []
-    assert kinds.tx_venues == frozenset()
-
-    assert kinds.observe_tx(swap_buy_tx("0x04", 13, POOL, WALLET2, ROUTER), registry, cur) == [POOL]
-    assert kinds.tx_venues == {POOL}
-    assert kinds.kind(POOL, cur) == KIND_VENUE_POOL
+    assert kinds.kind(POOL, cur) == KIND_CONTRACT_UNKNOWN
+    assert POOL not in cur.venues
+    assert len([b for b in rpc.calls if b and b[0][0] == "eth_call"]) == 1
 
 
 def _bundle_for(txh, block, transfers, events, sender, target):
@@ -904,7 +917,7 @@ class _Cur:
         return []
 
 
-def test_a_contract_that_is_ever_called_directly_is_a_trader_not_a_pool():
+def test_a_relayed_bot_that_answers_no_pair_interface_is_a_trader_not_a_pool():
     from core.ledger.kinds import AddressKinds
     from core.ledger.types import TokenReg, TransferLeg
 
@@ -913,7 +926,7 @@ def test_a_contract_that_is_ever_called_directly_is_a_trader_not_a_pool():
     bot = "0x" + "b0" * 20
     user = "0x" + "11" * 20
     router = "0x" + "70" * 20
-    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls], min_txs=2)
+    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls])
     registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
     cur = _Cur()
     kinds.observe_tx(_bundle_for("0x01", 100, [TransferLeg(1, token, router, bot, 10)], [], user, bot), registry, cur)
@@ -940,7 +953,7 @@ def test_a_contract_that_emits_a_swap_event_is_a_venue_on_first_sight():
     pool = "0x" + "b0" * 20
     user = "0x" + "11" * 20
     router = "0x" + "70" * 20
-    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls], min_txs=3)
+    kinds = AddressKinds(None, rpc=lambda calls: ["0x6001" for _ in calls])
     registry = {token: TokenReg(token=token, source="crystal", registered_block=1)}
     swap = VenueEvent(tag="V3SWAP", log_index=3, parsed={"pool": pool, "amount0": 5, "amount1": -5}, address=pool)
     b = _bundle_for(
