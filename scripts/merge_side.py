@@ -254,6 +254,20 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
     if not apply:
         return
 
+    with pc.cursor() as p:
+        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
+        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
+        p.execute("CREATE TEMP TABLE tmp_side_trades (LIKE launchpad_trades INCLUDING DEFAULTS)")
+        p.execute("CREATE TEMP TABLE tmp_side_ohlcv (LIKE launchpad_ohlcv INCLUDING DEFAULTS)")
+        psycopg2.extras.execute_values(
+            p, f"INSERT INTO tmp_side_trades ({','.join(trade_cols)}) VALUES %s", side_keep, page_size=1000
+        )
+        if candles:
+            psycopg2.extras.execute_values(
+                p, f"INSERT INTO tmp_side_ohlcv ({','.join(ohlcv_cols)}) VALUES %s", candles, page_size=1000
+            )
+    pc.commit()
+
     with pc:
         with pc.cursor() as p:
             p.execute("SET lock_timeout = '5s'")
@@ -284,11 +298,9 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 "DELETE FROM launchpad_trades WHERE token=%s AND block_number<=%s AND NOT (user_address = ANY(%s))",
                 (token, cutoff, list(late_users)),
             )
-            psycopg2.extras.execute_values(
-                p,
-                f"INSERT INTO launchpad_trades ({','.join(trade_cols)}) VALUES %s ON CONFLICT DO NOTHING",
-                side_keep,
-                page_size=1000,
+            p.execute(
+                f"INSERT INTO launchpad_trades ({','.join(trade_cols)}) "
+                f"SELECT {','.join(trade_cols)} FROM tmp_side_trades ON CONFLICT DO NOTHING"
             )
 
             if pos_update:
@@ -336,11 +348,9 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 (token, cutoff_ts),
             )
             if candles:
-                psycopg2.extras.execute_values(
-                    p,
-                    f"INSERT INTO launchpad_ohlcv ({','.join(ohlcv_cols)}) VALUES %s ON CONFLICT DO NOTHING",
-                    candles,
-                    page_size=1000,
+                p.execute(
+                    f"INSERT INTO launchpad_ohlcv ({','.join(ohlcv_cols)}) "
+                    f"SELECT {','.join(ohlcv_cols)} FROM tmp_side_ohlcv ON CONFLICT DO NOTHING"
                 )
 
             p.execute(
@@ -357,6 +367,10 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 """,
                 (token,),
             )
+    with pc.cursor() as p:
+        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
+        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
+    pc.commit()
     print("   committed", flush=True)
 
 
