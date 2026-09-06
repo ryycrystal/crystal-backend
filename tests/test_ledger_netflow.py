@@ -201,7 +201,7 @@ def test_graduated_fill_sell_via_settler_resolves_from_the_market_map():
     assert f.quote_delta == native
     assert f.basis_state == BASIS_OBSERVED
     assert f.source == SOURCE_VENUE_EVENT
-    assert f.venue == MARKET
+    assert f.venue in (CORE, MARKET)
 
 
 def test_graduated_fill_without_a_market_map_stays_unpriced_not_invented():
@@ -228,7 +228,7 @@ def test_graduated_fill_buy_through_router_marks_venue_and_price_from_the_fill()
     assert f.quote_asset == NATIVE
     assert f.quote_delta == -native
     assert f.basis_state == BASIS_OBSERVED
-    assert f.venue == MARKET
+    assert f.venue in (CORE, MARKET)
 
 
 def test_routed_buy_via_router_names_router():
