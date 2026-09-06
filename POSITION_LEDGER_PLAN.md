@@ -363,15 +363,22 @@ Order of evidence, first match wins, all cached in `address_kinds`:
 4. **`eth_getCode`** on first sight, cached forever: empty → `eoa`; `0xef0100 + 20 bytes`
    (48 hex chars) → `eoa_7702` (a wallet, CLAUDE.md); anything else → contract, pending
    the heuristic below.
-5. **Heuristic for unknown contracts**: a contract that, within a single transaction, both
-   receives and sends a registered token (or receives token and sends quote) and is never
-   `tx.from`, across two or more transactions → `venue_pool` candidate, written to
-   `venues` with `discovered = true`. Until classified it is treated as a venue for
-   position purposes (no row written; flows to it become the wallet's `venue`). This is the
-   rule that keeps unknown launchpads and pools out of the position table.
-6. **Bot contracts** (contract that *is* `tx.to` and ends the transaction holding tokens
-   with no pool-like pattern) keep positions as `contract_unknown` holders, matching the
-   CLAUDE.md decision that a bot's own contract is a real distinct actor.
+5. **Pool events**: an unknown contract that emits a pool event we already decode (V2/V3
+   `Swap`, `Sync`, nad.fun / PancakeSwap sync) is `venue_pool` on first sight
+   (`emits_venue_event`), for that transaction and from then on.
+6. **Shape heuristic for silent contracts**: a contract that, within a single transaction,
+   both receives and sends a registered token (or receives token and sends quote), is never
+   `tx.from` and never `tx.to` in any observed transaction, across three or more
+   transactions → `venue_pool` (`pool_shape_across_txs`), written to `venues` with
+   `discovered = true`. Until promoted it keeps its flows as a `contract_unknown` holder;
+   it is not treated as a venue on sight. The 09-07 JAMES replay is why: of 396 addresses
+   the earlier two-sighting rule promoted, 259 were trading bots with real positions on
+   prod, and being the direct target of a transaction is the tell a pool never shows.
+   The direct-target and origin history is seeded from `tx_meta`, so a bot called directly
+   while trading one token is not promoted while another token replays.
+7. **Bot contracts** (a contract that is ever `tx.to`, or trades without emitting pool
+   events) keep positions as `contract_unknown` holders, matching the CLAUDE.md decision
+   that a bot's own contract is a real distinct actor.
 
 The write seam checks `kind ∈ {eoa, eoa_7702, wallet_4337, contract_unknown}`; every other
 kind is refused. `integrity` reports `venue_leak` = number of position rows whose address
