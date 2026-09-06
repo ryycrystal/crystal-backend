@@ -156,12 +156,26 @@ def position_rows(cur, token: str) -> list[dict]:
     return [dict(zip(POSITION_COLUMNS, row)) for row in cur.fetchall()]
 
 
+def flow_shares(cur, token: str) -> tuple[Decimal | None, Decimal | None]:
+    cur.execute(
+        """
+        SELECT
+            COALESCE(SUM(mon_value) FILTER (WHERE kind IN ('buy', 'sell') AND basis_state = 'estimated'), 0),
+            COALESCE(SUM(mon_value) FILTER (WHERE kind IN ('buy', 'sell')), 0),
+            COALESCE(SUM(token_delta) FILTER (WHERE token_delta > 0 AND basis_state = 'unresolved'), 0),
+            COALESCE(SUM(token_delta) FILTER (WHERE token_delta > 0), 0)
+        FROM wallet_flows WHERE token = %s
+        """,
+        (token,),
+    )
+    est, total, unresolved, inflow = cur.fetchone()
+    est_share = Decimal(est) / Decimal(total) if total and Decimal(total) > 0 else None
+    unres_share = Decimal(unresolved) / Decimal(inflow) if inflow and Decimal(inflow) > 0 else None
+    return est_share, unres_share
+
+
 def token_shares(cur, tokens: list[str]) -> dict[str, tuple[Decimal | None, Decimal | None]]:
-    out = {}
-    for token in tokens:
-        rows = position_rows(cur, token)
-        out[token] = (estimated_share(rows), unresolved_share(rows))
-    return out
+    return {token: flow_shares(cur, token) for token in tokens}
 
 
 def position(cur, wallet: str, token: str) -> dict | None:
