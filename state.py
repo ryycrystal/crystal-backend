@@ -128,6 +128,20 @@ _SOURCE_BY_EMITTER = {
 }
 
 
+_INTERNAL_ADDRS_KEY: tuple[int, int] | None = None
+_INTERNAL_ADDRS: set[str] = set()
+
+
+def _internal_addrs() -> set[str]:
+    global _INTERNAL_ADDRS_KEY, _INTERNAL_ADDRS
+    addrs = getattr(h, "ADDRS", [])
+    key = (id(addrs), len(addrs))
+    if key != _INTERNAL_ADDRS_KEY:
+        _INTERNAL_ADDRS = {a.lower() for a in addrs}
+        _INTERNAL_ADDRS_KEY = key
+    return _INTERNAL_ADDRS
+
+
 def _source_for_emitter(log_addr: str) -> int | None:
     src = (log_addr or "").lower()
     if src == (h.CONTRACTS.get("ROUTER", "") or "").lower():
@@ -1347,7 +1361,7 @@ class State:
             to_addr = (ev.get("to") or "").lower()
 
             zero = "0x" + "0" * 40
-            internal = {a.lower() for a in getattr(h, "ADDRS", [])}
+            internal = _internal_addrs()
             venues = {
                 (getattr(lp, "market", "") or "").lower(),
                 (self.token_to_v3_pool.get(token) or "").lower(),
