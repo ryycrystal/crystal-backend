@@ -186,6 +186,18 @@ def _init_db_once() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE launchpad_trades
+            ADD COLUMN IF NOT EXISTS venue TEXT;
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE launchpad_trades
+            ADD COLUMN IF NOT EXISTS tx_index INTEGER;
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_launchpad_trades_block
             ON launchpad_trades (block_number);
             """

@@ -21,6 +21,16 @@ UNIV4_QUOTE_TOKENS = {
 }
 
 
+def _tx_index_of(log: dict) -> int | None:
+    raw = (log or {}).get("transactionIndex")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw, 16) if isinstance(raw, str) else int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 class BatchAccumulator:
     def __init__(self):
         self.trades: list[tuple] = []
@@ -46,6 +56,8 @@ class BatchAccumulator:
         native_reserve=0,
         token_reserve=0,
         realized_native=0,
+        venue=None,
+        tx_index=None,
     ):
         self.trades.append(
             (
@@ -63,6 +75,8 @@ class BatchAccumulator:
                 int(native_reserve or 0),
                 int(token_reserve or 0),
                 int(realized_native or 0),
+                venue,
+                int(tx_index) if tx_index is not None else None,
             )
         )
 
@@ -260,6 +274,7 @@ class Sequencer:
             maps["ordered"].append(
                 {
                     "log_idx": log_idx,
+                    "tx_index": _tx_index_of(log),
                     "from": from_addr,
                     "to": to_addr,
                     "amount": parsed.get("amount") or 0,
@@ -282,13 +297,16 @@ class Sequencer:
                 continue
             net = 0
             deliver_idx = 0
+            deliver_txi = None
             for t in maps.get("ordered", []):
+                if t["to"] == user or t["from"] == user:
+                    if int(t["log_idx"] or 0) >= deliver_idx:
+                        deliver_idx = int(t["log_idx"] or 0)
+                        deliver_txi = t.get("tx_index")
                 if t["to"] == user:
                     net += int(t["amount"] or 0)
-                    deliver_idx = max(deliver_idx, int(t["log_idx"] or 0))
                 if t["from"] == user:
                     net -= int(t["amount"] or 0)
-                    deliver_idx = max(deliver_idx, int(t["log_idx"] or 0))
             if net == 0:
                 continue
             diff = amount - net
@@ -308,6 +326,7 @@ class Sequencer:
                     ts=int(self._block_timestamps.get(blk, 0)),
                     txh=txh,
                     log_idx=deliver_idx,
+                    tx_index=deliver_txi,
                     cur=cur,
                     batch=batch,
                 )
@@ -360,7 +379,7 @@ class Sequencer:
                     found.setdefault(1, token)
         return found.get(0, ""), found.get(1, "")
 
-    def _apply_univ4_swap(self, parsed, blk, blk_ts, txh, lii, transfer_maps, cur=None, batch=None):
+    def _apply_univ4_swap(self, parsed, blk, blk_ts, txh, lii, transfer_maps, cur=None, batch=None, tx_index=None):
         pool_id = (parsed.get("pool_id") or "").lower()
         amount0 = int(parsed.get("amount0") or 0)
         amount1 = int(parsed.get("amount1") or 0)
@@ -385,7 +404,9 @@ class Sequencer:
         if real_user:
             ev["user"] = real_user
 
-        self._state.apply_launchpad_trade(ev, blk, blk_ts, txh, lii, h.UNIV4_POOL_MANAGER_ADDR, cur=cur, batch=batch)
+        self._state.apply_launchpad_trade(
+            ev, blk, blk_ts, txh, lii, h.UNIV4_POOL_MANAGER_ADDR, cur=cur, batch=batch, tx_index=tx_index
+        )
 
     def _resolve_trade_user(
         self,
@@ -765,6 +786,7 @@ class Sequencer:
                     batch=batch,
                     txh=txh,
                     log_idx=lii,
+                    tx_index=_tx_index_of(log),
                 )
 
             elif tag == "OBU":
@@ -859,7 +881,15 @@ class Sequencer:
                     parsed["user"] = real_user
 
                 self._state.apply_launchpad_trade(
-                    parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
+                    parsed,
+                    blk,
+                    blk_ts,
+                    txh,
+                    lii,
+                    log.get("address", "").lower(),
+                    cur=cur,
+                    batch=batch,
+                    tx_index=_tx_index_of(log),
                 )
 
             elif tag in ("MG", "NFT"):
@@ -954,7 +984,9 @@ class Sequencer:
 
             elif tag == "V4SWAP":
                 if parsed:
-                    self._apply_univ4_swap(parsed, blk, blk_ts, txh, lii, transfer_maps, cur=cur, batch=batch)
+                    self._apply_univ4_swap(
+                        parsed, blk, blk_ts, txh, lii, transfer_maps, cur=cur, batch=batch, tx_index=_tx_index_of(log)
+                    )
 
             elif tag in ("V2SWAP", "V3SWAP"):
                 pool_addr = (log.get("address") or "").lower()
@@ -978,7 +1010,15 @@ class Sequencer:
                     parsed["user"] = real_user
 
                 self._state.apply_launchpad_trade(
-                    parsed, blk, blk_ts, txh, lii, log.get("address", "").lower(), cur=cur, batch=batch
+                    parsed,
+                    blk,
+                    blk_ts,
+                    txh,
+                    lii,
+                    log.get("address", "").lower(),
+                    cur=cur,
+                    batch=batch,
+                    tx_index=_tx_index_of(log),
                 )
 
         self._verify_attribution(blk, transfer_maps, cur=cur, batch=batch)

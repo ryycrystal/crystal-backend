@@ -74,13 +74,16 @@ def test_price_native_matches_amount_ratio():
     assert abs(Decimal(p) - Decimal(native_amt) / Decimal(token_amt)) < Decimal("1e-49")
 
 
-def test_price_native_falls_back_to_reserves_then_floor():
+def test_price_native_falls_back_to_reserves_then_declines_to_guess():
     from_reserves = _price_native(0, 0, 10**18, 10**27)
     assert Decimal(from_reserves) == Decimal("0.000000001")
-    floor = _price_native(0, 0, 0, 0)
-    assert floor
-    assert Decimal(floor) > 0
+    assert _price_native(0, 0, 0, 0) is None
     assert _price_native(1, 10**27, 0, 0) == "0.000000000000000000000000001"
+
+
+def test_price_native_scales_a_six_decimal_quote():
+    assert Decimal(_price_native(2_000_000, 10**18, 0, 0, quote_decimals=6)) == Decimal("2")
+    assert _dec_str(2_500_000, 6) == "2.5"
 
 
 def test_latest_block_reads_kv_checkpoint(monkeypatch):
@@ -126,6 +129,10 @@ def test_asset_serves_quote_token(monkeypatch):
     assert body["asset"]["symbol"] == "WMON"
     assert body["asset"]["id"] == _checksum(dexscreener.WMON)
 
+    ctx = _CursorContext([None, (1,)])
+    monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)
+    assert dex_asset(id=dexscreener.USDC)["asset"]["symbol"] == "USDC"
+
 
 def test_pair_shape_and_creator_omitted_when_empty(monkeypatch):
     token = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
@@ -155,8 +162,22 @@ def test_events_swap_shape_and_direction(monkeypatch):
     token = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
     maker = "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb"
     rows = [
-        (200, 1756000100, "0xaaa", 3, maker, token, True, 10**18, 4 * 10**25, 11 * 10**18, 9 * 10**26),
-        (200, 1756000100, "0xaaa", 7, maker, token, False, 5 * 10**17, 2 * 10**25, 10 * 10**18, 92 * 10**25),
+        (
+            200,
+            1756000100,
+            "0xaaa",
+            3,
+            maker,
+            token,
+            True,
+            10**18,
+            4 * 10**25,
+            11 * 10**18,
+            9 * 10**26,
+            5,
+            dexscreener.WMON,
+        ),
+        (200, 1756000100, "0xaaa", 7, maker, token, False, 5 * 10**17, 2 * 10**25, 10 * 10**18, 92 * 10**25, 5, None),
     ]
     ctx = _CursorContext([rows])
     monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)
@@ -165,7 +186,7 @@ def test_events_swap_shape_and_direction(monkeypatch):
 
     assert buy["block"] == {"blockNumber": 200, "blockTimestamp": 1756000100}
     assert buy["eventType"] == "swap"
-    assert (buy["txnId"], buy["txnIndex"], buy["eventIndex"]) == ("0xaaa", 0, 3)
+    assert (buy["txnId"], buy["txnIndex"], buy["eventIndex"]) == ("0xaaa", 5, 3)
     assert buy["maker"] == _checksum(maker)
     assert buy["pairId"] == _checksum(token)
     assert buy["asset1In"] == "1" and buy["asset0Out"] == "40000000"
@@ -175,12 +196,43 @@ def test_events_swap_shape_and_direction(monkeypatch):
 
     assert sell["asset0In"] == "20000000" and sell["asset1Out"] == "0.5"
     assert "asset1In" not in sell and "asset0Out" not in sell
-    assert (sell["txnIndex"], sell["eventIndex"]) == (0, 7)
+    assert (sell["txnIndex"], sell["eventIndex"]) == (5, 7)
 
     query = ctx.executed[0][0]
     assert "ORDER BY t.block_number, t.log_index" in query
     assert "source = 0" in query
+    assert "t.venue = 'curve'" in query
+    assert "t.venue IS NULL" in query
     assert "migrated" in query
+
+
+def test_events_skip_unpriceable_rows_and_default_txn_index(monkeypatch):
+    token = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+    maker = "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb"
+    rows = [
+        (300, 1756000200, "0xbbb", 1, maker, token, True, 0, 0, 0, 0, None, dexscreener.WMON),
+        (300, 1756000200, "0xbbb", 2, maker, token, True, 10**18, 10**24, 10**18, 10**26, None, dexscreener.WMON),
+    ]
+    ctx = _CursorContext([rows])
+    monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)
+    events = dex_events(fromBlock=300, toBlock=300)["events"]
+    assert [e["eventIndex"] for e in events] == [2]
+    assert events[0]["txnIndex"] == 0
+
+
+def test_events_use_quote_decimals_for_the_native_leg(monkeypatch):
+    token = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+    maker = "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb"
+    rows = [
+        (400, 1756000300, "0xccc", 1, maker, token, True, 3_000_000, 10**18, 9_000_000, 5 * 10**18, 2, dexscreener.USDC)
+    ]
+    ctx = _CursorContext([rows])
+    monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)
+    ev = dex_events(fromBlock=400, toBlock=400)["events"][0]
+    assert ev["asset1In"] == "3"
+    assert ev["asset0Out"] == "1"
+    assert ev["reserves"] == {"asset0": "5", "asset1": "9"}
+    assert Decimal(ev["priceNative"]) == Decimal("3")
 
 
 def test_events_empty_and_inverted_range(monkeypatch):

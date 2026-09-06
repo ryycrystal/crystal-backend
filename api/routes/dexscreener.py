@@ -15,13 +15,32 @@ router = APIRouter(prefix="/dexscreener")
 DEX_KEY = os.getenv("DEXSCREENER_DEX_KEY", "crystal")
 FEE_BPS = int(os.getenv("DEXSCREENER_FEE_BPS", "100"))
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
-WAD = Decimal(10) ** 18
+LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
+USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+TOKEN_DECIMALS = 18
+QUOTE_DECIMALS = {WMON: 18, LVMON: 18, USDC: 6, AUSD: 6}
+QUOTE_NAMES = {
+    WMON: ("Wrapped Monad", "WMON"),
+    LVMON: ("Liquid Vault MON", "LVMON"),
+    USDC: ("USD Coin", "USDC"),
+    AUSD: ("AUSD", "AUSD"),
+}
 QUANTUM = Decimal(1).scaleb(-50)
 
 CURVE_TRADE_FILTER = """
     k.source = 0
-    AND (NOT k.migrated OR t.block_number < k.migrated_block
-         OR (t.block_number = k.migrated_block AND t.native_reserve > 0))
+    AND (
+        t.venue = 'curve'
+        OR (
+            t.venue IS NULL
+            AND (
+                NOT k.migrated
+                OR t.block_number < k.migrated_block
+                OR (t.block_number = k.migrated_block AND t.native_reserve > 0 AND t.token_reserve > 0)
+            )
+        )
+    )
 """
 
 
@@ -43,21 +62,33 @@ def _addr_or_404(v: str) -> str:
     raise HTTPException(status_code=404, detail="not found")
 
 
-def _dec_str(raw) -> str:
-    with localcontext() as ctx:
-        ctx.prec = 160
-        return format((Decimal(int(raw or 0)) / WAD).quantize(QUANTUM).normalize(), "f")
+def _quote_decimals(quote_token: str | None) -> int:
+    return QUOTE_DECIMALS.get((quote_token or WMON).lower(), 18)
 
 
-def _price_native(native_raw: int, token_raw: int, native_reserve: int, token_reserve: int) -> str:
+def _dec_str(raw, decimals: int = TOKEN_DECIMALS) -> str:
     with localcontext() as ctx:
         ctx.prec = 160
-        p = Decimal(native_raw) / Decimal(token_raw) if token_raw > 0 else Decimal(0)
-        if p <= 0 and token_reserve > 0:
-            p = Decimal(native_reserve) / Decimal(token_reserve)
+        scaled = Decimal(int(raw or 0)) / (Decimal(10) ** decimals)
+        return format(scaled.quantize(QUANTUM).normalize(), "f")
+
+
+def _price_native(
+    native_raw: int,
+    token_raw: int,
+    native_reserve: int,
+    token_reserve: int,
+    quote_decimals: int = 18,
+) -> str | None:
+    with localcontext() as ctx:
+        ctx.prec = 160
+        scale = Decimal(10) ** (TOKEN_DECIMALS - quote_decimals)
+        p = Decimal(native_raw) * scale / Decimal(token_raw) if token_raw > 0 else Decimal(0)
+        if p <= 0 and token_reserve > 0 and native_reserve > 0:
+            p = Decimal(native_reserve) * scale / Decimal(token_reserve)
         p = p.quantize(QUANTUM)
         if p <= 0:
-            p = QUANTUM
+            return None
         return format(p.normalize(), "f")
 
 
@@ -105,9 +136,8 @@ def dex_asset(id: str = Query(...)):
     if row is None:
         if not is_quote:
             raise HTTPException(status_code=404, detail="asset not found")
-        if addr == WMON:
-            return {"asset": {"id": checksummed, "name": "Wrapped Monad", "symbol": "WMON"}}
-        return {"asset": {"id": checksummed, "name": checksummed, "symbol": checksummed[2:8].upper()}}
+        name, symbol = QUOTE_NAMES.get(addr, (checksummed, checksummed[2:8].upper()))
+        return {"asset": {"id": checksummed, "name": name, "symbol": symbol}}
     name, symbol, circulating = row
     return {
         "asset": {
@@ -155,7 +185,8 @@ def dex_events(fromBlock: int = Query(...), toBlock: int = Query(...)):
         cur.execute(
             f"""
             SELECT t.block_number, t.timestamp, t.txhash, t.log_index, t.user_address, t.token,
-                   t.is_buy, t.native_amount, t.token_amount, t.native_reserve, t.token_reserve
+                   t.is_buy, t.native_amount, t.token_amount, t.native_reserve, t.token_reserve,
+                   t.tx_index, k.quote_token
             FROM launchpad_trades t
             JOIN launchpad_tokens k ON k.token = t.token
             WHERE t.block_number BETWEEN %s AND %s AND {CURVE_TRADE_FILTER}
@@ -165,23 +196,43 @@ def dex_events(fromBlock: int = Query(...), toBlock: int = Query(...)):
         )
         rows = cur.fetchall()
     events = []
-    for block_number, ts, txhash, log_index, user, token, is_buy, native_amt, token_amt, native_res, token_res in rows:
+    for row in rows:
+        (
+            block_number,
+            ts,
+            txhash,
+            log_index,
+            user,
+            token,
+            is_buy,
+            native_amt,
+            token_amt,
+            native_res,
+            token_res,
+            tx_index,
+            quote_token,
+        ) = row
+        qd = _quote_decimals(quote_token)
+        price = _price_native(int(native_amt), int(token_amt), int(native_res or 0), int(token_res or 0), qd)
+        if price is None:
+            print(f"[dexscreener] skipping unpriceable trade {txhash}#{log_index}", flush=True)
+            continue
         event = {
             "block": {"blockNumber": int(block_number), "blockTimestamp": int(ts)},
             "eventType": "swap",
             "txnId": txhash,
-            "txnIndex": 0,
+            "txnIndex": int(tx_index) if tx_index is not None else 0,
             "eventIndex": int(log_index),
             "maker": _checksum(user),
             "pairId": _checksum(token),
-            "priceNative": _price_native(int(native_amt), int(token_amt), int(native_res or 0), int(token_res or 0)),
-            "reserves": {"asset0": _dec_str(token_res), "asset1": _dec_str(native_res)},
+            "priceNative": price,
+            "reserves": {"asset0": _dec_str(token_res), "asset1": _dec_str(native_res, qd)},
         }
         if is_buy:
-            event["asset1In"] = _dec_str(native_amt)
+            event["asset1In"] = _dec_str(native_amt, qd)
             event["asset0Out"] = _dec_str(token_amt)
         else:
             event["asset0In"] = _dec_str(token_amt)
-            event["asset1Out"] = _dec_str(native_amt)
+            event["asset1Out"] = _dec_str(native_amt, qd)
         events.append(event)
     return {"events": events}

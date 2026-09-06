@@ -1163,6 +1163,8 @@ def _build_ohlcv_from_db(
 app = FastAPI(title="backend", version="0.1.0")
 
 _EDGE_CACHEABLE = (
+    "/dexscreener/latest-block",
+    "/dexscreener/events",
     "/tokens",
     "/token/",
     "/fun/token/",

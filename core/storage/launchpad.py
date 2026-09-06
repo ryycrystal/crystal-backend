@@ -104,6 +104,8 @@ def insert_trade(
     native_reserve=0,
     token_reserve=0,
     realized_native=0,
+    venue: str | None = None,
+    tx_index: int | None = None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     if cur is None:
@@ -124,9 +126,11 @@ def insert_trade(
                     txhash,
                     native_reserve,
                     token_reserve,
-                    realized_native
+                    realized_native,
+                    venue,
+                    tx_index
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (txhash, log_index) DO NOTHING;
                 """,
                 (
@@ -144,6 +148,8 @@ def insert_trade(
                     int(native_reserve or 0),
                     int(token_reserve or 0),
                     int(realized_native or 0),
+                    venue,
+                    int(tx_index) if tx_index is not None else None,
                 ),
             )
     else:
@@ -163,9 +169,11 @@ def insert_trade(
                 txhash,
                 native_reserve,
                 token_reserve,
-                realized_native
+                realized_native,
+                venue,
+                tx_index
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (txhash, log_index) DO NOTHING;
             """,
             (
@@ -183,6 +191,8 @@ def insert_trade(
                 int(native_reserve or 0),
                 int(token_reserve or 0),
                 int(realized_native or 0),
+                venue,
+                int(tx_index) if tx_index is not None else None,
             ),
         )
 
@@ -1757,7 +1767,7 @@ def insert_trades_batch(trades: list[tuple], cur) -> None:
         INSERT INTO launchpad_trades (
             block_number, log_index, timestamp, token, user_address,
             is_buy, native_amount, token_amount, usd_amount, price_native, txhash,
-            native_reserve, token_reserve, realized_native
+            native_reserve, token_reserve, realized_native, venue, tx_index
         )
         VALUES %s
         ON CONFLICT (txhash, log_index) DO NOTHING

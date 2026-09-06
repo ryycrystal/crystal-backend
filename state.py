@@ -905,6 +905,7 @@ class State:
         _log_addr: str,
         cur: psycopg2.extensions.cursor | None = None,
         batch=None,
+        tx_index: int | None = None,
     ) -> None:
         with self._lock:
             if txh and storage.trade_exists(txh, log_idx, cur=cur):
@@ -1131,6 +1132,7 @@ class State:
                 self._counted_trade_keys.add(counted_key)
                 trade_count_delta = 1
 
+            venue = "pool" if is_pool_swap else "curve"
             usd_amount = volume_usd_trade
 
             if batch is not None:
@@ -1149,6 +1151,8 @@ class State:
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
                     realized_native=int(realized_delta),
+                    venue=venue,
+                    tx_index=tx_index,
                 )
                 batch.set_token_state(
                     token,
@@ -1212,6 +1216,8 @@ class State:
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
                     realized_native=int(realized_delta),
+                    venue=venue,
+                    tx_index=tx_index,
                     cur=cur,
                 )
                 storage.update_token_after_trade(
@@ -1507,7 +1513,7 @@ class State:
             self._basis_overlay.clear()
 
     def apply_reconciliation_trade(
-        self, token, user, token_delta, native_amount, blk, ts, txh, log_idx, cur=None, batch=None
+        self, token, user, token_delta, native_amount, blk, ts, txh, log_idx, cur=None, batch=None, tx_index=None
     ):
         with self._lock:
             token = (token or "").lower()
@@ -1571,6 +1577,8 @@ class State:
                     native_reserve=int(lp.curve_native_reserve),
                     token_reserve=int(lp.curve_token_reserve),
                     realized_native=int(realized_delta),
+                    venue="reconciliation",
+                    tx_index=tx_index,
                     cur=cur,
                 )
                 storage.update_user_on_trade(
@@ -1618,6 +1626,8 @@ class State:
                 native_reserve=int(lp.curve_native_reserve),
                 token_reserve=int(lp.curve_token_reserve),
                 realized_native=int(realized_delta),
+                venue="reconciliation",
+                tx_index=tx_index,
             )
             batch.add_user_delta(user, native_amt, realized_delta, 0)
             batch.add_position_delta(
@@ -1971,7 +1981,7 @@ class State:
         return reserve_quote / reserve_base * (Decimal(10) ** (base_decimals - quote_decimals))
 
     def _record_graduated_launchpad_trade_locked(
-        self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch
+        self, *, lp_addr: str, mi, ev: dict, blk: int, ts: int, txh: str, log_idx: int, cur, batch, tx_index=None
     ) -> None:
         lp = self.launchpad_tokens.get(lp_addr)
         if lp is None:
@@ -2128,6 +2138,8 @@ class State:
                 price_native=lp.last_price_native,
                 txhash=txh or "",
                 realized_native=int(realized_delta),
+                venue="market",
+                tx_index=tx_index,
             )
             batch.set_token_state(lp_addr, token_state)
         else:
@@ -2145,6 +2157,8 @@ class State:
                     price_native=lp.last_price_native,
                     txhash=txh or "",
                     realized_native=int(realized_delta),
+                    venue="market",
+                    tx_index=tx_index,
                     cur=cur,
                 )
                 storage.update_token_after_trade(
@@ -2170,7 +2184,16 @@ class State:
                 pass
 
     def apply_market_trade(
-        self, blk: int, ts: int, ev: dict, log_addr: str, cur=None, batch=None, txh: str = "", log_idx: int = 0
+        self,
+        blk: int,
+        ts: int,
+        ev: dict,
+        log_addr: str,
+        cur=None,
+        batch=None,
+        txh: str = "",
+        log_idx: int = 0,
+        tx_index: int | None = None,
     ) -> None:
         if not ev:
             return
@@ -2213,6 +2236,7 @@ class State:
                     ts=ts,
                     txh=txh,
                     log_idx=log_idx,
+                    tx_index=tx_index,
                     cur=cur,
                     batch=batch,
                 )
