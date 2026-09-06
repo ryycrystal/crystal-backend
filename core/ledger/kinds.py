@@ -100,7 +100,12 @@ def _is_execution_error(error) -> bool:
     if error.get("code") == 3:
         return True
     message = str(error.get("message") or "").lower()
-    return "revert" in message or "execution error" in message
+    if "limit" in message or "too many" in message or "rate" in message:
+        return False
+    return any(
+        marker in message
+        for marker in ("revert", "execution", "out of gas", "invalid opcode", "stack", "invalid jump", "gas required")
+    )
 
 
 class JsonRpc:
@@ -158,8 +163,9 @@ class JsonRpc:
                 else:
                     results[i] = reply["result"]
             pending = retry
-        if pending:
+        if pending and any(calls[i][0] != "eth_call" for i in pending):
             raise RuntimeError(f"rpc batch failed after {self.attempts} attempts: {str(last_error)[:200]}")
+        # calls that never got a usable answer stay None: the caller treats that as unknown, not as a fact
         return results
 
 

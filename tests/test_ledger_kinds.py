@@ -724,6 +724,60 @@ def test_json_rpc_returns_empty_data_for_a_reverted_call_without_retrying(monkey
     assert len(attempts) == 1
 
 
+def test_json_rpc_treats_out_of_gas_as_an_answer_and_a_rate_limit_as_unknown(monkeypatch):
+    attempts: list[list[dict]] = []
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data)
+        attempts.append(payload)
+        replies = []
+        for item in payload:
+            target = item["params"][0]["to"]
+            if target == POOL:
+                replies.append({"id": item["id"], "error": {"code": -32603, "message": "out of gas"}})
+            else:
+                replies.append(
+                    {"id": item["id"], "error": {"code": -32007, "message": "50/second request limit reached"}}
+                )
+        return FakeResponse(json.dumps(replies).encode())
+
+    monkeypatch.setattr(kinds_mod, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(kinds_mod.time, "sleep", lambda s: None)
+    client = JsonRpc("http://rpc.test", max_rps=1000, attempts=2)
+    results = client.batch(
+        [
+            ("eth_call", [{"to": POOL, "data": "0x0dfe1681"}, "latest"]),
+            ("eth_call", [{"to": BOT, "data": "0x0dfe1681"}, "latest"]),
+        ]
+    )
+    assert results == ["0x", None]
+    assert len(attempts) == 2
+    assert [item["params"][0]["to"] for item in attempts[1]] == [BOT]
+
+
+def test_a_probe_that_never_answered_is_asked_again_later():
+    answers = {"count": 0}
+
+    def rpc(calls):
+        out = []
+        for method, params in calls:
+            if method == "eth_getCode":
+                out.append(CONTRACT_CODE)
+            else:
+                answers["count"] += 1
+                out.append(None if answers["count"] <= 2 else "0x")
+        return out
+
+    cur = FakeCursor()
+    kinds = AddressKinds(cur.factory, rpc=rpc)
+    registry = {TOKEN}
+    assert kinds.observe_tx(swap_sell_tx("0x01", 10, POOL, WALLET, ROUTER), registry, cur) == []
+    assert POOL not in kinds._not_pairs
+    assert kinds.observe_tx(swap_sell_tx("0x02", 11, POOL, WALLET, ROUTER), registry, cur) == []
+    assert POOL in kinds._not_pairs
+    assert answers["count"] == 4
+
+
 def test_json_rpc_honours_the_rate_limit(monkeypatch):
     clock = {"now": 0.0}
     sleeps: list[float] = []
