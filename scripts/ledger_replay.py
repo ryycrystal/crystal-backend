@@ -6,7 +6,7 @@ reference tables and the MON/USD sample series, then runs LedgerEngine.process_b
 flush per chunk of hot blocks. The old position engine is never invoked.
 
     DATABASE_URL=postgresql://...@localhost/crystal_ledger \\
-      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe]
+      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe | --wipe-token]
 """
 
 from __future__ import annotations
@@ -94,6 +94,16 @@ def wipe_ledger() -> None:
     with storage.db_cursor() as cur:
         cur.execute("TRUNCATE " + ", ".join(LEDGER_TABLES))
     print(f"[WIPE] truncated {len(LEDGER_TABLES)} ledger tables", flush=True)
+
+
+def wipe_tokens(tokens: list[str]) -> tuple[int, int]:
+    with storage.db_cursor() as cur:
+        cur.execute("DELETE FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
+        flows = cur.rowcount
+        cur.execute("DELETE FROM positions_v2 WHERE token = ANY(%s)", (tokens,))
+        positions = cur.rowcount
+    print(f"[WIPE] {len(tokens)} token(s): {flows:,} flows and {positions:,} positions deleted", flush=True)
+    return flows, positions
 
 
 class Watchdog:
@@ -409,6 +419,8 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     init_side_schema()
     if args.wipe:
         wipe_ledger()
+    elif args.wipe_token:
+        wipe_tokens(tokens)
     seed_from_prod(src, tokens, reference_tables=not args.skip_seed)
 
     created, venues = token_scope(src, tokens)
@@ -485,6 +497,11 @@ def main() -> None:
     ap.add_argument("--limit-blocks", type=int, default=0, help="process only the first N hot blocks")
     ap.add_argument("--rpc", default=os.environ.get("RPC_HTTP", "https://rpc.monad.xyz"))
     ap.add_argument("--wipe", action="store_true", help="truncate the ledger tables before replaying")
+    ap.add_argument(
+        "--wipe-token",
+        action="store_true",
+        help="delete only the replayed tokens' flows and positions, keeping other tokens' ledger data",
+    )
     ap.add_argument(
         "--skip-seed",
         action="store_true",

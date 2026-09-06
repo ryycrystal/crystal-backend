@@ -282,6 +282,34 @@ def _closest_hint(leg: _Leg, candidates: list[_Hint]) -> _Hint | None:
     return min(candidates, key=lambda h: (abs(h.token_delta - leg.token_delta), h.log_index))
 
 
+def _exact_hints(leg: _Leg, hints: list[_Hint], used: set[int]) -> list[_Hint]:
+    same_side = [
+        h
+        for h in hints
+        if h.log_index not in used and h.token == leg.token and _same_sign(h.token_delta, leg.token_delta)
+    ]
+    exact = [h for h in same_side if abs(h.token_delta - leg.token_delta) <= AMOUNT_TOLERANCE_WEI]
+    if exact:
+        return [min(exact, key=lambda h: h.log_index)]
+    if same_side and abs(sum(h.token_delta for h in same_side) - leg.token_delta) <= AMOUNT_TOLERANCE_WEI:
+        return sorted(same_side, key=lambda h: h.log_index)
+    return []
+
+
+def _prefer_venue_quote(leg: _Leg, matched: list[_Hint], own_asset: str, own_delta: int, rates: Rates) -> None:
+    asset, quote = _sum_hints(matched, rates)
+    if quote == 0 or _same_sign(quote, leg.token_delta) or _is_mon(asset) != _is_mon(own_asset):
+        return
+    if Decimal(abs(quote - own_delta)) > Decimal(abs(quote)) * FEE_TOLERANCE:
+        return
+    if quote != own_delta:
+        leg.quote_delta = quote
+        leg.source = SOURCE_VENUE_EVENT
+    leg.hint_price = _hint_price(matched, rates)
+    if leg.venue is None:
+        leg.venue = matched[0].venue
+
+
 def _within_fee_tolerance(leg_delta: int, hint_delta: int) -> bool:
     return abs(leg_delta - hint_delta) <= AMOUNT_TOLERANCE_WEI or (
         Decimal(abs(leg_delta - hint_delta)) <= Decimal(abs(hint_delta)) * FEE_TOLERANCE
@@ -457,6 +485,17 @@ def _resolve_wallet(
             leg.source = own_source
             leg.basis_state = BASIS_OBSERVED
             hint = event_quotes.get(leg.token)
+            if hint is None:
+                matched = _exact_hints(leg, hints, used)
+            elif abs(hint.token_delta - leg.token_delta) <= AMOUNT_TOLERANCE_WEI:
+                matched = [hint]
+            else:
+                matched = []
+            if matched:
+                for h in matched:
+                    used.add(h.log_index)
+                _prefer_venue_quote(leg, matched, own_asset, own_delta, rates)
+                return
             if hint is None:
                 near = [
                     h

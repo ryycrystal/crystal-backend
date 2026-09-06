@@ -677,3 +677,65 @@ def test_unregistered_token_and_passthrough_produce_nothing():
     other = "0x" + "99" * 20
     b = bundle([tf(1, other, WALLET, WALLET2, 5), tf(2, TOKEN, SETTLER, ROUTER, 5)], tx_meta=meta(WALLET, ROUTER))
     assert run(b) == []
+
+
+def test_routed_buy_books_the_venue_amount_and_leaves_the_router_fee_out():
+    tokens = 933_619_875_239_020_431_266_724_571
+    venue_native = 8_598_080_700_000_000_194_641
+    paid = 8_684_930_000_000_000_196_608
+    b = bundle(
+        [tf(55, TOKEN, CORE, ROUTER, tokens), tf(56, TOKEN, ROUTER, WALLET, tokens)],
+        [lt(54, ROUTER, True, venue_native, tokens)],
+        meta(WALLET, ROUTER, paid),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_BUY
+    assert f.quote_asset == NATIVE
+    assert f.quote_delta == -venue_native
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.source == SOURCE_VENUE_EVENT
+    assert f.venue == CORE
+    assert f.price_native == Decimal(venue_native) / Decimal(tokens)
+
+
+def test_routed_sell_with_trace_books_the_venue_amount_not_the_fee_reduced_receipt():
+    tokens, venue_native = 162_232_261 * E18, 6_968 * E18
+    received = venue_native - venue_native // 100
+    b = bundle(
+        [tf(26, TOKEN, WALLET, SETTLER, tokens), tf(29, TOKEN, SETTLER, CORE, tokens)],
+        [lt(28, SETTLER, False, venue_native, tokens)],
+        meta(WALLET, SETTLER, 0),
+        trace=TraceResult(available=True, transfers=[(CORE, SETTLER, venue_native), (SETTLER, WALLET, received)]),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_SELL
+    assert f.quote_delta == venue_native
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.source == SOURCE_VENUE_EVENT
+
+
+def test_split_curve_fills_summing_to_the_wallet_delta_book_the_venue_total():
+    t1, t2 = 1_346_767 * E18, 5_123_708 * E18
+    n1, n2 = 20 * E18, 79 * E18
+    b = bundle(
+        [tf(126, TOKEN, CORE, ROUTER, t1), tf(134, TOKEN, CORE, ROUTER, t2), tf(135, TOKEN, ROUTER, WALLET, t1 + t2)],
+        [lt(127, ROUTER, True, n1, t1), lt(133, ROUTER, True, n2, t2)],
+        meta(WALLET, ROUTER, 100 * E18),
+    )
+    f = only(run(b))
+    assert f.quote_delta == -(n1 + n2)
+    assert f.source == SOURCE_VENUE_EVENT
+    assert f.basis_state == BASIS_OBSERVED
+
+
+def test_own_quote_far_from_the_venue_amount_is_kept():
+    tokens, venue_native = 500 * E18, 3 * E18
+    b = bundle(
+        [tf(2, TOKEN, CORE, ROUTER, tokens), tf(3, TOKEN, ROUTER, WALLET, tokens)],
+        [lt(4, ROUTER, True, venue_native, tokens)],
+        meta(WALLET, ROUTER, 6 * E18),
+    )
+    f = only(run(b))
+    assert f.quote_delta == -6 * E18
+    assert f.source == SOURCE_TRANSFER_NET
+    assert f.venue == CORE

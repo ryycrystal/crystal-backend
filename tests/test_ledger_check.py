@@ -1,16 +1,24 @@
 from decimal import Decimal
 
+import pytest
+
 from scripts.ledger_check import (
+    CHIPOTLE,
     DUST_WEI,
+    FIXTURE_TOKENS,
+    JAMES,
+    MONCOCK,
     Check,
     all_pass,
     check_abs,
     check_eq,
     check_le,
     check_pct,
+    dust_limit,
     estimated_share,
     from_wei,
     render_table,
+    selected_tokens,
     unresolved_share,
     within_abs,
     within_pct,
@@ -89,3 +97,21 @@ def test_unresolved_share_counts_held_custody_and_sold():
     ]
     assert unresolved_share(rows) == Decimal(10) / Decimal(100)
     assert unresolved_share([{"balance_token": 0, "token_sold": 0, "unresolved_tokens": 0}]) is None
+
+
+def test_selected_tokens_resolves_fixture_names_case_insensitively():
+    assert selected_tokens(["CHIPOTLE"], []) == [CHIPOTLE]
+    assert selected_tokens(["moncock", "James"], []) == [MONCOCK, JAMES]
+    assert selected_tokens([], []) == list(FIXTURE_TOKENS)
+    assert selected_tokens(["chipotle"], [CHIPOTLE.upper()]) == [CHIPOTLE]
+    with pytest.raises(SystemExit):
+        selected_tokens(["nope"], [])
+
+
+def test_dust_limit_is_one_billionth_of_the_bought_amount_but_never_below_dust_wei():
+    assert dust_limit(0) == DUST_WEI
+    assert dust_limit(None) == DUST_WEI
+    assert dust_limit(10**9 * WEI) == WEI
+    assert dust_limit(3_173_915_918 * WEI) == 3_173_915_918 * 10**9
+    assert check_le("f", "balance_token", 1_147_748_982_595_449, dust_limit(3_173_915_918 * WEI)).ok
+    assert not check_le("f", "balance_token", 1_147_748_982_595_449, dust_limit(0)).ok

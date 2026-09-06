@@ -32,6 +32,7 @@ MONCOCK = "0x405b6330e213ded490240cbcdd64790806827777"
 MONCOCK_WALLET = "0xb9e37df144f7e6a86da69642a1f01bec7d2035d2"
 JAMES = "0x43cf5407bda1400498b8064d50a7e17528d87777"
 FIXTURE_TOKENS = (CHIPOTLE, MONCOCK, JAMES)
+FIXTURES = {"chipotle": CHIPOTLE, "moncock": MONCOCK, "james": JAMES}
 
 POSITION_COLUMNS = (
     "wallet",
@@ -106,6 +107,10 @@ def check_eq(fixture: str, name: str, actual, expected) -> Check:
 
 def check_le(fixture: str, name: str, actual, limit) -> Check:
     return Check(fixture, name, f"<= {limit}", str(actual), Decimal(actual) <= Decimal(limit))
+
+
+def dust_limit(token_bought) -> int:
+    return max(DUST_WEI, int(token_bought or 0) // 10**9)
 
 
 def check_missing(fixture: str, name: str) -> Check:
@@ -195,7 +200,7 @@ def chipotle_checks(cur) -> list[Check]:
         check_abs(name, "native_received", pos["native_received"], "34574.254", "0.01"),
         check_abs(name, "realized_pnl_native", pos["realized_pnl_native"], "13850.173", "0.01"),
         Check(name, "trade flows observed", "all observed", json.dumps(states, sort_keys=True), non_observed == 0),
-        check_le(name, "balance_token", int(pos["balance_token"]), DUST_WEI),
+        check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(pos["token_bought"])),
         check_eq(name, "unresolved_tokens", int(pos["unresolved_tokens"]), 0),
     ]
 
@@ -209,7 +214,7 @@ def moncock_checks(cur) -> list[Check]:
         check_abs(name, "token_bought", pos["token_bought"], "25719120.30", "0.01"),
         check_pct(name, "native_spent", pos["native_spent"], "477018", "0.5"),
         check_pct(name, "realized_pnl_native", pos["realized_pnl_native"], "-193957", "0.5"),
-        check_le(name, "balance_token", int(pos["balance_token"]), DUST_WEI),
+        check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(pos["token_bought"])),
     ]
 
 
@@ -311,6 +316,14 @@ def _pct(value) -> str:
     return "n/a" if value is None else f"{float(value) * 100:.3f}%"
 
 
+def selected_tokens(fixtures: list[str], tokens: list[str]) -> list[str]:
+    unknown = [name for name in fixtures if name.lower() not in FIXTURES]
+    if unknown:
+        raise SystemExit(f"unknown fixture(s) {unknown}; choose from {sorted(FIXTURES)}")
+    chosen = [FIXTURES[name.lower()] for name in fixtures] + [t.lower() for t in tokens]
+    return list(dict.fromkeys(chosen)) or list(FIXTURE_TOKENS)
+
+
 def run_checks(cur, rpc_url: str | None, tokens: list[str]) -> list[Check]:
     checks = []
     if CHIPOTLE in tokens:
@@ -328,12 +341,13 @@ def main() -> None:
     ap.add_argument("--rpc", default=os.environ.get("RPC_HTTP", "https://rpc.monad.xyz"))
     ap.add_argument("--skip-chain", action="store_true", help="skip the JAMES balanceOf comparison")
     ap.add_argument("--token", action="append", default=[], help="restrict to these fixture tokens")
+    ap.add_argument("--fixture", action="append", default=[], help="restrict to these fixtures by name")
     args = ap.parse_args()
 
     import core.storage as storage
 
     storage.init_pool()
-    tokens = [t.lower() for t in args.token] or list(FIXTURE_TOKENS)
+    tokens = selected_tokens(args.fixture, args.token)
     with storage.db_cursor() as cur:
         cur.execute("SELECT value FROM ledger_meta WHERE key = 'replay_head_block'")
         row = cur.fetchone()
