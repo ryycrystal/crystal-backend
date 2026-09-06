@@ -257,6 +257,22 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
     with pc:
         with pc.cursor() as p:
             p.execute("SET lock_timeout = '5s'")
+            fh.write(
+                json.dumps(
+                    {
+                        "kind": "meta",
+                        "token": token,
+                        "cutoff": cutoff,
+                        "cutoff_ts": cutoff_ts,
+                        "trade_cols": trade_cols,
+                        "ohlcv_cols": ohlcv_cols,
+                        "pos_cols": list(pos_cols),
+                        "late_users": sorted(late_users),
+                        "inserted_users": [r[0] for r in pos_insert],
+                    }
+                )
+                + "\n"
+            )
             snapshot(fh, "trade", token, prod_le)
             snapshot(fh, "position", token, prod_positions)
             p.execute("SELECT * FROM launchpad_tokens WHERE token=%s", (token,))
