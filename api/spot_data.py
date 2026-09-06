@@ -42,6 +42,32 @@ def spot_token_list() -> list[dict[str, Any]]:
     return out
 
 
+def spot_prices_from_markets(rows, mon_usd: Decimal) -> dict[str, Decimal | None]:
+    from api.api import STABLE_USD_QUOTES
+
+    native_equiv = {WMON}
+    prices: dict[str, Decimal | None] = {
+        WMON: mon_usd if mon_usd > 0 else None,
+        NATIVE: mon_usd if mon_usd > 0 else None,
+    }
+    for stable in STABLE_USD_QUOTES:
+        prices[stable] = Decimal(1)
+    pinned = set(STABLE_USD_QUOTES) | native_equiv | {NATIVE}
+    for base, quote, lp in rows:
+        lp = Decimal(lp)
+        if lp <= 0 or base in pinned:
+            continue
+        if quote in native_equiv:
+            prices[base] = (lp * mon_usd) if mon_usd > 0 else None
+        elif quote in STABLE_USD_QUOTES:
+            prices[base] = lp
+    for base, quote, lp in rows:
+        lp = Decimal(lp)
+        if base in native_equiv and lp > 0 and mon_usd > 0 and quote not in pinned:
+            prices.setdefault(quote, mon_usd / lp)
+    return prices
+
+
 def spot_prices(mon_usd: Decimal) -> dict[str, Decimal | None]:
     with db_cursor() as cur:
         cur.execute(
@@ -53,20 +79,7 @@ def spot_prices(mon_usd: Decimal) -> dict[str, Decimal | None]:
             """
         )
         rows = cur.fetchall()
-
-    native_equiv = {WMON}
-    prices: dict[str, Decimal | None] = {
-        WMON: mon_usd if mon_usd > 0 else None,
-        NATIVE: mon_usd if mon_usd > 0 else None,
-    }
-    for base, quote, lp in rows:
-        if quote in native_equiv:
-            prices.setdefault(base, (Decimal(lp) * mon_usd) if mon_usd > 0 else None)
-            if mon_usd > 0:
-                prices[base] = Decimal(lp) * mon_usd
-        elif base in native_equiv and Decimal(lp) > 0 and mon_usd > 0:
-            prices.setdefault(quote, mon_usd / Decimal(lp))
-    return prices
+    return spot_prices_from_markets(rows, mon_usd)
 
 
 _known_wallets: set[str] = set()
