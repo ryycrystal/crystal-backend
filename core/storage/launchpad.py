@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
@@ -11,6 +11,24 @@ from psycopg2.extras import Json, execute_values
 from .base import db_cursor
 
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+
+_N50_18_CAP = Decimal(10) ** 31
+
+
+def _fit_n50_18(v):
+    if v is None:
+        return Decimal(0)
+    try:
+        d = Decimal(v)
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(0)
+    if not d.is_finite():
+        return Decimal(0)
+    if d > _N50_18_CAP:
+        return _N50_18_CAP
+    if d < -_N50_18_CAP:
+        return -_N50_18_CAP
+    return d
 
 
 def record_block_processed(block_number: int, cur: psycopg2.extensions.cursor | None = None) -> None:
@@ -116,8 +134,8 @@ def insert_trade(
                     bool(is_buy),
                     int(native_amount),
                     int(token_amount),
-                    usd_amount,
-                    price_native,
+                    _fit_n50_18(usd_amount),
+                    _fit_n50_18(price_native),
                     txhash,
                     int(native_reserve or 0),
                     int(token_reserve or 0),
@@ -155,8 +173,8 @@ def insert_trade(
                 bool(is_buy),
                 int(native_amount),
                 int(token_amount),
-                usd_amount,
-                price_native,
+                _fit_n50_18(usd_amount),
+                _fit_n50_18(price_native),
                 txhash,
                 int(native_reserve or 0),
                 int(token_reserve or 0),
@@ -365,7 +383,7 @@ def update_user_on_trade(
                 (
                     addr,
                     int(abs(native_amount)),
-                    realized_delta,
+                    _fit_n50_18(realized_delta),
                     int(trade_count_delta),
                 ),
             )
@@ -454,8 +472,10 @@ def upsert_position(
 
     cb = int(cost_basis_delta)
     balance_insert = max(bd, 0)
-    unrealized_insert = Decimal(balance_insert) * Decimal(last_price_native) - Decimal(max(cb, 0))
-    total_insert = Decimal(realized_pnl_delta) + unrealized_insert
+    last_price_native = _fit_n50_18(last_price_native)
+    realized_pnl_delta = _fit_n50_18(realized_pnl_delta)
+    unrealized_insert = _fit_n50_18(Decimal(balance_insert) * Decimal(last_price_native) - Decimal(max(cb, 0)))
+    total_insert = _fit_n50_18(Decimal(realized_pnl_delta) + Decimal(unrealized_insert))
 
     if cur is None:
         with db_cursor() as cur2:
@@ -602,6 +622,8 @@ def upsert_ohlcv(
     mon_usd=0,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
+    price_native = _fit_n50_18(price_native)
+    mon_usd = _fit_n50_18(mon_usd or 0)
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -635,7 +657,7 @@ def upsert_ohlcv(
                     price_native,
                     price_native,
                     int(abs(native_amount)),
-                    mon_usd or 0,
+                    mon_usd,
                 ),
             )
     else:
@@ -670,7 +692,7 @@ def upsert_ohlcv(
                 price_native,
                 price_native,
                 int(abs(native_amount)),
-                mon_usd or 0,
+                mon_usd,
             ),
         )
 
@@ -968,11 +990,12 @@ def update_launchpad_token_price(
         SET last_price_native = %s
         WHERE token = %s;
     """
+    lpn = _fit_n50_18(last_price_native)
     if cur is None:
         with db_cursor() as cur2:
-            cur2.execute(sql, (last_price_native, tok))
+            cur2.execute(sql, (lpn, tok))
     else:
-        cur.execute(sql, (last_price_native, tok))
+        cur.execute(sql, (lpn, tok))
 
 
 def update_token_metadata_batch(metadata_list: list[dict]) -> None:
@@ -1703,6 +1726,7 @@ def get_block_logs_range(start_block: int, end_block: int, cur=None) -> dict[int
 def insert_trades_batch(trades: list[tuple], cur) -> None:
     if not trades:
         return
+    safe = [t[:8] + (_fit_n50_18(t[8]), _fit_n50_18(t[9])) + t[10:] for t in trades]
     execute_values(
         cur,
         """
@@ -1714,7 +1738,7 @@ def insert_trades_batch(trades: list[tuple], cur) -> None:
         VALUES %s
         ON CONFLICT (txhash, log_index) DO NOTHING
         """,
-        trades,
+        safe,
         page_size=1000,
     )
 
@@ -1724,13 +1748,14 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
         return
     data = []
     for token, u in token_updates.items():
+        lpn = _fit_n50_18(u["last_price_native"])
         data.append(
             (
-                u["last_price_native"],
+                lpn,
                 int(u["native_volume"]),
                 int(u["token_volume"]),
-                u["volume_usd"],
-                u["fees_usd"],
+                _fit_n50_18(u["volume_usd"]),
+                _fit_n50_18(u["fees_usd"]),
                 int(u["buy_count"]),
                 int(u["sell_count"]),
                 int(u["tx_count"]),
@@ -1741,7 +1766,7 @@ def update_tokens_batch(token_updates: dict[str, dict], cur) -> None:
                 int(u["snipers_count"]),
                 int(u.get("curve_native_reserve") or 0),
                 int(u.get("curve_token_reserve") or 0),
-                u["last_price_native"],
+                lpn,
                 token.lower(),
             )
         )
@@ -1783,7 +1808,7 @@ def update_users_batch(user_updates: dict[str, dict], cur) -> None:
     if not user_updates:
         return
     data = [
-        (addr, int(u["native_volume_delta"]), u["realized_delta"], u["trade_count_delta"])
+        (addr, int(u["native_volume_delta"]), _fit_n50_18(u["realized_delta"]), u["trade_count_delta"])
         for addr, u in user_updates.items()
     ]
     execute_values(
@@ -1807,10 +1832,12 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
     data = []
     for (addr, tok), p in position_updates.items():
         balance_insert = max(int(p["balance_token_delta"]), 0)
-        unrealized_insert = Decimal(balance_insert) * Decimal(p["last_price_native"]) - Decimal(
-            max(int(p["cost_basis_delta"]), 0)
+        lpn = _fit_n50_18(p["last_price_native"])
+        unrealized_insert = _fit_n50_18(
+            Decimal(balance_insert) * Decimal(lpn) - Decimal(max(int(p["cost_basis_delta"]), 0))
         )
-        total_insert = Decimal(p["realized_pnl_delta"]) + unrealized_insert
+        realized_delta = _fit_n50_18(p["realized_pnl_delta"])
+        total_insert = _fit_n50_18(Decimal(realized_delta) + Decimal(unrealized_insert))
         data.append(
             (
                 addr,
@@ -1820,14 +1847,14 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
                 int(p["native_spent_delta"]),
                 int(p["native_received_delta"]),
                 int(p["balance_token_delta"]),
-                p["realized_pnl_delta"],
+                realized_delta,
                 unrealized_insert,
                 total_insert,
                 int(p["trade_count_delta"]),
                 int(p["buy_count_delta"]),
                 int(p["sell_count_delta"]),
                 int(p.get("cost_basis_delta") or 0),
-                p["last_price_native"],
+                lpn,
             )
         )
     execute_values(
@@ -1864,7 +1891,7 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
                     balance_token, token_bought, token_sold, cost_basis_native, %s)
             WHERE user_address = %s AND token = %s
             """,
-            (p["last_price_native"], p["last_price_native"], addr, tok),
+            (_fit_n50_18(p["last_price_native"]), _fit_n50_18(p["last_price_native"]), addr, tok),
         )
 
 
@@ -1874,6 +1901,8 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
     aggregated: dict[tuple, dict] = {}
     for token, resolution_sec, bucket_start, price_native, native_amount, mon_usd in ohlcv_data:
         key = (token.lower(), int(resolution_sec), int(bucket_start))
+        price_native = _fit_n50_18(price_native)
+        mon_usd = _fit_n50_18(mon_usd or 0)
         if key not in aggregated:
             aggregated[key] = {
                 "open": price_native,
@@ -1881,7 +1910,7 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
                 "low": price_native,
                 "close": price_native,
                 "volume": int(abs(native_amount)),
-                "mon_usd": mon_usd or 0,
+                "mon_usd": mon_usd,
             }
         else:
             agg = aggregated[key]
@@ -1889,7 +1918,7 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
             agg["low"] = min(agg["low"], price_native)
             agg["close"] = price_native
             agg["volume"] += int(abs(native_amount))
-            agg["mon_usd"] = mon_usd or 0
+            agg["mon_usd"] = mon_usd
 
     data = [
         (k[0], k[1], k[2], v["open"], v["high"], v["low"], v["close"], v["volume"], v["mon_usd"])
