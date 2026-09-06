@@ -1,7 +1,8 @@
 # Position ledger plan — net-flow accounting for every wallet, token and venue
 
-Status: proposal, 2026-09-06. Owner: backend. Target: built and validated before the
-vault launch on 2026-09-13. Companion to CLAUDE.md §"Trade attribution" and §"Cost basis".
+Status: proposal, 2026-09-06, revised after review the same day. Owner: backend. Target:
+built and validated in shadow before the vault launch on 2026-09-13, cut over after it.
+Companion to CLAUDE.md §"Trade attribution" and §"Cost basis".
 
 ---
 
@@ -28,7 +29,7 @@ position row, including venues we have never seen before.
 
 Verified fixtures the new engine must reproduce exactly:
 
-| case | correct answer | what the current engine says |
+| case | correct answer | what the engine said before the 09-06 merge |
 |---|---|---|
 | `0x25afd360…f0f3` on CHIPOTLE (`0x8e74…f5e2`) | 20 trades, bought 3,173,915,918.78, sold the same, realized **13,850.173 MON**, dust balance | 15 trades, realized 7,529.053 MON |
 | `0xb9e37df1…35d2` on moncock (`0x405b…7777`) | bought 25,719,120.30, cost ≈477,018 MON, realized **−193,957 MON**, fully sold | phantom profit before the hand fix |
@@ -142,9 +143,14 @@ and swaps that lack a quote leg.**
 7. **Quote normalisation.** Every flow stores its quote asset and amount, plus `mon_value`
    and `usd_value` at block time from the oracle series, so MON-denominated and
    USD-denominated PnL are both first-class and consistent.
-8. **Estimated is labelled.** When a quote leg cannot be observed (no trace, no venue
-   event) the flow is marked `quote_estimated` and valued at the reference price. Nothing
-   silently becomes zero-basis.
+8. **Basis has three states, and money only moves on confirmed.** A flow's cost is
+   `observed` (the quote leg was seen on chain), `estimated` (a trade shape with an
+   unobservable quote leg, valued at the reference price) or `unresolved` (tokens moved
+   with no cost evidence at all; no number is invented). Confirmed PnL is computed from
+   observed basis only. Estimated and unresolved are reported beside it, never blended
+   in. Leaderboards, rewards, referral USD and anything ranked or paid use confirmed
+   figures only, because estimates can be manufactured by routing through a pool we
+   cannot observe and confirmed basis cannot.
 9. **Chain truth is checked continuously.** Sampled `balanceOf` at a pinned block must
    equal the ledger fold. Drift is a paged alert, not a quarterly discovery.
 10. **No frontend contract change.** `launchpad_positions` columns keep their names and
@@ -171,16 +177,28 @@ and swaps that lack a quote leg.**
 | `counterparty` | the other address on the transfer leg |
 | `origin` | `tx.from` (or the ERC-4337 sender when the tx is a bundle) |
 | `source` | `transfer_net`, `venue_event`, `trace`, `reconcile` — how the quote leg was observed |
-| `quote_estimated` | boolean, see §6.6 |
+| `basis_state` | `observed`, `estimated` or `unresolved`, see §6.6 |
 | `basis_delta` | signed basis moved by this row after the fold (filled by the folder, kept for audit) |
 | `realized_delta` | realized PnL booked by this row after the fold |
 
 ### `positions` (fold; today's `launchpad_positions`, same columns plus)
 
-`cost_basis_native` (exists), `basis_estimated_native` (portion of basis that came from
-estimated quotes), `custody_balance` (tokens held for the wallet inside our order book),
+Three sets of figures, one per basis state, so no consumer has to guess what a number
+contains:
+
+- **confirmed**: `cost_basis_native` (exists), `realized_pnl_native` (exists), unrealized
+  from the SQL fold — all computed from observed basis only;
+- **estimated**: `basis_estimated_native`, `realized_estimated_native`, and the
+  corresponding unrealized;
+- **unresolved**: `unresolved_tokens` (quantity held or sold with no cost evidence) and
+  `unresolved_proceeds_native` (proceeds already taken on such tokens — confirmed money,
+  unconfirmable gain).
+
+Plus `custody_balance` (tokens held for the wallet inside our order book),
 `first_flow_ts`, `last_flow_ts`, `flow_count`. `trade_count/buy_count/sell_count` count
-**transactions**, not legs, matching the #12 dedupe semantics.
+**transactions**, not legs, matching the #12 dedupe semantics. The frontends keep reading
+the confirmed columns under their existing names; a position that is mostly unresolved
+should render as "PnL incomplete" rather than as a small confident number.
 
 ### `address_kinds`
 
@@ -215,15 +233,20 @@ read them.
 1. **Logs by topic** (exists): `TF` for every ERC-20 transfer; venue events for price and
    volume; first-party custody and fill events; factory/initialise events for venue
    discovery.
-2. **Full block with transactions** (new): one `eth_getBlockByNumber(n, true)` per block
-   gives `from`, `to`, `value`, `input` selector for every transaction. One call per block
-   we already process; no per-trade RPC.
+2. **Transaction metadata** (new): `from`, `to`, `value` and the `input` selector for
+   every transaction that moved a registered token, cached in a `tx_meta` table next to
+   the log cache the way logs are, so history rebuilds never refetch it. Live it is filled
+   from one `eth_getBlockByNumber(n, true)` per block we already process. During a replay
+   the log cache already says which transactions matter, so only those are fetched
+   per-hash — a small fraction of one call per block over millions of blocks.
 3. **Traces on demand** (new, gated): `debug_traceTransaction` with `callTracer` is
    available on `rpc.monad.xyz` (verified 2026-09-06 on tx `0xcb3461…`). Requested only for
    transactions where a registered token moved **and** a native quote leg is unresolved
    after logs, value and venue events. Cached by txhash. Budgeted under the existing
-   `RPC_MAX_RPS` limiter; if the budget is exceeded the flow is booked `quote_estimated`
-   and queued for a backfill worker.
+   `RPC_MAX_RPS` limiter; if the budget is exceeded the flow is booked
+   `basis_state = estimated` and queued for a backfill worker. Traces do not exist beyond
+   the archive edge (met around 600k–800k blocks back on 2026-09-06), so old history
+   resolves from logs, value and venue events or not at all — see §6.4 and Phase 0.
 4. **Oracle series** (exists): MON/USD and LVMON rate at block time for `mon_value` and
    `usd_value`.
 
@@ -264,10 +287,20 @@ Per block, per transaction, in chain order:
 
 ### 6.4 Multi-wallet transactions
 
-Batchers and some routers settle several users in one transaction. Token deltas are exact
-per address. Quote attribution per address uses, in order: a venue event whose `user`
-matches the address; the address's own quote transfers; otherwise the transaction's total
-quote leg **pro-rata by token share**, flagged `quote_estimated`.
+Token deltas are exact per address. Quote attribution per address uses, in order:
+
+1. the address's own quote transfers and `tx.value`;
+2. a venue event in the same transaction whose `user` is the address;
+3. a venue event whose **token amount equals the address's token delta** — this is the
+   routed curve buy or sell through 0x or a router, where the event names the router but
+   the amount identifies the wallet. Single-wallet transactions, which is nearly all of
+   them, resolve here from logs alone with no trace;
+4. a trace, when available and within budget;
+5. otherwise, for batchers that settle several users in one transaction, the transaction's
+   total quote leg **pro-rata by token share**, booked `basis_state = estimated`.
+
+Phase 0 measures how much of the routed cohort stops at step 3; that number, not an
+assumption, sets the §13 thresholds.
 
 ### 6.5 Price
 
@@ -275,14 +308,27 @@ quote leg **pro-rata by token share**, flagged `quote_estimated`.
 observed; otherwise the venue event's price in that transaction; otherwise the token's last
 known price. Venue events remain the source for OHLCV.
 
-### 6.6 Estimated quotes
+### 6.6 Estimated and unresolved quotes
 
-When a token moved but no quote leg can be observed (third-party curve paying native via an
-internal call and no trace; OTC with off-chain payment), the row is booked as a trade at the
-**reference price** (last venue price at or before that block) with `quote_estimated =
-true` and `source = reconcile`. The position keeps `basis_estimated_native` so the UI can
-show "includes estimated cost" and a backfill job can replace the estimate with a trace
-later.
+Two different situations hide behind "we could not observe the cost", and they are kept
+apart:
+
+- **Estimated.** The movement has a trade shape — tokens came from or went to a venue, a
+  known counterparty pattern, a venue event exists — but the quote leg itself is
+  unobservable (third-party curve paying native through an internal call with no trace;
+  a batcher's pro-rata share). The row is booked at the **reference price** (last venue
+  price at or before that block) with `basis_state = estimated`. The position keeps
+  `basis_estimated_native` so the UI can say "includes estimated cost" and a backfill can
+  replace the estimate with a trace later.
+- **Unresolved.** Tokens arrived with no cost evidence at all: unknown sender, airdrop, a
+  venue we cannot price. No number is invented. The quantity is tracked as
+  `unresolved_tokens`; when those tokens are sold the proceeds are confirmed money but the
+  gain is not, and they accumulate in `unresolved_proceeds_native`. This replaces today's
+  zero-basis behaviour, which is how phantom profit is manufactured.
+
+Estimates are attackable — route a token through a pool we cannot observe and the
+reference price implies whatever basis you like — so nothing ranked or paid reads them
+(principle 8).
 
 ### 6.7 Basis and PnL (unchanged semantics, applied to the ledger)
 
@@ -291,7 +337,8 @@ later.
   `realized = Σ proceeds − Σ cost` exactly.
 - `transfer_out` carries basis proportionally; `transfer_in` from a ledger wallet inherits
   the sender's average cost; `transfer_in` from an unknown source, `airdrop` and `mint`
-  without payment carry zero basis and are flagged.
+  without payment are `unresolved` (never zero basis) unless the product decision in §14
+  chooses mark-to-market, in which case they are `estimated`.
 - `burn` realizes at zero proceeds. `swap_leg` realizes/opens at reference value.
 - `lp_add`, `vault_deposit`, `custody_deposit` park basis in the destination ledger (pool,
   vault, custody sub-balance); they are not sells. The reverse restores it.
@@ -349,7 +396,7 @@ means replaying its history through the same fold, which the side-database repla
 |---|---|---|---|
 | crystal curve (`LT`) | `TF` | native via `tx.value` (buy) and core event (sell) | event `user` used only as a hint |
 | graduated pools (V2/V3) | `TF` | WMON `TF` | swaps via routers net correctly |
-| Uniswap V4 PoolManager | `TF` | WMON `TF`, or native via trace | `V4SWAP` kept for price |
+| Uniswap V4 PoolManager | `TF` | WMON `TF` for WMON-paired pools; **native-currency pools settle the quote leg with no token transfer**, so the `V4SWAP` log or a trace carries the cost | `V4SWAP` kept for price, and for cost on native-currency pools — do not delete the decoder |
 | nad.fun v1/v2 curves and pairs | `TF` | native/WMON; LVMON-quoted tokens use the LVMON rate | generations are venue detail, invisible to the fold |
 | 0x Settler, AllowanceHolder, other routers | collapsed | collapsed | passthrough by classification, not by list |
 | unknown third-party pools/launchpads | `TF` | trace or estimated | discovered into `venues` |
@@ -382,8 +429,10 @@ means replaying its history through the same fold, which the side-database repla
   reconciler already does this) must equal the fold plus custody balance. Drift → alert.
 - **Closed positions**: `realized = Σ proceeds − Σ cost` for every position with
   `balance ≤ dust`. This is exact and cheap to assert nightly.
-- **Venue leak** = 0, **estimated share** (basis from estimated quotes ÷ total basis)
-  tracked per token and overall, **unclassified contracts** count.
+- **Venue leak** = 0; **estimated share** (estimated basis ÷ total basis) and
+  **unresolved share** (unresolved tokens ÷ tokens held or sold) tracked **per token** and
+  overall, because one thin token can hide a bad rule inside a healthy average;
+  **unclassified contracts** count.
 - All four surface in `integrity_last` next to the existing lag/gap checks.
 
 ---
@@ -406,13 +455,18 @@ the fold; the write seam gate. Shadow mode: the indexer writes `wallet_flows` an
 `positions_v2` alongside the current tables, no API change. Unit tests from fixtures; the
 eight existing position test files are ported to feed the fold instead of the old handlers.
 
-**Phase 2 — replay and diff (1–2 days).** Replay the affected token set into the side
-database using the replay tooling built for #12, fold, and diff against: the fixtures
-above; chain `balanceOf` for a 1,000-position sample; the 841 positions repaired on 09-05
-(must be unchanged); the 8,584 already-sold cohort (must move to the ledger answer).
+**Phase 2 — replay and diff (1–2 days).** Before folding, seed the side database with
+prod's oracle series (MON/USD samples and the LVMON rate) and the `tx_meta` cache, or
+history gets priced at today's rate and the replay refetches every block. Then replay the
+affected token set using the replay tooling built for #12, fold, and diff against: the
+fixtures above; chain `balanceOf` for a 1,000-position sample; the 841 positions repaired
+on 09-05 (must be unchanged); the 8,584 already-sold cohort (must move to the ledger
+answer). Shadow mode stays on across the vault launch.
 
-**Phase 3 — cutover (half a day).** Point the API at `positions_v2` through a view with the
-old column names. Keep the old tables for a week. Kill switch is the flag.
+**Phase 3 — cutover (half a day, after the vault launch).** Point the API at
+`positions_v2` through a view with the old column names. Keep the old tables for a week.
+Kill switch is the flag. Landing a cutover of the position seam in the days before
+2026-09-13 is the one risk this plan refuses; shadow across the launch costs nothing.
 
 **Phase 4 — delete (half a day).** Remove `_resolve_trade_user`, the passthrough
 early-return, `apply_reconciliation_trade`, the basis overlay, and the repair scripts they
@@ -430,8 +484,10 @@ than running two replays.
 2. Sampled balances match chain to the wei at the pinned block for ≥ 99.9% of sampled
    positions; the remainder are explained by a listed cause.
 3. Zero position rows on venue-classified addresses.
-4. Estimated-quote basis share < 1% overall; every estimated row carries a txhash a
-   backfill can trace.
+4. Estimated basis share < 1% **per token** and overall; unresolved share reported per
+   token with every unresolved row carrying its cause; every estimated row carries a
+   txhash a backfill can trace. If Phase 0 shows routed legs resolve worse than expected
+   from logs alone, the threshold is revised with the number, not waived.
 5. Indexer throughput ≥ 2× block rate during replay of a busy day, with the trace budget
    under the limiter.
 6. Frontends need no change: every field crystal.fun and the interface read keeps its
@@ -443,9 +499,12 @@ than running two replays.
 
 ## 14. Open decisions (need a product answer)
 
-- **Inbound transfers from unknown senders**: zero basis (today) vs mark-to-market at
-  receipt (Zerion/DeBank). Recommendation: mark-to-market with `basis_estimated`, since zero
-  basis manufactures fake profit on the next sell.
+- **Inbound transfers from unknown senders**: unresolved (no invented number) vs
+  mark-to-market at receipt (Zerion/DeBank). Zero basis, today's behaviour, is off the
+  table. Recommendation: unresolved by default, since it is the honest statement; if the
+  product wants a number, mark-to-market as `estimated` — but that changes realized PnL
+  users can already see, so it ships with a frontend "includes estimated cost" treatment
+  and a support note, not only a backend flag.
 - **Gas in PnL**: excluded by default, available in a view. Recommendation: keep excluded on
   the token PnL row; show it on the wallet summary.
 - **nad.fun scope**: positions for nad.fun tokens can be gated by `token_registry.active`
@@ -471,5 +530,5 @@ than running two replays.
 | replay + diff harness on the side DB | `scripts/` | 0.5 |
 | cutover view, integrity wiring, CLAUDE.md | `core/integrity.py`, `api/`, docs | 0.5 |
 
-Total ≈ 5.5 focused days, which fits before 2026-09-13 with a day of margin for the
-unknowns in Phase 0.
+Total ≈ 5.5 focused days. Phases 0–2 fit before 2026-09-13 with a day of margin for the
+unknowns in Phase 0; Phase 3 waits for the launch to pass.
