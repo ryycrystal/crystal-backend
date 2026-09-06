@@ -346,46 +346,46 @@ async def timestamps_for(blocks: list[int], cached: dict[int, list[dict]]) -> di
     return out
 
 
-def prefetch_chunk(
-    tx_meta: TxMetaStore, kinds: AddressKinds, logs_by_block: dict[int, list[dict]], cur, tokens: set[str]
-) -> tuple[int, int]:
-    hashes: set[str] = set()
+def prepare_chunk(
+    receipts: ReceiptLogs, tx_meta: TxMetaStore, blocks: list[int], cached: dict[int, list[dict]], watched: set[str]
+) -> tuple[dict[int, list[dict]], int]:
+    relevant = {blk: relevant_logs(cached.get(blk, []), watched) for blk in blocks}
+    relevant = {blk: logs for blk, logs in relevant.items() if logs}
+    with storage.db_cursor() as cur:
+        added = receipts.complete(relevant, cur)
+    hashes = sorted({(lg.get("transactionHash") or "").lower() for logs in relevant.values() for lg in logs} - {""})
+    parts = [hashes[i::PREFETCH_WORKERS] for i in range(PREFETCH_WORKERS)]
+    with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as pool:
+        list(pool.map(tx_meta.get_many, [p for p in parts if p]))
+    return relevant, added
+
+
+def prefetch_kinds(kinds: AddressKinds, logs_by_block: dict[int, list[dict]], cur, tokens: set[str]) -> int:
     addrs: set[str] = set()
     for logs in logs_by_block.values():
         for lg in logs:
-            hashes.add((lg.get("transactionHash") or "").lower())
             if (lg.get("address") or "").lower() not in tokens:
                 continue
             topics = lg.get("topics") or []
             if topics and str(topics[0]).lower() == TRANSFER_TOPIC and len(topics) >= 3:
                 addrs.add(h._topic_addr(topics[1]))
                 addrs.add(h._topic_addr(topics[2]))
-    hashes.discard("")
     addrs.discard("")
-    ordered = sorted(hashes)
-    parts = [ordered[i::PREFETCH_WORKERS] for i in range(PREFETCH_WORKERS)]
-    with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as pool:
-        list(pool.map(tx_meta.get_many, [p for p in parts if p]))
     kinds.kinds_for(sorted(addrs), cur)
-    return len(hashes), len(addrs)
+    return len(addrs)
 
 
 def process_chunk(
     engine: LedgerEngine,
-    tx_meta: TxMetaStore,
     kinds: AddressKinds,
-    receipts: ReceiptLogs,
-    blocks: list[int],
-    cached: dict[int, list[dict]],
+    relevant: dict[int, list[dict]],
     timestamps: dict[int, int],
-    watched: set[str],
+    receipt_logs_added: int,
 ) -> tuple[int, int]:
-    relevant = {blk: relevant_logs(cached.get(blk, []), watched) for blk in blocks}
-    relevant = {blk: logs for blk, logs in relevant.items() if logs}
     flows = 0
     with storage.db_cursor() as cur:
-        engine.stats["receipt_logs"] += receipts.complete(relevant, cur)
-        prefetch_chunk(tx_meta, kinds, relevant, cur, set(engine.registry(cur)) | QUOTE_ASSETS)
+        engine.stats["receipt_logs"] += receipt_logs_added
+        prefetch_kinds(kinds, relevant, cur, set(engine.registry(cur)) | QUOTE_ASSETS)
         for blk, logs in relevant.items():
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
         refolded = engine.flush(cur)
@@ -459,19 +459,30 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
 
     groups = [blocks[i : i + args.batch] for i in range(0, len(blocks), args.batch)]
     fetcher = ParallelFetcher(args.streams)
-    pool = ThreadPoolExecutor(max_workers=1)
-    pending = pool.submit(fetcher.fetch, groups[0])
+    fetch_pool = ThreadPoolExecutor(max_workers=1)
+    prepare_pool = ThreadPoolExecutor(max_workers=1)
+    fetched = {gi: fetch_pool.submit(fetcher.fetch, groups[gi]) for gi in range(min(2, len(groups)))}
+    cached_logs: dict[int, dict[int, list[dict]]] = {}
+
+    def prepared_for(gi: int):
+        cached_logs[gi] = fetched.pop(gi).result()
+        return prepare_pool.submit(prepare_chunk, receipts, tx_meta, groups[gi], cached_logs[gi], watched)
+
+    prepared = {0: prepared_for(0)}
     done = 0
     total_flows = 0
     total_refolds = 0
     t0 = time.time()
     for gi, group in enumerate(groups):
-        cached = pending.result()
+        relevant, receipt_logs_added = prepared.pop(gi).result()
+        cached = cached_logs.pop(gi)
+        if gi + 2 < len(groups):
+            fetched[gi + 2] = fetch_pool.submit(fetcher.fetch, groups[gi + 2])
         if gi + 1 < len(groups):
-            pending = pool.submit(fetcher.fetch, groups[gi + 1])
+            prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        flows, refolded = process_chunk(engine, tx_meta, kinds, receipts, group, cached, timestamps, watched)
+        flows, refolded = process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added)
         total_flows += flows
         total_refolds += refolded
         done += len(group)
@@ -484,7 +495,8 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
                 f"total {total_flows:,} flows; engine {dict(engine.stats)}",
                 flush=True,
             )
-    pool.shutdown()
+    fetch_pool.shutdown()
+    prepare_pool.shutdown()
     with storage.db_cursor() as cur:
         cur.execute(
             "INSERT INTO ledger_meta (key, value) VALUES ('replay_head_block', %s) "
