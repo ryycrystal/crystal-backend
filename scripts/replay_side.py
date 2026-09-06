@@ -39,7 +39,7 @@ from replay_addresses import _filter_logs  # noqa: E402
 import backfill  # noqa: E402
 import core.chain as h  # noqa: E402
 import core.storage as storage  # noqa: E402
-from core.sequencer import SEQUENCER, BatchAccumulator  # noqa: E402
+from core.sequencer import LEDGER, SEQUENCER, BatchAccumulator  # noqa: E402
 
 SEED_TABLES = (
     "launchpad_tokens",
@@ -248,6 +248,8 @@ def process_hot_blocks(blocks: list[int], logs_by_block: dict[int, list[dict]], 
         SEQUENCER._ready_blocks.discard(blk)
         SEQUENCER._block_timestamps.pop(blk, None)
     batch.flush(cur)
+    if LEDGER.enabled:
+        LEDGER.flush(cur)
     SEQUENCER._state.basis_clear_overlay()
     SEQUENCER._next_block = blocks[-1] + 1
     return counts

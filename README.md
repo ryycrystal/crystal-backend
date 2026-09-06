@@ -339,6 +339,7 @@ Read by the code (`core/storage/base.py`, `core/chain.py`, `modules/nadfun.py`, 
 | `METADATA_BATCH_SIZE` / `METADATA_LOG_EVERY` | Metadata worker tuning | defaults are fine |
 | `RPC_EXPORT_RPS` | Rate limit for the standalone dump exporter | dev tooling only |
 | `X_BEARER_TOKEN` | Twitter/X API token for the `/x` route | optional |
+| `LEDGER_ENABLED` | `1`/`true` runs the net-flow position ledger (`core/ledger`) alongside the indexer; unset keeps the old engine only | off by default |
 
 In production these are set as Container App **env vars and secrets** (`PGPASSWORD` and
 `RPC_HTTP` are secrets: `PGPASSWORD=secretref:pgpassword`). **Secrets are not in this

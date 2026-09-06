@@ -8,6 +8,7 @@ import core.storage as storage
 import state as _st
 from core import chain as h
 from core import oracle
+from core.ledger.engine import LedgerEngine
 from core.storage import db_cursor
 from modules import nadfun
 
@@ -679,9 +680,13 @@ class Sequencer:
             with db_cursor() as cur:
                 self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch, trade_txs)
                 _mark_processed(cur)
+                if batch is None and LEDGER.enabled:
+                    LEDGER.flush(cur)
         else:
             self._process_block_inner(blk, logs, cur, counts, seen, has_trades, batch, trade_txs)
             _mark_processed(cur)
+            if batch is None and LEDGER.enabled:
+                LEDGER.flush(cur)
 
         if counts_out is None:
             print(
@@ -1028,6 +1033,8 @@ class Sequencer:
                 )
 
         self._verify_attribution(blk, transfer_maps, cur=cur, batch=batch)
+        if LEDGER.enabled:
+            LEDGER.process_block(blk, self._timestamp_for_block_log(blk, logs[0] if logs else {}), logs, cur)
 
     def process_chunk(
         self,
@@ -1088,6 +1095,8 @@ class Sequencer:
             self._block_timestamps.pop(blk, None)
 
         batch.flush(cur)
+        if LEDGER.enabled:
+            LEDGER.flush(cur)
         # positions are now committed, so the cost basis overlay can safely re-seed
         # from the table again on the next chunk
         self._state.basis_clear_overlay()
@@ -1118,3 +1127,4 @@ class Sequencer:
 
 
 SEQUENCER = Sequencer(_st.State())
+LEDGER = LedgerEngine(db_cursor)
