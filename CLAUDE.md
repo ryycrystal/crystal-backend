@@ -1925,3 +1925,17 @@ Throughput and scale on 2026-09-06: 162 affected tokens, 3.41M distinct hot bloc
 split by token across 8 workers (`crystal_replay_w0..7`, ~465k hot blocks each) on a
 12-core laptop with prod reached through a tunnel. Each worker prefetches the next
 chunk's logs on a thread, so the tunnel round-trip overlaps the fold.
+
+## Spot portfolio pricing: USDC and AUSD are $1 by definition
+
+`api/spot_data.py` (`spot_prices_from_markets`) prices every token for `/spot/{wallet}`.
+It used to derive the **quote** of a WMON-based market by inverting the book against
+the external MON feed, so USDC read `feed / (WMON/USDC last price)` — 0.94 to 0.96
+whenever the exchange's own book and the feed disagreed by a few percent. Stables are
+now pinned at exactly 1 and never overwritten by any market, and tokens quoted in a
+stable take their market price as dollars. `tests/test_spot_prices_stables.py` pins it.
+
+The visible symptom was in the interface's Portfolio: `BalancesContent.tsx` pins USDC
+to 1 client-side on first paint and then trusts `priceUsd` from `/spot/{wallet}`, so the
+number flipped from 1.00 to 0.96 a moment after load. If a stable ever drifts from $1
+again, the price is coming from a new path, not from this one.
