@@ -30,6 +30,15 @@ AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
 STABLE_USD_TOKENS = (USDC, AUSD)
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
+PINNED_PRICE_TOKENS = frozenset(STABLE_USD_TOKENS) | frozenset(NATIVE_EQUIV_QUOTES)
+
+
+def _looks_stable(ticker: str, name: str) -> bool:
+    t = (ticker or "").strip().lower()
+    n = (name or "").strip().lower()
+    return t in _STABLE_TICKERS or n in _STABLE_TICKERS or " usd" in n or n.startswith("usd")
+
+
 POOL_FEE_RETRY_BLOCKS = 50_000
 
 # timer written pool tvl samples carry a negative log index so they share the
@@ -1751,9 +1760,7 @@ class State:
         token_l = (token or "").lower()
         if not token_l:
             return
-        t = (ticker or "").strip().lower()
-        n = (name or "").strip().lower()
-        if t in _STABLE_TICKERS or n in _STABLE_TICKERS or " usd" in n or n.startswith("usd"):
+        if _looks_stable(ticker, name):
             self.tokenToPrice[token_l] = Decimal(1)
 
     @staticmethod
@@ -2696,7 +2703,9 @@ class State:
                 for mkt in self.tokenGraph.get(token, []):
                     qa = (getattr(mkt, "quoteAddress", "") or "").lower()
                     ba = (getattr(mkt, "baseAddress", "") or "").lower()
-                    if qa != token:
+                    if qa != token or ba in PINNED_PRICE_TOKENS:
+                        continue
+                    if _looks_stable(getattr(mkt, "baseTicker", ""), getattr(mkt, "baseName", "")):
                         continue
 
                     r = getattr(mkt, "price", None)

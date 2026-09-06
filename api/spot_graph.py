@@ -71,56 +71,62 @@ def _mon_usd_at(ts: int) -> Decimal:
     return usd / (native / _WEI)
 
 
-def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str) -> Decimal | None:
-    addr = token["address"]
-    ticker = (token.get("ticker") or "").upper()
-    if ticker == "USDC":
-        return Decimal(1)
-    if addr == "native" or addr == wmon:
-        return mon_usd if mon_usd > 0 else None
+def _median_sync_price(addr: str, quote: str, ts: int) -> Decimal | None:
     with db_cursor() as cur:
-        # price the bucket from the MEDIAN of the syncs inside it, not the last one
-        # before the boundary. a single trade seconds before the cut can move a thin
-        # pool by orders of magnitude, and taking it alone froze that spike into the
-        # series forever. same reasoning as the vault and pool charts.
         cur.execute(
             """
-            SELECT e.reserve_quote, e.reserve_base, m.base_decimals
+            SELECT e.reserve_quote, e.reserve_base, m.base_decimals, m.quote_decimals
             FROM crystal_pool_sync_events e
             JOIN crystal_markets m ON m.market = e.market
             WHERE LOWER(m.base_address) = %s AND LOWER(m.quote_address) = %s
               AND e.timestamp > %s AND e.timestamp <= %s
             """,
-            (addr, wmon, int(ts) - RESOLUTION, int(ts)),
+            (addr, quote, int(ts) - RESOLUTION, int(ts)),
         )
         rows = cur.fetchall()
         if not rows:
-            # a quiet token has no sync inside the window, so carry the last known one
             cur.execute(
                 """
-                SELECT e.reserve_quote, e.reserve_base, m.base_decimals
+                SELECT e.reserve_quote, e.reserve_base, m.base_decimals, m.quote_decimals
                 FROM crystal_pool_sync_events e
                 JOIN crystal_markets m ON m.market = e.market
                 WHERE LOWER(m.base_address) = %s AND LOWER(m.quote_address) = %s AND e.timestamp <= %s
                 ORDER BY e.timestamp DESC LIMIT 1
                 """,
-                (addr, wmon, int(ts)),
+                (addr, quote, int(ts)),
             )
             row = cur.fetchone()
             rows = [row] if row else []
-    if not rows or mon_usd <= 0:
-        return None
     prices = []
     for r in rows:
-        rq, rb, base_decimals = Decimal(int(r[0] or 0)), Decimal(int(r[1] or 0)), int(r[2] or 18)
+        rq, rb = Decimal(int(r[0] or 0)), Decimal(int(r[1] or 0))
+        base_decimals, quote_decimals = int(r[2] or 18), int(r[3] or 18)
         if rq <= 0 or rb <= 0:
             continue
-        prices.append((rq / _WEI) / (rb / Decimal(10) ** base_decimals))
+        prices.append((rq / Decimal(10) ** quote_decimals) / (rb / Decimal(10) ** base_decimals))
     if not prices:
         return None
     prices.sort()
-    price_native = prices[len(prices) // 2]
-    return price_native * mon_usd
+    return prices[len(prices) // 2]
+
+
+def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str) -> Decimal | None:
+    from api.api import STABLE_USD_QUOTES
+
+    addr = (token["address"] or "").lower()
+    ticker = (token.get("ticker") or "").upper()
+    if addr in STABLE_USD_QUOTES or ticker in ("USDC", "AUSD"):
+        return Decimal(1)
+    if addr == "native" or addr == wmon:
+        return mon_usd if mon_usd > 0 else None
+    quotes = [(wmon, mon_usd)] + [(stable, Decimal(1)) for stable in STABLE_USD_QUOTES]
+    for quote, quote_usd in quotes:
+        if quote_usd <= 0:
+            continue
+        price_in_quote = _median_sync_price(addr, quote, ts)
+        if price_in_quote is not None:
+            return price_in_quote * quote_usd
+    return None
 
 
 def _balances_at_many(
