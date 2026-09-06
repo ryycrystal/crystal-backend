@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -49,7 +50,8 @@ SEED_TABLES = (
     "crystal_markets",
     "holder_denylist",
 )
-FETCH_ATTEMPTS = 6
+FETCH_ATTEMPTS = 40
+FETCH_TIMEOUT = 600
 
 
 def prod_conn():
@@ -62,6 +64,10 @@ def prod_conn():
         dbname=os.environ["PROD_PGDATABASE"],
         sslmode="require",
         connect_timeout=30,
+        keepalives=1,
+        keepalives_idle=20,
+        keepalives_interval=10,
+        keepalives_count=3,
     )
 
 
@@ -85,18 +91,36 @@ class LogSource:
 
     def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
         for attempt in range(FETCH_ATTEMPTS):
+            conn = self.conn()
+            watchdog = threading.Timer(FETCH_TIMEOUT, self._cancel, args=(conn,))
+            watchdog.daemon = True
+            watchdog.start()
             try:
-                with self.conn().cursor() as cur:
+                with conn.cursor() as cur:
                     cur.execute(
                         "SELECT number, logs FROM launchpad_block_logs WHERE number = ANY(%s)",
                         (numbers,),
                     )
                     return {int(n): (json.loads(v) if isinstance(v, str) else v) for n, v in cur.fetchall()}
             except psycopg2.Error as e:
-                print(f"[FETCH] attempt {attempt + 1}/{FETCH_ATTEMPTS} failed: {e!r}", flush=True)
+                print(f"[FETCH] attempt {attempt + 1}/{FETCH_ATTEMPTS} failed: {e!r}"[:200], flush=True)
                 self._drop()
                 time.sleep(min(2**attempt, 30))
+            finally:
+                watchdog.cancel()
         raise RuntimeError("prod log fetch kept failing")
+
+    @staticmethod
+    def _cancel(conn) -> None:
+        print(f"[FETCH] no answer in {FETCH_TIMEOUT}s, cancelling the stalled query", flush=True)
+        try:
+            conn.cancel()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 class ParallelFetcher:
@@ -111,6 +135,56 @@ class ParallelFetcher:
         for part in self._pool.map(lambda sp: sp[0].fetch(sp[1]) if sp[1] else {}, zip(self._sources, parts)):
             merged.update(part)
         return merged
+
+
+def wait_for_extra_logs(conn, numbers: list[int], required: set[int]) -> None:
+    needed = [b for b in numbers if b in required]
+    if not needed:
+        return
+    waited = 0
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) FROM unnest(%s::bigint[]) b
+                WHERE b IN (SELECT number FROM v4_done) OR b / 100 IN (SELECT win FROM v4_windows)
+                """,
+                (needed,),
+            )
+            have = cur.fetchone()[0]
+        conn.rollback()
+        if have >= len(needed):
+            return
+        if waited % 120 == 0:
+            print(f"[EXTRA] waiting for the v4 backfill: {have}/{len(needed)} blocks of this chunk fetched", flush=True)
+        time.sleep(10)
+        waited += 10
+
+
+def merge_extra_logs(conn, numbers: list[int], cached: dict[int, list[dict]]) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT number, logs FROM v4_logs WHERE number = ANY(%s)", (numbers,))
+        rows = cur.fetchall()
+    added = 0
+    for number, extra in rows:
+        number = int(number)
+        logs = cached.get(number)
+        if not logs:
+            continue
+        extra = json.loads(extra) if isinstance(extra, str) else extra
+        seen = {((lg.get("transactionHash") or "").lower(), str(lg.get("logIndex"))) for lg in logs}
+        stamp = logs[0].get("blockTimestamp")
+        for lg in extra:
+            key = ((lg.get("transactionHash") or "").lower(), str(lg.get("logIndex")))
+            if key in seen:
+                continue
+            lg = dict(lg)
+            if stamp is not None and lg.get("blockTimestamp") is None:
+                lg["blockTimestamp"] = stamp
+            logs.append(lg)
+            seen.add(key)
+            added += 1
+    return added
 
 
 def wipe_side() -> None:
@@ -179,7 +253,15 @@ def process_hot_blocks(blocks: list[int], logs_by_block: dict[int, list[dict]], 
     return counts
 
 
-async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe: bool, streams: int) -> None:
+async def replay(
+    addresses: list[str],
+    batch: int,
+    blocks_file: str | None,
+    wipe: bool,
+    streams: int,
+    extra_url: str | None,
+    required_file: str | None,
+) -> None:
     src = LogSource()
     if wipe:
         wipe_side()
@@ -202,6 +284,9 @@ async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe
 
     groups = [blocks[i : i + batch] for i in range(0, len(blocks), batch)]
     prefetch = ParallelFetcher(streams)
+    extra_conn = psycopg2.connect(extra_url) if extra_url else None
+    required = {int(b) for b in json.load(open(required_file))} if required_file else set()
+    extra_total = 0
     pool = ThreadPoolExecutor(max_workers=1)
     pending = pool.submit(prefetch.fetch, groups[0])
 
@@ -211,6 +296,9 @@ async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe
         cached = pending.result()
         if gi + 1 < len(groups):
             pending = pool.submit(prefetch.fetch, groups[gi + 1])
+        if extra_conn is not None:
+            wait_for_extra_logs(extra_conn, group, required)
+            extra_total += merge_extra_logs(extra_conn, group, cached)
         await backfill.ensure_block_timestamps(cached)
         filtered = _filter_logs(group, cached)
         with storage.db_cursor() as cur:
@@ -222,7 +310,8 @@ async def replay(addresses: list[str], batch: int, blocks_file: str | None, wipe
             seen = " ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v)
             print(
                 f"[REPLAY] {done:,}/{len(blocks):,} hot blocks ({rate:.0f}/s, eta {eta / 60:.0f}m) "
-                f"last chunk {group[0]}-{group[-1]}: {seen}",
+                f"last chunk {group[0]}-{group[-1]}: {seen}"
+                + (f" | extra v4 logs so far {extra_total:,}" if extra_conn else ""),
                 flush=True,
             )
 
@@ -237,6 +326,8 @@ def main() -> None:
     ap.add_argument("--blocks-file")
     ap.add_argument("--batch", type=int, default=500)
     ap.add_argument("--streams", type=int, default=4, help="parallel prod connections per chunk fetch")
+    ap.add_argument("--extra-logs-url", help="local store of backfilled PoolManager logs (scripts/backfill_v4_logs.py)")
+    ap.add_argument("--extra-required-file", help="blocks that must be in the store before their chunk is folded")
     ap.add_argument("--wipe", action="store_true", help="truncate every table in the side db before seeding")
     ap.add_argument("--fresh", action="store_true", help="side db starts empty: skip per-trade existence checks")
     args = ap.parse_args()
@@ -259,7 +350,17 @@ def main() -> None:
         raise SystemExit(f"DATABASE_URL must point at the side database, got {url[:40]!r}")
 
     storage.init_pool()
-    asyncio.run(replay(addresses, args.batch, args.blocks_file, args.wipe, args.streams))
+    asyncio.run(
+        replay(
+            addresses,
+            args.batch,
+            args.blocks_file,
+            args.wipe,
+            args.streams,
+            args.extra_logs_url,
+            args.extra_required_file,
+        )
+    )
 
 
 if __name__ == "__main__":

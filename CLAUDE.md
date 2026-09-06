@@ -1921,6 +1921,22 @@ Facts that cost hours, in order of how much they cost:
   topic-filtered at ingest, so dropping untracked-token transfers saves only 16%.
   Sampled hot blocks average 9 KB, so the whole cohort is ~34 GB of log JSON.
 
+- **The log cache holds only the topics that were indexed when a block was ingested.**
+  The V4 swap/initialize topics were added on 2026-09-05 (`fe8835f`), so every earlier
+  block has no PoolManager logs at all and a replay imputes every V4 leg at the tracked
+  pool's price (moncock's headline wallet: 474,059 replayed vs 477,018 actual). A
+  block can only carry a V4 leg for a token if that token's transfer touches the
+  PoolManager, and that transfer IS cached, so `scripts/backfill_v4_logs.py` scans for
+  those blocks (130k for the 162-token cohort, 143 tokens) and fetches their
+  PoolManager logs by exact block range into a local store; `replay_side.py
+  --extra-logs-url --extra-required-file` merges them per chunk and refuses to fold a
+  chunk before the backfill has covered it. Any future replay of pre-9/5 history needs
+  the same backfill, and prod's cache itself is still incomplete for those blocks.
+- **A tunnelled prod fetch can stall forever** (server done sending, client never sees
+  the end); five of eight workers sat 20 minutes that way. `LogSource.fetch` now runs
+  under a cancel-and-reconnect watchdog with TCP keepalives, and retries about 20
+  minutes of outage before giving up.
+
 Throughput and scale on 2026-09-06: 162 affected tokens, 3.41M distinct hot blocks,
 split by token across 8 workers (`crystal_replay_w0..7`, ~465k hot blocks each) on a
 12-core laptop with prod reached through a tunnel. Each worker prefetches the next
