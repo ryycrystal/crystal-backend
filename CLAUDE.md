@@ -2024,3 +2024,34 @@ Traps:
   `curl --noproxy '*' --resolve <host>:443:4.189.50.206` to talk to the ingress itself.
 - Indexer revisions report `trafficWeight` 0 (no ingress); poll `crystal-indexer` on
   `healthState`/`runningState`, not traffic weight.
+
+### Running a replay from inside Azure (the China link is the bottleneck, not compute)
+
+The side replay through the tunnel moved 0.2–1 MB/s per connection from Japan to a
+laptop in China and dropped streams under load; ten partitions would have taken days.
+Run it next to the database instead: Container Apps jobs `replay-<partition>` in
+`crystal-prod-env` (4 vCPU / 8 GiB, `replicaTimeout` 8 h) use the backend image, install
+Postgres inside the container as the side database, pull their partition files and the
+V4 log store from blob `crystalproddump/replay-jobs` with a SAS, replay at 160–640 hot
+blocks/s, run `report_side.py` and `merge_side.py --apply`, and upload logs and the
+rollback snapshot to `out/<partition>/`. The runner script is fetched from the blob at
+start so it can be edited without rebuilding; the job definitions live in JSON specs
+(`az containerapp job create --yaml`; the CLI cannot take `-c` inside `--command`).
+Give each job's system identity `AcrPull` on the registry yourself when creating from
+YAML, and do not set `PGSSLMODE=require` in the job environment: libpq applies it to
+the local database too. Ten partitions replayed in 14–20 minutes each.
+
+Two merge facts learned on 2026-09-07:
+
+- **Parallel merges into prod collide.** Ten jobs merging at once hit `lock_timeout`
+  on shared rows (`launchpad_users`, one wallet under many tokens) and died. The
+  write transaction per token is now serialized with prod advisory lock
+  `782301944118` (taken with `lock_timeout` 0, then 5 s for the real work) and retried;
+  the slow staging upload into session temp tables stays parallel and lock-free.
+- **A "hot block" for a token is not only a block with the token's Transfer.** A V4 swap
+  settled through the PoolManager's ERC-6909 claim balances moves no ERC-20 at all, so
+  the token-transfer scan misses it while the live indexer records it. Four such trades
+  on three tokens showed up as prod rows in blocks the replay never saw; the merge's
+  guard treats those as cache holes and skips the token, and the fix is to add the
+  blocks to the token's list. A future scan should also select blocks with a `V4SWAP`
+  whose pool id maps to the token in `univ4_pools`.
