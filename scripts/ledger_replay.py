@@ -6,7 +6,7 @@ reference tables and the MON/USD sample series, then runs LedgerEngine.process_b
 flush per chunk of hot blocks. The old position engine is never invoked.
 
     DATABASE_URL=postgresql://...@localhost/crystal_ledger \\
-      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe | --wipe-token]
+      python scripts/ledger_replay.py --token 0x... [--token ...] [--from-block N] [--blocks-file f] [--wipe | --wipe-token] [--reset-discovered]
 """
 
 from __future__ import annotations
@@ -110,6 +110,17 @@ def wipe_tokens(tokens: list[str]) -> tuple[int, int]:
         positions = cur.rowcount
     print(f"[WIPE] {len(tokens)} token(s): {flows:,} flows and {positions:,} positions deleted", flush=True)
     return flows, positions
+
+
+def reset_discovered() -> tuple[int, int]:
+    """Forget venues the classifier discovered on its own so the replay re-derives them under the current rules."""
+    with storage.db_cursor() as cur:
+        cur.execute("DELETE FROM venues WHERE discovered")
+        venues = cur.rowcount
+        cur.execute("DELETE FROM address_kinds WHERE source IN ('heuristic', 'venue_event')")
+        kinds = cur.rowcount
+    print(f"[RESET] {venues:,} discovered venues and {kinds:,} derived kinds forgotten", flush=True)
+    return venues, kinds
 
 
 class Watchdog:
@@ -458,6 +469,8 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         wipe_ledger()
     elif args.wipe_token:
         wipe_tokens(tokens)
+    if args.reset_discovered:
+        reset_discovered()
     seed_from_prod(src, tokens, reference_tables=not args.skip_seed)
 
     created, venues = token_scope(src, tokens)
@@ -569,6 +582,11 @@ def main() -> None:
         "--wipe-token",
         action="store_true",
         help="delete only the replayed tokens' flows and positions, keeping other tokens' ledger data",
+    )
+    ap.add_argument(
+        "--reset-discovered",
+        action="store_true",
+        help="forget venues the classifier discovered (pool-event and pool-shape rules) so this replay re-derives them",
     )
     ap.add_argument(
         "--skip-seed",
