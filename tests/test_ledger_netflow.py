@@ -168,6 +168,69 @@ def test_curve_sell_via_settler_amount_match():
     assert f.log_index == 3
 
 
+MARKET = "0x664fdc46471fd3b407a94e61bc18129abbee3171"
+MARKETS = {MARKET: (TOKEN, WMON)}
+
+
+def tr(idx: int, user: str, is_buy: bool, native: int, tokens: int, address: str = CORE) -> VenueEvent:
+    parsed = {
+        "market": MARKET,
+        "user": user,
+        "is_buy": is_buy,
+        "amount_in": native if is_buy else tokens,
+        "amount_out": tokens if is_buy else native,
+        "start_price": 0,
+        "end_price": 0,
+    }
+    return VenueEvent(tag="TR", log_index=idx, parsed=parsed, address=address)
+
+
+def test_graduated_fill_sell_via_settler_resolves_from_the_market_map():
+    tokens, native = 162_232_261 * E18, 6_968 * E18
+    b = bundle(
+        [tf(3, TOKEN, WALLET, SETTLER, tokens), tf(4, TOKEN, SETTLER, CORE, tokens)],
+        [tr(5, SETTLER, False, native, tokens)],
+        meta(WALLET, SETTLER, 0),
+    )
+    flows = run(b, markets=MARKETS)
+    assert [f.wallet for f in flows] == [WALLET]
+    f = flows[0]
+    assert f.kind == KIND_SELL
+    assert f.token_delta == -tokens
+    assert f.quote_asset == NATIVE
+    assert f.quote_delta == native
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.source == SOURCE_VENUE_EVENT
+    assert f.venue == MARKET
+
+
+def test_graduated_fill_without_a_market_map_stays_unpriced_not_invented():
+    tokens, native = 162_232_261 * E18, 6_968 * E18
+    b = bundle(
+        [tf(3, TOKEN, WALLET, SETTLER, tokens), tf(4, TOKEN, SETTLER, CORE, tokens)],
+        [tr(5, SETTLER, False, native, tokens)],
+        meta(WALLET, SETTLER, 0),
+    )
+    f = only(run(b))
+    assert f.basis_state != BASIS_OBSERVED
+
+
+def test_graduated_fill_buy_through_router_marks_venue_and_price_from_the_fill():
+    tokens, native = 933_619_875 * E18, 8_598 * E18
+    b = bundle(
+        [tf(2, TOKEN, CORE, ROUTER, tokens), tf(3, TOKEN, ROUTER, WALLET, tokens)],
+        [tr(4, ROUTER, True, native, tokens)],
+        meta(WALLET, ROUTER, native),
+    )
+    f = only(run(b, markets=MARKETS))
+    assert f.kind == KIND_BUY
+    assert f.token_delta == tokens
+    assert f.quote_asset == NATIVE
+    assert f.quote_delta == -native
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == MARKET
+
+
 def test_routed_buy_via_router_names_router():
     tokens, native = 500 * E18, 3 * E18
     b = bundle(

@@ -48,6 +48,7 @@ from core.ledger.types import (
 
 CURVE_TAGS = frozenset({"LT", "NFB", "NFS"})
 POOL_TAGS = frozenset({"V2SWAP", "V3SWAP", "V4SWAP"})
+CORE_FILL_TAGS = frozenset({"TR"})
 AMOUNT_TOLERANCE_WEI = 1
 FEE_TOLERANCE = Decimal("0.10")
 MAX_ROUTER_HOPS = 4
@@ -138,6 +139,7 @@ def _hints(
     tx_tokens: set[str],
     registry: dict[str, TokenReg],
     quote_assets: frozenset[str],
+    markets: dict[str, tuple[str, str]] | None = None,
 ) -> list[_Hint]:
     out: list[_Hint] = []
     for ev in bundle.venue_events:
@@ -158,6 +160,25 @@ def _hints(
             user = (parsed.get("user") or "").lower() or None
             asset = _curve_quote_asset(registry.get(token), quote_assets)
             out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
+        elif ev.tag in CORE_FILL_TAGS:
+            market = (parsed.get("market") or "").lower()
+            pair = (markets or {}).get(market)
+            if not pair:
+                continue
+            token, quote = pair[0].lower(), (pair[1] or "").lower()
+            if token not in tx_tokens:
+                continue
+            amount_in = int(parsed.get("amount_in") or 0)
+            amount_out = int(parsed.get("amount_out") or 0)
+            if parsed.get("is_buy"):
+                token_delta, quote_delta = amount_out, -amount_in
+            else:
+                token_delta, quote_delta = -amount_in, amount_out
+            if token_delta == 0 or quote_delta == 0:
+                continue
+            user = (parsed.get("user") or "").lower() or None
+            asset = quote if quote in quote_assets and quote not in (NATIVE, WMON) else NATIVE
+            out.append(_Hint(ev.log_index, market, token, token_delta, quote_delta, asset, user))
         elif ev.tag in POOL_TAGS:
             sign = 1 if ev.tag == "V4SWAP" else -1
             w0 = sign * int(parsed.get("amount0") or 0)
@@ -581,6 +602,7 @@ def net_transaction(
     quote_assets: frozenset[str] | set[str] = QUOTE_ASSETS,
     rates: Rates | None = None,
     reference_price: PriceFn | None = None,
+    markets: dict[str, tuple[str, str]] | None = None,
 ) -> list[Flow]:
     rates = rates or Rates()
     quote_assets = frozenset(a.lower() for a in quote_assets)
@@ -599,7 +621,7 @@ def net_transaction(
         return []
 
     tx_tokens = {leg.token for legs in legs_by_wallet.values() for leg in legs}
-    hints = _hints(bundle, tx_tokens, registry, quote_assets)
+    hints = _hints(bundle, tx_tokens, registry, quote_assets, markets)
     used: set[int] = set()
     all_legs = [leg for legs in legs_by_wallet.values() for leg in legs]
     for leg in all_legs:

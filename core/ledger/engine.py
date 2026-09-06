@@ -80,6 +80,7 @@ class LedgerEngine:
         self._head_fn = head_fn
         self._registry: dict | None = None
         self._market_tokens: dict[str, str] = {}
+        self._market_pairs: dict[str, tuple[str, str]] = {}
         self._affected: set[tuple[str, str]] = set()
         self._head: tuple[int, float] | None = None
         self._rate_cache: dict[int, Rates] = {}
@@ -96,6 +97,7 @@ class LedgerEngine:
 
         self._registry = self._seed_registry(cur, store)
         self._market_tokens = self._load_market_tokens(cur)
+        self._market_pairs = self._load_market_pairs(cur)
         return self._registry
 
     def _seed_registry(self, cur, store) -> dict:
@@ -158,7 +160,22 @@ class LedgerEngine:
     @staticmethod
     def _load_market_tokens(cur) -> dict[str, str]:
         cur.execute("SELECT market, base_address FROM crystal_markets")
-        return {(m or "").lower(): (b or "").lower() for m, b in cur.fetchall() if m and b}
+        out = {(m or "").lower(): (b or "").lower() for m, b in cur.fetchall() if m and b}
+        cur.execute("SELECT market, token FROM launchpad_tokens WHERE market IS NOT NULL")
+        for m, t in cur.fetchall():
+            if m and t:
+                out.setdefault(m.lower(), t.lower())
+        return out
+
+    @staticmethod
+    def _load_market_pairs(cur) -> dict[str, tuple[str, str]]:
+        cur.execute("SELECT market, base_address, quote_address FROM crystal_markets")
+        out = {(m or "").lower(): ((b or "").lower(), (q or "").lower()) for m, b, q in cur.fetchall() if m and b}
+        cur.execute("SELECT market, token, quote_token FROM launchpad_tokens WHERE market IS NOT NULL")
+        for m, t, q in cur.fetchall():
+            if m and t:
+                out.setdefault(m.lower(), (t.lower(), (q or WMON).lower()))
+        return out
 
     def _kinds_for(self, cur):
         if self._kinds is None:
@@ -298,7 +315,16 @@ class LedgerEngine:
             return self._reference_price(token, blk, ts, cur)
 
         def net(bundle: TxBundle) -> list[Flow]:
-            return list(net_transaction(bundle, registry, kind_of, rates=rates, reference_price=reference_price))
+            return list(
+                net_transaction(
+                    bundle,
+                    registry,
+                    kind_of,
+                    rates=rates,
+                    reference_price=reference_price,
+                    markets=self._market_pairs,
+                )
+            )
 
         flows: list[Flow] = []
         for bundle in bundles:
