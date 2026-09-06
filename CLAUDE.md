@@ -1032,6 +1032,15 @@ editing a shared file, verify your content actually landed —
 `git show HEAD:<file> | grep <marker>` — rather than assuming your commit is the
 one that carried it.
 
+### Stopping a background shell does not stop what it launched
+
+A harness-level "stop" ends the task, not the MSYS bash it started, and a bash retry
+loop keeps relaunching its children. On 2026-09-07 a stopped local merge wrapper kept
+merging partitions into prod from stale local databases for four more hours and silently
+overwrote rows an Azure job had just corrected (found only because a fixture wallet
+reverted). Kill by PID, then prove it with a process listing (`Get-CimInstance
+Win32_Process` filtered on the script name) before assuming nothing local can write.
+
 ## The deploy approval gate, and why not to route around it
 
 `main` auto-deploys, but the deploy job **pauses for manual approval from
