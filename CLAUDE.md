@@ -1822,3 +1822,34 @@ ORDER BY query_start;
 
 Reads are normal background traffic. A long-running write means a repair is in
 flight — do not start a second one (see the repair-script section).
+
+---
+
+## DEX Screener adapter (`api/routes/dexscreener.py`) — provenance, not heuristics
+
+`launchpad_trades` carries two nullable columns written at insert time by every trade path
+(`state.py` → `BatchAccumulator.add_trade` / `storage.insert_trade`):
+
+- `venue`: `curve`, `pool`, `market`, or `reconciliation` — which mechanism produced the row.
+- `tx_index`: the transaction's index in its block, from the raw log's `transactionIndex`.
+
+The adapter's `/events` serves **only `venue = 'curve'`** for `source = 0` tokens. The
+`venue IS NULL` branch of `CURVE_TRADE_FILTER` is a fallback for unstamped rows and should
+match nothing: `scripts/backfill_dexscreener_provenance.py` stamped every historical
+source-0 row from its receipt on 2026-09-06 (136 rows, 22 `log_index` re-keys for market
+rows written before `fe8835f` with loop-position indices). Do not reintroduce
+"native_reserve > 0 means curve" — the CHIPOTLE migration block has a curve trade and a
+Crystal market trade in the same transaction, and reserves cannot tell them apart.
+
+Other contract points: `txnIndex` is the real `tx_index` (0 only for unstamped rows);
+quote-side amounts scale by `QUOTE_DECIMALS` (USDC/AUSD are 6); a trade with no derivable
+price is **skipped and logged**, never floored to a fake positive value; `/latest-block`
+and `/events` are in `_EDGE_CACHEABLE`. Graduated crystal tokens go dark on DEX Screener
+by design — their post-migration trades are on Crystal's own market, which the adapter
+does not (yet) represent as a pair. That is a product decision, not a bug.
+
+Polling trap: **the indexer has no ingress, so its revisions report `trafficWeight` 0.**
+The `[?properties.trafficWeight > 0]` query from the deploy section works for `crystal-api`
+only; for `crystal-indexer` read `properties.active`, `healthState` and `runningState`
+(`RunningAtMaxScale` is healthy), then confirm progress from `[SQ]` log lines. Each `az`
+call from this environment takes 25–40s, so budget polling loops accordingly.
