@@ -10,7 +10,8 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 ## Current state snapshot (2026-09-02, update me when it changes)
 
 - Deployed: both container apps run the image tagged with origin/main's commit SHA via
-  the new CI pipeline (approval-gated). Verify with `az containerapp revision list`
+  the new CI pipeline (approval-gated). 2026-09-06: `31f9d9d` (uniswap v4 leg attribution
+  fix) was rolled to crystal-indexer then crystal-api directly with the azure cli. Verify with `az containerapp revision list`
   vs `git rev-parse origin/main` rather than trusting this line.
 - Branches: `dev` == `main` (kept in sync by PR). `block-scoped-clear` is a stale
   Aug-28-migration-era branch, 400+ commits behind — historical, don't build on it.
