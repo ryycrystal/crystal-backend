@@ -1953,5 +1953,24 @@ stable take their market price as dollars. `tests/test_spot_prices_stables.py` p
 
 The visible symptom was in the interface's Portfolio: `BalancesContent.tsx` pins USDC
 to 1 client-side on first paint and then trusts `priceUsd` from `/spot/{wallet}`, so the
-number flipped from 1.00 to 0.96 a moment after load. If a stable ever drifts from $1
-again, the price is coming from a new path, not from this one.
+number flipped from 1.00 to 0.96 a moment after load.
+
+There are five USD pricing paths. Know which one a number came from before debugging it:
+
+| path | source of the MON price | stables |
+|---|---|---|
+| `api.api._quote_price_usd` / `_mon_price_usd` (overviews, `/user`, holders, ws) | V3 MON/USD oracle pool via the sequencer | pinned at 1 |
+| indexer trade `usd_amount` (rewards volume) | same oracle through `state._quote_price_usd` | pinned at 1 |
+| `api.spot_data.spot_prices_from_markets` (`/spot/{wallet}` rows) | oracle | pinned at 1 |
+| `state.tokenToPrice` + `State.sweep` (vault NAV, pool TVL, vault samples for rewards vault-hours, referrals) | oracle, propagated along the market graph | pinned at 1 |
+| `api.spot_graph._token_price_at` (portfolio history graph) | trade-implied MON/USD at the bucket time | pinned at 1 |
+
+`State.sweep` propagates prices from a market's quote to its base. `PINNED_PRICE_TOKENS`
+(USDC, AUSD, WMON, LVMON) and ticker-recognised stables are never overwritten by a market.
+Before that guard, the USDC-quoted WMON/USDC order book repriced WMON to its **last print**
+— a stale trade with zero 24h volume, 3.8% above the oracle — and every WMON-quoted token,
+vault and pool inherited it. `tests/test_price_anchors.py` covers both the sweep and the graph.
+
+The graph change was shipped **without** bumping `VALUE_VERSION` on purpose: buckets stored
+before 2026-09-06 still value AUSD and USDC-quoted tokens at nothing, newer ones value them.
+Bump it if that step in old history ever matters enough to pay for a recompute.
