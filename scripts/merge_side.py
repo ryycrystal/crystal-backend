@@ -132,7 +132,8 @@ def reprice_trades(ix, side_trades, prod_trades):
                 row[ix["usd_amount"]] = (Decimal(row[ix["native_amount"]]) / WAD) * rate
         out.append(tuple(row))
     side_keys = {key(r) for r in side_trades}
-    dropped = [k for k in prod_by_key if k not in side_keys]
+    synthetic = {key(r) for r in prod_trades if "venue" in ix and r[ix["venue"]] == "reconciliation"}
+    dropped = [k for k in prod_by_key if k not in side_keys and k not in synthetic]
     return out, new_rows, dropped
 
 
