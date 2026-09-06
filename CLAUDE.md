@@ -1853,3 +1853,67 @@ The `[?properties.trafficWeight > 0]` query from the deploy section works for `c
 only; for `crystal-indexer` read `properties.active`, `healthState` and `runningState`
 (`RunningAtMaxScale` is healthy), then confirm progress from `[SQ]` log lines. Each `az`
 call from this environment takes 25–40s, so budget polling loops accordingly.
+
+---
+
+## Rebuilding history for a set of tokens: the side-database replay
+
+Fixing attribution code never repairs rows that were already folded wrong, and a
+position that *sold* against an understated basis cannot be patched from the live
+tables at all (its realized PnL is already booked). The systematic answer is
+`scripts/replay_side.py`: fold the affected tokens' entire history from EMPTY derived
+state into a local Postgres (`crystal_replay*`), reading only the raw log cache from
+prod through a read-only connection, then copy the corrected rows back per token with
+`scripts/merge_side.py`. Prod is never written until the merge, and the merge is
+snapshot-backed, dry-run by default, and refuses to run unless `PGHOST` names the live
+host. `scripts/compare_side.py` and `scripts/report_side.py` quantify the diff first.
+
+Facts that cost hours, in order of how much they cost:
+
+- **`process_chunk` walks every block number in the chunk's range and records each
+  one in `launchpad_blocks`.** For a sparse token that is the whole cost: 500 hot
+  blocks of a token's tail span ~300k real blocks, so the replay wrote ~1,000
+  `launchpad_blocks` rows per useful block and ran at 12–21 hot blocks/s. An empty
+  block is a no-op for the sequencer (no logs, no transfer maps, attribution
+  early-returns), so the side replay calls `_process_block` for hot blocks only and
+  records nothing: same output, **138 hot blocks/s** on the same token (115k hot
+  blocks in 14 min instead of ~90). The profile showed this as `cursor.execute`
+  costing 28 ms a call while the basis lookup itself took 0.18 ms — the executes were
+  the paged `launchpad_blocks` inserts, not the query you would guess.
+- **A block is "hot" for a token when any log's `address` is the token**, which
+  catches every trade because each one moves the ERC-20. Finding hot blocks means a
+  full pass over the 64M-row log cache: the `EXISTS (SELECT 1 FROM
+  jsonb_array_elements(...))` form short-circuits per row and takes ~4–6 minutes for
+  any number of addresses; a lateral `jsonb_array_elements` join that emits
+  (address, block) pairs expands every log of every block and was still running after
+  20 minutes. To get per-token lists in one pass, keep the EXISTS filter and add an
+  `ARRAY(SELECT DISTINCT ...)` of the matching addresses in the select list.
+- **The side replay never sees the MON/USD oracle pool's blocks**, so its `usd_amount`,
+  `volume_usd` and candle `mon_usd` are priced at whatever rate it started with. The
+  merge keeps prod's usd on trades prod already had, prices new legs at the rate prod
+  used for the nearest trade of the same token, carries prod's `mon_usd` per candle
+  bucket, and scales `fees_usd` by the volume ratio. Never copy side USD figures.
+- **Prod keeps trading during the replay.** The merge takes a cutoff block (the last
+  hot block the replay was given): prod rows after it are kept, a wallet with any
+  post-cutoff trade on that token is deferred untouched, token aggregates are
+  recomputed from the final trade set, and only candle buckets that close before the
+  cutoff are replaced. The first dry run on moncock found 17 post-cutoff trades from
+  10 wallets — without the cutoff those rows would have been deleted.
+- `launchpad_trades.id` is a BIGSERIAL: copying side ids into prod collides with other
+  tokens' rows and `ON CONFLICT DO NOTHING` then silently drops the trade. Let prod
+  assign ids; nothing in the API keys on the numeric id (trade ids on the wire are
+  `{txhash}-{log_index}`).
+- `state.py` calls `storage.trade_exists` through the package, so stubbing
+  `core.storage.launchpad.trade_exists` does nothing — patch both bindings.
+- A side database created before a schema change lacks the new columns
+  (`venue`/`tx_index` arrived in `be40a69`); run `schema.init_db()` against it before
+  replaying, and the merge inserts only columns both databases have.
+- Reconciliation legs (`venue = 'reconciliation'`) price the missing quantity at the
+  event's pool price, so native amounts on those legs can differ slightly from the MON
+  actually paid through an OTC or V4 leg: moncock's headline wallet replayed to
+  474,059 MON spent against a hand-derived 477,018 (0.6%), with token quantities exact.
+
+Throughput and scale on 2026-09-06: 162 affected tokens, 3.41M distinct hot blocks,
+split by token across 8 workers (`crystal_replay_w0..7`, ~465k hot blocks each) on a
+12-core laptop with prod reached through a tunnel. Each worker prefetches the next
+chunk's logs on a thread, so the tunnel round-trip overlaps the fold.
