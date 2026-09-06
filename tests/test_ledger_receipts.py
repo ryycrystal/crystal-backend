@@ -79,6 +79,9 @@ def test_txs_missing_venue_logs_wants_transfers_touching_the_venue_without_its_l
         manager_log(TX_SEEN, 4),
     ]
     assert txs_missing_venue_logs(logs, MANAGER) == [TX_V4]
+    assert txs_missing_venue_logs(logs, MANAGER, {TOKEN}) == [TX_V4]
+    assert txs_missing_venue_logs(logs, MANAGER, {POOL}) == []
+    assert ReceiptLogs(FakeRpc({}), MANAGER, {WALLET}).complete({1: logs}, FakeCursor()) == 0
 
 
 def test_complete_fetches_manager_logs_once_and_merges_them_into_the_block():

@@ -21,7 +21,7 @@ def _hex_int(raw) -> int:
     return int(raw, 16) if isinstance(raw, str) else int(raw)
 
 
-def txs_missing_venue_logs(logs: list[dict], venue: str) -> list[str]:
+def txs_missing_venue_logs(logs: list[dict], venue: str, tokens: set[str] | None = None) -> list[str]:
     venue = venue.lower()
     have: set[str] = set()
     need: set[str] = set()
@@ -29,8 +29,11 @@ def txs_missing_venue_logs(logs: list[dict], venue: str) -> list[str]:
         txhash = (log.get("transactionHash") or "").lower()
         if not txhash:
             continue
-        if (log.get("address") or "").lower() == venue:
+        address = (log.get("address") or "").lower()
+        if address == venue:
             have.add(txhash)
+            continue
+        if tokens is not None and address not in tokens:
             continue
         topics = log.get("topics") or []
         if len(topics) < 3 or str(topics[0]).lower() != TRANSFER_TOPIC:
@@ -41,14 +44,15 @@ def txs_missing_venue_logs(logs: list[dict], venue: str) -> list[str]:
 
 
 class ReceiptLogs:
-    def __init__(self, rpc, venue: str | None = None) -> None:
+    def __init__(self, rpc, venue: str | None = None, tokens: set[str] | None = None) -> None:
         self._rpc = rpc
         self._venue = (venue or h.UNIV4_POOL_MANAGER_ADDR).lower()
+        self._tokens = {t.lower() for t in tokens} if tokens is not None else None
         self.fetched = 0
         self.added = 0
 
     def complete(self, logs_by_block: dict[int, list[dict]], cur) -> int:
-        wanted = {blk: txs_missing_venue_logs(logs, self._venue) for blk, logs in logs_by_block.items()}
+        wanted = {blk: txs_missing_venue_logs(logs, self._venue, self._tokens) for blk, logs in logs_by_block.items()}
         hashes = sorted({txhash for txhashes in wanted.values() for txhash in txhashes})
         if not hashes:
             return 0

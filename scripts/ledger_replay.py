@@ -48,6 +48,7 @@ from core.ledger.kinds import AddressKinds  # noqa: E402
 from core.ledger.receipts import RECEIPT_LOG_DDL, ReceiptLogs  # noqa: E402
 from core.ledger.schema import LEDGER_TABLES, init_ledger_schema  # noqa: E402
 from core.ledger.txmeta import RpcClient, TxMetaStore  # noqa: E402
+from core.ledger.types import QUOTE_ASSETS  # noqa: E402
 from core.storage import schema  # noqa: E402
 
 SEED_TABLES = (
@@ -65,6 +66,7 @@ MON_USD_MIN_TRADE_WEI = 10**16
 SIDE_DB_MARKERS = ("crystal_ledger", "crystal_replay")
 PROD_QUERY_TIMEOUT = 300
 PREFETCH_WORKERS = 4
+RPC_BATCH_CALLS = 10
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 PROD_PAGE_ROWS = 2000
 
@@ -345,13 +347,15 @@ async def timestamps_for(blocks: list[int], cached: dict[int, list[dict]]) -> di
 
 
 def prefetch_chunk(
-    tx_meta: TxMetaStore, kinds: AddressKinds, logs_by_block: dict[int, list[dict]], cur
+    tx_meta: TxMetaStore, kinds: AddressKinds, logs_by_block: dict[int, list[dict]], cur, tokens: set[str]
 ) -> tuple[int, int]:
     hashes: set[str] = set()
     addrs: set[str] = set()
     for logs in logs_by_block.values():
         for lg in logs:
             hashes.add((lg.get("transactionHash") or "").lower())
+            if (lg.get("address") or "").lower() not in tokens:
+                continue
             topics = lg.get("topics") or []
             if topics and str(topics[0]).lower() == TRANSFER_TOPIC and len(topics) >= 3:
                 addrs.add(h._topic_addr(topics[1]))
@@ -381,7 +385,7 @@ def process_chunk(
     flows = 0
     with storage.db_cursor() as cur:
         engine.stats["receipt_logs"] += receipts.complete(relevant, cur)
-        prefetch_chunk(tx_meta, kinds, relevant, cur)
+        prefetch_chunk(tx_meta, kinds, relevant, cur, set(engine.registry(cur)) | QUOTE_ASSETS)
         for blk, logs in relevant.items():
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
         refolded = engine.flush(cur)
@@ -443,15 +447,15 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         print("[REPLAY] nothing to replay", flush=True)
         return
 
-    tx_meta = TxMetaStore(storage.db_cursor, args.rpc)
+    tx_meta = TxMetaStore(storage.db_cursor, args.rpc, rpc=RpcClient(args.rpc, batch_size=args.rpc_batch))
     kinds = AddressKinds(storage.db_cursor, args.rpc)
-    receipts = ReceiptLogs(RpcClient(args.rpc))
     engine = LedgerEngine(
         storage.db_cursor, rpc_url=args.rpc, enabled=True, tx_meta_store=tx_meta, kinds=kinds, rates_fn=SideRates()
     )
     with storage.db_cursor() as cur:
-        engine.refresh_registry(cur)
+        registry = engine.refresh_registry(cur)
         kinds.load_known(cur)
+    receipts = ReceiptLogs(RpcClient(args.rpc, batch_size=args.rpc_batch), tokens=set(registry))
 
     groups = [blocks[i : i + args.batch] for i in range(0, len(blocks), args.batch)]
     fetcher = ParallelFetcher(args.streams)
@@ -498,6 +502,12 @@ def main() -> None:
     ap.add_argument("--to-block", type=int)
     ap.add_argument("--blocks-file", help="cache of the hot block list; loaded when it exists")
     ap.add_argument("--batch", type=int, default=500)
+    ap.add_argument(
+        "--rpc-batch",
+        type=int,
+        default=RPC_BATCH_CALLS,
+        help="json-rpc calls per http request for transaction metadata and receipts; small batches avoid the per-second cap",
+    )
     ap.add_argument("--streams", type=int, default=4, help="parallel prod connections per chunk fetch")
     ap.add_argument("--limit-blocks", type=int, default=0, help="process only the first N hot blocks")
     ap.add_argument("--rpc", default=os.environ.get("RPC_HTTP", "https://rpc.monad.xyz"))
