@@ -92,11 +92,12 @@ class LogSource:
 
     def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
         for attempt in range(FETCH_ATTEMPTS):
-            conn = self.conn()
-            watchdog = threading.Timer(FETCH_TIMEOUT, self._cancel, args=(conn,))
-            watchdog.daemon = True
-            watchdog.start()
+            watchdog = None
             try:
+                conn = self.conn()
+                watchdog = threading.Timer(FETCH_TIMEOUT, self._cancel, args=(conn,))
+                watchdog.daemon = True
+                watchdog.start()
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT number, logs FROM launchpad_block_logs WHERE number = ANY(%s)",
@@ -109,7 +110,8 @@ class LogSource:
                 self._drop()
                 time.sleep(min(2**attempt, 30))
             finally:
-                watchdog.cancel()
+                if watchdog is not None:
+                    watchdog.cancel()
         raise RuntimeError("prod log fetch kept failing")
 
     @staticmethod
@@ -201,14 +203,28 @@ def wipe_side() -> None:
     print(f"[WIPE] truncated {len(tables)} side tables", flush=True)
 
 
-def seed_from_prod(pc) -> None:
-    with pc.cursor() as pcur, storage.db_cursor() as lcur:
+def seed_from_prod(pc, seed_url: str | None = None) -> None:
+    src = psycopg2.connect(seed_url) if seed_url else pc
+    if seed_url:
+        waited = 0
+        while True:
+            with src.cursor() as cur:
+                cur.execute("SELECT count(*) FROM holder_denylist")
+                ready = cur.fetchone()[0] > 0
+            src.rollback()
+            if ready:
+                break
+            if waited % 120 == 0:
+                print("[SEED] waiting for the local seed snapshot to finish", flush=True)
+            time.sleep(15)
+            waited += 15
+    with src.cursor() as pcur, storage.db_cursor() as lcur:
         for table in SEED_TABLES:
             try:
                 pcur.execute(f"SELECT * FROM {table}")
             except Exception:
-                pc.rollback()
-                print(f"[SEED] {table}: not on prod, skipped", flush=True)
+                src.rollback()
+                print(f"[SEED] {table}: not in the seed source, skipped", flush=True)
                 continue
             cols = [d[0] for d in pcur.description]
             rows = pcur.fetchall()
@@ -266,11 +282,12 @@ async def replay(
     streams: int,
     extra_url: str | None,
     required_file: str | None,
+    seed_url: str | None,
 ) -> None:
     src = LogSource()
     if wipe:
         wipe_side()
-    seed_from_prod(src.conn())
+    seed_from_prod(None if seed_url else src.conn(), seed_url)
 
     if blocks_file and os.path.exists(blocks_file):
         blocks = json.load(open(blocks_file))
@@ -333,6 +350,7 @@ def main() -> None:
     ap.add_argument("--streams", type=int, default=4, help="parallel prod connections per chunk fetch")
     ap.add_argument("--extra-logs-url", help="local store of backfilled PoolManager logs (scripts/backfill_v4_logs.py)")
     ap.add_argument("--extra-required-file", help="blocks that must be in the store before their chunk is folded")
+    ap.add_argument("--seed-from", help="copy the seed tables from this database instead of prod")
     ap.add_argument("--wipe", action="store_true", help="truncate every table in the side db before seeding")
     ap.add_argument("--fresh", action="store_true", help="side db starts empty: skip per-trade existence checks")
     args = ap.parse_args()
@@ -364,6 +382,7 @@ def main() -> None:
             args.streams,
             args.extra_logs_url,
             args.extra_required_file,
+            args.seed_from,
         )
     )
 
