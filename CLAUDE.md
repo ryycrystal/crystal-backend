@@ -813,6 +813,19 @@ and the graduated-pool path).
 - **Sell**: first sender that is not the pool, the zero address, or a known passthrough.
 - Falls back to the event's original `user` when it cannot do better.
 
+### V4 legs must be resolved through the PoolManager's address, not the pool id
+
+`_apply_univ4_swap` used to hand `_resolve_trade_user` the bytes32 pool id as the
+"pool" and no `is_buy`. The pool id is not a node in the transfer graph (the token
+moves from the PoolManager's *address*), so the resolver could not tell the side,
+fell back to the swap's `sender`, and credited the executor contract that called
+the PoolManager. The real wallet then got a reconciliation leg for the same tokens
+at the tracked pool's price: the leg was booked twice and the exact V4 amount never
+reached the wallet. Fixed 2026-09-06 (pass the PoolManager address and derive the
+side from the token-side amount's sign); `tests/test_univ4_attribution.py` pins it.
+A V4-routed buy on moncock replays to 477,000.57 MON spent against a hand-derived
+477,018.49 with the fix, versus 474,059.15 without it.
+
 ### `PASSTHROUGH_ADDRS` — the router list (core/chain.py)
 
 Stateless execution contracts that forward someone else's trade and never hold a

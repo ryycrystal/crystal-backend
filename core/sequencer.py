@@ -400,7 +400,13 @@ class Sequencer:
             "sqrt_price_x96": int(parsed.get("sqrt_price_x96") or 0),
             "user": parsed.get("sender", ""),
         }
-        real_user = self._resolve_trade_user(txh, {**ev, "token": pi.token_addr}, pool_id, transfer_maps)
+        token_delta = amount0 if pi.token_is_0 else amount1
+        real_user = self._resolve_trade_user(
+            txh,
+            {**ev, "token": pi.token_addr, "is_buy": token_delta > 0},
+            h.UNIV4_POOL_MANAGER_ADDR,
+            transfer_maps,
+        )
         if real_user:
             ev["user"] = real_user
 
