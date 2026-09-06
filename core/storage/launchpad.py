@@ -13,6 +13,7 @@ from .base import db_cursor
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
 _N50_18_CAP = Decimal(10) ** 31
+_N50_18_CAP_SQL = "10000000000000000000000000000000"
 
 
 def _fit_n50_18(v):
@@ -23,10 +24,13 @@ def _fit_n50_18(v):
     except (InvalidOperation, TypeError, ValueError):
         return Decimal(0)
     if not d.is_finite():
+        print(f"[clamp] dropping non-finite value {v!r} -> 0 (numeric(50,18))", flush=True)
         return Decimal(0)
     if d > _N50_18_CAP:
+        print(f"[clamp] value {d} exceeds numeric(50,18) cap, clamping to {_N50_18_CAP}", flush=True)
         return _N50_18_CAP
     if d < -_N50_18_CAP:
+        print(f"[clamp] value {d} below -numeric(50,18) cap, clamping to {-_N50_18_CAP}", flush=True)
         return -_N50_18_CAP
     return d
 
@@ -262,6 +266,9 @@ def update_token_after_trade(
     curve_token_reserve=0,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
+    last_price_native = _fit_n50_18(last_price_native)
+    volume_usd = _fit_n50_18(volume_usd)
+    fees_usd = _fit_n50_18(fees_usd)
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -510,20 +517,28 @@ def upsert_position(
                     buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                     sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                     cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                    unrealized_pnl_native = crystal_unrealized_pnl(
+                    unrealized_pnl_native = LEAST(GREATEST(crystal_unrealized_pnl(
                         launchpad_positions.balance_token + EXCLUDED.balance_token,
                         launchpad_positions.token_bought + EXCLUDED.token_bought,
                         launchpad_positions.token_sold + EXCLUDED.token_sold,
                         launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
-                        %s),
-                    total_pnl_native = (
+                        %s), -"""
+                + _N50_18_CAP_SQL
+                + """::numeric), """
+                + _N50_18_CAP_SQL
+                + """::numeric),
+                    total_pnl_native = LEAST(GREATEST((
                         launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
                     ) + crystal_unrealized_pnl(
                         launchpad_positions.balance_token + EXCLUDED.balance_token,
                         launchpad_positions.token_bought + EXCLUDED.token_bought,
                         launchpad_positions.token_sold + EXCLUDED.token_sold,
                         launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
-                        %s);
+                        %s), -"""
+                + _N50_18_CAP_SQL
+                + """::numeric), """
+                + _N50_18_CAP_SQL
+                + """::numeric);
                 """,
                 (
                     addr,
@@ -576,20 +591,28 @@ def upsert_position(
                 buy_count = launchpad_positions.buy_count + EXCLUDED.buy_count,
                 sell_count = launchpad_positions.sell_count + EXCLUDED.sell_count,
                 cost_basis_native = GREATEST(launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native, 0),
-                unrealized_pnl_native = crystal_unrealized_pnl(
+                unrealized_pnl_native = LEAST(GREATEST(crystal_unrealized_pnl(
                     launchpad_positions.balance_token + EXCLUDED.balance_token,
                     launchpad_positions.token_bought + EXCLUDED.token_bought,
                     launchpad_positions.token_sold + EXCLUDED.token_sold,
                     launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
-                    %s),
-                total_pnl_native = (
+                    %s), -"""
+            + _N50_18_CAP_SQL
+            + """::numeric), """
+            + _N50_18_CAP_SQL
+            + """::numeric),
+                total_pnl_native = LEAST(GREATEST((
                     launchpad_positions.realized_pnl_native + EXCLUDED.realized_pnl_native
                 ) + crystal_unrealized_pnl(
                     launchpad_positions.balance_token + EXCLUDED.balance_token,
                     launchpad_positions.token_bought + EXCLUDED.token_bought,
                     launchpad_positions.token_sold + EXCLUDED.token_sold,
                     launchpad_positions.cost_basis_native + EXCLUDED.cost_basis_native,
-                    %s);
+                    %s), -"""
+            + _N50_18_CAP_SQL
+            + """::numeric), """
+            + _N50_18_CAP_SQL
+            + """::numeric);
             """,
             (
                 addr,
@@ -766,6 +789,7 @@ def upsert_token_created(
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
     quote_token_l = (quote_token or WMON).lower()
+    last_price_native = _fit_n50_18(last_price_native)
     if cur is None:
         with db_cursor() as cur2:
             cur2.execute(
@@ -1881,14 +1905,26 @@ def upsert_positions_batch(position_updates: dict[tuple[str, str], dict], cur) -
         [(d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13]) for d in data],
         page_size=1000,
     )
+    _CAP = _N50_18_CAP_SQL
     for (addr, tok), p in position_updates.items():
         cur.execute(
             """
             UPDATE launchpad_positions SET
-                unrealized_pnl_native = crystal_unrealized_pnl(
+                unrealized_pnl_native = LEAST(GREATEST(crystal_unrealized_pnl(
                     balance_token, token_bought, token_sold, cost_basis_native, %s),
-                total_pnl_native = realized_pnl_native + crystal_unrealized_pnl(
-                    balance_token, token_bought, token_sold, cost_basis_native, %s)
+                    -"""
+            + _CAP
+            + """::numeric), """
+            + _CAP
+            + """::numeric),
+                total_pnl_native = LEAST(GREATEST(
+                    realized_pnl_native + crystal_unrealized_pnl(
+                        balance_token, token_bought, token_sold, cost_basis_native, %s),
+                    -"""
+            + _CAP
+            + """::numeric), """
+            + _CAP
+            + """::numeric)
             WHERE user_address = %s AND token = %s
             """,
             (_fit_n50_18(p["last_price_native"]), _fit_n50_18(p["last_price_native"]), addr, tok),

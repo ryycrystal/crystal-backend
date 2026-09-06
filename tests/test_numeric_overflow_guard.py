@@ -116,3 +116,167 @@ def test_batch_accumulator_add_trade_preserves_values():
     assert row[6] == NATIVE_AMT
     assert row[7] == TOKEN_AMT
     assert Decimal(row[9]) == Decimal(NATIVE_AMT) / Decimal(TOKEN_AMT)
+
+
+class _CapturingCursor:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append(("execute", sql, tuple(params) if params else ()))
+
+    def executemany(self, sql, seq):
+        for p in seq:
+            self.calls.append(("execute", sql, tuple(p)))
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+def _flatten(x):
+    if isinstance(x, (list, tuple)):
+        for e in x:
+            yield from _flatten(e)
+    else:
+        yield x
+
+
+def _numeric_params(calls):
+    for _, _sql, params in calls:
+        for v in _flatten(params):
+            if isinstance(v, (int, Decimal)) and not isinstance(v, bool):
+                yield v
+            elif isinstance(v, float):
+                yield Decimal(str(v))
+
+
+def test_full_batch_flush_never_writes_a_numeric_over_cap(monkeypatch):
+    from core.storage import launchpad as L
+
+    cur = _CapturingCursor()
+
+    def fake_execute_values(cur_arg, sql, rows, page_size=None, template=None):
+        for row in rows:
+            cur.calls.append(("execute_values", sql, tuple(row)))
+
+    monkeypatch.setattr(L, "execute_values", fake_execute_values)
+
+    b = BatchAccumulator()
+
+    b.add_trade(
+        block_number=102263857,
+        log_index=48,
+        timestamp=1788600000,
+        token=TOKEN,
+        user_address=USER,
+        is_buy=True,
+        native_amount=NATIVE_AMT,
+        token_amount=TOKEN_AMT,
+        usd_amount=Decimal("15.55"),
+        price_native=Decimal(NATIVE_AMT) / Decimal(TOKEN_AMT),
+        txhash=TXH,
+    )
+
+    b.add_trade(
+        block_number=102263764,
+        log_index=4,
+        timestamp=1788600000,
+        token="0x0158abff6d8344b35b5afffe7dbefc431b731a70",
+        user_address="0xffffffffffffffffffffffffffffffffff3f4087",
+        is_buy=False,
+        native_amount=78900012596557541714,
+        token_amount=361959467626928724,
+        usd_amount=OVERFLOW_PRICE * Decimal("0.0253"),
+        price_native=OVERFLOW_PRICE,
+        txhash="0x2c0b356b4899948e86830eaf8a9d5f00b7da4c6b92422e47a59cc6c08ed1ca55",
+    )
+
+    b.set_token_state(
+        "0x0158abff6d8344b35b5afffe7dbefc431b731a70",
+        {
+            "last_price_native": OVERFLOW_PRICE,
+            "native_volume": 10**23,
+            "token_volume": 10**23,
+            "volume_usd": OVERFLOW_PRICE,
+            "fees_usd": OVERFLOW_PRICE,
+            "buy_count": 1,
+            "sell_count": 1,
+            "tx_count": 2,
+            "circulating_supply": 10**26,
+            "approaching_75": False,
+            "approaching_75_block": None,
+            "approaching_75_at": None,
+            "snipers_count": 0,
+            "curve_native_reserve": 0,
+            "curve_token_reserve": 0,
+        },
+    )
+
+    b.add_user_delta(USER, NATIVE_AMT, OVERFLOW_PRICE, trade_count_delta=1)
+
+    b.add_position_delta(
+        user_address=USER,
+        token="0x0158abff6d8344b35b5afffe7dbefc431b731a70",
+        token_bought_delta=0,
+        token_sold_delta=361959467626928724,
+        native_spent_delta=0,
+        native_received_delta=78900012596557541714,
+        balance_token_delta=-361959467626928724,
+        realized_pnl_delta=OVERFLOW_PRICE,
+        trade_count_delta=1,
+        buy_count_delta=0,
+        sell_count_delta=1,
+        last_price_native=OVERFLOW_PRICE,
+        cost_basis_delta=-100,
+    )
+
+    b.add_ohlcv(
+        "0x0158abff6d8344b35b5afffe7dbefc431b731a70",
+        60,
+        1788600000,
+        OVERFLOW_PRICE,
+        78900012596557541714,
+        OVERFLOW_PRICE,
+    )
+
+    b.add_sniper(TOKEN, USER)
+
+    b.flush(cur)
+
+    assert cur.calls, "batch.flush produced no SQL"
+
+    offenders = []
+    for v in _numeric_params(cur.calls):
+        try:
+            d = Decimal(v)
+        except Exception:
+            continue
+        if not d.is_finite() or abs(d) > CAP:
+            offenders.append(v)
+
+    assert not offenders, f"batch.flush() sent {len(offenders)} numeric params exceeding {CAP}. First: {offenders[:3]}"
+
+    for _, sql, _params in cur.calls:
+        if "crystal_unrealized_pnl" in sql:
+            assert "LEAST(GREATEST(" in sql, (
+                "crystal_unrealized_pnl result must be wrapped in LEAST(GREATEST(...)) "
+                "so its output cannot overflow numeric(50,18):\n" + sql
+            )
+
+
+def test_clamp_warning_fires_only_when_actually_clamped(capsys):
+    _fit_n50_18(Decimal("1"))
+    _fit_n50_18(Decimal(NATIVE_AMT) / Decimal(TOKEN_AMT))
+    out = capsys.readouterr().out
+    assert "[clamp]" not in out
+
+    _fit_n50_18(OVERFLOW_PRICE)
+    out = capsys.readouterr().out
+    assert "[clamp]" in out
+
+    _fit_n50_18(Decimal("Infinity"))
+    out = capsys.readouterr().out
+    assert "[clamp]" in out
