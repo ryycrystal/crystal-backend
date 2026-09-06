@@ -109,7 +109,7 @@ def nearest(points: list[tuple[int, Decimal]], keys: list[int], ts: int) -> Deci
     return min(candidates, key=lambda p: abs(p[0] - ts))[1]
 
 
-def reprice_trades(ix, side_trades, prod_trades):
+def reprice_trades(ix, side_trades, prod_trades, hot=None):
     key = lambda r: (r[ix["txhash"]].lower(), int(r[ix["log_index"]]))  # noqa: E731
     prod_by_key = {key(r): r for r in prod_trades}
     points = sorted(
@@ -133,8 +133,12 @@ def reprice_trades(ix, side_trades, prod_trades):
         out.append(tuple(row))
     side_keys = {key(r) for r in side_trades}
     synthetic = {key(r) for r in prod_trades if "venue" in ix and r[ix["venue"]] == "reconciliation"}
-    dropped = [k for k in prod_by_key if k not in side_keys and k not in synthetic]
-    return out, new_rows, dropped
+    unmatched = [k for k in prod_by_key if k not in side_keys and k not in synthetic]
+    if hot is None:
+        dropped = unmatched
+    else:
+        dropped = [k for k in unmatched if int(prod_by_key[k][ix["block_number"]]) not in hot]
+    return out, new_rows, dropped, len(unmatched) - len(dropped)
 
 
 def carry_mon_usd(ohlcv_cols, side_ohlcv, prod_ohlcv):
@@ -180,7 +184,7 @@ def aggregates(ix, rows):
     return agg
 
 
-def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
+def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh, hot=None):
     trade_cols = [c for c in shared_columns(sc, pc, "launchpad_trades") if c != "id"]
     ohlcv_cols = shared_columns(sc, pc, "launchpad_ohlcv")
     pos_cols = ("user_address", "balance_token", *POSITION_COLS)
@@ -213,7 +217,7 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
     prod_gt = [r for r in prod_trades if int(r[ix["block_number"]]) > cutoff]
     late_users = {r[ix["user_address"]] for r in prod_gt}
 
-    repriced, new_trades, dropped = reprice_trades(ix, side_trades, prod_le)
+    repriced, new_trades, dropped, replaced = reprice_trades(ix, side_trades, prod_le, hot)
     side_keep = [r for r in repriced if r[ix["user_address"]] not in late_users]
     prod_le_keep = [r for r in prod_le if r[ix["user_address"]] in late_users]
     final_rows = prod_gt + prod_le_keep + side_keep
@@ -239,7 +243,7 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
 
     print(
         f"{token}  trades prod {len(prod_trades):,} ({len(prod_gt)} after cutoff) -> {len(final_rows):,} "
-        f"(+{new_trades:,} new, {len(dropped)} dropped)   positions update {len(pos_update):,} "
+        f"(+{new_trades:,} new, {replaced} replaced, {len(dropped)} dropped)   positions update {len(pos_update):,} "
         f"insert {len(pos_insert):,} deferred {len(deferred)}   candles {len(prod_candles_replaced):,} -> {len(candles):,}   "
         f"volume_usd {prod_volume_usd:,.0f} -> {agg['volume_usd']:,.0f}",
         flush=True,
@@ -249,7 +253,8 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
         return
     if dropped:
         print(
-            f"   prod has {len(dropped)} pre-cutoff trades the side set lacks, e.g. {dropped[:3]}; skipping", flush=True
+            f"   prod has {len(dropped)} pre-cutoff trades in blocks the replay never saw, e.g. {dropped[:3]}; skipping",
+            flush=True,
         )
         return
     if not apply:
@@ -396,8 +401,11 @@ def main():
     if args.apply and EXPECTED_PGHOST_MARKER not in os.environ.get("PGHOST", ""):
         raise SystemExit(f"refusing to --apply: PGHOST is not {EXPECTED_PGHOST_MARKER}")
     cutoff = args.cutoff
-    if cutoff is None and args.blocks_file:
-        cutoff = max(json.load(open(args.blocks_file)))
+    hot = None
+    if args.blocks_file:
+        hot = {int(b) for b in json.load(open(args.blocks_file))}
+        if cutoff is None:
+            cutoff = max(hot)
     if cutoff is None:
         raise SystemExit("pass --cutoff or --blocks-file")
 
@@ -415,7 +423,7 @@ def main():
     with open(args.snapshot, "a", encoding="utf-8") as fh:
         for i, token in enumerate(tokens, 1):
             print(f"[{i}/{len(tokens)}] ", end="")
-            merge_token(sc, pc, token, cutoff, cutoff_ts, args.apply, fh)
+            merge_token(sc, pc, token, cutoff, cutoff_ts, args.apply, fh, hot)
     print(f"done in {time.time() - t0:.0f}s", flush=True)
 
 
