@@ -12,12 +12,14 @@ include = [
     "indexer_main.py",
     "env_loader.py",
     "core/*.py",
+    "core/ledger/*.py",
     "core/adapters/*.py",
     "core/storage/*.py",
     "modules/*.py",
     "api/*.py",
     "api/routes/*.py",
     "tests/*.py",
+    "scripts/ledger_*.py",
 ]
 
 [tool.ruff.format]

@@ -10,7 +10,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-RAW_URL = os.environ.get("LEDGER_TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+DIRECT_URL = os.environ.get("LEDGER_TEST_DATABASE_URL")
+RAW_URL = DIRECT_URL or os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+SCRATCH_DB = os.environ.get("SCRATCH_DB_NAME", "crystal_lp_itest") + "_ledger_store"
 PROD_TUNNEL_PORT = 15433
 
 pytestmark = pytest.mark.skipif(
@@ -34,7 +36,29 @@ def _local_only(url: str) -> None:
         pytest.skip("ledger store tests only run against a local side database")
 
 
-def _ensure_base_schema(conn) -> None:
+def _swap_db(url: str, dbname: str) -> str:
+    head, _, tail = url.rpartition("/")
+    query = ""
+    if "?" in tail:
+        _, _, query = tail.partition("?")
+        query = "?" + query
+    return f"{head}/{dbname}{query}"
+
+
+def _scratch(action: str) -> None:
+    import psycopg2
+
+    connection = psycopg2.connect(RAW_URL)
+    connection.autocommit = True
+    with connection.cursor() as cur:
+        cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s", (SCRATCH_DB,))
+        cur.execute(f"DROP DATABASE IF EXISTS {SCRATCH_DB}")
+        if action == "create":
+            cur.execute(f"CREATE DATABASE {SCRATCH_DB}")
+    connection.close()
+
+
+def _ensure_base_schema(conn, url: str) -> None:
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.launchpad_blocks')")
         present = cur.fetchone()[0] is not None
@@ -43,7 +67,7 @@ def _ensure_base_schema(conn) -> None:
     from core.storage import base as storage_base
 
     previous_url = storage_base._DATABASE_URL
-    storage_base._DATABASE_URL = RAW_URL
+    storage_base._DATABASE_URL = url
     storage_base._POOL = None
     try:
         import core.storage as storage
@@ -64,9 +88,14 @@ def conn():
     import psycopg2
 
     _local_only(RAW_URL)
-    connection = psycopg2.connect(RAW_URL)
+    if DIRECT_URL:
+        url = DIRECT_URL
+    else:
+        _scratch("create")
+        url = _swap_db(RAW_URL, SCRATCH_DB)
+    connection = psycopg2.connect(url)
     connection.autocommit = True
-    _ensure_base_schema(connection)
+    _ensure_base_schema(connection, url)
     from core.ledger.schema import init_ledger_schema
 
     with connection.cursor() as cur:
@@ -75,6 +104,8 @@ def conn():
     yield connection
     connection.rollback()
     connection.close()
+    if not DIRECT_URL:
+        _scratch("drop")
 
 
 @pytest.fixture
