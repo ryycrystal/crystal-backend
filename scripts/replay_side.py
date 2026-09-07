@@ -98,23 +98,25 @@ class LogSource:
 
     def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
         for attempt in range(FETCH_ATTEMPTS):
-            conn = self.conn()
-            watchdog = threading.Timer(FETCH_TIMEOUT, self._cancel, args=(conn,))
-            watchdog.daemon = True
-            watchdog.start()
+            watchdog = None
             try:
+                conn = self.conn()
+                watchdog = threading.Timer(FETCH_TIMEOUT, self._cancel, args=(conn,))
+                watchdog.daemon = True
+                watchdog.start()
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT number, logs FROM launchpad_block_logs WHERE number = ANY(%s)",
                         (numbers,),
                     )
                     return {int(n): (json.loads(v) if isinstance(v, str) else v) for n, v in cur.fetchall()}
-            except psycopg2.Error as e:
+            except (psycopg2.Error, RuntimeError, OSError) as e:
                 print(f"[FETCH] attempt {attempt + 1}/{FETCH_ATTEMPTS} failed: {e!r}"[:200], flush=True)
                 self._drop()
                 time.sleep(min(2**attempt, 30))
             finally:
-                watchdog.cancel()
+                if watchdog is not None:
+                    watchdog.cancel()
         raise RuntimeError("prod log fetch kept failing")
 
     @staticmethod
