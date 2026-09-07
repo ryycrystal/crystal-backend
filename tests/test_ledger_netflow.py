@@ -974,7 +974,9 @@ def test_a_pair_swap_that_moved_no_token_here_moved_it_somewhere_else():
     movement booked one of JAMES's wallets as selling the same tokens twice, into a negative balance.
     """
     pools = {POOL: (TOKEN, WMON, True)}
-    b = bundle([tf(91, WMON, POOL, WALLET, 200 * E18)], [v3swap(90, POOL, WALLET, 777 * E18, -200 * E18)], meta(WALLET, POOL))
+    b = bundle(
+        [tf(91, WMON, POOL, WALLET, 200 * E18)], [v3swap(90, POOL, WALLET, 777 * E18, -200 * E18)], meta(WALLET, POOL)
+    )
     assert [f for f in run(b, pools=pools) if f.token == TOKEN] == [], "the tokens moved in another transaction"
 
 
@@ -1007,3 +1009,28 @@ def test_a_pair_swap_whose_quote_did_move_is_still_a_price():
     assert f.kind == KIND_BUY
     assert f.quote_delta == -3 * E18
     assert f.basis_state == BASIS_OBSERVED
+
+
+def test_no_flow_is_priced_above_every_quote_that_moved_in_its_transaction():
+    """A relayer forwards what it received and is paid in another asset, keeping wei of dust.
+
+    A wallet's implied price has to come from what it sent, not from what it was left holding. Measured
+    from the net position this shape gives a price twelve orders of magnitude too high, which then prices
+    the movement that really passed through. This asserts the ceiling rather than that shape: the real
+    reproduction is JAMES transaction 0x9b3623e855d9 at block 89,459,208, where it booked 523 trillion MON
+    of cost against a token trading at 0.06, and which now nets to 0.0595 MON per token.
+    """
+    dust = 99_921_408
+    b = bundle(
+        [
+            tf(211, WMON, POOL, WALLET2, 59 * E18),
+            tf(217, TOKEN, WALLET3, WALLET2, 878 * E18),
+            tf(218, TOKEN, WALLET2, WALLET, 878 * E18 + dust),
+        ],
+        tx_meta=meta(WALLET3, WALLET2),
+    )
+    flows = run(b, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1)))
+    for f in flows:
+        assert abs(f.quote_delta or 0) <= 59 * E18, (
+            f"{f.wallet[:10]} {f.kind}: {f.quote_delta} exceeds every quote that moved in this transaction"
+        )

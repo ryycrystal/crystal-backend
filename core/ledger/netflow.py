@@ -948,22 +948,39 @@ def _flow(bundle: TxBundle, leg: _Leg, sub_index: int, origin: str | None, rates
     )
 
 
+def _sold_by(moves: list[_Move]) -> dict[str, dict[str, int]]:
+    """How much of each token each wallet actually sent, which is not the same as its net position."""
+    out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for move in moves:
+        if move.delta < 0:
+            out[move.token][move.wallet] += -move.delta
+    return out
+
+
 def _seller_hints(
-    token_deltas: dict[str, dict[str, int]],
+    moves: list[_Move],
     quote_raw: dict[str, dict[str, int]],
     tx_tokens: set[str],
     kinds: _Kinds,
     rates: Rates,
 ) -> list[_Hint]:
+    """What a wallet with no venue event of its own implies about the price, from what it was paid.
+
+    The quantity has to be what the wallet sent, not what it was left holding. A relayer that
+    forwards everything it receives nets to dust, and pairing that dust with the whole payment it
+    collected implies a price twelve orders of magnitude too high, which then prices the movement
+    that really passed through it.
+    """
+    sold = _sold_by(moves)
     out: list[_Hint] = []
     for token in sorted(tx_tokens):
-        for addr, delta in sorted(token_deltas.get(token, {}).items()):
-            if delta >= 0 or not kinds.is_wallet(addr):
+        for addr, quantity in sorted(sold.get(token, {}).items()):
+            if quantity <= 0 or not kinds.is_wallet(addr):
                 continue
             own = _own_quote(quote_raw.get(addr, {}), rates)
             if own is None or own[1] <= 0:
                 continue
-            out.append(_Hint(-(len(out) + 1), addr, token, -delta, -own[1], own[0], None))
+            out.append(_Hint(-(len(out) + 1), addr, token, quantity, -own[1], own[0], None))
     return out
 
 
@@ -1004,7 +1021,7 @@ def net_transaction(
 
     tx_tokens = {leg.token for legs in legs_by_wallet.values() for leg in legs}
     hints = _hints(bundle, tx_tokens, registry, quote_assets, kinds, markets)
-    hints += _seller_hints(token_deltas, quote_raw, tx_tokens, kinds, rates)
+    hints += _seller_hints(moves, quote_raw, tx_tokens, kinds, rates)
     used: set[int] = set()
     all_legs = [leg for legs in legs_by_wallet.values() for leg in legs]
     for leg in all_legs:
