@@ -218,6 +218,18 @@ CHECKS = [
         "OR (observed_tokens = 0 AND observed_basis <> 0) OR (estimated_tokens = 0 AND estimated_basis <> 0)",
     ),
     (
+        "no wallet holds two swap legs of one token against each other",
+        """
+        SELECT count(*) FROM wallet_flows a JOIN wallet_flows b
+          ON a.txhash = b.txhash AND a.wallet = b.wallet AND a.token = b.token AND a.log_index <> b.log_index
+        WHERE a.kind = 'swap_leg' AND b.kind = 'swap_leg' AND sign(a.token_delta) <> sign(b.token_delta)
+        """,
+    ),
+    (
+        "every flow was written by the current interpretation",
+        f"SELECT count(*) FROM wallet_flows WHERE interpretation < {INTERPRETATION}",
+    ),
+    (
         "no position carries negative inventory or negative held-out basis",
         "SELECT count(*) FROM positions_v2 WHERE observed_tokens < 0 OR estimated_tokens < 0 "
         "OR unresolved_tokens < 0 OR cost_basis_native < 0 OR basis_estimated_native < 0 "
@@ -299,6 +311,39 @@ def run_invariants(cur) -> int:
     return failures
 
 
+PRICE_SPREAD = """
+WITH priced AS (
+    SELECT price_native FROM wallet_flows
+    WHERE token = %s AND basis_state = 'observed' AND kind IN ('buy', 'sell')
+      AND price_native IS NOT NULL AND price_native > 0
+),
+middle AS (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price_native) m FROM priced)
+SELECT count(*) FILTER (WHERE price_native > m * %s OR price_native < m / %s), count(*),
+       min(price_native), (SELECT m FROM middle), max(price_native)
+FROM priced, middle
+"""
+SPREAD_FACTOR = 1000
+
+
+def run_prices(cur, tokens: list[str]) -> None:
+    """How far observed prices sit from a token's own median.
+
+    Reported rather than asserted: a token's price genuinely moves over its life, so a wide spread is not by
+    itself wrong. It is the shape a decimals or units error makes, and it is worth looking at before
+    trusting any cost figure, because a single absurd price also poisons every flow later priced by
+    reference to it.
+    """
+    for token in tokens:
+        cur.execute(PRICE_SPREAD, (token, SPREAD_FACTOR, SPREAD_FACTOR))
+        off, priced, low, mid, high = cur.fetchone()
+        if not priced:
+            continue
+        print(
+            f"  {token[:12]}: {off:,} of {priced:,} observed prices are more than {SPREAD_FACTOR}x from the "
+            f"median  [{float(low):.3e} .. {float(mid):.3e} .. {float(high):.3e} MON per token]"
+        )
+
+
 def run_supply(cur, tokens: list[str]) -> int:
     failures = 0
     for token in tokens:
@@ -376,11 +421,15 @@ def main() -> int:
     print(f"  {partial} token(s) hold flows without coverage from creation; {negatives} negative balance(s) overall")
     print(f"  {stale:,} flow(s) were written by an interpretation older than {INTERPRETATION}")
 
+    tokens = [t.lower() for t in args.token]
+    if not tokens:
+        cur.execute(FULLY_REPLAYED)
+        tokens = [r[0] for r in cur.fetchall()]
+    print("")
+    print("observed price spread")
+    run_prices(cur, tokens)
+
     if not args.skip_supply:
-        tokens = [t.lower() for t in args.token]
-        if not tokens:
-            cur.execute(FULLY_REPLAYED)
-            tokens = [r[0] for r in cur.fetchall()]
         print("")
         print(f"supply conservation ({len(tokens)} fully replayed token(s))")
         failures += run_supply(cur, tokens)
