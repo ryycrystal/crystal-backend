@@ -567,6 +567,53 @@ def _movements(bundle: TxBundle, tokens: set[str], quote_assets: frozenset[str])
     return moves, quotes
 
 
+def _venue_movements(
+    bundle: TxBundle,
+    tokens: set[str],
+    pools: dict[str, tuple[str, str, bool]] | None,
+    kinds: _Kinds,
+) -> tuple[list[_Move], list[_QuoteMove]]:
+    """Movements a swap event reports when no ERC-20 carried them.
+
+    Uniswap V4 can settle a swap against the pool manager's internal claim balances, so a real trade can
+    leave no transfer at all. Those transactions are invisible to any rule that starts from transfers, and
+    on moncock alone 26 wallet-transactions vanish that way. The pool's own registration says which token
+    it trades, so the event is sufficient evidence on its own. The actor comes from the event, never from
+    the transaction origin, which is a bundler or a relayer as often as it is the trader.
+    """
+    t_moves: list[_Move] = []
+    q_moves: list[_QuoteMove] = []
+    if not pools:
+        return t_moves, q_moves
+    for ev in bundle.venue_events:
+        if ev.tag not in POOL_TAGS:
+            continue
+        parsed = ev.parsed or {}
+        venue = (ev.address or "").lower()
+        if not _trusted_emitter(venue, kinds):
+            continue
+        key = str(parsed.get("pool_id") or venue).lower()
+        info = pools.get(key)
+        if not info:
+            continue
+        token, quote, token_is_0 = info
+        token = (token or "").lower()
+        if token not in tokens or _venue_token_amounts(bundle, venue, token):
+            continue
+        sign = 1 if ev.tag == "V4SWAP" else -1
+        a0 = sign * int(parsed.get("amount0") or 0)
+        a1 = sign * int(parsed.get("amount1") or 0)
+        if a0 == 0 or a1 == 0 or _same_sign(a0, a1):
+            continue
+        token_delta, quote_delta = (a0, a1) if token_is_0 else (a1, a0)
+        actor = (parsed.get("user") or parsed.get("sender") or "").lower()
+        if not actor or not kinds.is_wallet(actor):
+            continue
+        t_moves.append(_Move(ev.log_index, actor, token, token_delta, venue))
+        q_moves.append(_QuoteMove(ev.log_index, actor, (quote or NATIVE).lower(), quote_delta, venue))
+    return t_moves, q_moves
+
+
 def _quote_total(assigned: list[_QuoteMove], rates: Rates) -> tuple[str, int, str]:
     """Conserve every quote leg; mixed currencies collapse to their MON equivalent, never to one family."""
     assets = {q.asset for q in assigned}
@@ -875,6 +922,7 @@ def net_transaction(
     rates: Rates | None = None,
     reference_price: PriceFn | None = None,
     markets: dict[str, tuple[str, str]] | None = None,
+    pools: dict[str, tuple[str, str, bool]] | None = None,
 ) -> list[Flow]:
     rates = rates or Rates()
     quote_assets = frozenset(a.lower() for a in quote_assets)
@@ -884,6 +932,9 @@ def net_transaction(
     origin = (bundle.userop_sender or (bundle.meta.from_addr if bundle.meta else None) or "").lower() or None
 
     moves, quote_moves = _movements(bundle, tokens, quote_assets)
+    extra_moves, extra_quotes = _venue_movements(bundle, tokens, pools, kinds)
+    moves += extra_moves
+    quote_moves += extra_quotes
     actions = _match_actions(moves, quote_moves, kinds, rates)
     legs_by_wallet: dict[str, list[_Leg]] = defaultdict(list)
     own_by_leg: dict[int, tuple[tuple[str, int] | None, str]] = {}

@@ -96,8 +96,7 @@ only path by which this branch can break production with the flag off, and it sh
 
 ## Status
 
-Seam 1 is mostly built. Eight of the nine written fixtures pass; the ninth, a claim-settled swap that
-moves no ERC-20, still fails and keeps its marker. Flows are now built from individual movements matched
+Seam 1 is built and all nine written fixtures pass with no markers left. Flows are now built from individual movements matched
 to the payment that funded them, a venue event is evidence only from a classified venue, and a flow's key
 comes from its own movement rather than an ordinal over the registry.
 
@@ -111,8 +110,13 @@ names said what they were doing. Consequence: cost basis rises slightly on every
 PnL falls by the same amount. Exposing the fee as its own field, so gross and net are both available, is
 follow-up work rather than part of this seam.
 
-Still open in seam 1: movements from venue events where no ERC-20 moves, which needs the pool-to-token
-mapping inside netting. Then seams 2, 3 and 4, and step 0 coverage, none of which are started.
+A swap that settles against a pool manager's internal claim balances now produces movements from the
+event itself, keyed by the pool's own registration, with the actor taken from the event rather than the
+transaction origin. The engine must pass its pool table in for this to fire; until it does, those trades
+stay invisible in a replay.
+
+Next: a clean rebuild of the side database, because every change here alters values on real data and so
+far they are proven only against synthetic fixtures. Then step 0 coverage, and seams 2, 3 and 4.
 ## Acceptance
 
 Twelve value-level fixtures, from `feedback7.md`, each with the number it must produce. Quantity checks

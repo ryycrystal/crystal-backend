@@ -5,7 +5,7 @@ balance comparisons, supply conservation and SQL invariants all pass while cost,
 identity are wrong. None of these can be expressed as a quantity check.
 
 The rule these exist to satisfy, from feedback8.md: a check must be shown to FAIL on the defect it targets
-before it is allowed to pass on the fix. Each test below is therefore marked xfail(strict=True) against the
+before it is allowed to pass on the fix. Each was written as a failing test first, marked xfail(strict=True) against the
 current engine. As a seam is repaired its fixtures start passing and pytest reports XPASS as a failure,
 which is the signal to drop the marker. A test that stops failing for the wrong reason is caught the same way.
 
@@ -13,8 +13,6 @@ Numbers come from feedback7.md's acceptance table, which measured the "today" co
 """
 
 from decimal import Decimal
-
-import pytest
 
 from core.ledger.netflow import net_transaction  # noqa: E402
 from core.ledger.types import (  # noqa: E402
@@ -169,7 +167,6 @@ def test_11_flow_identity_survives_a_registry_change():
     assert set(keyed_before) == set(keyed_after), "the same movement changed key when another token registered"
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: a swap with no ERC-20 leg never reaches netting")
 def test_01_a_claim_settled_swap_is_a_movement_without_a_transfer():
     """Uniswap V4 can settle against claim balances, moving no ERC-20. Today: no rows at all."""
     swap = VenueEvent(
@@ -179,8 +176,13 @@ def test_01_a_claim_settled_swap_is_a_movement_without_a_transfer():
         address=POOL,
     )
     b = bundle([], [swap], meta(WALLET, POOL))
-    flows = [f for f in run(b, rates=RATES) if f.token == TOKEN]
+    pools = {"0x01": (TOKEN, USDC, True)}
+    flows = [f for f in run(b, rates=RATES, pools=pools) if f.token == TOKEN]
     assert flows, "a claim-settled swap must still produce a movement"
+    f = flows[0]
+    assert f.wallet == WALLET
+    assert f.token_delta == 320 * E18
+    assert f.kind == KIND_BUY
 
 
 def test_the_defects_these_fixtures_target_are_invisible_to_a_quantity_check():
