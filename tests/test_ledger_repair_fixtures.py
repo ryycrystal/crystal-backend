@@ -47,11 +47,10 @@ from tests.test_ledger_netflow import (
     tf,
 )
 
-RATES = Rates(mon_usd=Decimal(1))
+RATES = Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1))
 FORGER = "0x" + "f0" * 20
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: transaction-wide netting collapses both actions")
 def test_02_an_unequal_round_trip_keeps_both_actions():
     """Buy 100 at 100 and sell 60 at 72 in one transaction. Today: one flow, +40 for -28 WMON."""
     b = bundle(
@@ -73,7 +72,6 @@ def test_02_an_unequal_round_trip_keeps_both_actions():
     assert sells[0].quote_delta == 72 * E18
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: one netted row per wallet and token, keyed by an ordinal")
 def test_03_sell_then_buy_keeps_its_own_identity():
     """Sell at log 2, buy at log 7. Today: one flow anchored at 2 but labelled a buy."""
     b = bundle(
@@ -91,7 +89,6 @@ def test_03_sell_then_buy_keeps_its_own_identity():
     assert earliest.kind == KIND_SELL
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: opposite-sign movements are matched by coincidence")
 def test_04_a_gift_and_an_unrelated_payment_are_not_a_purchase():
     """A is gifted 100 by B and separately pays 10 WMON to C. Today: an observed buy at -10 WMON."""
     b = bundle(
@@ -104,7 +101,7 @@ def test_04_a_gift_and_an_unrelated_payment_are_not_a_purchase():
     f = only(run(b, rates=RATES))
     assert f.kind == KIND_TRANSFER_IN
     assert f.basis_state == BASIS_UNRESOLVED
-    assert f.quote_delta == 0
+    assert not f.quote_delta
 
 
 @pytest.mark.xfail(strict=True, reason="seam 1: any address may emit a venue topic, no emitter gate")
@@ -121,7 +118,6 @@ def test_08_a_forged_venue_event_cannot_manufacture_a_purchase():
     assert f.basis_state == BASIS_UNRESOLVED
 
 
-@pytest.mark.xfail(strict=True, reason="seam 4: _own_quote keeps one quote family and discards the other")
 def test_09_a_purchase_funded_in_two_quotes_conserves_both():
     """10 WMON + 20 USDC at 1 USD/MON for 100 tokens. Today: 20 MON recorded, a third understated."""
     b = bundle(
@@ -154,7 +150,6 @@ def test_10_a_router_fee_is_retained_not_erased():
     assert abs(f.quote_delta) == paid, "the fee must stay in cost, or be recorded separately"
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: sub_index is an ordinal over currently registered tokens")
 def test_11_flow_identity_survives_a_registry_change():
     """Registering a token that sorts earlier must not renumber an existing token's key."""
     legs = [

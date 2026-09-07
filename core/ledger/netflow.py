@@ -500,6 +500,162 @@ def _collect(bundle: TxBundle, tokens: set[str], quote_assets: frozenset[str]):
     return token_deltas, first_log, quote_raw, quote_sources
 
 
+@dataclass
+class _Move:
+    log_index: int
+    wallet: str
+    token: str
+    delta: int
+    counterparty: str
+
+
+@dataclass
+class _QuoteMove:
+    log_index: int
+    wallet: str
+    asset: str
+    delta: int
+    counterparty: str
+    source: str = SOURCE_TRANSFER_NET
+
+
+def _movements(bundle: TxBundle, tokens: set[str], quote_assets: frozenset[str]):
+    """Every observed movement kept apart; netting them per wallet is what erases actions."""
+    moves: list[_Move] = []
+    quotes: list[_QuoteMove] = []
+    for leg in bundle.transfers:
+        if leg.amount <= 0:
+            continue
+        if leg.token in tokens:
+            moves.append(_Move(leg.log_index, leg.from_addr, leg.token, -leg.amount, leg.to_addr))
+            moves.append(_Move(leg.log_index, leg.to_addr, leg.token, leg.amount, leg.from_addr))
+        elif leg.token in quote_assets:
+            quotes.append(_QuoteMove(leg.log_index, leg.from_addr, leg.token, -leg.amount, leg.to_addr))
+            quotes.append(_QuoteMove(leg.log_index, leg.to_addr, leg.token, leg.amount, leg.from_addr))
+    meta = bundle.meta
+    top = None
+    if meta and meta.value and meta.value > 0:
+        src, dst = (meta.from_addr or "").lower(), (meta.to_addr or "").lower()
+        top = (src, dst, int(meta.value))
+        if src:
+            quotes.append(_QuoteMove(-1, src, NATIVE, -int(meta.value), dst))
+        if dst:
+            quotes.append(_QuoteMove(-1, dst, NATIVE, int(meta.value), src))
+    trace = bundle.trace
+    if trace and trace.available:
+        skipped_top = False
+        for src, dst, value in trace.transfers:
+            src, dst, value = (src or "").lower(), (dst or "").lower(), int(value or 0)
+            if value <= 0:
+                continue
+            if not skipped_top and top is not None and (src, dst, value) == top:
+                skipped_top = True
+                continue
+            quotes.append(_QuoteMove(-1, src, NATIVE, -value, dst, SOURCE_TRACE))
+            quotes.append(_QuoteMove(-1, dst, NATIVE, value, src, SOURCE_TRACE))
+    return moves, quotes
+
+
+def _quote_total(assigned: list[_QuoteMove], rates: Rates) -> tuple[str, int, str]:
+    """Conserve every quote leg; mixed currencies collapse to their MON equivalent, never to one family."""
+    assets = {q.asset for q in assigned}
+    source = SOURCE_TRACE if {q.source for q in assigned} == {SOURCE_TRACE} else SOURCE_TRANSFER_NET
+    if len(assets) == 1:
+        asset = next(iter(assets))
+        return asset, _to_native_units(asset, sum(q.delta for q in assigned), rates), source
+    total = Decimal(0)
+    for q in assigned:
+        if q.asset in MON_FAMILY:
+            total += Decimal(_to_native_units(q.asset, q.delta, rates))
+        elif rates.usdc_per_mon > 0:
+            total += Decimal(q.delta) / USD_UNIT / rates.usdc_per_mon * WEI
+    return NATIVE, int(total), source
+
+
+def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove]) -> list[_QuoteMove]:
+    """Cancel a wrap against the payment it funded.
+
+    Receiving WMON from the zero address and then spending it is one payment, not income plus a payment,
+    so an unmatched inbound leg offsets a matched outbound leg of the same asset. A sale's proceeds are
+    never spare, because they were matched to the disposal that earned them.
+    """
+    if not spare or not assigned:
+        return assigned
+    out: list[_QuoteMove] = []
+    for q in assigned:
+        remaining = q.delta
+        for other in spare:
+            if other.asset != q.asset or _same_sign(other.delta, remaining) or not remaining:
+                continue
+            take = min(abs(remaining), abs(other.delta))
+            remaining += take if remaining < 0 else -take
+            other.delta += take if other.delta < 0 else -take
+        if remaining:
+            out.append(_QuoteMove(q.log_index, q.wallet, q.asset, remaining, q.counterparty, q.source))
+    return out
+
+
+def _payment_reaches(quote: _QuoteMove, party: str, quotes: list[_QuoteMove]) -> bool:
+    """True when a payment moved between the wallet and party, directly or through one intermediary.
+
+    An escrow or settlement contract standing between two counterparties is still one payment, so a
+    single hop is followed. Anything further is not treated as the same action.
+    """
+    if quote.counterparty == party:
+        return True
+    for other in quotes:
+        if other.wallet != quote.counterparty:
+            continue
+        if other.asset == quote.asset and other.counterparty == party:
+            return True
+    return False
+
+
+def _match_actions(moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, rates: Rates):
+    """Pair each token movement with the payment that funded it.
+
+    A payment counts only when it reached the party the tokens came from. Where that party is a venue or a
+    router, any non-wallet counterparty qualifies, because a routed trade pays a different hop than it
+    receives from. Where it is an ordinary wallet the match must be exact, which is what stops an unrelated
+    payment elsewhere in the same transaction from reading as a purchase.
+    """
+    actions: list[tuple[_Move, list[_QuoteMove]]] = []
+    by_wallet: dict[str, list[_Move]] = defaultdict(list)
+    for m in moves:
+        if m.delta and kinds.is_wallet(m.wallet):
+            by_wallet[m.wallet].append(m)
+    quotes_by_wallet: dict[str, list[_QuoteMove]] = defaultdict(list)
+    for q in quotes:
+        if q.delta:
+            quotes_by_wallet[q.wallet].append(q)
+
+    for wallet in sorted(by_wallet):
+        wallet_moves = sorted(by_wallet[wallet], key=lambda m: (m.log_index, m.token))
+        assigned: dict[int, list[_QuoteMove]] = {i: [] for i in range(len(wallet_moves))}
+        spare: list[_QuoteMove] = []
+        for q in sorted(quotes_by_wallet.get(wallet, []), key=lambda q: q.log_index):
+            best = None
+            best_gap = None
+            for i, m in enumerate(wallet_moves):
+                if _same_sign(q.delta, m.delta):
+                    continue
+                if kinds.is_wallet(m.counterparty) and not _payment_reaches(q, m.counterparty, quotes):
+                    continue
+                if not kinds.is_wallet(m.counterparty) and kinds.is_wallet(q.counterparty):
+                    continue
+                gap = abs(q.log_index - m.log_index)
+                if best_gap is None or gap < best_gap:
+                    best = i
+                    best_gap = gap
+            if best is not None:
+                assigned[best].append(q)
+            else:
+                spare.append(q)
+        for i, m in enumerate(wallet_moves):
+            actions.append((m, _less_conversions(assigned[i], spare)))
+    return actions
+
+
 def _resolve_wallet(
     legs: list[_Leg],
     own: tuple[str, int] | None,
@@ -716,12 +872,18 @@ def net_transaction(
     token_deltas, first_log, quote_raw, quote_sources = _collect(bundle, tokens, quote_assets)
     origin = (bundle.userop_sender or (bundle.meta.from_addr if bundle.meta else None) or "").lower() or None
 
+    moves, quote_moves = _movements(bundle, tokens, quote_assets)
+    actions = _match_actions(moves, quote_moves, kinds, rates)
     legs_by_wallet: dict[str, list[_Leg]] = defaultdict(list)
-    for token in sorted(token_deltas):
-        for addr, delta in sorted(token_deltas[token].items()):
-            if delta == 0 or not kinds.is_wallet(addr):
-                continue
-            legs_by_wallet[addr].append(_Leg(addr, token, delta, first_log[(addr, token)]))
+    own_by_leg: dict[int, tuple[tuple[str, int] | None, str]] = {}
+    for move, assigned in actions:
+        leg = _Leg(move.wallet, move.token, move.delta, move.log_index)
+        if assigned:
+            asset, delta, source = _quote_total(assigned, rates)
+            own_by_leg[id(leg)] = ((asset, delta), source)
+        else:
+            own_by_leg[id(leg)] = (None, SOURCE_TRANSFER_NET)
+        legs_by_wallet[move.wallet].append(leg)
     if not legs_by_wallet:
         return []
 
@@ -734,10 +896,9 @@ def net_transaction(
         _counterparty_and_venue(bundle, leg, kinds)
 
     for wallet in sorted(legs_by_wallet):
-        own = _own_quote(quote_raw.get(wallet, {}), rates)
-        sources = quote_sources.get(wallet, set())
-        own_source = SOURCE_TRACE if sources == {SOURCE_TRACE} else SOURCE_TRANSFER_NET
-        _resolve_wallet(legs_by_wallet[wallet], own, own_source, hints, used, rates)
+        for leg in legs_by_wallet[wallet]:
+            own, own_source = own_by_leg[id(leg)]
+            _resolve_wallet([leg], own, own_source, hints, used, rates)
 
     _resolve_across_wallets(all_legs, hints, used, rates)
     _swap_pairs(legs_by_wallet, reference_price)
@@ -750,5 +911,11 @@ def net_transaction(
         else:
             _classify_unpriced(leg, bundle, kinds, origin, reference_price)
 
-    all_legs.sort(key=lambda leg: (leg.wallet, leg.token))
-    return [_flow(bundle, leg, i, origin, rates) for i, leg in enumerate(all_legs)]
+    all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))
+    seen: dict[tuple[str, str, int], int] = defaultdict(int)
+    flows = []
+    for leg in all_legs:
+        key = (leg.wallet, leg.token, leg.log_index)
+        flows.append(_flow(bundle, leg, seen[key], origin, rates))
+        seen[key] += 1
+    return flows

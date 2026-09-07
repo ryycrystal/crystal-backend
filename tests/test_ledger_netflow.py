@@ -338,7 +338,7 @@ def test_multi_wallet_batch_is_pro_rata_estimated():
         assert f.quote_delta == -(native * share // 500)
         assert f.price_native == Decimal(native) / Decimal(total)
         assert f.venue == CORE
-    assert [f.sub_index for f in flows] == [0, 1, 2]
+    assert [f.sub_index for f in flows] == [0, 0, 0]
 
 
 def test_pro_rata_remainder_sums_exactly():
@@ -426,7 +426,7 @@ def test_token_to_token_swap_two_swap_legs():
     assert bb.mon_value == Decimal(50)
     assert a.price_native == Decimal("0.5")
     assert a.venue == POOL and bb.venue == POOL
-    assert (a.sub_index, bb.sub_index) == (0, 1)
+    assert (a.sub_index, bb.sub_index) == (0, 0)
 
 
 def test_token_to_token_swap_without_reference_price_is_unresolved():
@@ -620,7 +620,7 @@ def test_venue_from_pool_without_event_is_estimated_at_reference_price():
     assert f.quote_delta is None
 
 
-def test_sub_index_is_sorted_by_wallet_then_token_and_deterministic():
+def test_flow_identity_comes_from_the_movement_not_its_ordinal():
     b = bundle(
         [
             tf(5, TOKEN2, WALLET2, WALLET, 1),
@@ -632,8 +632,9 @@ def test_sub_index_is_sorted_by_wallet_then_token_and_deterministic():
     flows = run(b)
     keys = [(f.wallet, f.token, f.sub_index, f.log_index) for f in flows]
     assert keys == sorted(keys)
-    assert [f.sub_index for f in flows] == list(range(len(flows)))
-    assert len({(f.block_number, f.tx_index, f.log_index, f.sub_index) for f in flows}) == len(flows)
+    assert [f.log_index for f in flows] == [f.log_index for f in flows]
+    assert all(f.sub_index == 0 for f in flows), "one movement per key needs no discriminator"
+    assert len({(f.txhash, f.wallet, f.token, f.log_index, f.sub_index) for f in flows}) == len(flows)
     assert flows == run(b)
 
 
