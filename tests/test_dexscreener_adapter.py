@@ -235,6 +235,35 @@ def test_events_use_quote_decimals_for_the_native_leg(monkeypatch):
     assert Decimal(ev["priceNative"]) == Decimal("3")
 
 
+def test_events_omits_reserves_when_snapshot_missing(monkeypatch):
+    token = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+    maker = "0xdbf03b407c01e7cd3cbea99509d93f8dddc8c6fb"
+    rows = [
+        (
+            200,
+            1756000100,
+            "0xaaa",
+            3,
+            maker,
+            token,
+            True,
+            10**18,
+            4 * 10**25,
+            11 * 10**18,
+            9 * 10**26,
+            4,
+            dexscreener.WMON,
+        ),
+        (201, 1756000200, "0xbbb", 4, maker, token, True, 10**18, 4 * 10**25, 0, 0, 5, dexscreener.WMON),
+    ]
+    ctx = _CursorContext([rows])
+    monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)
+    healthy, zeroed = dex_events(fromBlock=200, toBlock=201)["events"]
+    assert healthy["reserves"] == {"asset0": "900000000", "asset1": "11"}
+    assert "reserves" not in zeroed
+    assert Decimal(zeroed["priceNative"]) == Decimal(10**18) / Decimal(4 * 10**25)
+
+
 def test_events_empty_and_inverted_range(monkeypatch):
     ctx = _CursorContext([[]])
     monkeypatch.setattr(dexscreener, "db_cursor", lambda: ctx)

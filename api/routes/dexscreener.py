@@ -226,8 +226,9 @@ def dex_events(fromBlock: int = Query(...), toBlock: int = Query(...)):
             "maker": _checksum(user),
             "pairId": _checksum(token),
             "priceNative": price,
-            "reserves": {"asset0": _dec_str(token_res), "asset1": _dec_str(native_res, qd)},
         }
+        if int(native_res or 0) > 0 and int(token_res or 0) > 0:
+            event["reserves"] = {"asset0": _dec_str(token_res), "asset1": _dec_str(native_res, qd)}
         if is_buy:
             event["asset1In"] = _dec_str(native_amt, qd)
             event["asset0Out"] = _dec_str(token_amt)
