@@ -414,28 +414,6 @@ def _flow_key(flow: Flow) -> tuple[int, int, int, int]:
     return (flow.block_number, flow.tx_index, flow.log_index, flow.sub_index)
 
 
-def fold(prev: PositionState | None, flows: list[Flow]) -> tuple[PositionState, list[Flow]]:
-    state = (
-        replace(prev, parked={name: replace(bucket) for name, bucket in prev.parked.items()})
-        if prev
-        else PositionState()
-    )
-    out: list[Flow] = []
-    for flow in sorted(flows, key=_flow_key):
-        if not state.wallet:
-            state.wallet = flow.wallet
-            state.token = flow.token
-        effect = _apply(state, flow)
-        timestamp = int(flow.timestamp)
-        if state.first_flow_ts is None or timestamp < state.first_flow_ts:
-            state.first_flow_ts = timestamp
-        state.last_flow_ts = timestamp
-        state.last_flow_block = flow.block_number
-        state.flow_count += 1
-        out.append(replace(flow, **effect.as_flow_fields()))
-    return state, out
-
-
 def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tuple[dict[str, PositionState], list[Flow]]:
     """Fold every wallet of one token together, in chain order.
 
@@ -452,6 +430,8 @@ def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tupl
         state = states.get(flow.wallet)
         if state is None:
             state = states[flow.wallet] = PositionState(wallet=flow.wallet, token=flow.token)
+        elif not state.wallet:
+            state.wallet, state.token = flow.wallet, flow.token
         effect = _apply(state, flow, transit)
         _stamp(state, flow)
         out.append(replace(flow, **effect.as_flow_fields()))
@@ -465,6 +445,17 @@ def _stamp(state: PositionState, flow: Flow) -> None:
     state.last_flow_ts = timestamp
     state.last_flow_block = flow.block_number
     state.flow_count += 1
+
+
+def fold(prev: PositionState | None, flows: list[Flow]) -> tuple[PositionState, list[Flow]]:
+    """One wallet's slice of the same fold, for callers that hold only one wallet's flows.
+
+    A transfer's other half is by definition another wallet's, so nothing is inherited here; that is the
+    whole reason the token-wide fold exists.
+    """
+    wallet = (prev.wallet if prev is not None else "") or next((flow.wallet for flow in flows), "")
+    states, out = fold_token({wallet: prev} if prev is not None else None, flows)
+    return states.get(wallet) or prev or PositionState(), out
 
 
 def fold_position(wallet: str, token: str, flows: list[Flow]) -> tuple[PositionRow, list[Flow]]:

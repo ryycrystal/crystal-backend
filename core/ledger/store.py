@@ -244,6 +244,14 @@ def load_token_flows(cur, token: str, after: int | None = None) -> list[Flow]:
     return [_flow_from_row(row) for row in cur.fetchall()]
 
 
+def _position_from_row(row) -> PositionRow:
+    """Quantities come back from a numeric column as decimals, and the fold counts in whole wei."""
+    values = {}
+    for column, value in zip(POSITION_COLUMNS, row):
+        values[column] = int(value) if isinstance(value, Decimal) else value
+    return PositionRow(**values)
+
+
 def load_positions(cur, token: str, wallets) -> dict:
     """Rebuild each wallet's fold state from what was stored, so a fold can resume instead of starting over."""
     from core.ledger.fold import PositionState
@@ -255,7 +263,7 @@ def load_positions(cur, token: str, wallets) -> dict:
         f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions_v2 WHERE token = %s AND wallet = ANY(%s)",
         (_lower(token), addrs),
     )
-    rows = [PositionRow(**dict(zip(POSITION_COLUMNS, row))) for row in cur.fetchall()]
+    rows = [_position_from_row(row) for row in cur.fetchall()]
     parked = load_parked(cur, [(row.wallet, row.token) for row in rows])
     return {row.wallet: PositionState.from_row(row, parked.get((row.wallet, row.token))) for row in rows}
 

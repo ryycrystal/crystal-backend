@@ -788,3 +788,17 @@ def test_a_newer_interpretation_of_the_same_movement_replaces_the_older_reading(
     cur.execute("SELECT kind FROM wallet_flows")
     assert cur.fetchone()[0] == "sell", "an older reading never wins"
     assert _count(cur, "wallet_flows") == 1
+
+
+def test_a_position_resumed_from_the_database_counts_in_whole_wei(cur):
+    """A numeric column reads back as a decimal, and decimal division truncates where integer division floors."""
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    _covered(cur, TOKEN_X, 400)
+    store.insert_flows(cur, [_buy(100, WALLET_A, 3 * 10**18, 10**18)])
+    store.refold_tokens(cur, {TOKEN_X: 100}, fold_token)
+    resumed = store.load_positions(cur, TOKEN_X, [WALLET_A])[WALLET_A]
+    for name in ("balance_token", "cost_basis_native", "observed_tokens", "unresolved_tokens"):
+        assert isinstance(getattr(resumed, name), int), name
+    assert resumed.balance_token == 3 * 10**18 and resumed.cost_basis_native == 10**18
