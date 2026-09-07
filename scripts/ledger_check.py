@@ -25,6 +25,7 @@ DUST_WEI = 10**15
 VENUE_KINDS = {"venue_pool", "venue_router", "venue_curve", "venue_custody", "token", "zero"}
 BALANCE_OF_SELECTOR = "0x70a08231"
 CHAIN_BATCH = 20
+HOLDER_DUST_WEI = 10**15
 RPC_INTERVAL = 0.06
 
 CHIPOTLE = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
@@ -329,23 +330,34 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
 
     holders = [w for w in prod_holders(cur, JAMES) if kinds.get(w) not in VENUE_KINDS]
     missing = [w for w in holders if w not in ledger]
-    checks.append(
-        Check(
-            name,
-            f"prod holders present ({len(holders)})",
-            "0 missing",
-            f"{len(missing)} missing {missing[:5]}",
-            not missing,
-        )
-    )
     if rpc_url is None:
+        checks.append(
+            Check(
+                name,
+                f"prod holders present ({len(holders)}, unverified against chain)",
+                "0 missing",
+                f"{len(missing)} missing {missing[:5]}",
+                not missing,
+            )
+        )
         checks.append(Check(name, "chain balanceOf", "skipped", "skipped", True))
         return checks
 
     targets = sorted(set(wallets) | set(missing))
     balances, unreachable = chain_balances(rpc_url, JAMES, targets, head)
-    mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
     where = f"at block {head:,}" if head else "at latest"
+    held_at_head = [w for w in missing if balances.get(w, 0) > HOLDER_DUST_WEI]
+    arrived_later = [w for w in missing if w in balances and balances[w] <= HOLDER_DUST_WEI]
+    checks.append(
+        Check(
+            name,
+            f"prod holders present ({len(holders)}, holding on chain {where})",
+            "0 missing",
+            f"{len(held_at_head)} missing {held_at_head[:5]}; {len(arrived_later)} of prod's holders bought after the head",
+            not held_at_head,
+        )
+    )
+    mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
     checks.append(
         Check(
             name,
