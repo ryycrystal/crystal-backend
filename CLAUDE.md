@@ -922,7 +922,10 @@ verify against the code rather than trusting either. Ideally they get merged.
 ## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
 
 ### Contract generations and the migration history
-- Gen-3 core router is `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration).
+- **The live core is `0x8e42afa92A8B0ED3eE23Db6B108419Aae47aD61F` (relaunch 2026-09-06, block
+  102,410,369)** with vault factory `0x2388208C8F39e1E5A7FfbF8a2B30c73C7009cc00`. See the
+  relaunch section near the end of this file.
+- Gen-3 core router was `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration), now retired.
   Event topics changed at that migration and the `Migrated` event was REMOVED — old
   topic assumptions silently match nothing.
 - nad.fun has two curve generations with different emitters (v1 `0xA728…/0x6F6B…`,
@@ -2080,3 +2083,62 @@ Two merge facts learned on 2026-09-07:
   guard treats those as cache holes and skips the token, and the fix is to add the
   blocks to the token's list. A future scan should also select blocks with a `V4SWAP`
   whose pool id maps to the token in `univ4_pools`.
+
+---
+
+## The 2026-09-06 crystal relaunch (new core, wiped crystal history)
+
+Crystal was redeployed on 2026-09-06 07:31 UTC and every old crystal row was deleted.
+**nad.fun was untouched and must stay that way in any follow-up.**
+
+| what | address | first block |
+| --- | --- | --- |
+| core / router | `0x8e42afa92A8B0ED3eE23Db6B108419Aae47aD61F` | 102,410,369 |
+| vault factory | `0x2388208C8F39e1E5A7FfbF8a2B30c73C7009cc00` | 102,410,392 |
+| market 1 WMON/USDC (AMM, canonical) | `0xF3daa78C8928447a337Bf217725B87DAe36C4aA4` | 102,410,373 |
+| market 2 WMON/USDC (non-canonical) | `0xAd523d1130E43d2548c630D43f7fA3e91681019E` | 102,410,376 |
+| market 3 AUSD/USDC | `0x6C46B8B533C957658A0A0b88Dd4e62cf0e3E731f` | 102,410,379 |
+| market 4 cbBTC/USDC | `0x13cd06343D38620e9374f24C32F0f2deE92c255C` | 102,410,382 |
+
+**Only two addresses are configured.** Every crystal event tag (`MC`, `TR`, `LT`, orderbook,
+pool, `MG`) is gated on `addr == CONTRACTS["ROUTER"]`, so markets are *discovered* from the
+core's `MarketCreated` events and must never be hardcoded. Vault tags are gated on
+`VAULT_FACTORY_ADDRS`. The event topics did not change in this relaunch — the decoder already
+knew `MARKET_CREATED_V2_TOPIC` — so no parser work was needed.
+
+**Both retired vault factories stay indexed** (`0xe35937…` gen2, `0x3dbf7D…` legacy).
+`tests/test_vault_factory_generations.py` fails if the list drops below two, because a retired
+factory still holds withdrawable user funds. Do not "clean these up" — dropping them strands
+depositors, and it has already caused one incident.
+
+### What the purge did, and what it left
+
+`scripts/purge_crystal_generation.py --before-block 102410369 --apply` removed **545,686 rows**
+across 15 tables (496,255 of them `crystal_orderbook_events`), scoped by
+`launchpad_tokens.source = 0 AND created_block < blk` and `crystal_markets.created_block < blk`.
+The script re-counts nad.fun tokens/trades/positions before and after and **rolls back if any of
+them shrink** — that guard is the reason it is safe to run against prod; keep it.
+
+Deliberately **not** purged, because the script does not cover them and they are a product call:
+`crystal_vaults` (2), `crystal_vault_users` (5), `crystal_vault_deposits`/`withdrawals` (19),
+`crystal_vault_balance_samples` (98k, unrebuildable — see the clean-reindex table above),
+`crystal_users` (12), `crystal_revenue_samples` (2.5k), `spot_graph_buckets` (4.9k),
+`referral_*` (23). They point at retired markets and are now orphaned.
+
+A full pre-purge snapshot of every crystal table (27 gzipped CSVs, 7.7 MiB) was written to the
+session scratchpad `crystal-purge-snapshot/`. The old data is also re-derivable from
+`launchpad_block_logs`, which was preserved.
+
+### Two traps met while doing this
+
+- **`record_dex_tip` has no backwards guard.** It blindly `set_meta`s whatever block it is
+  handed, so running `SEQUENCER.process_chunk` over *historical* blocks rewinds the DEX Screener
+  checkpoint. Register historical events by calling the `state.apply_*` method directly inside
+  one transaction instead of replaying a chunk.
+- **`scripts/replay_addresses.py` is not address-scoped for logs.** `_hot_blocks` picks blocks
+  *containing* your addresses, but `_filter_logs` then keeps every log those blocks carry that
+  `accepts_log_for_indexing` allows — including `TF` transfers for any known launchpad token and
+  `V3SWAP` (a `PASSTHROUGH` tag that returns True for every address). Replaying the four
+  market-creation blocks would have **re-applied two nad.fun transfers and a V3 swap**; trades are
+  idempotent on `(txhash, log_index)` but transfers are not, so balances would have been
+  corrupted. Check what else lives in a block before replaying it.
