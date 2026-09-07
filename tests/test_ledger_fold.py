@@ -532,3 +532,99 @@ def test_an_unpriced_sale_is_neither_a_loss_nor_part_of_the_running_average():
     assert state.realized_pnl_native == 400 and state.realized_estimated_native == 0
     assert state.trade_count == 3 and state.sell_count == 2
     _closed_identity(state)
+
+
+WALLETS = ["0x" + f"{n:02x}" * 20 for n in (0x11, 0x55, 0x99, 0xDD)]
+
+
+def _random_token_history(rng):
+    """Several wallets trading one token, handing it to each other, over random blocks."""
+    held = dict.fromkeys(WALLETS, 0)
+    flows = []
+    block = 0
+    for _ in range(rng.randint(8, 60)):
+        block += 1
+        actor = rng.choice(WALLETS)
+        choice = rng.random()
+        owners = [w for w in WALLETS if held[w] > 0]
+        if choice < 0.35 or not owners:
+            amount = rng.randint(1, 10**6)
+            flows.append(_flow("buy", amount, -rng.randint(1, 10**9), block=block, wallet=actor))
+            held[actor] += amount
+        elif choice < 0.6:
+            seller = rng.choice(owners)
+            amount = rng.randint(1, held[seller])
+            flows.append(_flow("sell", -amount, rng.randint(0, 10**9), block=block, wallet=seller))
+            held[seller] -= amount
+        else:
+            sender = rng.choice(owners)
+            receiver = rng.choice([w for w in WALLETS if w != sender])
+            amount = rng.randint(1, held[sender])
+            log_index = rng.randint(0, 5)
+            flows += [
+                _flow(
+                    "transfer_out",
+                    -amount,
+                    block=block,
+                    log_index=log_index,
+                    sub_index=0,
+                    wallet=sender,
+                    counterparty=receiver,
+                ),
+                _flow(
+                    "transfer_in",
+                    amount,
+                    block=block,
+                    log_index=log_index,
+                    sub_index=1,
+                    wallet=receiver,
+                    counterparty=sender,
+                ),
+            ]
+            held[sender] -= amount
+            held[receiver] += amount
+    return flows
+
+
+def _transfer_pairs(out):
+    pairs = {}
+    for flow in out:
+        if flow.kind in ("transfer_out", "transfer_in"):
+            pairs.setdefault((flow.txhash, flow.log_index), []).append(flow)
+    return [legs for legs in pairs.values() if len(legs) == 2]
+
+
+def test_a_transfer_moves_cost_between_wallets_without_creating_or_destroying_any():
+    from core.ledger.fold import fold_token
+
+    for seed in range(200):
+        rng = random.Random(20000 + seed)
+        flows = _random_token_history(rng)
+        states, out = fold_token(None, flows)
+        for legs in _transfer_pairs(out):
+            gone = next(f for f in legs if f.token_delta < 0)
+            arrived = next(f for f in legs if f.token_delta > 0)
+            assert arrived.basis_observed_delta == -gone.basis_observed_delta, seed
+            assert arrived.basis_estimated_delta == -gone.basis_estimated_delta, seed
+            assert arrived.qty_observed == -gone.qty_observed, seed
+            assert arrived.qty_unresolved == -gone.qty_unresolved, seed
+        assert sum(f.basis_observed_delta for f in out) == sum(s.cost_basis_native for s in states.values()), seed
+        assert sum(f.qty_observed for f in out) == sum(s.observed_tokens for s in states.values()), seed
+
+
+def test_a_token_folded_in_pieces_lands_where_one_pass_lands():
+    from core.ledger.fold import fold_token
+
+    for seed in range(200):
+        rng = random.Random(30000 + seed)
+        flows = _random_token_history(rng)
+        whole, whole_out = fold_token(None, flows)
+        blocks = sorted({f.block_number for f in flows})
+        cut = rng.choice(blocks)
+        head, head_out = fold_token(None, [f for f in flows if f.block_number <= cut])
+        resumed = {w: PositionState.from_row(s.to_row(), s.parked) for w, s in head.items()}
+        tail, tail_out = fold_token(resumed, [f for f in flows if f.block_number > cut])
+        assert {w: s.to_row() for w, s in tail.items()} == {w: s.to_row() for w, s in whole.items()}, (seed, cut)
+        assert sorted(head_out + tail_out, key=lambda f: (f.block_number, f.log_index, f.sub_index)) == sorted(
+            whole_out, key=lambda f: (f.block_number, f.log_index, f.sub_index)
+        ), (seed, cut)
