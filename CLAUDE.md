@@ -2129,6 +2129,24 @@ A full pre-purge snapshot of every crystal table (27 gzipped CSVs, 7.7 MiB) was 
 session scratchpad `crystal-purge-snapshot/`. The old data is also re-derivable from
 `launchpad_block_logs`, which was preserved.
 
+### `crystal_vaults.market` is the pair's canonical market, not the vault's own
+
+`state.apply_market_created` calls `storage.link_crystal_vaults_for_market` whenever a
+**canonical** market is created, and that UPDATE matches vaults by **asset pair**
+(`WHERE (quote=X AND base=Y) OR (quote=Y AND base=X)`), not by vault identity. So registering
+the relaunched canonical WMON/USDC market re-pointed both retired `crystal mm` vaults at it.
+
+This is the intended design (vaults follow their pair's live market across a market upgrade) and
+the column already disagreed with chain beforehand: vault `0x581172…` reads
+`market() = 0xc8045b5d…` on chain while the DB said `0x43b1e521…`. Do not "repair" it to the
+on-chain value — pointing a vault at a market row that no longer exists risks it disappearing
+from `/vaults/list`, and **one of those vaults still has a live depositor**:
+`0x5a90e781…` holds 13,472,106,654,981 shares on chain in the closed vault `0x581172…`, which is
+still fully withdrawable. Keeping it attached to a live market is what keeps it visible.
+
+Consequence to be aware of after any relaunch: retired vaults surface under the new canonical
+market until someone deletes them, and deleting the one with a holder would hide real funds.
+
 ### Two traps met while doing this
 
 - **`record_dex_tip` has no backwards guard.** It blindly `set_meta`s whatever block it is
