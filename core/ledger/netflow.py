@@ -682,15 +682,21 @@ def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove]) -> li
 def _payment_reaches(quote: _QuoteMove, party: str, quotes: list[_QuoteMove]) -> bool:
     """True when a payment moved between the wallet and party, directly or through one intermediary.
 
-    An escrow or settlement contract standing between two counterparties is still one payment, so a
-    single hop is followed. Anything further is not treated as the same action.
+    An escrow or settlement contract standing between two counterparties is still one payment, so a single
+    hop is followed. What arrives has to be what was sent: a payment forwarded through an escrow keeps its
+    amount, and requiring that is what separates it from an unrelated refund that merely happens to pass
+    through the same contract. Without it, a 99 USDC refund elsewhere in the transaction could pay for a
+    hand-off of 165,765 MON worth of tokens, and the wallet that handed them over booked the difference as a
+    loss it never took.
     """
     if quote.counterparty == party:
         return True
     for other in quotes:
         if other.wallet != quote.counterparty:
             continue
-        if other.asset == quote.asset and other.counterparty == party:
+        if other.asset != quote.asset or other.counterparty != party:
+            continue
+        if _within_fee_tolerance(abs(other.delta), abs(quote.delta)):
             return True
     return False
 
