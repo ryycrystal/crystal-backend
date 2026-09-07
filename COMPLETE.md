@@ -155,5 +155,12 @@ blocks a second running next to the database in Azure. chipotle needs that path,
 fixture covers a single wallet with 20 trades, so what it would add is one more hand-checked wallet,
 not new coverage of the value layer.
 
+**A position does not say how far forward its coverage runs.** Coverage from creation is what decides
+whether a token is served at all, and it has a `to_block`, but nothing on the position row carries it.
+The aborted chipotle replay made this concrete: it left 148,000 blocks of real history covered from
+creation through block 38,146,392, which is honest and correct as of that block, and would have been
+read as current. Those rows were deleted rather than left. A consumer needs the coverage end alongside
+the position, and the invariant that a served position is current needs somewhere to look.
+
 **The fee is not exposed as its own field.** Cost is what the wallet paid, which is the conservation the
 reviews asked for, but a consumer cannot separate what the venue received from what the router took.
