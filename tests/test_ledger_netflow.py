@@ -1070,3 +1070,17 @@ def test_a_venue_event_still_prices_a_partial_fill():
     )
     f = only(run(b))
     assert f.quote_delta is not None and abs(f.quote_delta) <= 20 * E18
+
+
+def test_two_halves_that_agree_on_the_price_are_a_trade():
+    b = bundle(
+        [
+            tf(103, TOKEN, WALLET, WALLET2, 100 * E18),
+            tf(104, USDC, WALLET2, WALLET, 500_000_000),
+        ],
+        tx_meta=meta(WALLET2, WALLET),
+    )
+    halves = {f.wallet: f for f in run(b) if f.token == TOKEN}
+    assert halves[WALLET].kind == KIND_SELL and halves[WALLET2].kind == KIND_BUY
+    assert halves[WALLET].quote_delta == 500_000_000
+    assert halves[WALLET2].quote_delta == -500_000_000
