@@ -69,6 +69,7 @@ NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
 AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
 STABLE_USD_QUOTES = {USDC, AUSD}
+USD_PEGGED_QUOTES = {USDC}
 
 
 def _fmt(value) -> str:
@@ -1204,6 +1205,7 @@ app.include_router(x_router)
 
 
 _mon_price_cache: tuple[float, Decimal] | None = None
+_ausd_price_cache: tuple[float, Decimal] | None = None
 
 
 _lvmon_rate_cache: tuple[float, Decimal] | None = None
@@ -1223,6 +1225,31 @@ def _lvmon_rate() -> Decimal:
         return Decimal(1)
     _lvmon_rate_cache = (now, rate)
     return rate
+
+
+def _ausd_price_usd() -> Decimal:
+    global _ausd_price_cache
+    now = time.time()
+    if _ausd_price_cache and (now - _ausd_price_cache[0]) < 30:
+        return _ausd_price_cache[1]
+    try:
+        stored = storage.get_ausd_price_usd()
+        rate = Decimal(stored) if stored is not None else Decimal(1)
+        if rate <= 0:
+            rate = Decimal(1)
+    except Exception:
+        return Decimal(1)
+    _ausd_price_cache = (now, rate)
+    return rate
+
+
+def stable_quote_usd(quote_token: str | None) -> Decimal:
+    """Dollar value of a stable quote. USDC is the anchor and is exactly one;
+    AUSD floats on its own book and is read from the oracle."""
+    quote = (quote_token or "").lower()
+    if quote == AUSD:
+        return _ausd_price_usd()
+    return Decimal(1)
 
 
 def _mon_price_usd() -> Decimal:
@@ -1250,7 +1277,7 @@ def _quote_price_usd(quote_token: str | None) -> Decimal:
     if quote in NATIVE_EQUIV_QUOTES:
         return _mon_price_usd()
     if quote in STABLE_USD_QUOTES:
-        return Decimal(1)
+        return stable_quote_usd(quote)
     return Decimal(0)
 
 

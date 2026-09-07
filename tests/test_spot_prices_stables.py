@@ -43,3 +43,19 @@ def test_without_a_feed_stables_are_still_one_dollar_and_native_is_unknown():
     prices = spot_prices_from_markets([(WMON, USDC, Decimal("0.026724"))], Decimal(0))
     assert prices[USDC] == Decimal(1)
     assert prices[WMON] is None
+
+
+def test_ausd_takes_the_oracle_rate_while_usdc_stays_pegged(monkeypatch):
+    monkeypatch.setattr(api.api, "_ausd_price_usd", lambda: Decimal("0.99"))
+    prices = spot_prices_from_markets([(XAUT, AUSD, Decimal("100"))], FEED)
+    assert prices[USDC] == Decimal(1)
+    assert prices[AUSD] == Decimal("0.99")
+    assert prices[XAUT] == Decimal("99")
+
+
+def test_stable_quote_usd_only_floats_ausd(monkeypatch):
+    monkeypatch.setattr(api.api, "_ausd_price_usd", lambda: Decimal("0.97"))
+    assert api.api.stable_quote_usd(USDC) == Decimal(1)
+    assert api.api.stable_quote_usd(AUSD) == Decimal("0.97")
+    assert api.api._quote_price_usd(AUSD) == Decimal("0.97")
+    assert api.api._quote_price_usd(USDC) == Decimal(1)

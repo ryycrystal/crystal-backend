@@ -111,15 +111,19 @@ def _median_sync_price(addr: str, quote: str, ts: int) -> Decimal | None:
 
 
 def _token_price_at(token: dict[str, Any], ts: int, mon_usd: Decimal, wmon: str) -> Decimal | None:
-    from api.api import STABLE_USD_QUOTES
+    from api.api import AUSD, STABLE_USD_QUOTES, stable_quote_usd
 
     addr = (token["address"] or "").lower()
     ticker = (token.get("ticker") or "").upper()
-    if addr in STABLE_USD_QUOTES or ticker in ("USDC", "AUSD"):
+    if addr in STABLE_USD_QUOTES:
+        return stable_quote_usd(addr)
+    if ticker == "AUSD":
+        return stable_quote_usd(AUSD)
+    if ticker == "USDC":
         return Decimal(1)
     if addr == "native" or addr == wmon:
         return mon_usd if mon_usd > 0 else None
-    quotes = [(wmon, mon_usd)] + [(stable, Decimal(1)) for stable in STABLE_USD_QUOTES]
+    quotes = [(wmon, mon_usd)] + [(stable, stable_quote_usd(stable)) for stable in STABLE_USD_QUOTES]
     for quote, quote_usd in quotes:
         if quote_usd <= 0:
             continue

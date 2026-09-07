@@ -21,11 +21,12 @@ def _market(base, quote, price, base_ticker="", base_name=""):
     return mi
 
 
-def _state(markets):
+def _state(markets, ausd=Decimal(1)):
     st = State.__new__(State)
     st._lock = threading.RLock()
     st.mon_price_usd = ORACLE
     st.lvmon_rate = Decimal("1.05")
+    st.ausd_price_usd = Decimal(ausd)
     st.tokenToPrice = {}
     st.tokenGraph = {}
     st._seed_aux_prices_locked()
@@ -64,6 +65,38 @@ def test_a_stable_as_base_of_a_native_market_stays_at_one_dollar():
 
 def test_pinned_set_covers_the_anchors():
     assert {USDC, AUSD, WMON, LVMON} <= set(state_mod.PINNED_PRICE_TOKENS)
+
+
+def test_only_usdc_is_hard_pegged_to_a_dollar():
+    assert state_mod.USD_PEGGED_TOKENS == (USDC,)
+    assert AUSD not in state_mod.USD_PEGGED_TOKENS
+
+
+def test_ausd_seeds_from_its_own_rate_rather_than_a_hardcoded_dollar():
+    st = _state([], ausd=Decimal("0.9971"))
+    assert st.tokenToPrice[AUSD] == Decimal("0.9971")
+    assert st.tokenToPrice[USDC] == Decimal(1)
+
+
+def test_the_ausd_usdc_book_moves_the_ausd_price():
+    st = _state([])
+    st.set_ausd_price_usd(Decimal("0.994"))
+    assert st.ausd_price_usd == Decimal("0.994")
+    assert st.tokenToPrice[AUSD] == Decimal("0.994")
+
+
+def test_an_implausible_ausd_print_is_ignored_and_the_last_rate_stands():
+    st = _state([], ausd=Decimal("0.998"))
+    for bogus in (Decimal(0), Decimal("0.2"), Decimal("4"), None, "not a number"):
+        st.set_ausd_price_usd(bogus)
+        assert st.ausd_price_usd == Decimal("0.998")
+        assert st.tokenToPrice[AUSD] == Decimal("0.998")
+
+
+def test_a_token_quoted_in_ausd_is_priced_through_the_ausd_rate():
+    st = _state([_market(CHIP, AUSD, "2")], ausd=Decimal("0.5"))
+    st.sweep()
+    assert st.tokenToPrice[CHIP] == Decimal(1)
 
 
 class _FakeCursor:

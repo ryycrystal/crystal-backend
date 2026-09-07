@@ -1577,6 +1577,33 @@ def set_mon_price_usd(value) -> None:
         )
 
 
+def set_ausd_price_usd(value) -> None:
+    val = Decimal(value)
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO launchpad_meta (key, value)
+            VALUES ('ausd_price_usd', %s)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value;
+            """,
+            (val,),
+        )
+
+
+def get_ausd_price_usd():
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT value
+            FROM launchpad_meta
+            WHERE key = 'ausd_price_usd';
+            """
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def get_mon_price_usd():
     with db_cursor() as cur:
         cur.execute(
