@@ -144,10 +144,16 @@ Together these show up as the price spread, the one structural check that does n
 | JAMES | 441 of 84,906 |
 | moncock | 673 of 187,853 |
 
-**chipotle has not been rebuilt.** Its own logs appear in 337,308 blocks against 41,799 for JAMES, so it is
-several hours through the tunnel from here. It is replaying now and may not finish; a registry-wide replay
-needs the Azure job path regardless, where this code was measured at 160 to 640 blocks a second against
-about 50 here.
+**chipotle was not rebuilt, and cannot be from here.** Its own logs appear in 337,308 blocks against
+41,799 for JAMES, and it is dense: 12.7 flows per hot block against JAMES's 3.7, with 56,547 wallets.
+Measured over its first 500 blocks it replays at **5 blocks a second, an 18-hour projection**, because
+almost all of that time is RPC round trips for transaction metadata and this link is in China. JAMES and
+moncock managed about 50. It was started and stopped rather than left to grind.
+
+This is the same constraint that governs any registry-wide replay: the code was measured at 160 to 640
+blocks a second running next to the database in Azure. chipotle needs that path, not this one. Its
+fixture covers a single wallet with 20 trades, so what it would add is one more hand-checked wallet,
+not new coverage of the value layer.
 
 **The fee is not exposed as its own field.** Cost is what the wallet paid, which is the conservation the
 reviews asked for, but a consumer cannot separate what the venue received from what the router took.
