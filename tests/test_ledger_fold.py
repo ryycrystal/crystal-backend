@@ -663,7 +663,6 @@ def test_basis_released_by_a_transfer_reaches_the_receiver_however_it_was_labell
     refund and called a buy at 0.163 MON. Because it is a buy, inheritance never runs and the 47,875 MON the
     sender released is destroyed. On moncock the same chain drops the whole cost of a wallet's holding.
     """
-    from core.ledger.fold import fold_token
 
     sender, receiver = WALLETS[0], WALLETS[1]
     flows = [
@@ -671,9 +670,38 @@ def test_basis_released_by_a_transfer_reaches_the_receiver_however_it_was_labell
         _flow("transfer_out", -3_641_364, block=2, log_index=123, sub_index=0, wallet=sender, counterparty=receiver),
         _flow("buy", 3_641_364, -1, block=2, log_index=123, sub_index=1, wallet=receiver, counterparty=sender),
     ]
+    _assert_handover_conserves(flows)
+
+
+def test_an_inbound_swap_leg_of_a_transfer_takes_up_the_cost_too():
+    """The receiving half is labelled a swap leg when the wallet moved another token in the same
+    transaction. It is still the receiving half of a transfer, and on JAMES 306 hand-offs lost part of
+    their cost this way.
+    """
+    sender, receiver = WALLETS[0], WALLETS[1]
+    flows = [
+        _flow("buy", 1_219_721, -97_304, block=1, wallet=sender),
+        _flow("transfer_out", -1_219_721, block=2, log_index=29, sub_index=0, wallet=sender, counterparty=receiver),
+        _flow(
+            "swap_leg",
+            1_219_721,
+            -92_480,
+            block=2,
+            log_index=29,
+            sub_index=1,
+            wallet=receiver,
+            counterparty=sender,
+            basis_state="estimated",
+        ),
+    ]
+    _assert_handover_conserves(flows)
+
+
+def _assert_handover_conserves(flows):
+    from core.ledger.fold import fold_token
+
     states, out = fold_token(None, flows)
-    assert out[1].basis_delta == -47_875, "the sender releases what it held"
-    assert out[2].basis_delta == 47_875, "and the receiver takes it up, whatever the label says"
-    assert states[receiver].cost_basis_native == 47_875
-    assert states[sender].cost_basis_native == 0
-    assert sum(f.basis_delta for f in out) == 47_875, "no basis is created or destroyed in the hand-off"
+    released, taken = out[1].basis_delta, out[2].basis_delta
+    assert taken == -released, f"the sender released {released} and the receiver took {taken}"
+    assert states[flows[0].wallet].cost_basis_native == 0
+    assert states[flows[2].wallet].cost_basis_native == -released

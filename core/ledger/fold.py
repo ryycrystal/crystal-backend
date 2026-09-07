@@ -32,6 +32,13 @@ BUY_KINDS = frozenset({KIND_BUY, KIND_MINT})
 INBOUND_KINDS = frozenset({KIND_TRANSFER_IN, KIND_AIRDROP})
 PARK_KINDS = frozenset({KIND_LP_ADD, KIND_VAULT_DEPOSIT})
 RESTORE_KINDS = frozenset({KIND_LP_REMOVE, KIND_VAULT_WITHDRAW})
+HANDOVER_KINDS = BUY_KINDS | INBOUND_KINDS | {KIND_SWAP_LEG}
+"""Inbound movements that can be the receiving half of a transfer.
+
+Which of these a movement is labelled depends on what else its wallet did in the transaction, and none
+of that changes the fact that a sender released cost into it. On JAMES 306 hand-offs arrived labelled a
+swap leg and kept a reference price instead of the cost handed to them."""
+
 PARKED_AGGREGATES = (
     "parked_observed_tokens",
     "parked_estimated_tokens",
@@ -401,9 +408,9 @@ def _apply(state: PositionState, flow: Flow, transit: dict | None = None) -> Eff
     if kind == KIND_CUSTODY_WITHDRAW:
         state.custody_balance -= amount
         return Effect()
+    if delta > 0 and kind in HANDOVER_KINDS and transit is not None and _handover(flow) in transit:
+        return _apply_transfer_in(state, flow, amount, transit)
     if kind in BUY_KINDS:
-        if transit is not None and _handover(flow) in transit:
-            return _apply_transfer_in(state, flow, amount, transit)
         return _apply_buy(state, flow, amount)
     if kind == KIND_SELL:
         return _apply_sell(state, flow, amount)

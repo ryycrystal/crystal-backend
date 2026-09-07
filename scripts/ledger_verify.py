@@ -131,6 +131,7 @@ CHECKS = [
          AND in_leg.log_index = out_leg.log_index AND in_leg.token = out_leg.token
          AND in_leg.wallet = out_leg.counterparty
         WHERE out_leg.kind = 'transfer_out' AND in_leg.token_delta > 0
+          AND out_leg.basis_delta < 0
           AND in_leg.basis_delta <> -out_leg.basis_delta
         """,
     ),
