@@ -761,3 +761,74 @@ def test_reference_price_is_the_median_of_recent_sized_observed_trades_only():
     assert engine._reference_price("0xtoken", 100, 1_700_000_000, cur) == Decimal("0.0201")
     assert "basis_state = 'observed'" in cur.sql[0]
     assert "abs(token_delta) >= %s" in cur.sql[0]
+
+
+def transfer_block_logs(blk, sender, receiver, amount, txh):
+    return [_log(blk, 2, 10, txh, TOKEN, [TF_TOPIC, _ta(sender), _ta(receiver)], "0x" + _w(amount))]
+
+
+@pytestmark_db
+def test_a_transfer_carries_its_cost_all_the_way_into_the_stored_positions(seeded):
+    """The whole path: buy, hand the tokens on, sell them from the other wallet.
+
+    Folded wallet by wallet the receiver's tokens arrive priceless and the sale reads as pure profit, which
+    is the phantom-profit shape the rebuild exists to remove. Both halves must survive storage for this to
+    work at all, so this also pins the primary key that used to collapse them into one row.
+    """
+    from core.ledger.types import TxMeta
+    from core.storage import db_cursor
+
+    transfer_block, sale_block = BUY_BLOCK + 10, BUY_BLOCK + 20
+    transfer_tx, sale_tx = "0x" + "77" * 32, "0x" + "88" * 32
+    metas = dict(fixture_metas())
+    metas[transfer_tx] = TxMeta(transfer_tx, transfer_block, 2, WALLET, WALLET2, 0, "0xa9059cbb")
+    metas[sale_tx] = TxMeta(sale_tx, sale_block, 3, WALLET2, CORE, 0, "0x1fff991f")
+    kinds = fixture_kinds()
+    kinds.kinds[WALLET2] = "eoa"
+    engine = fixture_engine(db_cursor, metas=FakeTxMeta(metas), kinds=kinds)
+    engine.scope = frozenset({TOKEN})
+
+    sale = [
+        _log(sale_block, 3, 26, sale_tx, TOKEN, [TF_TOPIC, _ta(WALLET2), _ta(CORE)], "0x" + _w(BUY_TOKENS)),
+        _log(
+            sale_block,
+            3,
+            28,
+            sale_tx,
+            CORE,
+            [TR_TOPIC, _ta(MARKET), _ta(WALLET2)],
+            "0x" + _w(0) + _w(BUY_TOKENS) + _w(SELL_NATIVE) + _w(0) + _w(0),
+        ),
+    ]
+    with db_cursor() as cur:
+        engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur)
+        engine.process_block(
+            transfer_block,
+            1_757_000_000 + transfer_block,
+            transfer_block_logs(transfer_block, WALLET, WALLET2, BUY_TOKENS, transfer_tx),
+            cur,
+        )
+        engine.process_block(sale_block, 1_757_000_000 + sale_block, sale, cur)
+        engine.cover(cur, [TOKEN], BUY_BLOCK - 1000, sale_block)
+        engine.flush(cur)
+
+        cur.execute(
+            "SELECT wallet, kind, sub_index, basis_delta FROM wallet_flows WHERE block_number = %s ORDER BY sub_index",
+            (transfer_block,),
+        )
+        halves = cur.fetchall()
+        cur.execute(
+            "SELECT wallet, balance_token, cost_basis_native, realized_pnl_native, unresolved_tokens "
+            "FROM positions_v2 WHERE token = %s ORDER BY wallet",
+            (TOKEN,),
+        )
+        positions = {row[0]: row[1:] for row in cur.fetchall()}
+
+    assert [(w, k, s) for w, k, s, _ in halves] == [(WALLET, "transfer_out", 0), (WALLET2, "transfer_in", 1)]
+    assert halves[0][3] == -BUY_NATIVE and halves[1][3] == BUY_NATIVE, (
+        "the cost leaves one wallet and reaches the other"
+    )
+    assert positions[WALLET] == (0, 0, 0, 0), "the sender keeps neither the tokens nor their cost, and books no gain"
+    balance, basis, realized, unresolved = positions[WALLET2]
+    assert (balance, basis, unresolved) == (0, 0, 0)
+    assert realized == SELL_NATIVE - BUY_NATIVE, "the sale is priced against what the sender originally paid"
