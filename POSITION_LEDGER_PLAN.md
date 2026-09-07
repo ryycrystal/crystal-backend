@@ -356,6 +356,14 @@ Order of evidence, first match wins, all cached in `address_kinds`:
 1. **Known lists**: crystal core, launchpad curves, our order book (custody), vault
    factories and vaults, `PASSTHROUGH_ADDRS`, 0x Settler / AllowanceHolder, known routers,
    V4 PoolManager, WMON/USDC/AUSD/LVMON token contracts, the zero address.
+   **Every generation counts, not just the live one.** `core/chain.py` holds a single
+   `CRYSTAL_ADDR` that moves with each relaunch (four so far: 05-14, 08-04, 08-28, 09-07),
+   and the indexer only needs the current one. A historical ledger needs the union, or a
+   replay classifies a retired core as an unknown contract, fails the pair probe and books
+   positions on it. `CRYSTAL_CORE_ADDRS` in `core/ledger/kinds.py` carries the full list.
+   The same hazard applies to any list an env var replaces wholesale (`PASSTHROUGH_ADDRESSES`,
+   `VAULT_FACTORY_ADDRESSES`): live config is not history, and the ledger should keep its own
+   generation lists rather than inherit a moving pointer.
 2. **Factory and initialise events we already index**: V2 pair creation, V3 pool creation,
    `V4INIT`, nad.fun pair creation, crystal migrations (`MG`) → `venue_pool`.
 3. **ERC-4337**: a transaction to the EntryPoint carrying `UserOperationEvent` → the
