@@ -295,7 +295,26 @@ def token_scope(src: LogSource, tokens: list[str]) -> tuple[dict[str, int], dict
         venues[token.lower()].add(market.lower())
     missing = [t for t in tokens if t not in created]
     if missing:
-        raise SystemExit(f"not in prod launchpad_tokens: {missing}")
+        with storage.db_cursor() as cur:
+            cur.execute("SELECT token, created_block FROM launchpad_tokens WHERE token = ANY(%s)", (missing,))
+            for token, blk in cur.fetchall():
+                if blk:
+                    created[token] = int(blk)
+                    print(
+                        f"[SCOPE] {token}: prod no longer lists it, using the side database's created block {int(blk):,}",
+                        flush=True,
+                    )
+            cur.execute("SELECT token_addr, pool FROM launchpad_pools WHERE token_addr = ANY(%s)", (missing,))
+            for token, pool in cur.fetchall():
+                venues[token].add(pool.lower())
+            cur.execute(
+                "SELECT base_address, market FROM crystal_markets WHERE LOWER(base_address) = ANY(%s)", (missing,)
+            )
+            for token, market in cur.fetchall():
+                venues[token.lower()].add(market.lower())
+        missing = [t for t in tokens if t not in created]
+    if missing:
+        raise SystemExit(f"not in prod launchpad_tokens nor the side database: {missing}")
     return created, venues
 
 
