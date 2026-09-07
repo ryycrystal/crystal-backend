@@ -1,9 +1,11 @@
 """Fetch a contract's own logs straight from the chain for a block range, 100 blocks per window.
 
-Prod's log cache only holds logs for addresses the indexer was tracking when it fetched the block, so a token
-registered late (a nad.fun token registered at migration) has a history the cache never saw. This script pulls
-that history from the public RPC, which caps eth_getLogs at 100 blocks, rejects topic filters, and allows
-JSON-RPC batches of a handful of windows per request. It writes {block: [log, ...]} JSON that
+Prod's log cache is filtered by TOPIC, not by address: it holds every address's logs for the topics the indexer
+was watching when it fetched the block (measured 2026-09-07: 69 of 74 Transfer emitters in a 300-block sample are
+not in any registry). So a token's own history is in the cache from its first block, but logs whose topic was
+added later are missing everywhere, which is why V4 swap events are absent before 2026-09-05. This script fills
+those gaps by address from the public RPC, which caps eth_getLogs at 100 blocks, rejects topic filters, and
+allows JSON-RPC batches of a handful of windows per request. It writes {block: [log, ...]} JSON that
 scripts/ledger_replay.py merges through --chain-logs-file.
 
   python scripts/ledger_chain_logs.py --address 0xTOKEN --from 85000000 --to 85819843 --out james_curve.json
