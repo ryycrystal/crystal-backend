@@ -48,6 +48,13 @@ from core.ledger.types import (
 
 CURVE_TAGS = frozenset({"LT", "NFB", "NFS"})
 POOL_TAGS = frozenset({"V2SWAP", "V3SWAP", "V4SWAP"})
+SETTLING_TAGS = frozenset({"V4SWAP"})
+"""Venues that can move a token without an ERC-20 transfer.
+
+Uniswap V4 settles against the pool manager's own claim balances, so a real trade can leave no transfer
+at all and the event is the only evidence there is. A V2 or V3 pair has no such mechanism: it moves the
+ERC-20 in the same transaction, so an event with no transfer means the tokens were sent in an earlier one
+and that movement is already recorded."""
 CORE_FILL_TAGS = frozenset({"TR"})
 AMOUNT_TOLERANCE_WEI = 1
 FEE_TOLERANCE = Decimal("0.10")
@@ -594,7 +601,7 @@ def _venue_movements(
     if not pools:
         return t_moves, q_moves
     for ev in bundle.venue_events:
-        if ev.tag not in POOL_TAGS:
+        if ev.tag not in SETTLING_TAGS:
             continue
         parsed = ev.parsed or {}
         venue = (ev.address or "").lower()
@@ -865,9 +872,17 @@ def _resolve_across_wallets(legs: list[_Leg], hints: list[_Hint], used: set[int]
 
 
 def _swap_pairs(legs_by_wallet: dict[str, list[_Leg]], reference_price: PriceFn | None) -> None:
+    """Two unpriced movements in opposite directions are a swap only if they are two different tokens.
+
+    One token leaving and returning is a wallet sending to itself, which changes nothing. Priced as a swap
+    it becomes a sale and a purchase that never happened, and since the two cancel, no quantity check can
+    see it.
+    """
     for legs in legs_by_wallet.values():
         pending = [leg for leg in legs if not leg.resolved and leg.kind is None]
         if len(pending) != 2 or _same_sign(pending[0].token_delta, pending[1].token_delta):
+            continue
+        if pending[0].token == pending[1].token:
             continue
         for leg in pending:
             leg.kind = KIND_SWAP_LEG

@@ -932,3 +932,47 @@ def test_a_small_transfer_beside_a_large_one_names_its_own_recipient():
     incoming = {f.log_index: f for f in flows if f.token_delta > 0}
     assert incoming[33].wallet == WALLET2 and incoming[33].counterparty == WALLET
     assert incoming[34].wallet == fee_taker and incoming[34].counterparty == WALLET
+
+
+def test_a_wallet_sending_tokens_to_itself_is_not_a_swap():
+    """Two opposite movements of ONE token are a self-transfer; a swap is two different tokens.
+
+    Priced as a swap the pair invents a sale and a purchase out of a movement that changed nothing, which
+    net quantity cannot see. Three of JAMES's transactions have this shape.
+    """
+    b = bundle([tf(188, TOKEN, WALLET, WALLET, 265 * E18)], tx_meta=meta(WALLET, TOKEN))
+    flows = [f for f in run(b, reference_price=lambda _t: Decimal("0.5")) if f.wallet == WALLET]
+    assert {f.kind for f in flows} == {KIND_TRANSFER_OUT, KIND_TRANSFER_IN}, [f.kind for f in flows]
+    assert all(f.quote_delta is None for f in flows), "nothing was bought or sold"
+    assert sum(f.token_delta for f in flows) == 0
+
+
+def test_a_token_to_token_swap_is_still_a_swap():
+    b = bundle(
+        [tf(4, TOKEN, WALLET, POOL, 100 * E18), tf(5, TOKEN2, POOL, WALLET, 50 * E18)],
+        tx_meta=meta(WALLET, POOL),
+    )
+    flows = [f for f in run(b, reference_price=lambda _t: Decimal("0.5")) if f.wallet == WALLET]
+    assert {f.kind for f in flows} == {KIND_SWAP_LEG}, [f.kind for f in flows]
+
+
+def v3swap(idx, pool, sender, amount0, amount1):
+    return VenueEvent(
+        tag="V3SWAP",
+        log_index=idx,
+        parsed={"pool": pool, "sender": sender, "user": sender, "amount0": amount0, "amount1": amount1},
+        address=pool,
+    )
+
+
+def test_a_pair_swap_that_moved_no_token_here_moved_it_somewhere_else():
+    """Transfer into the pair, then call swap: the disposal belongs to the transfer, not to the later call.
+
+    Uniswap V4 can settle a swap against internal claim balances, so a V4 event with no transfer really is
+    the movement. A V2 or V3 pair cannot: it always moves the ERC-20 in the same transaction, so an absent
+    transfer means the tokens arrived in an earlier one and are already recorded. Reading the event as a
+    movement booked one of JAMES's wallets as selling the same tokens twice, into a negative balance.
+    """
+    pools = {POOL: (TOKEN, WMON, True)}
+    b = bundle([tf(91, WMON, POOL, WALLET, 200 * E18)], [v3swap(90, POOL, WALLET, 777 * E18, -200 * E18)], meta(WALLET, POOL))
+    assert [f for f in run(b, pools=pools) if f.token == TOKEN] == [], "the tokens moved in another transaction"
