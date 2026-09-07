@@ -8,6 +8,7 @@ from state import AUSD, LVMON, USDC, WMON, State
 CHIP = "0xc0ffee0000000000000000000000000000000001"
 USDT = "0xc0ffee0000000000000000000000000000000002"
 XAUT = "0x01bff41798a0bcf287b996046ca68b395dbc1071"
+ROUTER = "0x8e42afa92a8b0ed3ee23db6b108419aae47ad61f"
 ORACLE = Decimal("0.0257")
 BOOK = Decimal("0.0268")
 
@@ -156,3 +157,45 @@ def test_graph_prefers_the_wmon_market_and_prices_it_through_the_oracle(monkeypa
 def test_graph_returns_nothing_for_a_token_with_no_syncs_anywhere(monkeypatch):
     sg = _patch_graph_db(monkeypatch, {})
     assert sg._token_price_at({"address": CHIP, "ticker": "CHIP"}, 1000, ORACLE, WMON) is None
+
+
+def _ausd_market():
+    mi = _market(AUSD, USDC, 0)
+    mi.market = "0x6c46b8b533c957658a0a0b88dd4e62cf0e3e731f"
+    mi.quoteDecimals, mi.baseDecimals, mi.scaleFactor = 6, 6, 4
+    return mi
+
+
+def _wmon_market():
+    mi = _market(WMON, USDC, 0)
+    mi.market = "0xf3daa78c8928447a337bf217725b87dae36c4aa4"
+    mi.quoteDecimals, mi.baseDecimals, mi.scaleFactor = 6, 18, 21
+    return mi
+
+
+def _trade_state(monkeypatch, mi):
+    import core.storage as storage_mod
+
+    st = _state([])
+    st.addressToMarket = {mi.market: mi}
+    st.launchpad_market_to_token = {}
+    monkeypatch.setitem(state_mod.h.CONTRACTS, "ROUTER", ROUTER)
+    monkeypatch.setattr(storage_mod, "insert_market_trade", lambda *a, **k: None)
+    monkeypatch.setattr(storage_mod, "update_crystal_market_price", lambda *a, **k: None)
+    monkeypatch.setattr(storage_mod, "set_ausd_price_usd", lambda v: None)
+    return st
+
+
+def test_an_ausd_usdc_trade_publishes_the_new_ausd_rate(monkeypatch):
+    mi = _ausd_market()
+    st = _trade_state(monkeypatch, mi)
+    st.apply_market_trade(1, 1, {"market": mi.market, "end_price": 9940}, ROUTER)
+    assert st.ausd_price_usd == Decimal("0.994")
+    assert st.tokenToPrice[AUSD] == Decimal("0.994")
+
+
+def test_a_wmon_usdc_trade_never_touches_the_ausd_rate(monkeypatch):
+    mi = _wmon_market()
+    st = _trade_state(monkeypatch, mi)
+    st.apply_market_trade(1, 1, {"market": mi.market, "end_price": 26_000_000}, ROUTER)
+    assert st.ausd_price_usd == Decimal(1)
