@@ -112,7 +112,40 @@ read as a reference price. A test pins the conservation that does hold.
 
 ---
 
-## Fixture checks
+## Fixture checks: moncock fails, and the expectation is what is wrong
+
+`ledger_check.py --fixture moncock` reports 6 of 9. The three failures are all the same thing:
+
+```
+moncock | token_bought                         | 25719120.30 +- 0.01 | 8147671.96 | FAIL
+moncock | native_spent (confirmed + estimated) | 477018 +- 0.5%      |   16335.51 | FAIL
+moncock | realized (confirmed + estimated)     | -193957 +- 0.5%     |       0.00 | FAIL
+```
+
+That wallet does not buy moncock. It receives it from its own router contract, which buys from the
+pools. Under the netted model the whole transaction collapsed to one row per wallet and the purchase
+was attributed to the wallet, which is where 477,018 came from. Under the movement model the wallet's
+acquisitions are transfers that carry the router's cost with them, so they land in `cost_basis_native`
+and not in `native_spent`, which counts purchases only.
+
+Its position now reads: three transfers in carrying **155,631.31 MON** of inherited basis, one real buy
+of 16,335.51, and a transfer out releasing exactly the 171,966.81 total. Conservation holds to the wei.
+Before the last fix in this session those three transfers carried nothing at all.
+
+**This needs a decision rather than a code change.** Either the fixture is restated against cost basis
+instead of `native_spent`, or the model attributes a router's purchase to the wallet it delivers to.
+The second is what the old engine did and it is what produced the phantom holders; the first is
+consistent with everything else here. It is not for me to pick.
+
+The remaining gap is separate and real: 171,966.81 MON of inherited cost against 25.7 million tokens is
+0.0067 MON each, against a token whose median price is 0.0131. So roughly half the cost is still being
+lost somewhere upstream in the router chain. That is the next thing to chase.
+
+**chipotle did not run.** Its own logs appear in 337,308 blocks, against 41,799 for JAMES and 115,075
+for moncock, so it is several hours through the tunnel and was not attempted after the connection
+dropped twice. Its fixture covers one wallet with 20 trades.
+
+## Earlier fixture checks
 
 Pending. moncock and chipotle are replaying; `ledger_check.py` and `ledger_verify.py` run when they finish.
 
