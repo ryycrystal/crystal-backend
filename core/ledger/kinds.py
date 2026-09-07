@@ -38,6 +38,14 @@ SOURCE_HEURISTIC = "heuristic"
 SOURCE_USEROP = "userop_event"
 SOURCE_VENUE_EVENT = "venue_event"
 SOURCE_PAIR_PROBE = "pair_probe"
+CRYSTAL_CORE_ADDRS = frozenset(
+    {
+        "0xab0a934eea61c69329735eb37bd72d8c871c56f3",
+        "0x77d53b3b39af88ab51b38844cc93385ef5378080",
+        "0x6eb2af5fc575689053ac9b413220cabfd01a2f9a",
+        "0x8e42afa92a8b0ed3ee23db6b108419aae47ad61f",
+    }
+)
 PAIR_TOKEN0_SELECTOR = "0x0dfe1681"
 PAIR_TOKEN1_SELECTOR = "0xd21220a7"
 PROBE_BATCH = 25
@@ -182,6 +190,8 @@ def known_address_kinds() -> dict[str, str]:
     for addr in ENTRYPOINTS:
         kinds[addr] = KIND_VENUE_ROUTER
     kinds[h.UNIV4_POOL_MANAGER_ADDR] = KIND_VENUE_POOL
+    for addr in CRYSTAL_CORE_ADDRS:
+        kinds[addr] = KIND_VENUE_CUSTODY
     kinds[h.CRYSTAL_ADDR] = KIND_VENUE_CUSTODY
     return kinds
 
