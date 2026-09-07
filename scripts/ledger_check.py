@@ -158,25 +158,33 @@ def position_rows(cur, token: str) -> list[dict]:
     return [dict(zip(POSITION_COLUMNS, row)) for row in cur.fetchall()]
 
 
-def flow_shares(cur, token: str) -> tuple[Decimal | None, Decimal | None]:
+def flow_shares(cur, token: str) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Estimated value, tokens arriving with no price of their own, and tokens still without a cost.
+
+    The last two used to be one number. A transfer has no price of its own and its row still says so,
+    but the tokens it delivers now carry the sender's cost, so the label no longer measures what it was
+    being read as. The share that matters is how much of the inflow ended up in the unresolved bucket,
+    and both are reported so the difference between them is visible rather than assumed.
+    """
     cur.execute(
         """
         SELECT
             COALESCE(SUM(mon_value) FILTER (WHERE kind IN ('buy', 'sell') AND basis_state = 'estimated'), 0),
             COALESCE(SUM(mon_value) FILTER (WHERE kind IN ('buy', 'sell')), 0),
             COALESCE(SUM(token_delta) FILTER (WHERE token_delta > 0 AND basis_state = 'unresolved'), 0),
-            COALESCE(SUM(token_delta) FILTER (WHERE token_delta > 0), 0)
+            COALESCE(SUM(token_delta) FILTER (WHERE token_delta > 0), 0),
+            COALESCE(SUM(qty_unresolved) FILTER (WHERE token_delta > 0), 0)
         FROM wallet_flows WHERE token = %s
         """,
         (token,),
     )
-    est, total, unresolved, inflow = cur.fetchone()
+    est, total, unpriced, inflow, without_cost = cur.fetchone()
     est_share = Decimal(est) / Decimal(total) if total and Decimal(total) > 0 else None
-    unres_share = Decimal(unresolved) / Decimal(inflow) if inflow and Decimal(inflow) > 0 else None
-    return est_share, unres_share
+    share = (lambda n: Decimal(n) / Decimal(inflow)) if inflow and Decimal(inflow) > 0 else (lambda n: None)
+    return est_share, share(without_cost), share(unpriced)
 
 
-def token_shares(cur, tokens: list[str]) -> dict[str, tuple[Decimal | None, Decimal | None]]:
+def token_shares(cur, tokens: list[str]) -> dict[str, tuple]:
     return {token: flow_shares(cur, token) for token in tokens}
 
 
@@ -397,9 +405,10 @@ def invariant_checks(cur, tokens: list[str]) -> list[Check]:
     )
     venue_rows = int(cur.fetchone()[0])
     checks = [check_eq(name, "positions on venue addresses", venue_rows, 0)]
-    for token, (est, unres) in token_shares(cur, tokens).items():
+    for token, (est, unres, unpriced) in token_shares(cur, tokens).items():
         checks.append(Check(name, f"{token[:10]} estimated share", "reported", _pct(est), True))
-        checks.append(Check(name, f"{token[:10]} unresolved share", "reported", _pct(unres), True))
+        checks.append(Check(name, f"{token[:10]} inflow still without a cost", "reported", _pct(unres), True))
+        checks.append(Check(name, f"{token[:10]} inflow with no price of its own", "reported", _pct(unpriced), True))
     return checks
 
 

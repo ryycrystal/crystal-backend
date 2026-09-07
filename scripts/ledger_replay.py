@@ -472,9 +472,10 @@ def summary(tokens: list[str]) -> None:
         "[SUMMARY] flow basis states for the replayed tokens: " + ", ".join(f"{s} {n:,}" for s, n in states), flush=True
     )
     for token in tokens:
-        est, unres = shares.get(token, (None, None))
+        est, unres, unpriced = shares.get(token, (None, None, None))
         print(
-            f"[SUMMARY] {token}: estimated share {_pct(est)}, unresolved share {_pct(unres)}",
+            f"[SUMMARY] {token}: estimated share {_pct(est)}, inflow still without a cost {_pct(unres)}, "
+            f"inflow arriving with no price of its own {_pct(unpriced)}",
             flush=True,
         )
 
