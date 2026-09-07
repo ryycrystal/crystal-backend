@@ -136,6 +136,23 @@ vault the wallet had used.
 while the flag is off, and refuses to start against a database without the ledger tables instead of
 raising inside the block transaction.
 
+## What the rebuilt data found that the tests did not
+
+Every seam above was green across the whole suite before any of these was known. They were found by
+rebuilding JAMES and asking the stored rows questions no test had asked, and each is now a test.
+
+| what was wrong | how it showed | why no test saw it |
+|---|---|---|
+| the two halves of a transfer shared a primary key, so one was dropped on insert | 65,791 of 72,690 wallet-to-wallet transfer rows had no counterparty half | the netflow tests never wrote to a database, and the collision only happens on insert |
+| parked basis was deleted and never rewritten on a full fold | no `parked_entitlements` rows after any replay's first flush | an early return that read as 'nothing to do' |
+| a movement took its counterparty from the wallet's largest neighbour in the transaction | 2,751 of JAMES's transfer rows named the trading partner instead of who received a 0.2% fee | correct while a leg was a netted position; wrong once a leg became one movement |
+| a wallet sending tokens to itself was read as a token swap | three transactions booked a sale and a purchase that cancelled | the pair is opposite-signed and unpriced, which is exactly a swap's shape |
+| a pair swap with no transfer of its own invented a second disposal | one wallet sold the same tokens twice, into a negative balance | the rule was written for Uniswap V4, which really can settle with no transfer |
+| a pair's reported quote was taken as the price with nothing backing it | two flows booked 554 trillion MON against a token priced at 0.06 | the amount matched the token side, and nothing checked the quote side |
+
+The common shape: all six conserve net token quantity per wallet, which is why the balance, supply and
+coverage checks stayed green through every one of them.
+
 Next: rebuild the three fixtures on this code and re-run `ledger_check` and `ledger_verify`, then the
 next review round.
 
