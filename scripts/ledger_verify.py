@@ -100,12 +100,39 @@ CHECKS = [
         """,
     ),
     (
-        "no duplicate flow keys",
+        "no wallet holds two movements of one token at a single chain position",
         """
         SELECT count(*) FROM (
-            SELECT txhash, log_index, sub_index, wallet, token, count(*)
-            FROM wallet_flows GROUP BY 1,2,3,4,5 HAVING count(*) > 1
+            SELECT block_number, tx_index, log_index, wallet, token, sign(token_delta)
+            FROM wallet_flows GROUP BY 1,2,3,4,5,6 HAVING count(*) > 1
         ) dupes
+        """,
+    ),
+    (
+        "both halves of a wallet-to-wallet transfer are stored",
+        """
+        SELECT count(*) FROM wallet_flows f
+        JOIN address_kinds k ON k.address = f.counterparty
+        WHERE f.kind IN ('transfer_in', 'transfer_out')
+          AND k.kind IN ('eoa', 'eoa_7702', 'wallet_4337', 'contract_unknown')
+          AND NOT EXISTS (
+              SELECT 1 FROM wallet_flows g
+              WHERE g.block_number = f.block_number AND g.tx_index = f.tx_index
+                AND g.log_index = f.log_index AND g.wallet = f.counterparty AND g.token = f.token
+          )
+        """,
+    ),
+    (
+        "a transfer between two wallets moves its cost as well as its tokens",
+        """
+        SELECT count(*) FROM wallet_flows out_leg
+        JOIN wallet_flows in_leg
+          ON in_leg.block_number = out_leg.block_number AND in_leg.tx_index = out_leg.tx_index
+         AND in_leg.log_index = out_leg.log_index AND in_leg.token = out_leg.token
+         AND in_leg.wallet = out_leg.counterparty
+        WHERE out_leg.kind = 'transfer_out' AND in_leg.kind IN ('transfer_in', 'airdrop')
+          AND COALESCE(in_leg.quote_delta, 0) = 0
+          AND in_leg.basis_delta <> -out_leg.basis_delta
         """,
     ),
     (

@@ -43,8 +43,9 @@ from replay_side import FETCH_ATTEMPTS, LogSource, ParallelFetcher  # noqa: E402
 import backfill  # noqa: E402
 import core.chain as h  # noqa: E402
 import core.storage as storage  # noqa: E402
-from core.ledger.engine import LedgerEngine, Rates  # noqa: E402
+from core.ledger.engine import LedgerEngine  # noqa: E402
 from core.ledger.kinds import AddressKinds  # noqa: E402
+from core.ledger.rates import SAMPLE_TABLE, SEED_SAMPLES, RateBook, from_samples  # noqa: E402
 from core.ledger.receipts import RECEIPT_LOG_DDL, ReceiptLogs  # noqa: E402
 from core.ledger.schema import LEDGER_TABLES, init_ledger_schema  # noqa: E402
 from core.ledger.txmeta import RpcClient, RpcError, TxMetaStore  # noqa: E402
@@ -60,9 +61,7 @@ SEED_TABLES = (
     "launchpad_meta",
     "holder_denylist",
 )
-MON_USD_SAMPLE_TABLE = "ledger_mon_usd_samples"
-MON_USD_SAMPLE_RESOLUTION = 60
-MON_USD_MIN_TRADE_WEI = 10**16
+MON_USD_SAMPLE_TABLE = SAMPLE_TABLE
 SIDE_DB_MARKERS = ("crystal_ledger", "crystal_replay")
 PROD_QUERY_TIMEOUT = 300
 PREFETCH_WORKERS = 4
@@ -202,30 +201,9 @@ def copy_table(src: LogSource, lcur, table: str, where: str = "", params: tuple 
 
 
 def seed_mon_usd_samples(src: LogSource, lcur) -> int:
+    """Copy prod's rate series in exactly the buckets the shared rate book will ask for."""
     t0 = time.time()
-    rows, _ = prod_rows(
-        src,
-        """
-        SELECT bucket, block_number, rate FROM (
-            SELECT DISTINCT ON (timestamp / %s)
-                timestamp / %s * %s AS bucket,
-                block_number,
-                usd_amount / (native_amount / 1e18) AS rate
-            FROM launchpad_trades
-            WHERE native_amount >= %s AND usd_amount > 0 AND timestamp > 0
-            ORDER BY timestamp / %s, timestamp DESC, block_number DESC, log_index DESC
-        ) s
-        ORDER BY bucket
-        """,
-        (
-            MON_USD_SAMPLE_RESOLUTION,
-            MON_USD_SAMPLE_RESOLUTION,
-            MON_USD_SAMPLE_RESOLUTION,
-            MON_USD_MIN_TRADE_WEI,
-            MON_USD_SAMPLE_RESOLUTION,
-        ),
-        timeout=1800,
-    )
+    rows, _ = prod_rows(src, SEED_SAMPLES, timeout=1800)
     rows = [(int(b), int(n), Decimal(r)) for b, n, r in rows]
     lcur.execute(f"TRUNCATE {MON_USD_SAMPLE_TABLE}")
     if rows:
@@ -235,10 +213,7 @@ def seed_mon_usd_samples(src: LogSource, lcur) -> int:
             rows,
             page_size=5000,
         )
-    print(
-        f"[SEED] {MON_USD_SAMPLE_TABLE}: {len(rows):,} samples at {MON_USD_SAMPLE_RESOLUTION}s in {time.time() - t0:.0f}s",
-        flush=True,
-    )
+    print(f"[SEED] {MON_USD_SAMPLE_TABLE}: {len(rows):,} samples in {time.time() - t0:.0f}s", flush=True)
     return len(rows)
 
 
@@ -251,33 +226,6 @@ def seed_from_prod(src: LogSource, tokens: list[str], reference_tables: bool) ->
             seed_mon_usd_samples(src, lcur)
         copy_table(src, lcur, "launchpad_positions", "WHERE token = ANY(%s)", (tokens,))
     print(f"[SEED] done in {time.time() - t0:.0f}s", flush=True)
-
-
-class SideRates:
-    def __init__(self) -> None:
-        self._cache: dict[int, Rates] = {}
-        self._lvmon: Decimal | None = None
-
-    def __call__(self, blk: int, ts: int, cur) -> Rates:
-        bucket = int(ts or 0) // MON_USD_SAMPLE_RESOLUTION
-        cached = self._cache.get(bucket)
-        if cached is not None:
-            return cached
-        cur.execute(
-            f"SELECT rate FROM {MON_USD_SAMPLE_TABLE} WHERE bucket_ts <= %s ORDER BY bucket_ts DESC LIMIT 1",
-            (bucket * MON_USD_SAMPLE_RESOLUTION,),
-        )
-        row = cur.fetchone()
-        mon_usd = Decimal(str(row[0])) if row and row[0] is not None else Decimal(0)
-        if self._lvmon is None:
-            cur.execute("SELECT value FROM launchpad_meta WHERE key = 'lvmon_mon_rate'")
-            meta = cur.fetchone()
-            self._lvmon = Decimal(str(meta[0])) if meta and meta[0] is not None else Decimal(1)
-        rates = Rates(mon_usd=mon_usd, lvmon_rate=self._lvmon, usdc_per_mon=mon_usd)
-        if len(self._cache) > 8192:
-            self._cache.clear()
-        self._cache[bucket] = rates
-        return rates
 
 
 def token_scope(src: LogSource, tokens: list[str]) -> tuple[dict[str, int], dict[str, set[str]]]:
@@ -580,7 +528,12 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     tx_meta = TxMetaStore(storage.db_cursor, args.rpc, rpc=RpcClient(args.rpc, batch_size=args.rpc_batch))
     kinds = AddressKinds(storage.db_cursor, args.rpc)
     engine = LedgerEngine(
-        storage.db_cursor, rpc_url=args.rpc, enabled=True, tx_meta_store=tx_meta, kinds=kinds, rates_fn=SideRates()
+        storage.db_cursor,
+        rpc_url=args.rpc,
+        enabled=True,
+        tx_meta_store=tx_meta,
+        kinds=kinds,
+        rates_fn=RateBook(from_samples),
     )
     engine.scope = frozenset(tokens)
     with storage.db_cursor() as cur:

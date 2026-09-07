@@ -1,0 +1,79 @@
+"""The replay and the live engine must value the same flow identically (feedback4 finding 12b)."""
+
+from decimal import Decimal
+
+from core.ledger.rates import BUCKET_SECONDS, MIN_SAMPLE_WEI, RateBook, bucket_start, from_samples, from_trades
+
+TRADES = [
+    (1_700_000_000, 100, 2 * 10**18, Decimal("60")),
+    (1_700_000_100, 101, 10**15, Decimal("999")),
+    (1_700_000_400, 102, 5 * 10**18, Decimal("150")),
+]
+
+
+class FakeCursor:
+    """Answers both rate queries from one set of trades, the way the two real stores would."""
+
+    def __init__(self, trades, meta=None):
+        self.trades = trades
+        self.meta = meta or {}
+        self._result = None
+
+    def execute(self, sql, params=()):
+        if "launchpad_meta" in sql:
+            value = self.meta.get(params[0])
+            self._result = (value,) if value is not None else None
+        elif "launchpad_trades" in sql:
+            before, minimum = params
+            usable = [t for t in self.trades if t[0] < before and t[2] >= minimum]
+            self._result = (usable[-1][3] / (Decimal(usable[-1][2]) / Decimal(10**18)),) if usable else None
+        else:
+            at = params[0]
+            buckets = {}
+            for ts, _, native, usd in self.trades:
+                if native >= MIN_SAMPLE_WEI:
+                    buckets[bucket_start(ts)] = usd / (Decimal(native) / Decimal(10**18))
+            earlier = [b for b in sorted(buckets) if b <= at]
+            self._result = (buckets[earlier[-1]],) if earlier else None
+
+    def fetchone(self):
+        return self._result
+
+
+def test_both_stores_answer_with_the_same_rate_for_the_same_flow():
+    meta = {"mon_price_usd": "0.03", "lvmon_mon_rate": "1"}
+    for ts in (1_700_000_000, 1_700_000_150, 1_700_000_299, 1_700_000_400, 1_700_000_900):
+        live = RateBook(from_trades)(0, ts, FakeCursor(TRADES, meta))
+        replayed = RateBook(from_samples)(0, ts, FakeCursor(TRADES, meta))
+        assert live == replayed, ts
+
+
+def test_a_bucket_is_the_same_length_and_edge_for_both():
+    assert BUCKET_SECONDS == 300
+    assert bucket_start(1_699_999_800) == 1_699_999_800
+    assert bucket_start(1_700_000_099) == 1_699_999_800
+    assert bucket_start(1_700_000_100) == 1_700_000_100
+
+
+def test_a_trade_too_small_to_price_is_ignored_by_both():
+    small = [(1_700_000_000, 100, 10**15, Decimal("999"))]
+    meta = {"mon_price_usd": "0.03", "lvmon_mon_rate": "1"}
+    live = RateBook(from_trades)(0, 1_700_000_000, FakeCursor(small, meta))
+    replayed = RateBook(from_samples)(0, 1_700_000_000, FakeCursor(small, meta))
+    assert live.mon_usd == replayed.mon_usd == Decimal("0.03"), "both fall back to the recorded rate"
+
+
+def test_the_rate_book_caches_per_bucket_not_per_call():
+    calls = []
+
+    def counting(cur, at):
+        calls.append(at)
+        return Decimal(7)
+
+    book = RateBook(counting)
+    cur = FakeCursor(TRADES, {"lvmon_mon_rate": "1"})
+    book(0, 1_699_999_800, cur)
+    book(0, 1_700_000_099, cur)
+    assert calls == [1_699_999_800]
+    book(0, 1_700_000_100, cur)
+    assert calls == [1_699_999_800, 1_700_000_100]

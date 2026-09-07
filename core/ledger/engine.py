@@ -9,6 +9,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from core import chain as h
+from core.ledger.rates import RateBook
 from core.ledger.types import (
     BASIS_OBSERVED,
     ENTRYPOINTS,
@@ -27,8 +28,6 @@ from core.ledger.types import (
 __all__ = ["LedgerEngine", "Rates"]
 TRACE_WINDOW_BLOCKS = 500_000
 HEAD_TTL_SECONDS = 30.0
-RATE_BUCKET_SECONDS = 300
-MIN_RATE_SAMPLE_WEI = 10**18
 TOKEN_SOURCES = {0: "crystal", 1: "nadfun_v1", 2: "nadfun_v2"}
 REGISTERING_TAGS = {"TC", "NFC", "MC"}
 TRACEABLE_KINDS = {"buy", "sell", "transfer_in", "transfer_out", "swap_leg"}
@@ -87,7 +86,6 @@ class LedgerEngine:
         self.scope: frozenset[str] | None = None
         self._affected: dict[str, int] = {}
         self._head: tuple[int, float] | None = None
-        self._rate_cache: dict[int, Rates] = {}
         self._price_cache: dict[tuple[str, int], Decimal | None] = {}
         self.stats: dict[str, int] = defaultdict(int)
 
@@ -454,43 +452,9 @@ class LedgerEngine:
             return int(json.loads(resp.read())["result"], 16)
 
     def _rates_at(self, blk: int, ts: int, cur) -> Rates:
-        if self._rates_fn is not None:
-            return self._rates_fn(blk, ts, cur)
-        bucket = int(ts or 0) // RATE_BUCKET_SECONDS
-        cached = self._rate_cache.get(bucket)
-        if cached is not None:
-            return cached
-        mon_usd = self._mon_usd_at(blk, cur)
-        lvmon = self._meta_decimal(cur, "lvmon_mon_rate", Decimal(1))
-        rates = Rates(mon_usd=mon_usd, lvmon_rate=lvmon, usdc_per_mon=mon_usd)
-        if len(self._rate_cache) > 4096:
-            self._rate_cache.clear()
-        self._rate_cache[bucket] = rates
-        return rates
-
-    def _mon_usd_at(self, blk: int, cur) -> Decimal:
-        cur.execute(
-            """
-            SELECT usd_amount / (native_amount / 1e18)
-            FROM launchpad_trades
-            WHERE block_number <= %s AND native_amount >= %s AND usd_amount > 0
-            ORDER BY block_number DESC, log_index DESC
-            LIMIT 1
-            """,
-            (int(blk), MIN_RATE_SAMPLE_WEI),
-        )
-        row = cur.fetchone()
-        if row and row[0]:
-            return Decimal(str(row[0]))
-        return self._meta_decimal(cur, "mon_price_usd", Decimal(0))
-
-    @staticmethod
-    def _meta_decimal(cur, key: str, default: Decimal) -> Decimal:
-        cur.execute("SELECT value FROM launchpad_meta WHERE key = %s", (key,))
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return Decimal(str(row[0]))
-        return default
+        if self._rates_fn is None:
+            self._rates_fn = RateBook()
+        return self._rates_fn(blk, ts, cur)
 
     def affected_keys(self) -> list[str]:
         return sorted(self._affected)
