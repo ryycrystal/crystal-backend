@@ -1,5 +1,23 @@
-REVIEW
+REVIEWED - NOT ACCEPTED
 
+> This document was written by the author of the branch and its green table was, as first published,
+> overstated. Six independent reviews (`feedback.md`, `feedback2.md` … `feedback8.md`) have since read it.
+> What they confirm is the **quantity** layer: balances reconcile to the wei against chain, supply is fully
+> accounted for, and no consumer reads these tables yet. What they refute is that any of this validates the
+> **value** layer. Every accounting defect found preserves net token quantity per wallet, which is exactly
+> why the checks below pass while cost, proceeds, confidence and identity are wrong.
+>
+> Specific corrections to what follows, all verified: of 4,373 position rows carrying a cost basis, two are
+> graded against a number; 8 of the 28 result rows are hardcoded to pass; the duplicate-flow invariant cannot
+> fail, because its group key is a superkey of the primary key, and it hides 163 positions holding double
+> their true balance; supply conservation passes on a dropped transfer and on a wallet misclassified as a
+> venue; the determinism test is a warm-cache rerun of a 29-flow, fully-observed fixture; and 9,516 flows
+> price a one-wei rounding residue as `observed` cost.
+>
+> Do not turn `LEDGER_ENABLED` on. Against a normally initialised database the ledger tables do not exist,
+> and the result is an indefinite indexing outage rather than shadow mode. See `feedback4.md` and
+> `feedback8.md` for the reproduction, and `REPAIR_PLAN.md` (itself reviewed and found wrong in
+> `feedback7.md`) for where the repair stands.
 # accounting-fix: net-flow position ledger
 
 Generated 2026-09-07 11:28 from the side database `crystal_ledger` after replaying the three fixture tokens from prod's log cache.
@@ -177,7 +195,10 @@ one-off harnesses in the session scratchpad (`test_moncock_chain.py`, `test_dete
 The coverage report inside `ledger_verify.py` also found 159 leftover tokens in the shared side database from
 earlier partial experiments, holding 389 negative balances. A negative balance is arithmetically impossible on
 chain and arises only when a replay starts after a token's creation, so it is kept as the detector for a token
-whose history was only partly folded. None of the three fixture tokens is affected.
+whose history was only partly folded. CHIPOTLE is itself one of them: its first flow is at block
+100,890,493 against a creation block of 100,890,244, so it is partial by 249 blocks and
+`ledger_verify.py` counts two fully replayed tokens, not three. An earlier version of this sentence
+claimed no fixture token was affected, which was false.
 
 ### ledger_verify.py
 
