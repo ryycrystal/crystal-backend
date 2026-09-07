@@ -96,27 +96,49 @@ only path by which this branch can break production with the flag off, and it sh
 
 ## Status
 
-Seam 1 is built and all nine written fixtures pass with no markers left. Flows are now built from individual movements matched
-to the payment that funded them, a venue event is evidence only from a classified venue, and a flow's key
-comes from its own movement rather than an ordinal over the registry.
+All four seams and step 0 are built, and the full suite is green at 756 tests. What each one changed:
 
-**One decision changed behaviour and is worth knowing about.** Router fees are no longer removed from
-cost. Previously a routed buy was booked at the venue amount whenever the wallet's own payment was within
-10% of it, so a wallet paying 8,684.93 for tokens the pool received 8,598.08 for had the 86.85 difference
-deleted from its books. That was a documented deviation, and `feedback2.md` finding 8 rates it a P1
-because the wallet's outflow is not conserved. Cost is now what the wallet actually paid, and proceeds are
-what it actually kept. Three tests that asserted the old behaviour were rewritten, not weakened; their
-names said what they were doing. Consequence: cost basis rises slightly on every routed trade and realized
-PnL falls by the same amount. Exposing the fee as its own field, so gross and net are both available, is
-follow-up work rather than part of this seam.
+**Step 0, coverage.** A replay now records, in the same transaction as the flows, which block range it
+actually read for each token, and a position is only served for a token whose coverage reaches back to
+its registration. A token seen in passing keeps its flows as evidence and gets no position, which is
+where the leftovers' 389 negative balances came from. A cached block list only certifies coverage from
+its own first block, so a list built for a later window cannot claim a history it never read.
 
-A swap that settles against a pool manager's internal claim balances now produces movements from the
-event itself, keyed by the pool's own registration, with the actor taken from the event rather than the
-transaction origin. The engine must pass its pool table in for this to fire; until it does, those trades
-stay invisible in a replay.
+**Seam 1, the movement.** Flows are built from individual movements matched to the payment that funded
+them, a venue event counts only from a classified venue, and a claim-settled swap produces movements
+from the event and the pool's own registration. Two consequences worth knowing:
 
-Next: a clean rebuild of the side database, because every change here alters values on real data and so
-far they are proven only against synthetic fixtures. Then step 0 coverage, and seams 2, 3 and 4.
+- Router fees are no longer removed from cost. A wallet paying 8,684.93 for tokens the pool received
+  8,598.08 for used to have the 86.85 deleted. Cost is now what the wallet paid and proceeds are what it
+  kept, so cost basis rises slightly on every routed trade and realized falls by the same amount.
+- A movement's identity now carries its side. Keyed on the log index alone, the two halves of one
+  transfer collided on the primary key and one was dropped on insert: 65,791 of 72,690 wallet-to-wallet
+  transfer rows in the side database had lost their counterparty half. The netflow tests never wrote to a
+  database, so only a test that stored its result caught it. Ordering the outgoing half first is also what
+  lets seam 3 release a sender's basis before the receiver inherits it.
+
+**Seam 2, the disposal shape.** Each flow stores the whole vector the fold computed rather than two
+totals, so a sale drawing on observed, estimated and unresolved inventory at once is recoverable from its
+row. An unpriced disposal no longer books the released basis as a loss: it leaves the running average and
+waits in its own bucket. Every field the fold carries is now persisted, so a stored position is a
+checkpoint a later fold can resume from.
+
+**Seam 3, the ordered fold.** A token is folded as one pass across all its wallets in chain order, so a
+transfer hands its cost to the receiver instead of destroying it. The fold resumes from the persisted
+checkpoint and only loads the wallets in the new flows; a flow landing at or below the watermark folds
+the whole token again, which is the correction path and stays off the common one.
+
+**Seam 4, parked basis.** Basis parked in a pool or vault is recorded against that pool or vault. Pooled
+into one aggregate, withdrawing 100 from a vault that held it at 100 returned 550, the average of every
+vault the wallet had used.
+
+**Also shipped:** the sequencer reaches the ledger through a gate that imports nothing from `core.ledger`
+while the flag is off, and refuses to start against a database without the ledger tables instead of
+raising inside the block transaction.
+
+Next: rebuild the three fixtures on this code and re-run `ledger_check` and `ledger_verify`, then the
+next review round.
+
 ## Acceptance
 
 Twelve value-level fixtures, from `feedback7.md`, each with the number it must produce. Quantity checks
