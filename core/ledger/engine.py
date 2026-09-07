@@ -83,6 +83,7 @@ class LedgerEngine:
         self._registry: dict | None = None
         self._market_tokens: dict[str, str] = {}
         self._market_pairs: dict[str, tuple[str, str]] = {}
+        self._pools: dict[str, tuple[str, str, bool]] = {}
         self._affected: set[tuple[str, str]] = set()
         self._head: tuple[int, float] | None = None
         self._rate_cache: dict[int, Rates] = {}
@@ -100,6 +101,7 @@ class LedgerEngine:
         self._registry = self._seed_registry(cur, store)
         self._market_tokens = self._load_market_tokens(cur)
         self._market_pairs = self._load_market_pairs(cur)
+        self._pools = self._load_pools(cur)
         return self._registry
 
     def _seed_registry(self, cur, store) -> dict:
@@ -167,6 +169,20 @@ class LedgerEngine:
         for m, t in cur.fetchall():
             if m and t:
                 out.setdefault(m.lower(), t.lower())
+        return out
+
+    @staticmethod
+    def _load_pools(cur) -> dict[str, tuple[str, str, bool]]:
+        """Which token each pool trades, so a swap that settles internally still names one."""
+        out: dict[str, tuple[str, str, bool]] = {}
+        cur.execute("SELECT pool_id, token_addr, native_addr, token_is_0 FROM univ4_pools")
+        for pool, token, quote, token_is_0 in cur.fetchall():
+            if pool and token:
+                out[pool.lower()] = ((token or "").lower(), (quote or WMON).lower(), bool(token_is_0))
+        cur.execute("SELECT pool, token_addr, native_addr, token_is_0 FROM launchpad_pools")
+        for pool, token, quote, token_is_0 in cur.fetchall():
+            if pool and token:
+                out.setdefault(pool.lower(), ((token or "").lower(), (quote or WMON).lower(), bool(token_is_0)))
         return out
 
     @staticmethod
@@ -327,6 +343,7 @@ class LedgerEngine:
                     rates=rates,
                     reference_price=reference_price,
                     markets=self._market_pairs,
+                    pools=self._pools,
                 )
             )
 
