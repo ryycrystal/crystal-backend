@@ -138,7 +138,7 @@ raising inside the block transaction.
 
 ## What the rebuilt data found that the tests did not
 
-Every seam above was green across the whole suite before any of these was known. They were found by
+Every seam above was green across the whole suite before any of these was known. Seven were found by
 rebuilding JAMES and asking the stored rows questions no test had asked, and each is now a test.
 
 | what was wrong | how it showed | why no test saw it |
@@ -149,6 +149,7 @@ rebuilding JAMES and asking the stored rows questions no test had asked, and eac
 | a wallet sending tokens to itself was read as a token swap | three transactions booked a sale and a purchase that cancelled | the pair is opposite-signed and unpriced, which is exactly a swap's shape |
 | a pair swap with no transfer of its own invented a second disposal | one wallet sold the same tokens twice, into a negative balance | the rule was written for Uniswap V4, which really can settle with no transfer |
 | a pair's reported quote was taken as the price with nothing backing it | two flows booked 554 trillion MON against a token priced at 0.06 | the amount matched the token side, and nothing checked the quote side |
+| a wallet's implied price was measured from its net position rather than from what it sent | a relayer forwarding everything it received netted to wei of dust, and its whole payment divided by that dust priced the movement that passed through it at 523 trillion MON | the price is arithmetically correct for the quantity it was given; only the quantity was the wrong one |
 
 The common shape: all six conserve net token quantity per wallet, which is why the balance, supply and
 coverage checks stayed green through every one of them.
