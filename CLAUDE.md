@@ -2129,6 +2129,32 @@ A full pre-purge snapshot of every crystal table (27 gzipped CSVs, 7.7 MiB) was 
 session scratchpad `crystal-purge-snapshot/`. The old data is also re-derivable from
 `launchpad_block_logs`, which was preserved.
 
+### AUSD floats, USDC is the dollar anchor
+
+AUSD used to be hardcoded to $1 alongside USDC. Since 2026-09-07 only **USDC** is pegged
+(`state.USD_PEGGED_TOKENS`); AUSD carries a live rate derived the same way the MON rate is:
+
+- `state.apply_market_trade` publishes it whenever the **AUSD/USDC** market prints, matched on
+  `baseAddress == AUSD and quoteAddress == USDC` rather than a hardcoded market address, so it
+  survives a market redeploy. The book quotes USDC per AUSD and USDC is the anchor, so the book
+  price *is* the dollar price.
+- `core.oracle.ausd_price_from_market_price` drops anything outside **0.5–1.5** as a thin-book
+  print; the previous rate then stands. Widen the band if a real depeg needs to show through.
+- Persisted in `launchpad_meta` under `ausd_price_usd`, restored in `rebuild_from_db`, and read
+  API-side by `api.api._ausd_price_usd()` (30s cache) via `stable_quote_usd(addr)`.
+- **Use `stable_quote_usd(addr)`, never `Decimal(1)`, for a stable quote.** `_quote_price_usd`,
+  `spot_data.spot_prices_from_markets` and `spot_graph._token_price_at` all go through it.
+
+`STABLE_USD_QUOTES` still contains both, and AUSD stays in `PINNED_PRICE_TOKENS` — that set means
+"do not reprice this from an arbitrary market", which is still true; only its *value* is dynamic.
+
+Not changed, and worth a decision: `api/routes/vaults.py::_STABLE_QUOTE_TICKERS` still counts
+`ausd` as a stable quote for **APY methodology** (constant-price basis). That is a valuation
+choice, not a price, so it was left alone.
+
+The rate only appears in `launchpad_meta` once AUSD prints away from parity — the setter skips
+no-op updates, so an empty key means "still exactly $1", and every read falls back to 1.
+
 ### `crystal_vaults.market` is the pair's canonical market, not the vault's own
 
 `state.apply_market_created` calls `storage.link_crystal_vaults_for_market` whenever a
