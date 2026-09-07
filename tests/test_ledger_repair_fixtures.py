@@ -104,7 +104,6 @@ def test_04_a_gift_and_an_unrelated_payment_are_not_a_purchase():
     assert not f.quote_delta
 
 
-@pytest.mark.xfail(strict=True, reason="seam 1: any address may emit a venue topic, no emitter gate")
 def test_08_a_forged_venue_event_cannot_manufacture_a_purchase():
     """A wallet-to-wallet transfer plus a launchpad trade event from an unaccepted address."""
     forged = lt(5, WALLET, True, 10 * E18, 100 * E18, address=FORGER)
@@ -133,7 +132,6 @@ def test_09_a_purchase_funded_in_two_quotes_conserves_both():
     assert abs(f.quote_delta) == 30 * E18
 
 
-@pytest.mark.xfail(strict=True, reason="seam 4: FEE_TOLERANCE rewrites the wallet's outflow to the venue amount")
 def test_10_a_router_fee_is_retained_not_erased():
     """The wallet pays 109.90 MON, the venue receives 100.00. Today the 9.90 is deleted."""
     paid = 1099 * E18 // 10

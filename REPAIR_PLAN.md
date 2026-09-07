@@ -94,6 +94,25 @@ only path by which this branch can break production with the flag off, and it sh
 
 ---
 
+## Status
+
+Seam 1 is mostly built. Eight of the nine written fixtures pass; the ninth, a claim-settled swap that
+moves no ERC-20, still fails and keeps its marker. Flows are now built from individual movements matched
+to the payment that funded them, a venue event is evidence only from a classified venue, and a flow's key
+comes from its own movement rather than an ordinal over the registry.
+
+**One decision changed behaviour and is worth knowing about.** Router fees are no longer removed from
+cost. Previously a routed buy was booked at the venue amount whenever the wallet's own payment was within
+10% of it, so a wallet paying 8,684.93 for tokens the pool received 8,598.08 for had the 86.85 difference
+deleted from its books. That was a documented deviation, and `feedback2.md` finding 8 rates it a P1
+because the wallet's outflow is not conserved. Cost is now what the wallet actually paid, and proceeds are
+what it actually kept. Three tests that asserted the old behaviour were rewritten, not weakened; their
+names said what they were doing. Consequence: cost basis rises slightly on every routed trade and realized
+PnL falls by the same amount. Exposing the fee as its own field, so gross and net are both available, is
+follow-up work rather than part of this seam.
+
+Still open in seam 1: movements from venue events where no ERC-20 moves, which needs the pool-to-token
+mapping inside netting. Then seams 2, 3 and 4, and step 0 coverage, none of which are started.
 ## Acceptance
 
 Twelve value-level fixtures, from `feedback7.md`, each with the number it must produce. Quantity checks

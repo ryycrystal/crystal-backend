@@ -134,17 +134,31 @@ def _venue_quote_asset(bundle: TxBundle, venue: str, quote_assets: frozenset[str
     return max(seen.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
+def _trusted_emitter(venue: str, kinds: _Kinds) -> bool:
+    """A venue event is evidence only from an address that is actually a venue.
+
+    Any contract can emit any topic. Without this, a wallet-to-wallet transfer alongside a forged swap log
+    becomes an observed purchase at whatever price the forger chose, which is the strongest confidence the
+    ledger has. Classification already knows which addresses are venues, so the gate costs nothing and,
+    unlike the indexer's own gate, it does not expire when a contract generation is retired.
+    """
+    return bool(venue) and kinds.of(venue) in VENUE_KINDS
+
+
 def _hints(
     bundle: TxBundle,
     tx_tokens: set[str],
     registry: dict[str, TokenReg],
     quote_assets: frozenset[str],
+    kinds: _Kinds,
     markets: dict[str, tuple[str, str]] | None = None,
 ) -> list[_Hint]:
     out: list[_Hint] = []
     for ev in bundle.venue_events:
         parsed = ev.parsed or {}
         venue = (ev.address or "").lower()
+        if not _trusted_emitter(venue, kinds):
+            continue
         if ev.tag in CURVE_TAGS:
             token = (parsed.get("token") or "").lower()
             if token not in tx_tokens:
@@ -343,9 +357,6 @@ def _prefer_venue_quote(leg: _Leg, matched: list[_Hint], own_asset: str, own_del
         return
     if Decimal(abs(quote - own_delta)) > Decimal(abs(quote)) * FEE_TOLERANCE:
         return
-    if quote != own_delta:
-        leg.quote_delta = quote
-        leg.source = SOURCE_VENUE_EVENT
     leg.hint_price = _hint_price(matched, rates)
     if leg.venue is None:
         leg.venue = matched[0].venue
@@ -888,7 +899,7 @@ def net_transaction(
         return []
 
     tx_tokens = {leg.token for legs in legs_by_wallet.values() for leg in legs}
-    hints = _hints(bundle, tx_tokens, registry, quote_assets, markets)
+    hints = _hints(bundle, tx_tokens, registry, quote_assets, kinds, markets)
     hints += _seller_hints(token_deltas, quote_raw, tx_tokens, kinds, rates)
     used: set[int] = set()
     all_legs = [leg for legs in legs_by_wallet.values() for leg in legs]

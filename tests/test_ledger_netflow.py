@@ -680,7 +680,7 @@ def test_unregistered_token_and_passthrough_produce_nothing():
     assert run(b) == []
 
 
-def test_routed_buy_books_the_venue_amount_and_leaves_the_router_fee_out():
+def test_routed_buy_books_what_the_wallet_paid_including_the_router_fee():
     tokens = 933_619_875_239_020_431_266_724_571
     venue_native = 8_598_080_700_000_000_194_641
     paid = 8_684_930_000_000_000_196_608
@@ -692,14 +692,12 @@ def test_routed_buy_books_the_venue_amount_and_leaves_the_router_fee_out():
     f = only(run(b))
     assert f.kind == KIND_BUY
     assert f.quote_asset == NATIVE
-    assert f.quote_delta == -venue_native
+    assert f.quote_delta == -paid
     assert f.basis_state == BASIS_OBSERVED
-    assert f.source == SOURCE_VENUE_EVENT
     assert f.venue == CORE
-    assert f.price_native == Decimal(venue_native) / Decimal(tokens)
 
 
-def test_routed_sell_with_trace_books_the_venue_amount_not_the_fee_reduced_receipt():
+def test_routed_sell_books_the_receipt_the_wallet_actually_kept():
     tokens, venue_native = 162_232_261 * E18, 6_968 * E18
     received = venue_native - venue_native // 100
     b = bundle(
@@ -710,12 +708,11 @@ def test_routed_sell_with_trace_books_the_venue_amount_not_the_fee_reduced_recei
     )
     f = only(run(b))
     assert f.kind == KIND_SELL
-    assert f.quote_delta == venue_native
+    assert f.quote_delta == received
     assert f.basis_state == BASIS_OBSERVED
-    assert f.source == SOURCE_VENUE_EVENT
 
 
-def test_split_curve_fills_summing_to_the_wallet_delta_book_the_venue_total():
+def test_split_curve_fills_book_what_the_wallet_sent():
     t1, t2 = 1_346_767 * E18, 5_123_708 * E18
     n1, n2 = 20 * E18, 79 * E18
     b = bundle(
@@ -724,8 +721,7 @@ def test_split_curve_fills_summing_to_the_wallet_delta_book_the_venue_total():
         meta(WALLET, ROUTER, 100 * E18),
     )
     f = only(run(b))
-    assert f.quote_delta == -(n1 + n2)
-    assert f.source == SOURCE_VENUE_EVENT
+    assert f.quote_delta == -100 * E18
     assert f.basis_state == BASIS_OBSERVED
 
 
