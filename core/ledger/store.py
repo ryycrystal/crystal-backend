@@ -34,9 +34,12 @@ _FLOW_ADDRESS = {"txhash", "wallet", "token", "quote_asset", "venue", "counterpa
 _KEY_CHUNK = 500
 _PAGE_SIZE = 1000
 
+_FLOW_KEY_COLUMNS = ("block_number", "tx_index", "log_index", "sub_index")
 _INSERT_FLOWS_SQL = (
     f"INSERT INTO wallet_flows ({', '.join(FLOW_COLUMNS)}) VALUES %s "
-    "ON CONFLICT (block_number, tx_index, log_index, sub_index) DO NOTHING RETURNING 1"
+    f"ON CONFLICT ({', '.join(_FLOW_KEY_COLUMNS)}) DO UPDATE SET "
+    + ", ".join(f"{col} = EXCLUDED.{col}" for col in FLOW_COLUMNS if col not in _FLOW_KEY_COLUMNS)
+    + " WHERE wallet_flows.interpretation < EXCLUDED.interpretation RETURNING 1"
 )
 _SELECT_FLOWS_SQL = (
     f"SELECT {', '.join(FLOW_COLUMNS)} FROM wallet_flows "
@@ -125,9 +128,22 @@ def _flow_pk(flow: Flow) -> tuple[int, int, int, int]:
 
 
 def insert_flows(cur, flows: list[Flow]) -> int:
+    """Store these movements, replacing any the engine has since reinterpreted.
+
+    Two different movements sharing one key inside a single transaction is a netting defect, not a fact
+    about the chain. It is said out loud here because the version that quietly kept whichever arrived first
+    is how one half of 65,791 wallet-to-wallet transfers went missing without a single failing test.
+    """
     if not flows:
         return 0
-    rows = [tuple(_flow_value(flow, column) for column in FLOW_COLUMNS) for flow in flows]
+    by_key: dict[tuple[int, int, int, int], Flow] = {}
+    for flow in flows:
+        key = _flow_pk(flow)
+        clashing = by_key.get(key)
+        if clashing is not None and clashing != flow:
+            print(f"[LEDGER] two different movements claim {key}; keeping the later one", flush=True)
+        by_key[key] = flow
+    rows = [tuple(_flow_value(flow, column) for column in FLOW_COLUMNS) for flow in by_key.values()]
     inserted = execute_values(cur, _INSERT_FLOWS_SQL, rows, page_size=_PAGE_SIZE, fetch=True)
     return len(inserted)
 

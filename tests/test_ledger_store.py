@@ -321,7 +321,7 @@ def test_ledger_schema_widens_tables_an_earlier_version_created(cur):
         assert set(columns) <= present, (table, set(columns) - present)
 
 
-def test_insert_flows_ignores_primary_key_conflicts(cur):
+def test_insert_flows_keeps_the_stored_reading_and_collapses_duplicates_within_one_batch(cur):
     from core.ledger import store
 
     first = [_flow(log_index=1), _flow(log_index=2), _flow(log_index=2, sub_index=1, wallet=WALLET_B)]
@@ -763,3 +763,28 @@ def test_folding_a_token_forgets_positions_whose_flows_are_gone(cur):
     cur.execute("DELETE FROM wallet_flows")
     assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 0
     assert _positions(cur, TOKEN_X) == []
+
+
+def test_a_newer_interpretation_of_the_same_movement_replaces_the_older_reading(cur):
+    """Evidence is fixed; what the engine made of it is not. A re-replay must correct, not be ignored."""
+    from core.ledger import store
+    from core.ledger.types import INTERPRETATION
+
+    original = _flow(kind="buy", token_delta=10**18, interpretation=INTERPRETATION)
+    assert store.insert_flows(cur, [original]) == 1
+
+    same_reading = replace(original, kind="sell", token_delta=-(10**18))
+    assert store.insert_flows(cur, [same_reading]) == 0, "no newer reading, so nothing changes"
+    cur.execute("SELECT kind FROM wallet_flows")
+    assert cur.fetchone()[0] == "buy"
+
+    newer = replace(original, kind="sell", token_delta=-(10**18), interpretation=INTERPRETATION + 1)
+    assert store.insert_flows(cur, [newer]) == 1
+    cur.execute("SELECT kind, token_delta, interpretation FROM wallet_flows")
+    assert cur.fetchone() == ("sell", Decimal(-(10**18)), INTERPRETATION + 1)
+
+    stale = replace(original, kind="buy", interpretation=INTERPRETATION - 1)
+    assert store.insert_flows(cur, [stale]) == 0
+    cur.execute("SELECT kind FROM wallet_flows")
+    assert cur.fetchone()[0] == "sell", "an older reading never wins"
+    assert _count(cur, "wallet_flows") == 1
