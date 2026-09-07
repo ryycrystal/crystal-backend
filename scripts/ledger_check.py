@@ -202,6 +202,13 @@ def trade_basis_states(cur, wallet: str, token: str) -> dict[str, int]:
 
 
 def chipotle_checks(cur) -> list[Check]:
+    """CHIPOTLE against hand-derived figures.
+
+    native_spent and realized moved on 2026-09-07, when router fees stopped being removed from cost. The
+    earlier figures booked the venue's amount; these book what the wallet actually sent, verified against
+    tx.value for every one of its buys. The two differ by 166.546970 MON of fees, and realized falls by
+    exactly that, because proceeds did not change.
+    """
     name = "CHIPOTLE"
     pos = position(cur, CHIPOTLE_WALLET, CHIPOTLE)
     if pos is None:
@@ -212,9 +219,9 @@ def chipotle_checks(cur) -> list[Check]:
         check_eq(name, "trade_count", int(pos["trade_count"]), 20),
         check_abs(name, "token_bought", pos["token_bought"], "3173915918.78", "0.01"),
         check_abs(name, "token_sold", pos["token_sold"], "3173915918.78", "0.01"),
-        check_abs(name, "native_spent", pos["native_spent"], "20724.081", "0.01"),
+        check_abs(name, "native_spent", pos["native_spent"], "20890.627", "0.01"),
         check_abs(name, "native_received", pos["native_received"], "34574.254", "0.01"),
-        check_abs(name, "realized_pnl_native", pos["realized_pnl_native"], "13850.173", "0.01"),
+        check_abs(name, "realized_pnl_native", pos["realized_pnl_native"], "13683.627", "0.01"),
         Check(name, "trade flows observed", "all observed", json.dumps(states, sort_keys=True), non_observed == 0),
         check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(pos["token_bought"])),
         check_eq(name, "unresolved_tokens", int(pos["unresolved_tokens"]), 0),
