@@ -1060,3 +1060,13 @@ def test_a_wallets_quote_is_conserved_across_its_movements_even_when_split_oddly
     flows = [f for f in run(b) if f.wallet == WALLET and f.token == TOKEN]
     assert sum(f.quote_delta or 0 for f in flows) == -100 * E18 + 60 * E18 + 90 * E18
     assert sum(f.token_delta for f in flows) == 0
+
+
+def test_a_venue_event_still_prices_a_partial_fill():
+    b = bundle(
+        [tf(4, WMON, WALLET, POOL, 10 * E18), tf(5, TOKEN, POOL, WALLET, 50 * E18)],
+        [v3swap(6, POOL, WALLET, -100 * E18, 20 * E18)],
+        meta(WALLET, POOL),
+    )
+    f = only(run(b))
+    assert f.quote_delta is not None and abs(f.quote_delta) <= 20 * E18

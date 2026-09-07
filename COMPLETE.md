@@ -114,6 +114,29 @@ Pending. moncock and chipotle are replaying; `ledger_check.py` and `ledger_verif
 
 ---
 
+## The open defect, measured
+
+A venue's reported price is applied to a whole movement even when the event covers a fraction of it.
+That is right for a wallet buying 600 tokens from a pool and 200 more over the counter at the same
+price, which is a tested case. It is wrong for a relayer whose movement has nothing to do with the
+event's size: on moncock transaction `0xbd8349ea12` at block 39,118,042 it priced 138,034 tokens at
+2,519,335 MON against a token trading at 0.013, and handed a relayer contract the difference as profit
+it never made.
+
+| token | flows more than a thousandfold from the median | share of traded value they carry |
+|---|---|---|
+| JAMES | 433 of 84,966 | 0.010% |
+| moncock | 1,238 of 188,030 | 0.117% |
+
+Bounding the extension was tried and reverted: it breaks the legitimate over-the-counter case above.
+The real fix is to price only the portion the event covers and leave the remainder unresolved, which
+seam 2 already has the inventory for but which needs a movement to be splittable into a priced and an
+unpriced part. That is the first item for the next round, not a threshold on the ratio.
+
+It lands on relayer and router contracts rather than on traders, because those are the addresses whose
+movements are unrelated to the event sizes around them. It does not violate any conservation law: the
+affected wallets' token quantities and their transaction-level quote totals are still exact.
+
 ## Known gaps, deliberately
 
 - **The fee is not exposed as its own field.** Cost is what the wallet paid, which is the conservation the
