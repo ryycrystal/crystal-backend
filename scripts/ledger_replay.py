@@ -645,7 +645,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     summary(tokens)
 
 
-def refold_only(tokens: list[str], chunk: int = 2000) -> None:
+def refold_only(tokens: list[str]) -> None:
     """Recompute positions from stored flows, for a fold change that alters no flow's identity or evidence."""
     from core.ledger import fold, store
     from core.ledger.schema import init_ledger_schema
@@ -653,18 +653,15 @@ def refold_only(tokens: list[str], chunk: int = 2000) -> None:
     t0 = time.time()
     with storage.db_cursor() as cur:
         init_ledger_schema(cur)
-        cur.execute("SELECT DISTINCT wallet, token FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
-        keys = [(wallet, token) for wallet, token in cur.fetchall()]
         covered = store.coverage_from_creation(cur, tokens)
-    skipped = [t for t in tokens if t not in covered]
+    skipped = [token for token in tokens if token not in covered]
     if skipped:
         print(f"[REFOLD] no coverage from creation, positions left alone: {skipped}", flush=True)
-    keys = [key for key in keys if key[1] in covered]
     written = 0
-    for start in range(0, len(keys), chunk):
+    for token in [token for token in tokens if token in covered]:
         with storage.db_cursor() as cur:
-            written += store.refold(cur, keys[start : start + chunk], fold.fold)
-        print(f"[REFOLD] {min(start + chunk, len(keys)):,}/{len(keys):,} positions", flush=True)
+            written += store.refold_tokens(cur, {token: 0}, fold.fold_token)
+        print(f"[REFOLD] {token}: folded", flush=True)
     print(f"[REFOLD] {written:,} positions in {time.time() - t0:.0f}s", flush=True)
     summary(tokens)
 

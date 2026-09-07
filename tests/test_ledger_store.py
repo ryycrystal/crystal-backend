@@ -419,25 +419,23 @@ def test_upsert_positions_replaces_the_whole_row(cur):
 
 
 def _sum_fold(prev, flows):
-    balance = sum(f.token_delta for f in flows)
-    row = _position(
-        wallet="",
-        token="",
-        balance_token=balance,
-        flow_count=len(flows),
-        first_flow_ts=flows[0].timestamp,
-        last_flow_ts=flows[-1].timestamp,
-        last_flow_block=flows[-1].block_number,
-    )
-    return row, [replace(f, basis_delta=f.token_delta, realized_delta=-f.token_delta) for f in flows]
-
-
-class _State:
-    def __init__(self, balance: int) -> None:
-        self.balance = balance
-
-    def to_row(self):
-        return _position(balance_token=self.balance, flow_count=1)
+    """A stand-in for the real fold: one state per wallet, resuming from prev when it is given one."""
+    by_wallet: dict[str, list] = {}
+    for flow in flows:
+        by_wallet.setdefault(flow.wallet, []).append(flow)
+    states = {}
+    for wallet, wallet_flows in by_wallet.items():
+        carried = prev.get(wallet) if prev else None
+        states[wallet] = _position(
+            wallet=wallet,
+            token=wallet_flows[0].token,
+            balance_token=sum(f.token_delta for f in wallet_flows) + (carried.balance_token if carried else 0),
+            flow_count=len(wallet_flows) + (carried.flow_count if carried else 0),
+            first_flow_ts=wallet_flows[0].timestamp,
+            last_flow_ts=wallet_flows[-1].timestamp,
+            last_flow_block=wallet_flows[-1].block_number,
+        )
+    return states, [replace(f, basis_delta=f.token_delta, realized_delta=-f.token_delta) for f in flows]
 
 
 def test_refold_round_trip_writes_positions_and_fold_deltas(cur):
@@ -450,9 +448,7 @@ def test_refold_round_trip_writes_positions_and_fold_deltas(cur):
         _flow(block_number=103, log_index=1, token_delta=1, wallet=WALLET_B, token=TOKEN_Y),
     ]
     assert store.insert_flows(cur, flows) == 4
-    written = store.refold(
-        cur, [(WALLET_A, TOKEN_X), (WALLET_B, TOKEN_X), (WALLET_B, TOKEN_Y), (WALLET_A, TOKEN_Y)], _sum_fold
-    )
+    written = store.refold_tokens(cur, {TOKEN_X: 0, TOKEN_Y: 0}, _sum_fold)
     assert written == 3
     cur.execute("SELECT wallet, token, balance_token, flow_count, last_flow_block FROM positions_v2 ORDER BY 1, 2")
     assert cur.fetchall() == [
@@ -467,19 +463,14 @@ def test_refold_round_trip_writes_positions_and_fold_deltas(cur):
         (102, Decimal(7), Decimal(-7)),
         (103, Decimal(1), Decimal(-1)),
     ]
-    assert store.refold(cur, [(WALLET_A, TOKEN_X)], _sum_fold) == 1
-    assert store.refold(cur, [(WALLET_A, TOKEN_Y)], _sum_fold) == 0
-    assert store.refold(cur, [], _sum_fold) == 0
-    assert store.refold(cur, [(WALLET_A, TOKEN_X)], lambda prev, fs: _State(sum(f.token_delta for f in fs))) == 1
-    cur.execute(
-        "SELECT balance_token, flow_count FROM positions_v2 WHERE wallet = %s AND token = %s", (WALLET_A, TOKEN_X)
-    )
-    assert cur.fetchone() == (Decimal(6), 1)
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, _sum_fold) == 2
+    assert store.refold_tokens(cur, {"0x" + "99" * 20: 0}, _sum_fold) == 0
+    assert store.refold_tokens(cur, {}, _sum_fold) == 0
 
 
 def test_refold_with_the_real_fold(cur):
     from core.ledger import store
-    from core.ledger.fold import fold
+    from core.ledger.fold import fold_token
 
     flows = [
         _flow(
@@ -501,7 +492,7 @@ def test_refold_with_the_real_fold(cur):
         ),
     ]
     assert store.insert_flows(cur, flows) == 2
-    assert store.refold(cur, [(WALLET_A, TOKEN_X)], fold) == 1
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 1
     cur.execute(
         "SELECT balance_token, token_bought, token_sold, native_spent, native_received, realized_pnl_native, trade_count "
         "FROM positions_v2 WHERE wallet = %s AND token = %s",
@@ -651,10 +642,124 @@ def test_purge_wallets_removes_flows_and_positions_of_the_named_wallets_only(cur
     )
     store.upsert_positions(cur, [_position(wallet=WALLET_A), _position(wallet=WALLET_B)])
 
-    assert store.purge_wallets(cur, [WALLET_A.upper(), WALLET_A]) == 2
-    assert store.purge_wallets(cur, []) == 0
+    assert store.purge_wallets(cur, [WALLET_A.upper(), WALLET_A]) == sorted({TOKEN_X, TOKEN_Y}), (
+        "the tokens it names are the ones whose fold is now stale"
+    )
+    assert store.purge_wallets(cur, []) == []
 
     cur.execute("SELECT DISTINCT wallet FROM wallet_flows")
     assert {r[0] for r in cur.fetchall()} == {WALLET_B}
     cur.execute("SELECT wallet FROM positions_v2")
     assert [r[0] for r in cur.fetchall()] == [WALLET_B]
+
+
+def _buy(block, wallet, amount, cost, log_index=1):
+    return _flow(
+        block_number=block,
+        log_index=log_index,
+        wallet=wallet,
+        token=TOKEN_X,
+        token_delta=amount,
+        quote_delta=-cost,
+        mon_value=Decimal(cost) / Decimal(10**18),
+        kind="buy",
+        txhash="0x" + f"{block:064x}",
+    )
+
+
+def _handover(block, sender, receiver, amount, log_index=5):
+    common = dict(
+        block_number=block,
+        log_index=log_index,
+        token=TOKEN_X,
+        quote_asset=None,
+        quote_delta=None,
+        mon_value=Decimal(0),
+        source="transfer_net",
+        venue=None,
+        txhash="0x" + f"{block:064x}",
+    )
+    return [
+        _flow(sub_index=0, wallet=sender, token_delta=-amount, kind="transfer_out", counterparty=receiver, **common),
+        _flow(sub_index=1, wallet=receiver, token_delta=amount, kind="transfer_in", counterparty=sender, **common),
+    ]
+
+
+def _covered(cur, token, through):
+    from core.ledger import store
+
+    store.register_token(cur, token, "crystal", 1, None, 18)
+    store.extend_coverage(cur, token, 1, through)
+
+
+def test_folding_a_token_incrementally_matches_folding_it_whole(cur):
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    _covered(cur, TOKEN_X, 400)
+    flows = [
+        _buy(100, WALLET_A, 10**18, 2 * 10**18),
+        *_handover(200, WALLET_A, WALLET_B, 4 * 10**17),
+        _flow(
+            block_number=300,
+            log_index=1,
+            wallet=WALLET_B,
+            token=TOKEN_X,
+            token_delta=-(4 * 10**17),
+            quote_delta=10**18,
+            mon_value=Decimal(1),
+            kind="sell",
+            txhash=TX_2,
+        ),
+    ]
+    assert store.insert_flows(cur, flows) == 4
+    assert store.refold_tokens(cur, {TOKEN_X: 100}, fold_token) == 2
+    cur.execute("SELECT folded_through FROM token_fold_state WHERE token = %s", (TOKEN_X,))
+    assert cur.fetchone()[0] == 300
+    whole = _positions(cur, TOKEN_X)
+
+    cur.execute("TRUNCATE positions_v2, parked_entitlements, token_fold_state")
+    for block in (100, 200, 300):
+        touched = min(f.block_number for f in flows if f.block_number == block)
+        assert store.refold_tokens(cur, {TOKEN_X: touched}, fold_token) >= 1
+    assert _positions(cur, TOKEN_X) == whole, "one flush per block must land where a single pass lands"
+
+
+def _positions(cur, token):
+    cur.execute(
+        "SELECT wallet, balance_token, cost_basis_native, realized_pnl_native, unresolved_tokens, flow_count "
+        "FROM positions_v2 WHERE token = %s ORDER BY wallet",
+        (token,),
+    )
+    return cur.fetchall()
+
+
+def test_a_flow_below_the_watermark_forces_the_whole_token_to_be_folded_again(cur):
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    _covered(cur, TOKEN_X, 400)
+    store.insert_flows(cur, [_buy(300, WALLET_A, 10**18, 2 * 10**18)])
+    assert store.refold_tokens(cur, {TOKEN_X: 300}, fold_token) == 1
+    assert _positions(cur, TOKEN_X) == [(WALLET_A, Decimal(10**18), Decimal(2 * 10**18), Decimal(0), Decimal(0), 1)]
+
+    store.insert_flows(cur, [_buy(100, WALLET_A, 3 * 10**18, 3 * 10**18, log_index=2)])
+    assert store.refold_tokens(cur, {TOKEN_X: 100}, fold_token) == 1
+    assert _positions(cur, TOKEN_X) == [
+        (WALLET_A, Decimal(4 * 10**18), Decimal(5 * 10**18), Decimal(0), Decimal(0), 2)
+    ], "the earlier flow must be folded in, not appended on top of a stale checkpoint"
+
+
+def test_folding_a_token_forgets_positions_whose_flows_are_gone(cur):
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    _covered(cur, TOKEN_X, 400)
+    store.insert_flows(cur, [_buy(100, WALLET_A, 10**18, 10**18), _buy(101, WALLET_B, 10**18, 10**18)])
+    assert store.refold_tokens(cur, {TOKEN_X: 100}, fold_token) == 2
+    cur.execute("DELETE FROM wallet_flows WHERE wallet = %s", (WALLET_B,))
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 1
+    assert [row[0] for row in _positions(cur, TOKEN_X)] == [WALLET_A]
+    cur.execute("DELETE FROM wallet_flows")
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 0
+    assert _positions(cur, TOKEN_X) == []

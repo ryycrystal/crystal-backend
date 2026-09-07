@@ -171,12 +171,6 @@ def _position_row(state, wallet: str, token: str) -> PositionRow:
     return replace(row, wallet=wallet, token=token)
 
 
-def _fold_result(result):
-    if isinstance(result, tuple) and len(result) == 2:
-        return result
-    return result, []
-
-
 def _write_fold_deltas(cur, updates: list[tuple]) -> None:
     if not updates:
         return
@@ -224,29 +218,95 @@ def _write_parked(cur, keys: list[tuple[str, str]], parked: list[tuple]) -> None
         )
 
 
-def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
-    rows: list[PositionRow] = []
-    updates: list[tuple] = []
-    parked: list[tuple] = []
-    folded_keys: list[tuple[str, str]] = []
-    for (wallet, token), flows in load_flows(cur, keys).items():
-        if not flows:
-            continue
-        state, folded = _fold_result(fold_fn(None, flows))
-        rows.append(_position_row(state, wallet, token))
-        folded_keys.append((wallet, token))
-        for venue, bucket in getattr(state, "parked", {}).items():
-            parked.append((wallet, token, venue, *(int(getattr(bucket, name)) for name in PARKED_COLUMNS)))
-        stored = {_flow_pk(flow): flow for flow in flows}
-        for flow in folded:
-            before = stored.get(_flow_pk(flow))
-            values = _fold_values(flow)
-            if before is None or _fold_values(before) != values:
-                updates.append((*_flow_pk(flow), *values))
+def load_token_flows(cur, token: str, after: int | None = None) -> list[Flow]:
+    sql = f"SELECT {', '.join(FLOW_COLUMNS)} FROM wallet_flows WHERE token = %s"
+    params: tuple = (_lower(token),)
+    if after is not None:
+        sql += " AND block_number > %s"
+        params += (int(after),)
+    cur.execute(sql + " ORDER BY block_number, tx_index, log_index, sub_index", params)
+    return [_flow_from_row(row) for row in cur.fetchall()]
+
+
+def load_positions(cur, token: str, wallets) -> dict:
+    """Rebuild each wallet's fold state from what was stored, so a fold can resume instead of starting over."""
+    from core.ledger.fold import PositionState
+
+    addrs = sorted({_lower(wallet) for wallet in wallets if wallet})
+    if not addrs:
+        return {}
+    cur.execute(
+        f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions_v2 WHERE token = %s AND wallet = ANY(%s)",
+        (_lower(token), addrs),
+    )
+    rows = [PositionRow(**dict(zip(POSITION_COLUMNS, row))) for row in cur.fetchall()]
+    parked = load_parked(cur, [(row.wallet, row.token) for row in rows])
+    return {row.wallet: PositionState.from_row(row, parked.get((row.wallet, row.token))) for row in rows}
+
+
+def fold_watermarks(cur, tokens) -> dict[str, int]:
+    addrs = sorted({_lower(token) for token in tokens if token})
+    if not addrs:
+        return {}
+    cur.execute("SELECT token, folded_through FROM token_fold_state WHERE token = ANY(%s)", (addrs,))
+    return {token: int(block) for token, block in cur.fetchall()}
+
+
+def set_fold_watermark(cur, token: str, block: int) -> None:
+    cur.execute(
+        "INSERT INTO token_fold_state (token, folded_through) VALUES (%s, %s) "
+        "ON CONFLICT (token) DO UPDATE SET folded_through = EXCLUDED.folded_through",
+        (_lower(token), int(block)),
+    )
+
+
+def _write_fold(cur, token: str, states: dict, folded: list[Flow], stored: dict, full: bool) -> None:
+    if full:
+        cur.execute("DELETE FROM positions_v2 WHERE token = %s", (_lower(token),))
+        cur.execute("DELETE FROM parked_entitlements WHERE token = %s", (_lower(token),))
+    rows = [_position_row(state, wallet, token) for wallet, state in states.items()]
+    keys = [(wallet, token) for wallet in states]
+    parked = [
+        (wallet, token, venue, *(int(getattr(bucket, name)) for name in PARKED_COLUMNS))
+        for wallet, state in states.items()
+        for venue, bucket in getattr(state, "parked", {}).items()
+    ]
+    updates = []
+    for flow in folded:
+        before = stored.get(_flow_pk(flow))
+        values = _fold_values(flow)
+        if before is None or _fold_values(before) != values:
+            updates.append((*_flow_pk(flow), *values))
     upsert_positions(cur, rows)
     _write_fold_deltas(cur, updates)
-    _write_parked(cur, folded_keys, parked)
-    return len(rows)
+    _write_parked(cur, [] if full else keys, parked)
+
+
+def refold_tokens(cur, touched: dict[str, int], fold_fn) -> int:
+    """Fold each touched token in chain order, resuming from its checkpoint where the new flows allow it.
+
+    A flow landing at or below the watermark means history changed underneath the checkpoint, so that token
+    is folded from the beginning; otherwise only the wallets in the new flows are loaded and advanced. The
+    full pass is what makes a correction possible at all, and keeping it off the common path is what makes
+    the ordered fold affordable.
+    """
+    watermarks = fold_watermarks(cur, touched)
+    written = 0
+    for token in sorted(touched):
+        watermark = watermarks.get(token)
+        full = watermark is None or int(touched[token]) <= watermark
+        flows = load_token_flows(cur, token, None if full else watermark)
+        if not flows:
+            if full:
+                cur.execute("DELETE FROM positions_v2 WHERE token = %s", (_lower(token),))
+                cur.execute("DELETE FROM parked_entitlements WHERE token = %s", (_lower(token),))
+            continue
+        previous = None if full else load_positions(cur, token, {flow.wallet for flow in flows})
+        states, folded = fold_fn(previous, flows)
+        _write_fold(cur, token, states, folded, {_flow_pk(flow): flow for flow in flows}, full)
+        set_fold_watermark(cur, token, max(int(flow.block_number) for flow in flows))
+        written += len(states)
+    return written
 
 
 def delete_token_flows(cur, tokens, block: int) -> list[tuple[str, str]]:
@@ -308,14 +368,15 @@ def coverage_from_creation(cur, tokens) -> dict[str, int]:
     return {token: int(to_block) for token, to_block in cur.fetchall()}
 
 
-def purge_wallets(cur, wallets) -> int:
+def purge_wallets(cur, wallets) -> list[str]:
+    """Remove everything an address earned while it was mistaken for a wallet; returns the tokens affected."""
     addrs = sorted({_lower(wallet) for wallet in wallets if wallet})
     if not addrs:
-        return 0
+        return []
     cur.execute("DELETE FROM positions_v2 WHERE wallet = ANY(%s)", (addrs,))
     cur.execute("DELETE FROM parked_entitlements WHERE wallet = ANY(%s)", (addrs,))
-    cur.execute("DELETE FROM wallet_flows WHERE wallet = ANY(%s)", (addrs,))
-    return cur.rowcount
+    cur.execute("DELETE FROM wallet_flows WHERE wallet = ANY(%s) RETURNING token", (addrs,))
+    return sorted({token for (token,) in cur.fetchall()})
 
 
 def get_tx_meta(cur, txhashes) -> dict[str, TxMeta]:

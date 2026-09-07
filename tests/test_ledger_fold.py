@@ -25,6 +25,7 @@ def _flow(
     mon_value=None,
     source="transfer_net",
     counterparty=None,
+    wallet=None,
 ):
     if quote is None:
         quote_asset = None
@@ -37,7 +38,7 @@ def _flow(
         sub_index=sub_index,
         txhash=txhash or f"0x{block:064x}",
         timestamp=timestamp if timestamp is not None else 1_700_000_000 + block,
-        wallet=WALLET,
+        wallet=wallet or WALLET,
         token=TOKEN,
         token_delta=token_delta,
         quote_asset=quote_asset,

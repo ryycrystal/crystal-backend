@@ -9,6 +9,7 @@ LEDGER_TABLES = (
     "venues",
     "token_registry",
     "token_coverage",
+    "token_fold_state",
     "parked_entitlements",
     "tx_meta",
     "tx_traces",
@@ -134,6 +135,13 @@ _STATEMENTS = (
         quote_token      TEXT,
         decimals         INTEGER NOT NULL DEFAULT 18,
         active           BOOLEAN NOT NULL DEFAULT TRUE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS token_fold_state
+    (
+        token          TEXT PRIMARY KEY,
+        folded_through BIGINT NOT NULL
     )
     """,
     """

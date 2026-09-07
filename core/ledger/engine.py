@@ -85,7 +85,7 @@ class LedgerEngine:
         self._market_pairs: dict[str, tuple[str, str]] = {}
         self._pools: dict[str, tuple[str, str, bool]] = {}
         self.scope: frozenset[str] | None = None
-        self._affected: set[tuple[str, str]] = set()
+        self._affected: dict[str, int] = {}
         self._head: tuple[int, float] | None = None
         self._rate_cache: dict[int, Rates] = {}
         self._price_cache: dict[tuple[str, int], Decimal | None] = {}
@@ -315,7 +315,8 @@ class LedgerEngine:
         from core.ledger.netflow import net_transaction
 
         if self.scope:
-            self._affected.update(store.delete_token_flows(cur, self.scope, blk))
+            for _, token in store.delete_token_flows(cur, self.scope, blk):
+                self._touch(token, blk)
         if not logs:
             return 0
         if self._registry is None:
@@ -364,9 +365,9 @@ class LedgerEngine:
                 bundle = replace(bundle, userop_sender=sender)
             discovered = set(kinds.observe_tx(bundle, registry, cur))
             if discovered:
-                store.purge_wallets(cur, discovered)
+                for token in store.purge_wallets(cur, discovered):
+                    self._touch(token, 0)
                 flows = [f for f in flows if f.wallet not in discovered]
-                self._affected = {key for key in self._affected if key[0] not in discovered}
                 self.stats["purged"] += len(discovered)
             tx_flows = net(bundle)
             if self._needs_trace(tx_flows) and self._within_trace_window(blk):
@@ -382,8 +383,13 @@ class LedgerEngine:
         inserted = store.insert_flows(cur, flows)
         self.stats["flows"] += inserted
         for flow in flows:
-            self._affected.add((flow.wallet, flow.token))
+            self._touch(flow.token, blk)
         return inserted
+
+    def _touch(self, token: str, blk: int) -> None:
+        """Remember the earliest block this flush changed for a token; below its watermark forces a refold."""
+        current = self._affected.get(token)
+        self._affected[token] = int(blk) if current is None else min(current, int(blk))
 
     def _reference_price(self, token: str, blk: int, ts: int, cur) -> Decimal | None:
         key = (token, int(blk))
@@ -486,7 +492,7 @@ class LedgerEngine:
             return Decimal(str(row[0]))
         return default
 
-    def affected_keys(self) -> list[tuple[str, str]]:
+    def affected_keys(self) -> list[str]:
         return sorted(self._affected)
 
     def cover(self, cur, tokens, from_block: int, to_block: int) -> None:
@@ -507,11 +513,11 @@ class LedgerEngine:
             return 0
         from core.ledger import fold, store
 
-        keys = sorted(self._affected)
-        self._affected.clear()
-        covered = store.coverage_from_creation(cur, {token for _, token in keys})
-        folded = [key for key in keys if key[1] in covered]
-        self.stats["uncovered"] += len(keys) - len(folded)
-        written = store.refold(cur, folded, fold.fold)
+        touched = self._affected
+        self._affected = {}
+        covered = store.coverage_from_creation(cur, touched)
+        folded = {token: blk for token, blk in touched.items() if token in covered}
+        self.stats["uncovered"] += len(touched) - len(folded)
+        written = store.refold_tokens(cur, folded, fold.fold_token)
         self.stats["refolded"] += written
         return written

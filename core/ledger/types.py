@@ -163,6 +163,12 @@ class Effect:
         out["realized_delta"] = self.realized_delta
         return out
 
+    def __add__(self, other: "Effect") -> "Effect":
+        return Effect(**{name: getattr(self, name) + getattr(other, name) for name in EFFECT_COLUMNS})
+
+    def __neg__(self) -> "Effect":
+        return Effect(**{name: -getattr(self, name) for name in EFFECT_COLUMNS})
+
 
 EFFECT_COLUMNS = tuple(Effect.__dataclass_fields__)
 FOLD_COLUMNS = ("basis_delta", "realized_delta", *EFFECT_COLUMNS)

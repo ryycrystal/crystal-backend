@@ -279,15 +279,45 @@ def _apply_sell(state: PositionState, flow: Flow, amount: int) -> Effect:
     return effect
 
 
-def _apply_transfer_out(state: PositionState, amount: int) -> Effect:
+def _handover(flow: Flow) -> tuple[str, int]:
+    """One transfer is one log, so its two halves name each other by their shared chain position."""
+    return (flow.txhash, flow.log_index)
+
+
+def _apply_transfer_out(state: PositionState, flow: Flow, amount: int, transit: dict | None) -> Effect:
     taken, released_observed, released_estimated = _take_open(state, amount)
-    return _released(taken, released_observed, released_estimated)
+    effect = _released(taken, released_observed, released_estimated)
+    if transit is not None:
+        transit[_handover(flow)] = effect
+    return effect
 
 
-def _apply_transfer_in(state: PositionState, flow: Flow, amount: int) -> Effect:
+def _apply_transfer_in(state: PositionState, flow: Flow, amount: int, transit: dict | None) -> Effect:
+    """Tokens arrive at the cost the sender released, unless the receiver paid a price of its own.
+
+    Without this a transfer destroys cost: the sender's basis leaves and nothing takes it up, so the
+    receiver holds tokens at no known price and their eventual sale reads as pure profit. What the receiver
+    actually paid, when there is such a payment, is better evidence than the sender's history and wins.
+    """
     cost = _quote_wei(flow)
-    basis_state = flow.basis_state if cost > 0 else BASIS_UNRESOLVED
-    return _open(state, amount, cost, basis_state)
+    if cost > 0:
+        return _open(state, amount, cost, flow.basis_state)
+    handed_over = transit.pop(_handover(flow), None) if transit is not None else None
+    if handed_over is None:
+        return _open(state, amount, 0, BASIS_UNRESOLVED)
+    arriving = -handed_over
+    effect = Effect()
+    for quantity, basis, basis_state in (
+        (arriving.qty_observed, arriving.basis_observed_delta, BASIS_OBSERVED),
+        (arriving.qty_estimated, arriving.basis_estimated_delta, BASIS_ESTIMATED),
+        (arriving.qty_unresolved, 0, BASIS_UNRESOLVED),
+    ):
+        if quantity:
+            effect = effect + _open(state, quantity, basis, basis_state)
+    short = amount - (arriving.qty_observed + arriving.qty_estimated + arriving.qty_unresolved)
+    if short > 0:
+        effect = effect + _open(state, short, 0, BASIS_UNRESOLVED)
+    return effect
 
 
 def _apply_burn(state: PositionState, amount: int) -> Effect:
@@ -350,7 +380,7 @@ def _apply_swap_leg(state: PositionState, flow: Flow, amount: int, delta: int) -
     return _apply_sell(state, flow, amount)
 
 
-def _apply(state: PositionState, flow: Flow) -> Effect:
+def _apply(state: PositionState, flow: Flow, transit: dict | None = None) -> Effect:
     delta = _wei(flow.token_delta)
     amount = abs(delta)
     kind = flow.kind
@@ -368,9 +398,9 @@ def _apply(state: PositionState, flow: Flow) -> Effect:
     if kind == KIND_SWAP_LEG:
         return _apply_swap_leg(state, flow, amount, delta)
     if kind == KIND_TRANSFER_OUT:
-        return _apply_transfer_out(state, amount)
+        return _apply_transfer_out(state, flow, amount, transit)
     if kind in INBOUND_KINDS:
-        return _apply_transfer_in(state, flow, amount)
+        return _apply_transfer_in(state, flow, amount, transit)
     if kind == KIND_BURN:
         return _apply_burn(state, amount)
     if kind in PARK_KINDS:
@@ -404,6 +434,37 @@ def fold(prev: PositionState | None, flows: list[Flow]) -> tuple[PositionState, 
         state.flow_count += 1
         out.append(replace(flow, **effect.as_flow_fields()))
     return state, out
+
+
+def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tuple[dict[str, PositionState], list[Flow]]:
+    """Fold every wallet of one token together, in chain order.
+
+    Folding wallet by wallet cannot see a transfer as one event, only as two unrelated halves, so the cost
+    the sender releases has nowhere to go and the receiver's tokens arrive priceless. One pass over the
+    whole token in chain order puts both halves in the same fold, with the sending half ordered first.
+    """
+    states = {wallet: replace(state) for wallet, state in (prev or {}).items()}
+    for state in states.values():
+        state.parked = {name: replace(bucket) for name, bucket in state.parked.items()}
+    out: list[Flow] = []
+    transit: dict[tuple[str, int], Effect] = {}
+    for flow in sorted(flows, key=_flow_key):
+        state = states.get(flow.wallet)
+        if state is None:
+            state = states[flow.wallet] = PositionState(wallet=flow.wallet, token=flow.token)
+        effect = _apply(state, flow, transit)
+        _stamp(state, flow)
+        out.append(replace(flow, **effect.as_flow_fields()))
+    return states, out
+
+
+def _stamp(state: PositionState, flow: Flow) -> None:
+    timestamp = int(flow.timestamp)
+    if state.first_flow_ts is None or timestamp < state.first_flow_ts:
+        state.first_flow_ts = timestamp
+    state.last_flow_ts = timestamp
+    state.last_flow_block = flow.block_number
+    state.flow_count += 1
 
 
 def fold_position(wallet: str, token: str, flows: list[Flow]) -> tuple[PositionRow, list[Flow]]:

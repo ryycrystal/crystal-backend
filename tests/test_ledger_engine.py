@@ -429,7 +429,7 @@ def test_engine_folds_curve_buy_and_settler_sell_into_one_closed_position(seeded
     with db_cursor() as cur:
         inserted_buy = engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur)
         inserted_sell = engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur)
-        assert engine.affected_keys() == [(WALLET, TOKEN)]
+        assert engine.affected_keys() == [TOKEN]
         refolded = engine.flush(cur)
 
     assert inserted_buy == 1
@@ -701,7 +701,7 @@ def test_discovering_a_venue_purges_the_rows_it_earned_as_a_wallet(seeded):
         assert cur.fetchone()[0] == 1
         kinds.kinds[WALLET] = "venue_pool"
         assert engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur) == 0
-        assert engine.affected_keys() == []
+        assert engine.affected_keys() == [TOKEN], "the purge invalidated this token's fold, so it must be refolded"
         engine.flush(cur)
         cur.execute("SELECT count(*) FROM wallet_flows")
         assert cur.fetchone()[0] == 0

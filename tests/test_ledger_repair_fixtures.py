@@ -296,3 +296,76 @@ def test_10c_withdrawing_from_a_place_nothing_was_parked_in_restores_nothing():
     assert out[-1].basis_delta == 0, "B holds nothing of this wallet's, so nothing comes back priced"
     assert state.unresolved_tokens == 100
     assert state.parked_observed_basis == 100, "A still holds the parked basis"
+
+
+SENDER_LOW = "0x" + "11" * 20
+SENDER_HIGH = "0x" + "ee" * 20
+RECEIVER_MID = "0x" + "88" * 20
+
+
+def _transfer_pair(sender, receiver, block, log_index, amount):
+    """The two halves of one transfer: one log, two movements, the outgoing one folding first."""
+    return [
+        fold_flow(
+            "transfer_out",
+            -amount,
+            None,
+            block=block,
+            log_index=log_index,
+            sub_index=0,
+            wallet=sender,
+            counterparty=receiver,
+        ),
+        fold_flow(
+            "transfer_in",
+            amount,
+            None,
+            block=block,
+            log_index=log_index,
+            sub_index=1,
+            wallet=receiver,
+            counterparty=sender,
+        ),
+    ]
+
+
+def _cross_wallet_case(sender, receiver):
+    return [
+        fold_flow(KIND_BUY, 100, -100, block=1, wallet=sender),
+        *_transfer_pair(sender, receiver, block=2, log_index=4, amount=100),
+        fold_flow(KIND_SELL, -100, 150, block=3, wallet=receiver),
+    ]
+
+
+def test_05_basis_travels_with_a_transfer_whichever_way_the_addresses_sort():
+    """The sender's released basis is the receiver's cost. Today the receiver books it as unresolved.
+
+    Both address orders must give the same answer: the two halves of a transfer share a chain position, so
+    an order that came from sorting on the address decided which wallet folded first, and in 56.8% of real
+    pairs that was the receiver.
+    """
+    from core.ledger.fold import fold_token
+
+    for sender, receiver in ((SENDER_LOW, RECEIVER_MID), (SENDER_HIGH, RECEIVER_MID)):
+        states, out = fold_token(None, _cross_wallet_case(sender, receiver))
+        arrival = next(f for f in out if f.kind == KIND_TRANSFER_IN)
+        assert arrival.basis_delta == 100, f"{sender} -> {receiver}: the basis must arrive with the tokens"
+        assert arrival.basis_observed_delta == 100
+        assert states[receiver].cost_basis_native == 0, "it is then released by the sale"
+        assert states[receiver].realized_pnl_native == 50, "150 received against the 100 the sender paid"
+        assert states[receiver].unresolved_tokens == 0
+        assert states[sender].cost_basis_native == 0 and states[sender].observed_tokens == 0
+        assert states[sender].realized_pnl_native == 0, "handing tokens away is not a gain"
+
+
+def test_05b_an_unresolved_sender_hands_on_nothing_to_inherit():
+    from core.ledger.fold import fold_token
+
+    flows = [
+        fold_flow(KIND_TRANSFER_IN, 100, None, block=1, wallet=SENDER_LOW, basis_state=BASIS_UNRESOLVED),
+        *_transfer_pair(SENDER_LOW, RECEIVER_MID, block=2, log_index=4, amount=100),
+    ]
+    states, out = fold_token(None, flows)
+    arrival = out[-1]
+    assert arrival.basis_delta == 0
+    assert states[RECEIVER_MID].unresolved_tokens == 100
