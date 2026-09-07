@@ -130,8 +130,7 @@ CHECKS = [
           ON in_leg.block_number = out_leg.block_number AND in_leg.tx_index = out_leg.tx_index
          AND in_leg.log_index = out_leg.log_index AND in_leg.token = out_leg.token
          AND in_leg.wallet = out_leg.counterparty
-        WHERE out_leg.kind = 'transfer_out' AND in_leg.kind IN ('transfer_in', 'airdrop')
-          AND COALESCE(in_leg.quote_delta, 0) = 0
+        WHERE out_leg.kind = 'transfer_out' AND in_leg.token_delta > 0
           AND in_leg.basis_delta <> -out_leg.basis_delta
         """,
     ),
