@@ -8,12 +8,15 @@ LEDGER_TABLES = (
     "address_kinds",
     "venues",
     "token_registry",
+    "token_coverage",
     "tx_meta",
     "tx_traces",
     "ledger_meta",
 )
 
-FLOW_EFFECT_DDL = tuple(f"{column} NUMERIC(78, 0) NOT NULL DEFAULT 0" for column in EFFECT_COLUMNS)
+FLOW_EFFECT_DDL = tuple(f"{column} NUMERIC(78, 0) NOT NULL DEFAULT 0" for column in EFFECT_COLUMNS) + (
+    "interpretation INTEGER NOT NULL DEFAULT 0",
+)
 POSITION_INVENTORY_DDL = (
     "observed_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
     "estimated_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
@@ -131,6 +134,47 @@ _STATEMENTS = (
         decimals         INTEGER NOT NULL DEFAULT 18,
         active           BOOLEAN NOT NULL DEFAULT TRUE
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS token_coverage
+    (
+        token      TEXT NOT NULL,
+        from_block BIGINT NOT NULL,
+        to_block   BIGINT NOT NULL,
+        PRIMARY KEY (token, from_block)
+    )
+    """,
+    """
+    CREATE OR REPLACE VIEW ledger_token_coverage AS
+    WITH spans AS (
+        SELECT r.token, r.registered_block, c.from_block, c.to_block
+        FROM token_registry r
+        JOIN token_coverage c ON c.token = r.token OR c.token = '*'
+    ),
+    edges AS (
+        SELECT token, registered_block, from_block, to_block,
+               MAX(to_block) OVER (
+                   PARTITION BY token ORDER BY from_block, to_block
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ) AS reach
+        FROM spans
+    ),
+    islands AS (
+        SELECT token, registered_block, from_block, to_block,
+               SUM(CASE WHEN reach IS NULL OR from_block > reach + 1 THEN 1 ELSE 0 END) OVER (
+                   PARTITION BY token ORDER BY from_block, to_block
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS island
+        FROM edges
+    ),
+    merged AS (
+        SELECT token, registered_block, island, MIN(from_block) AS from_block, MAX(to_block) AS to_block
+        FROM islands GROUP BY token, registered_block, island
+    )
+    SELECT token, from_block, to_block, registered_block,
+           registered_block IS NOT NULL
+           AND from_block <= registered_block AND registered_block <= to_block AS from_creation
+    FROM merged
     """,
     """
     CREATE TABLE IF NOT EXISTS tx_meta

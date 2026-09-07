@@ -866,6 +866,25 @@ def _swap_pairs(legs_by_wallet: dict[str, list[_Leg]], reference_price: PriceFn 
             _price_by_reference(leg, reference_price)
 
 
+def _sub_indices(legs: list[_Leg]) -> dict[int, int]:
+    """Separate the movements that share a chain position, outgoing first.
+
+    A transfer is one log and two movements, so the log index alone cannot identify either of them: keyed on
+    it alone the sender and the receiver collide on the primary key and one is silently dropped on insert.
+    Ordering the outgoing side first is not cosmetic either: it is what lets a fold in chain order release a
+    sender's basis before the receiver inherits it, at the one position where both happen at once.
+    """
+    out: dict[int, int] = {}
+    by_position: dict[int, list[_Leg]] = defaultdict(list)
+    for leg in legs:
+        by_position[leg.log_index].append(leg)
+    for position in by_position.values():
+        position.sort(key=lambda leg: (leg.token_delta > 0, leg.wallet, leg.token))
+        for ordinal, leg in enumerate(position):
+            out[id(leg)] = ordinal
+    return out
+
+
 def _flow(bundle: TxBundle, leg: _Leg, sub_index: int, origin: str | None, rates: Rates) -> Flow:
     mon_value, usd_value = _values(leg.quote_asset, leg.quote_delta, rates)
     price = _price(mon_value, leg.token_delta) if leg.basis_state == BASIS_OBSERVED else None
@@ -973,11 +992,6 @@ def net_transaction(
         else:
             _classify_unpriced(leg, bundle, kinds, origin, reference_price)
 
+    sub_index = _sub_indices(all_legs)
     all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))
-    seen: dict[tuple[str, str, int], int] = defaultdict(int)
-    flows = []
-    for leg in all_legs:
-        key = (leg.wallet, leg.token, leg.log_index)
-        flows.append(_flow(bundle, leg, seen[key], origin, rates))
-        seen[key] += 1
-    return flows
+    return [_flow(bundle, leg, sub_index[id(leg)], origin, rates) for leg in all_legs]

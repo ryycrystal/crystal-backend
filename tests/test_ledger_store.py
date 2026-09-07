@@ -212,7 +212,82 @@ def test_ledger_schema_is_idempotent_and_never_touches_existing_tables(conn, cur
     cur.execute("DROP TABLE ledger_test_bystander")
     for statement in _STATEMENTS:
         head = " ".join(statement.split())
-        assert head.startswith("CREATE TABLE IF NOT EXISTS") or head.startswith("CREATE INDEX IF NOT EXISTS")
+        assert head.startswith(("CREATE TABLE IF NOT EXISTS", "CREATE INDEX IF NOT EXISTS", "CREATE OR REPLACE VIEW"))
+
+
+def _coverage(cur):
+    cur.execute("SELECT token, from_block, to_block FROM token_coverage ORDER BY token, from_block")
+    return cur.fetchall()
+
+
+def _from_creation(cur, token):
+    cur.execute(
+        "SELECT from_block, to_block FROM ledger_token_coverage WHERE token = %s AND from_creation ORDER BY 1", (token,)
+    )
+    return cur.fetchall()
+
+
+def test_coverage_ranges_merge_when_they_touch_and_stay_apart_when_they_do_not(cur):
+    from core.ledger import store
+
+    cur.execute("DELETE FROM token_coverage")
+    store.extend_coverage(cur, TOKEN_X, 100, 200)
+    store.extend_coverage(cur, TOKEN_X, 201, 250)
+    store.extend_coverage(cur, TOKEN_X, 150, 260)
+    store.extend_coverage(cur, TOKEN_X, 300, 400)
+    store.extend_coverage(cur, TOKEN_X, 120, 130)
+    assert _coverage(cur) == [(TOKEN_X, 100, 260), (TOKEN_X, 300, 400)]
+    store.extend_coverage(cur, TOKEN_X, 261, 299)
+    assert _coverage(cur) == [(TOKEN_X, 100, 400)]
+    store.extend_coverage(cur, TOKEN_X, 500, 499)
+    assert _coverage(cur) == [(TOKEN_X, 100, 400)]
+    store.extend_coverage(cur, None, 90, 95)
+    store.extend_coverage(cur, None, 96, 96)
+    assert _coverage(cur) == [("*", 90, 96), (TOKEN_X, 100, 400)]
+
+
+def test_coverage_from_creation_needs_the_registered_block_inside_one_unbroken_span(cur):
+    from core.ledger import store
+
+    cur.execute("DELETE FROM token_coverage")
+    cur.execute("DELETE FROM token_registry")
+    store.register_token(cur, TOKEN_X, "crystal", 1000, None, 18)
+    store.register_token(cur, TOKEN_Y, "crystal", 5000, None, 18)
+    store.register_token(cur, "0x" + "77" * 20, "spot_quote", None, None, 18)
+    store.extend_coverage(cur, TOKEN_X, 1200, 2000)
+    assert store.coverage_from_creation(cur, [TOKEN_X, TOKEN_Y]) == {}
+    store.extend_coverage(cur, TOKEN_X, 1000, 1199)
+    assert store.coverage_from_creation(cur, [TOKEN_X, TOKEN_Y]) == {TOKEN_X: 2000}
+    store.extend_coverage(cur, None, 4000, 6000)
+    assert store.coverage_from_creation(cur, [TOKEN_X, TOKEN_Y]) == {TOKEN_X: 2000, TOKEN_Y: 6000}
+    store.extend_coverage(cur, None, 2001, 3999)
+    assert store.coverage_from_creation(cur, [TOKEN_X, TOKEN_Y]) == {TOKEN_X: 6000, TOKEN_Y: 6000}
+    assert _from_creation(cur, TOKEN_X) == [(1000, 6000)]
+    unknown = "0x" + "77" * 20
+    store.extend_coverage(cur, unknown, 100, 9000)
+    assert store.coverage_from_creation(cur, [unknown]) == {}, "an unknown creation block cannot be certified covered"
+    assert store.coverage_from_creation(cur, []) == {}
+    cur.execute("DELETE FROM token_coverage")
+    cur.execute("DELETE FROM token_registry")
+    store.invalidate_registry()
+
+
+def test_delete_token_flows_removes_one_block_of_the_named_tokens_and_names_the_positions(cur):
+    from core.ledger import store
+
+    cur.execute("DELETE FROM wallet_flows")
+    flows = [
+        _flow(block_number=100, log_index=1),
+        _flow(block_number=100, log_index=2, wallet=WALLET_B),
+        _flow(block_number=100, log_index=3, token=TOKEN_Y),
+        _flow(block_number=101, log_index=1),
+    ]
+    assert store.insert_flows(cur, flows) == 4
+    gone = store.delete_token_flows(cur, [TOKEN_X.upper()], 100)
+    assert sorted(gone) == [(WALLET_A, TOKEN_X), (WALLET_B, TOKEN_X)]
+    assert store.delete_token_flows(cur, [], 100) == []
+    cur.execute("SELECT block_number, token FROM wallet_flows ORDER BY 1, 2")
+    assert cur.fetchall() == [(100, TOKEN_Y), (101, TOKEN_X)]
 
 
 def test_ledger_schema_widens_tables_an_earlier_version_created(cur):

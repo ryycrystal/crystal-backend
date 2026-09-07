@@ -84,6 +84,7 @@ class LedgerEngine:
         self._market_tokens: dict[str, str] = {}
         self._market_pairs: dict[str, tuple[str, str]] = {}
         self._pools: dict[str, tuple[str, str, bool]] = {}
+        self.scope: frozenset[str] | None = None
         self._affected: set[tuple[str, str]] = set()
         self._head: tuple[int, float] | None = None
         self._rate_cache: dict[int, Rates] = {}
@@ -304,11 +305,19 @@ class LedgerEngine:
         return bundles, moved
 
     def process_block(self, blk: int, ts: int, logs: list[dict], cur) -> int:
-        if not logs:
-            return 0
+        """Net this block's transactions into flows.
+
+        A scoped run is the authority for its tokens in every block it covers, so whatever an earlier run
+        wrote for them in this block is dropped first and the positions it touched are refolded. Without
+        that, the first interpretation of a block would win forever.
+        """
         from core.ledger import store
         from core.ledger.netflow import net_transaction
 
+        if self.scope:
+            self._affected.update(store.delete_token_flows(cur, self.scope, blk))
+        if not logs:
+            return 0
         if self._registry is None:
             self.refresh_registry(cur)
         if self._register_from_events(blk, logs, cur, store):
@@ -480,13 +489,29 @@ class LedgerEngine:
     def affected_keys(self) -> list[tuple[str, str]]:
         return sorted(self._affected)
 
+    def cover(self, cur, tokens, from_block: int, to_block: int) -> None:
+        """Commit, alongside the flows, which blocks these tokens are now complete for; None means all."""
+        from core.ledger import store
+
+        for token in tokens if tokens is not None else (None,):
+            store.extend_coverage(cur, token, from_block, to_block)
+
     def flush(self, cur) -> int:
+        """Fold the touched positions, but only for tokens whose coverage reaches back to their creation.
+
+        A token seen only because another token's transaction moved it has flows that are real evidence
+        and a position that would be a fragment of an unreplayed history. Serving the fragment is where the
+        leftover tokens' negative balances came from, so it is not served at all.
+        """
         if not self._affected:
             return 0
         from core.ledger import fold, store
 
         keys = sorted(self._affected)
         self._affected.clear()
-        written = store.refold(cur, keys, fold.fold)
+        covered = store.coverage_from_creation(cur, {token for _, token in keys})
+        folded = [key for key in keys if key[1] in covered]
+        self.stats["uncovered"] += len(keys) - len(folded)
+        written = store.refold(cur, folded, fold.fold)
         self.stats["refolded"] += written
         return written

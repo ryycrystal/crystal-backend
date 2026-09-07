@@ -630,12 +630,30 @@ def test_flow_identity_comes_from_the_movement_not_its_ordinal():
         tx_meta=meta(WALLET3, TOKEN),
     )
     flows = run(b)
-    keys = [(f.wallet, f.token, f.sub_index, f.log_index) for f in flows]
-    assert keys == sorted(keys)
-    assert [f.log_index for f in flows] == [f.log_index for f in flows]
-    assert all(f.sub_index == 0 for f in flows), "one movement per key needs no discriminator"
-    assert len({(f.txhash, f.wallet, f.token, f.log_index, f.sub_index) for f in flows}) == len(flows)
+    assert len({(f.block_number, f.tx_index, f.log_index, f.sub_index) for f in flows}) == len(flows), (
+        "both halves of a transfer share a log index, so the stored key must still separate them"
+    )
+    for f in flows:
+        assert f.sub_index == (0 if f.token_delta < 0 else 1), "the outgoing half folds first"
     assert flows == run(b)
+
+
+def test_both_halves_of_a_wallet_to_wallet_transfer_survive_being_stored():
+    """One log, two movements. Keyed on the log alone they collide and the second is dropped on insert."""
+    b = bundle([tf(3, TOKEN, WALLET, WALLET2, 100 * E18)], tx_meta=meta(WALLET, WALLET2))
+    flows = run(b)
+    assert {f.wallet for f in flows} == {WALLET, WALLET2}
+    keys = {(f.block_number, f.tx_index, f.log_index, f.sub_index) for f in flows}
+    assert len(keys) == 2, "the sender and the receiver must not share a primary key"
+    out = next(f for f in flows if f.token_delta < 0)
+    into = next(f for f in flows if f.token_delta > 0)
+    assert out.sub_index < into.sub_index, "the sender must fold before the receiver at one chain position"
+
+
+def test_a_self_transfer_keeps_two_movements_apart():
+    b = bundle([tf(4, TOKEN, WALLET, WALLET, 5 * E18)], tx_meta=meta(WALLET, WALLET))
+    flows = run(b)
+    assert len({(f.log_index, f.sub_index) for f in flows}) == len(flows)
 
 
 def test_routed_buy_split_across_venues_nets_to_one_row():

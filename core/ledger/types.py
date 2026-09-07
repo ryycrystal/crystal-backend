@@ -19,6 +19,8 @@ USEROP_EVENT_TOPIC = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 DUST_WEI = 10**15
 WEI = Decimal(10) ** 18
+INTERPRETATION = 2
+EVERY_TOKEN = "*"
 
 KIND_BUY = "buy"
 KIND_SELL = "sell"
@@ -125,6 +127,7 @@ class Flow:
     realized_estimated_delta: int = 0
     unresolved_proceeds_delta: int = 0
     disposed_unresolved_basis_delta: int = 0
+    interpretation: int = INTERPRETATION
 
 
 @dataclass

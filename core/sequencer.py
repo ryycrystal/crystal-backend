@@ -8,7 +8,7 @@ import core.storage as storage
 import state as _st
 from core import chain as h
 from core import oracle
-from core.ledger.engine import LedgerEngine
+from core.ledger_gate import LedgerGate
 from core.storage import db_cursor
 from modules import nadfun
 
@@ -1128,4 +1128,4 @@ class Sequencer:
 
 
 SEQUENCER = Sequencer(_st.State())
-LEDGER = LedgerEngine(db_cursor)
+LEDGER = LedgerGate(db_cursor)

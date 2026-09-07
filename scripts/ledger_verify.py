@@ -28,6 +28,10 @@ import urllib.request
 
 import psycopg2
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.ledger.types import INTERPRETATION  # noqa: E402
+
 RPC = os.environ.get("RPC_HTTP", "https://rpc.monad.xyz")
 TOTAL_SUPPLY = "0x18160ddd"
 BALANCE_OF = "0x70a08231"
@@ -60,24 +64,30 @@ CHECKS = [
         """,
     ),
     (
-        "no negative balance among tokens replayed from creation",
+        "no negative balance among tokens covered from creation",
         """
         SELECT count(*) FROM positions_v2 p
-        WHERE p.balance_token < 0 AND p.token IN (
-            SELECT f.token FROM wallet_flows f JOIN launchpad_tokens t ON t.token = f.token
-            GROUP BY f.token, t.created_block HAVING MIN(f.block_number) <= t.created_block
-        )
+        WHERE p.balance_token < 0
+          AND p.token IN (SELECT token FROM ledger_token_coverage WHERE from_creation)
         """,
     ),
     ("no position holds a negative custody balance", "SELECT count(*) FROM positions_v2 WHERE custody_balance < 0"),
     ("no position reports a negative sold quantity", "SELECT count(*) FROM positions_v2 WHERE token_sold < 0"),
     (
-        "every wallet that has flows has a position row",
+        "every wallet with flows in a token covered from creation has a position row",
         """
         SELECT count(*) FROM (
             SELECT DISTINCT token, wallet FROM wallet_flows
+            WHERE token IN (SELECT token FROM ledger_token_coverage WHERE from_creation)
             EXCEPT SELECT token, wallet FROM positions_v2
         ) missing
+        """,
+    ),
+    (
+        "no position is served for a token whose coverage does not reach its creation",
+        """
+        SELECT count(*) FROM positions_v2
+        WHERE token NOT IN (SELECT token FROM ledger_token_coverage WHERE from_creation)
         """,
     ),
     (
@@ -171,17 +181,19 @@ CHECKS = [
 
 COVERAGE = """
     SELECT count(*) FROM (
-        SELECT f.token FROM wallet_flows f JOIN launchpad_tokens t ON t.token = f.token
-        GROUP BY f.token, t.created_block HAVING MIN(f.block_number) > t.created_block
+        SELECT DISTINCT token FROM wallet_flows
+        EXCEPT SELECT token FROM ledger_token_coverage WHERE from_creation
     ) partial
 """
 
 FULLY_REPLAYED = """
-    SELECT f.token FROM wallet_flows f JOIN launchpad_tokens t ON t.token = f.token
-    GROUP BY f.token, t.created_block HAVING MIN(f.block_number) <= t.created_block
+    SELECT DISTINCT f.token FROM wallet_flows f
+    WHERE f.token IN (SELECT token FROM ledger_token_coverage WHERE from_creation)
 """
 
 NEGATIVES = "SELECT count(*) FROM positions_v2 WHERE balance_token < 0"
+
+STALE_INTERPRETATIONS = "SELECT count(*) FROM wallet_flows WHERE interpretation < %s"
 
 
 def rpc_batch(calls: list[tuple[str, str, str]], attempts: int = 6) -> list:
@@ -310,9 +322,12 @@ def main() -> int:
     partial = int(cur.fetchone()[0])
     cur.execute(NEGATIVES)
     negatives = int(cur.fetchone()[0])
+    cur.execute(STALE_INTERPRETATIONS, (INTERPRETATION,))
+    stale = int(cur.fetchone()[0])
     print("")
     print("coverage")
-    print(f"  {partial} token(s) start after their creation block, holding {negatives} negative balance(s)")
+    print(f"  {partial} token(s) hold flows without coverage from creation; {negatives} negative balance(s) overall")
+    print(f"  {stale:,} flow(s) were written by an interpretation older than {INTERPRETATION}")
 
     if not args.skip_supply:
         tokens = [t.lower() for t in args.token]

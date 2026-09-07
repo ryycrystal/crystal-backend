@@ -6,6 +6,7 @@ from decimal import Decimal
 from psycopg2.extras import Json, execute_values
 
 from core.ledger.types import (
+    EVERY_TOKEN,
     FOLD_COLUMNS,
     POSITION_TEXT_COLUMNS,
     Flow,
@@ -196,6 +197,65 @@ def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
     upsert_positions(cur, rows)
     _write_fold_deltas(cur, updates)
     return len(rows)
+
+
+def delete_token_flows(cur, tokens, block: int) -> list[tuple[str, str]]:
+    """Drop what any earlier run wrote for these tokens in this block, returning the positions it touched."""
+    addrs = sorted({_lower(token) for token in tokens if token})
+    if not addrs:
+        return []
+    cur.execute(
+        "DELETE FROM wallet_flows WHERE block_number = %s AND token = ANY(%s) RETURNING wallet, token",
+        (int(block), addrs),
+    )
+    return [(wallet, token) for wallet, token in cur.fetchall()]
+
+
+def extend_coverage(cur, token: str | None, from_block: int, to_block: int) -> None:
+    """Record that every movement of this token in [from_block, to_block] is in wallet_flows.
+
+    None means every registered token, which is what the live indexer sees. Touching or overlapping ranges
+    merge into one row, so a token replayed from creation and then followed live holds a single span.
+    """
+    key = _lower(token) or EVERY_TOKEN
+    lo, hi = int(from_block), int(to_block)
+    if lo > hi:
+        return
+    cur.execute(
+        "SELECT from_block, to_block FROM token_coverage "
+        "WHERE token = %s AND from_block <= %s + 1 AND to_block >= %s - 1 ORDER BY from_block",
+        (key, hi, lo),
+    )
+    rows = cur.fetchall()
+    if len(rows) == 1 and int(rows[0][0]) <= lo and int(rows[0][1]) >= hi:
+        return
+    for a, b in rows:
+        lo = min(lo, int(a))
+        hi = max(hi, int(b))
+    if len(rows) == 1:
+        cur.execute(
+            "UPDATE token_coverage SET from_block = %s, to_block = %s WHERE token = %s AND from_block = %s",
+            (lo, hi, key, int(rows[0][0])),
+        )
+        return
+    if rows:
+        cur.execute(
+            "DELETE FROM token_coverage WHERE token = %s AND from_block <= %s + 1 AND to_block >= %s - 1",
+            (key, hi, lo),
+        )
+    cur.execute("INSERT INTO token_coverage (token, from_block, to_block) VALUES (%s, %s, %s)", (key, lo, hi))
+
+
+def coverage_from_creation(cur, tokens) -> dict[str, int]:
+    """The block each token is covered through, for tokens whose coverage reaches back to their registration."""
+    addrs = sorted({_lower(token) for token in tokens if token})
+    if not addrs:
+        return {}
+    cur.execute(
+        "SELECT token, MAX(to_block) FROM ledger_token_coverage WHERE from_creation AND token = ANY(%s) GROUP BY token",
+        (addrs,),
+    )
+    return {token: int(to_block) for token, to_block in cur.fetchall()}
 
 
 def purge_wallets(cur, wallets) -> int:

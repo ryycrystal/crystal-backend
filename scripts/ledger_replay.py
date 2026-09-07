@@ -108,6 +108,7 @@ def wipe_tokens(tokens: list[str]) -> tuple[int, int]:
         flows = cur.rowcount
         cur.execute("DELETE FROM positions_v2 WHERE token = ANY(%s)", (tokens,))
         positions = cur.rowcount
+        cur.execute("DELETE FROM token_coverage WHERE token = ANY(%s)", (tokens,))
     print(f"[WIPE] {len(tokens)} token(s): {flows:,} flows and {positions:,} positions deleted", flush=True)
     return flows, positions
 
@@ -448,13 +449,22 @@ def process_chunk(
     relevant: dict[int, list[dict]],
     timestamps: dict[int, int],
     receipt_logs_added: int,
+    span: tuple[list[str], int, int] | None = None,
 ) -> tuple[int, int]:
+    """Fold one chunk, recording its coverage in the same transaction as the flows it produced.
+
+    The span is the whole hot-block range scanned so far, not the blocks that happened to carry a flow: a
+    block the scan skipped is one where the token provably did not move, which is exactly what coverage
+    means. Committing it separately would let a crash leave flows that claim more coverage than they have.
+    """
     flows = 0
     with storage.db_cursor() as cur:
         engine.stats["receipt_logs"] += receipt_logs_added
         prefetch_kinds(kinds, relevant, cur, set(engine.registry(cur)) | QUOTE_ASSETS)
         for blk, logs in relevant.items():
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
+        if span is not None:
+            engine.cover(cur, span[0], span[1], span[2])
         refolded = engine.flush(cur)
     return flows, refolded
 
@@ -465,10 +475,11 @@ def process_chunk_with_retries(
     relevant: dict[int, list[dict]],
     timestamps: dict[int, int],
     receipt_logs_added: int,
+    span: tuple[list[str], int, int] | None = None,
 ) -> tuple[int, int]:
     for attempt in range(CHUNK_ATTEMPTS):
         try:
-            return process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added)
+            return process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added, span)
         except (RuntimeError, RpcError, psycopg2.OperationalError, psycopg2.errors.DeadlockDetected) as exc:
             if attempt + 1 == CHUNK_ATTEMPTS:
                 raise
@@ -556,6 +567,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     engine = LedgerEngine(
         storage.db_cursor, rpc_url=args.rpc, enabled=True, tx_meta_store=tx_meta, kinds=kinds, rates_fn=SideRates()
     )
+    engine.scope = frozenset(tokens)
     with storage.db_cursor() as cur:
         registry = engine.refresh_registry(cur)
         kinds.load_known(cur)
@@ -592,7 +604,8 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        flows, refolded = process_chunk_with_retries(engine, kinds, relevant, timestamps, receipt_logs_added)
+        span = (tokens, from_block, group[-1])
+        flows, refolded = process_chunk_with_retries(engine, kinds, relevant, timestamps, receipt_logs_added, span)
         total_flows += flows
         total_refolds += refolded
         done += len(group)
@@ -627,6 +640,11 @@ def refold_only(tokens: list[str], chunk: int = 2000) -> None:
         init_ledger_schema(cur)
         cur.execute("SELECT DISTINCT wallet, token FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
         keys = [(wallet, token) for wallet, token in cur.fetchall()]
+        covered = store.coverage_from_creation(cur, tokens)
+    skipped = [t for t in tokens if t not in covered]
+    if skipped:
+        print(f"[REFOLD] no coverage from creation, positions left alone: {skipped}", flush=True)
+    keys = [key for key in keys if key[1] in covered]
     written = 0
     for start in range(0, len(keys), chunk):
         with storage.db_cursor() as cur:
@@ -634,6 +652,30 @@ def refold_only(tokens: list[str], chunk: int = 2000) -> None:
         print(f"[REFOLD] {min(start + chunk, len(keys)):,}/{len(keys):,} positions", flush=True)
     print(f"[REFOLD] {written:,} positions in {time.time() - t0:.0f}s", flush=True)
     summary(tokens)
+
+
+def backfill_coverage(tokens: list[str]) -> None:
+    """Record coverage for a database replayed before coverage existed, from what its flows already prove.
+
+    Only claims what the earlier run's own scope claimed: the token's registration block through its last
+    flow. A token whose first flow is later than its registration gets the range it actually has, which is
+    what then keeps it out of positions.
+    """
+    from core.ledger import store
+    from core.ledger.schema import init_ledger_schema
+
+    with storage.db_cursor() as cur:
+        init_ledger_schema(cur)
+        for token in tokens:
+            cur.execute("SELECT MIN(block_number), MAX(block_number) FROM wallet_flows WHERE token = %s", (token,))
+            lo, hi = cur.fetchone()
+            if lo is None:
+                continue
+            cur.execute("SELECT registered_block FROM token_registry WHERE token = %s", (token,))
+            row = cur.fetchone()
+            start = int(row[0]) if row and row[0] is not None and int(row[0]) <= int(lo) else int(lo)
+            store.extend_coverage(cur, token, start, int(hi))
+            print(f"[COVER] {token}: {start:,}-{int(hi):,}", flush=True)
 
 
 def main() -> None:
@@ -682,6 +724,11 @@ def main() -> None:
         action="store_true",
         help="fold only: recompute these tokens' positions and fold columns from the flows already stored",
     )
+    ap.add_argument(
+        "--backfill-coverage",
+        action="store_true",
+        help="record coverage for tokens replayed before coverage existed, from the span their flows already prove",
+    )
     args = ap.parse_args()
 
     tokens = list(dict.fromkeys(t.lower() for t in args.token))
@@ -689,6 +736,8 @@ def main() -> None:
         raise SystemExit("pass --token")
     require_side_db()
     storage.init_pool()
+    if args.backfill_coverage:
+        backfill_coverage(tokens)
     if args.refold:
         refold_only(tokens)
         return

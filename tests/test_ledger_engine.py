@@ -320,6 +320,94 @@ def seeded(db):
     yield db
 
 
+OTHER_TOKEN = "0x" + "b2" * 20
+WALLET2 = "0x" + "c3" * 20
+WALLET3 = "0x" + "d4" * 20
+OTHER_TX = "0x" + "e5" * 32
+
+
+def other_token_transfer_logs() -> list[dict]:
+    return [
+        _log(BUY_BLOCK, 9, 70, OTHER_TX, OTHER_TOKEN, [TF_TOPIC, _ta(WALLET2), _ta(WALLET3)], "0x" + _w(7 * 10**18))
+    ]
+
+
+def fixture_engine(db_cursor, metas=None, kinds=None):
+    return LedgerEngine(
+        cur_factory=db_cursor,
+        enabled=True,
+        tx_meta_store=metas or FakeTxMeta(fixture_metas()),
+        trace_store=FakeTrace(),
+        kinds=kinds or fixture_kinds(),
+        rates_fn=fixed_rates,
+        head_fn=lambda: SELL_BLOCK + 1_000_000,
+    )
+
+
+@pytestmark_db
+def test_a_token_touched_only_incidentally_gets_flows_but_no_position(seeded):
+    """Replaying TOKEN from creation also sees OTHER_TOKEN move in the same block.
+
+    Its flows are evidence and are kept; its position would be a fragment of an unreplayed history, and that
+    fragment is where every negative balance in the leftover tokens came from (feedback2.md finding 7).
+    """
+    import psycopg2
+
+    from core.storage import db_cursor
+
+    conn = psycopg2.connect(seeded)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO launchpad_tokens (token, creator, name, symbol, source, created_block, created_at) "
+            "VALUES (%s, %s, 'Other', 'OTHER', 0, %s, %s)",
+            (OTHER_TOKEN, WALLET2, BUY_BLOCK - 5000, 1_756_990_000),
+        )
+    conn.close()
+    kinds = fixture_kinds()
+    kinds.kinds[WALLET2] = "eoa"
+    kinds.kinds[WALLET3] = "eoa"
+    kinds.kinds[OTHER_TOKEN] = "token"
+    engine = fixture_engine(db_cursor, kinds=kinds)
+    engine.scope = frozenset({TOKEN})
+    with db_cursor() as cur:
+        engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs() + other_token_transfer_logs(), cur)
+        engine.cover(cur, [TOKEN], BUY_BLOCK - 1000, BUY_BLOCK)
+        engine.flush(cur)
+        cur.execute("SELECT count(*) FROM wallet_flows WHERE token = %s", (OTHER_TOKEN,))
+        other_flows = cur.fetchone()[0]
+        cur.execute("SELECT token, count(*) FROM positions_v2 GROUP BY token ORDER BY token")
+        positions = dict(cur.fetchall())
+    assert other_flows == 2, "the movement is evidence and must be kept"
+    assert OTHER_TOKEN not in positions, "a token with no coverage from creation must not be served as positions"
+    assert positions.get(TOKEN) == 1
+
+
+@pytestmark_db
+def test_replaying_a_block_again_replaces_what_an_earlier_run_wrote_for_the_scoped_token(seeded):
+    """A replay is the authority for its scope in the blocks it covers; first-writer-wins is not (feedback7 P1-2)."""
+    from dataclasses import replace as dc_replace
+
+    from core.ledger import store
+    from core.storage import db_cursor
+
+    engine = fixture_engine(db_cursor)
+    engine.scope = frozenset({TOKEN})
+    with db_cursor() as cur:
+        engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur)
+        buy = store.load_flows(cur, [(WALLET, TOKEN)])[(WALLET, TOKEN)][0]
+        cur.execute("DELETE FROM wallet_flows")
+        stale = dc_replace(buy, kind="sell", token_delta=-buy.token_delta, wallet=WALLET2)
+        assert store.insert_flows(cur, [stale]) == 1
+    engine = fixture_engine(db_cursor)
+    engine.scope = frozenset({TOKEN})
+    with db_cursor() as cur:
+        engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur)
+        cur.execute("SELECT wallet, kind FROM wallet_flows WHERE block_number = %s", (BUY_BLOCK,))
+        rows = cur.fetchall()
+    assert rows == [(WALLET, "buy")], "the earlier run's row at the same key must be replaced, not kept"
+
+
 @pytestmark_db
 def test_engine_folds_curve_buy_and_settler_sell_into_one_closed_position(seeded):
     from core.ledger import store
