@@ -415,9 +415,9 @@ def run_checks(cur, rpc_url: str | None, tokens: list[str]) -> list[Check]:
     if MONCOCK in tokens:
         checks += moncock_checks(cur)
     if JAMES in tokens:
-        cur.execute("SELECT value FROM ledger_meta WHERE key = 'replay_head_block'")
+        cur.execute("SELECT MAX(block_number) FROM wallet_flows WHERE token = %s", (JAMES,))
         row = cur.fetchone()
-        head = int(row[0]) if row and str(row[0]).isdigit() else None
+        head = int(row[0]) if row and row[0] else None
         checks += james_checks(cur, rpc_url, head)
     checks += invariant_checks(cur, tokens)
     return checks
@@ -440,7 +440,7 @@ def main() -> None:
         row = cur.fetchone()
         head = row[0] if row else "unknown"
         checks = run_checks(cur, None if args.skip_chain else args.rpc, tokens)
-    print(f"replay head block: {head}")
+    print(f"ledger_meta replay_head_block: {head} (each token is compared at its own last folded block)")
     print(render_table(checks))
     passed = sum(c.ok for c in checks)
     print(f"{passed}/{len(checks)} checks passed")
