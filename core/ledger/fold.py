@@ -297,10 +297,14 @@ def _apply_transfer_in(state: PositionState, flow: Flow, amount: int, transit: d
 
     Without this a transfer destroys cost: the sender's basis leaves and nothing takes it up, so the
     receiver holds tokens at no known price and their eventual sale reads as pure profit. What the receiver
-    actually paid, when there is such a payment, is better evidence than the sender's history and wins.
+    actually paid, when there is such a payment the netting could stand behind, is better evidence than the
+    sender's history and wins.
+
+    The row's own `basis_state` still describes this movement's own price, which for a plain transfer is
+    nothing. The confidence of what the receiver now holds is in the effect vector, not that label.
     """
     cost = _quote_wei(flow)
-    if cost > 0:
+    if cost > 0 and flow.basis_state != BASIS_UNRESOLVED:
         return _open(state, amount, cost, flow.basis_state)
     handed_over = transit.pop(_handover(flow), None) if transit is not None else None
     if handed_over is None:

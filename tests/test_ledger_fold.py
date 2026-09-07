@@ -628,3 +628,29 @@ def test_a_token_folded_in_pieces_lands_where_one_pass_lands():
         assert sorted(head_out + tail_out, key=lambda f: (f.block_number, f.log_index, f.sub_index)) == sorted(
             whole_out, key=lambda f: (f.block_number, f.log_index, f.sub_index)
         ), (seed, cut)
+
+
+def test_an_inbound_flow_the_netting_could_not_stand_behind_still_inherits():
+    """A price the netting marked unresolved is not evidence, so the sender's basis is still the better answer."""
+    from core.ledger.fold import fold_token
+
+    sender, receiver = WALLETS[0], WALLETS[1]
+    flows = [
+        _flow("buy", 100, -100, block=1, wallet=sender),
+        _flow("transfer_out", -100, block=2, log_index=4, sub_index=0, wallet=sender, counterparty=receiver),
+        _flow(
+            "transfer_in",
+            100,
+            999,
+            block=2,
+            log_index=4,
+            sub_index=1,
+            wallet=receiver,
+            counterparty=sender,
+            basis_state="unresolved",
+        ),
+    ]
+    states, out = fold_token(None, flows)
+    assert out[-1].basis_delta == 100, "the discarded price must not block the inheritance"
+    assert states[receiver].cost_basis_native == 100
+    assert states[receiver].observed_tokens == 100
