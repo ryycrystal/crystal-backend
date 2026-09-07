@@ -158,3 +158,98 @@ Crystal was redeployed on 2026-09-06 and `scripts/purge_crystal_generation.py` d
 
 - Never point `LEDGER_TEST_DATABASE_URL` at the side database: the engine tests truncate the ledger and seed tables. Use `TEST_DATABASE_URL` with a unique `SCRATCH_DB_NAME`.
 - Prod is read only through the tunnel on 127.0.0.1:15433; `prod_conn` retries transient proxy resets.
+
+## Additional verification
+
+Beyond the three fixtures, four independent tests were run against the same side database. Each targets a
+failure class the fixture tables cannot see. Scripts: `scripts/ledger_verify.py` (committed) and three
+one-off harnesses in the session scratchpad (`test_moncock_chain.py`, `test_determinism.py`,
+`test_prod_differential.py`).
+
+| test | what it proves | result |
+|---|---|---|
+| supply conservation | totalSupply equals ledger wallets + venues + contract + burn addresses at each token's head block; catches a holder the replay never recorded | PASS, 0 unaccounted on all three |
+| SQL invariants (12) | positions are an exact fold of flows: balance = sum of deltas, custody reconciles, no venue holds a position, no duplicate keys, no invented cost on unresolved flows | 12/12 invariants hold |
+| determinism | wipe and replay the same blocks; SHA-256 of flows and positions must match | PASS, identical |
+| moncock chain comparison | every one of 9,375 wallets against balanceOf at the token's head block | answered 9,375, unanswered 0, mismatched 0, PASS |
+| differential vs prod's engine | where the two engines disagree on a moncock balance, the chain decides which is right | chain agrees with the ledger: 213; chain agrees with prod:    0 |
+
+The coverage report inside `ledger_verify.py` also found 159 leftover tokens in the shared side database from
+earlier partial experiments, holding 389 negative balances. A negative balance is arithmetically impossible on
+chain and arises only when a replay starts after a token's creation, so it is kept as the detector for a token
+whose history was only partly folded. None of the three fixture tokens is affected.
+
+### ledger_verify.py
+
+```
+15,584 positions and 175,102 flows across 162 tokens
+
+invariants
+  PASS  balance_token equals the sum of that wallet's flow deltas
+  PASS  custody_balance equals the sum of that wallet's custody legs
+  PASS  no negative balance among tokens replayed from creation
+  PASS  no position holds a negative custody balance
+  PASS  no position reports a negative sold quantity
+  PASS  every wallet that has flows has a position row
+  PASS  every position row has at least one flow
+  PASS  no duplicate flow keys
+  PASS  no position sits on an address classified as a venue
+  PASS  no flow claims a quote it did not name an asset for
+  PASS  observed basis never rests on a zero quote
+  PASS  unresolved flows carry no invented cost
+  12/12 invariants hold
+
+coverage
+  159 token(s) start after their creation block, holding 389 negative balance(s)
+
+supply conservation (3 fully replayed token(s))
+  PASS  0x8e74f6e943 at 101,923,730: unaccounted 0.000000 (0.000000% of supply), 3 venues, 0 unanswered
+  PASS  0x405b6330e2 at 102,355,176: unaccounted 0.000000 (0.000000% of supply), 16 venues, 0 unanswered
+  PASS  0x43cf5407bd at 102,523,914: unaccounted 0.000000 (0.000000% of supply), 9 venues, 0 unanswered
+
+OK
+```
+
+### moncock chain comparison
+
+```
+comparing 9,375 moncock wallets against chain at block 102,355,176
+answered 9,375, unanswered 0, mismatched 0
+PASS
+```
+
+### determinism
+
+```
+run 1: 29 flows sha 90f14b2c5e8300ea  2 positions sha ba8ca9600e1a9cda
+re-replaying the same blocks from scratch...
+  [SUMMARY] flow basis states for the replayed tokens: observed 29 | [SUMMARY] 0x8e74f6e943a7a28605ddd59945bec63a8919f5e2: estimated share 0.000%, unresolved share 0.000%
+run 2: 29 flows sha 90f14b2c5e8300ea  2 positions sha ba8ca9600e1a9cda
+flows identical:     yes
+positions identical: yes
+PASS
+```
+
+### differential vs prod
+
+```
+prod lists 14 venue or token-contract addresses as holders; excluded from the comparison
+moncock at block 102,355,176: ledger has 9,375 wallets, prod has 9,759
+  in both: 9,375   disagree: 168   disagree by more than dust: 160
+  only the ledger has (above dust): 0
+  only prod has (above dust): 53
+
+asking the chain about 213 disputed wallets at block 102,355,176...
+  chain agrees with the ledger: 213
+  chain agrees with prod:       0
+  chain agrees with neither:    0
+  unanswered reads:             0
+    0x0142a2fbc817 ledger           0.0000 prod     479,371.5365 chain           0.0000  -> ledger
+    0x02095af453be ledger          31.8182 prod           0.0000 chain          31.8182  -> ledger
+    0x0631d61b529c ledger     285,007.3124 prod     301,849.6106 chain     285,007.3124  -> ledger
+    0x06bc7232c6ce ledger           0.0000 prod      -4,809.7880 chain           0.0000  -> ledger
+    0x0b3984edc8ae ledger     350,640.6827 prod           0.0000 chain     350,640.6827  -> ledger
+    0x0e24b9d2aa3e ledger           0.0000 prod     -85,690.4906 chain           0.0000  -> ledger
+    0x0e331a293bb2 ledger     804,529.2659 prod           0.0000 chain     804,529.2659  -> ledger
+    0x1180eaef1d6c ledger       1,704.7750 prod           0.0000 chain       1,704.7750  -> ledger
+```
