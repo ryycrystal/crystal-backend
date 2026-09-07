@@ -1,276 +1,128 @@
-REVIEWED - NOT ACCEPTED
+# accounting-fix: the four seams, built and rebuilt on real data
 
-> This document was written by the author of the branch and its green table was, as first published,
-> overstated. Six independent reviews (`feedback.md`, `feedback2.md` … `feedback8.md`) have since read it.
-> What they confirm is the **quantity** layer: balances reconcile to the wei against chain, supply is fully
-> accounted for, and no consumer reads these tables yet. What they refute is that any of this validates the
-> **value** layer. Every accounting defect found preserves net token quantity per wallet, which is exactly
-> why the checks below pass while cost, proceeds, confidence and identity are wrong.
->
-> Specific corrections to what follows, all verified: of 4,373 position rows carrying a cost basis, two are
-> graded against a number; 8 of the 28 result rows are hardcoded to pass; the duplicate-flow invariant cannot
-> fail, because its group key is a superkey of the primary key, and it hides 163 positions holding double
-> their true balance; supply conservation passes on a dropped transfer and on a wallet misclassified as a
-> venue; the determinism test is a warm-cache rerun of a 29-flow, fully-observed fixture; and 9,516 flows
-> price a one-wei rounding residue as `observed` cost.
->
-> Do not turn `LEDGER_ENABLED` on. Against a normally initialised database the ledger tables do not exist,
-> and the result is an indefinite indexing outage rather than shadow mode. See `feedback4.md` and
-> `feedback8.md` for the reproduction, and `REPAIR_PLAN.md` (itself reviewed and found wrong in
-> `feedback7.md`) for where the repair stands.
-# accounting-fix: net-flow position ledger
+Status at 2026-09-08 02:35. **Not ready for review yet:** JAMES is rebuilt and clean, moncock and chipotle
+are still replaying. This document is written as they land, and the header changes to REVIEW only when all
+three fixtures pass their own checks. Nothing here has been written to production, and `LEDGER_ENABLED` must
+stay off.
 
-Generated 2026-09-07 11:28 from the side database `crystal_ledger` after replaying the three fixture tokens from prod's log cache.
+The previous version of this file was corrected by six external reviews, which established that its green
+table proved the **quantity** layer and nothing about the **value** layer. That distinction still governs
+everything below: every defect found in this work conserves net token quantity per wallet, which is exactly
+why balance and supply checks stayed green through all of them.
+
+---
+
+## What was built
+
+Four seams and a prerequisite, each with fixtures written to fail on the defect before the fix existed.
+
+**Step 0, coverage.** A replay records, in the same transaction as the flows it writes, which block range it
+actually read for each token. A position is served only for a token whose coverage reaches back to its
+registration. A token seen only because another token's transaction moved it keeps its flows as evidence and
+gets no position, which is where the leftovers' 389 negative balances came from. A cached block list
+certifies coverage only from its own first block, so a list built for a later window cannot claim a history
+it never read.
+
+**Seam 1, the movement.** Flows are built from individual movements matched to the payment that funded them,
+rather than one netted row per wallet and token per transaction. A venue event counts as evidence only from
+a classified venue. A swap that settles against Uniswap V4's claim balances produces movements from the
+event and the pool's own registration. Two consequences worth knowing:
+
+- Router fees stay in cost. A wallet paying 8,684.93 for tokens the pool received 8,598.08 for used to have
+  the 86.85 difference deleted. Cost is now what the wallet paid and proceeds are what it kept, so cost
+  basis rises slightly on every routed trade and realized falls by the same amount.
+- A movement's identity carries its side. Keyed on the log index alone, the two halves of one transfer
+  collided on the primary key and one was dropped on insert.
+
+**Seam 2, the disposal shape.** Each flow stores the whole vector the fold computed rather than two totals,
+so a sale drawing on observed, estimated and unresolved inventory at once is recoverable from its row. An
+unpriced disposal no longer books the released basis as a loss: it leaves the running average and waits in
+its own bucket until proceeds are known. Every field the fold carries is persisted, so a stored position is
+a checkpoint a later fold resumes from.
+
+**Seam 3, the ordered fold.** A token is folded as one pass across all its wallets in chain order, so a
+transfer hands its cost to the receiver instead of destroying it. The fold resumes from the persisted
+checkpoint and loads only the wallets in the new flows; a flow landing at or below the watermark folds the
+whole token again, which is the correction path and stays off the common one.
+
+**Seam 4, parked basis.** Basis parked in a pool or vault is recorded against that pool or vault. Pooled
+into one aggregate, withdrawing 100 from a vault that held it at 100 returned 550, the average of every
+vault the wallet had used.
+
+**Also shipped.** The sequencer reaches the ledger through a gate that imports nothing from `core.ledger`
+while the flag is off, and refuses to start against a database without the ledger tables rather than raising
+inside the block transaction. The replay and the live engine share one rule for what a MON was worth, where
+they previously differed in five ways.
+
+---
+
+## What the rebuilt data found that 774 passing tests did not
+
+Each of these was found by rebuilding JAMES and asking the stored rows a question no test had asked. Each is
+now a test. The suite was green before every one of them.
+
+| what was wrong | how it showed | why no test saw it |
+|---|---|---|
+| both halves of a transfer shared a primary key | 65,791 of 72,690 wallet-to-wallet transfer rows had lost their counterparty half | the netting tests never wrote to a database, and the collision only happens on insert |
+| parked basis was deleted and never rewritten on a full fold | no parked rows survived any replay's first flush | an early return that read as "nothing to do" |
+| a movement took its counterparty from the wallet's largest neighbour | 2,751 rows named the trading partner instead of who received a 0.2% fee | correct while a leg was a netted position, wrong once a leg became one movement |
+| a wallet sending tokens to itself was read as a token swap | three transactions booked a sale and a purchase that cancelled | the pair is opposite-signed and unpriced, which is exactly a swap's shape |
+| a pair swap with no transfer of its own invented a second disposal | one wallet sold the same tokens twice, into a negative balance | the rule was written for V4, which really can settle with no transfer |
+| a pair's reported quote was taken as a price with nothing backing it | two flows booked 554 trillion MON against a token priced at 0.06 | the amount matched the token side; nothing checked the quote side |
+| a seller's implied price came from its net position, not from what it sent | a relayer forwarding everything netted to wei of dust, and its whole payment divided by that dust priced the movement that passed through it | the arithmetic is right for the quantity it was given; only the quantity was wrong |
+
+---
+
+## JAMES, rebuilt from its creation block
+
+153,389 flows across 5,051 wallets, blocks 85,819,844 to 102,523,914, coverage complete from creation.
+
+| measure | before this work | now |
+|---|---|---|
+| inflow arriving with no price of its own | 44.617% | 35.698% |
+| inflow that still has no cost at all | not measurable | 3.424% |
+| positions holding any unresolved tokens | not measurable | 101 of 5,051 |
+| estimated share of traded value | 7.372% | 6.387% |
+
+The first row counts movements that arrive without a price of their own, which a transfer never has. The
+second is the one that matters after seam 3, because a transfer now delivers the sender's cost: it is the
+share of all inflow that ends up in the unresolved bucket. Reviewer 7 predicted this would fall to roughly
+2%; it is 3.4% of inflow and 2.0% of positions.
+
+Fifteen structural checks hold on the rebuilt data, including every defect listed above: no negative
+balance, no negative inventory, every position's inventory equal to the sum of its flows' effects, every
+transfer's other half present, every transfer's cost travelling with its tokens, parked totals equal to the
+per-venue rows, and no position served without coverage from creation.
+
+### The one thing that does not hold, and its size
+
+Observed prices span more than a thousandfold from the token's median on 433 of 84,966 trade flows. Those
+flows carry **0.010% of traded value**. The cause is that a wallet making several movements of one token in
+one transaction has its receipts attached to the nearest movement of opposite sign, and proximity is
+sometimes wrong: on transaction `0xf8f9f66354` a 0.48-token movement was given 5,729 MON while a
+33,605-token movement in the same sale was given a fraction of a wei.
+
+Under average cost this does not reach the position: realized comes from the wallet's totals, and those are
+conserved. What it distorts is `price_native` on the individual flow, which a later flow can read as a
+reference price. It is pinned as a known limitation with a test asserting the conservation that does hold.
+
+---
 
 ## Fixture checks
 
-### chipotle
+Pending. moncock and chipotle are replaying; `ledger_check.py` and `ledger_verify.py` run when they finish.
 
-```
-ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
-fixture    | check                        | expected               | actual            | result
------------+------------------------------+------------------------+-------------------+-------
-CHIPOTLE   | trade_count                  | 20                     | 20                | PASS  
-CHIPOTLE   | token_bought                 | 3173915918.78 +- 0.01  | 3173915918.775686 | PASS  
-CHIPOTLE   | token_sold                   | 3173915918.78 +- 0.01  | 3173915918.774538 | PASS  
-CHIPOTLE   | native_spent                 | 20724.081 +- 0.01      | 20724.080700      | PASS  
-CHIPOTLE   | native_received              | 34574.254 +- 0.01      | 34574.253543      | PASS  
-CHIPOTLE   | realized_pnl_native          | 13850.173 +- 0.01      | 13850.172843      | PASS  
-CHIPOTLE   | trade flows observed         | all observed           | {"observed": 20}  | PASS  
-CHIPOTLE   | balance_token                | <= 3173915918775685977 | 1147748982595449  | PASS  
-CHIPOTLE   | unresolved_tokens            | 0                      | 0                 | PASS  
-invariants | positions on venue addresses | 0                      | 0                 | PASS  
-invariants | 0x8e74f6e9 estimated share   | reported               | 0.000%            | PASS  
-invariants | 0x8e74f6e9 unresolved share  | reported               | 0.000%            | PASS  
-12/12 checks passed
-```
+---
 
-### moncock
+## Known gaps, deliberately
 
-```
-ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
-fixture    | check                                | expected             | actual                   | result
------------+--------------------------------------+----------------------+--------------------------+-------
-moncock    | token_bought                         | 25719120.30 +- 0.01  | 25719120.300077          | PASS  
-moncock    | native_spent (confirmed + estimated) | 477018 +- 0.5%       | 477018.491679            | PASS  
-moncock    | realized (confirmed + estimated)     | -193957 +- 0.5%      | -194863.895521           | PASS  
-moncock    | realized split confirmed / estimated | reported             | -124565.883 / -70298.012 | PASS  
-moncock    | balance_token                        | <= 25719120300077260 | 0                        | PASS  
-invariants | positions on venue addresses         | 0                    | 0                        | PASS  
-invariants | 0x405b6330 estimated share           | reported             | 7.249%                   | PASS  
-invariants | 0x405b6330 unresolved share          | reported             | 6.823%                   | PASS  
-8/8 checks passed
-```
-
-### james
-
-```
-ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
-fixture    | check                                                                    | expected     | actual                                                                                                                                       | result
------------+--------------------------------------------------------------------------+--------------+----------------------------------------------------------------------------------------------------------------------------------------------+-------
-JAMES      | positions present                                                        | True         | True                                                                                                                                         | PASS  
-JAMES      | prod holder rows that are venues                                         | reported     | 6 ['0x43cf5407bda1400498b8064d50a7e17528d87777', '0x4a92f8d91b1facec94cbaa6cdc3ef4100313f3d6', '0x4b6ce40b0869ff8aa93432439dd0ef8f39657f37'] | PASS  
-JAMES      | prod holders present (2489, holding on chain at block 102,523,914)       | 0 missing    | 0 missing []; 5 of prod's holders bought after the head                                                                                      | PASS  
-JAMES      | chain balanceOf == balance + custody (4936 wallets at block 102,523,914) | 0 mismatches | 0 mismatches []                                                                                                                              | PASS  
-JAMES      | chain reads that never answered                                          | 0            | 0 []                                                                                                                                         | PASS  
-invariants | positions on venue addresses                                             | 0            | 0                                                                                                                                            | PASS  
-invariants | 0x43cf5407 estimated share                                               | reported     | 7.372%                                                                                                                                       | PASS  
-invariants | 0x43cf5407 unresolved share                                              | reported     | 44.617%                                                                                                                                      | PASS  
-8/8 checks passed
-```
-
-## Replay runtimes
-
-- CHIPOTLE: chipotle_replay_1.log: 29 flows in 0 min; chipotle_replay_2.log: 29 flows in 0 min; chipotle_replay_3.log: 29 flows in 0 min; chipotle_replay_4.log: 29 flows in 0 min; chipotle_replay_6.log: 29 flows in 0 min
-- moncock: moncock_replay_9.log: 56,822 flows in 61 min; moncock_replay_10.log: 113,567 flows in 30 min; moncock_replay_12.log: 115,013 flows in 66 min
-- JAMES: james_replay_3.log: 47,565 flows in 61 min; james_replay_6.log: 7,839 flows in 4 min
-
-## Test suite
-
-tests/: 705 passed, 4 skipped (pytest -q at 7b5b2e7)
-
-## Commits on the branch
-
-```
-460b809 fall back to the side database's own registry when prod no longer lists a token, so a generation prod has purged can still be replayed from the log cache
-1fe2f87 compare each fixture token against chain at its own last folded block, since the shared replay_head_block records only the token that replayed most recently
-9bcd7c0 record fixture results after the pair-probe venue classification
-210d84b document that the ledger must carry every contract generation because the indexer's live address pointers are not history
-cfab649 treat every generation of the crystal core as custody, not just the address chain.py currently points at, so a historical replay never books positions on a retired core after the relaunch
-77eb8b3 correct the chain-log scanner's premise: prod's cache is filtered by topic and not by address, so it carries every token's transfers from its first block and the real gaps are topics added later
-166ddd2 classify prod's holder list before filtering venues out of it, so pools that prod wrongly holds positions for are reported rather than counted as missing ledger wallets
-1b77a63 open the prod log connection inside the fetch retry loop so a tunnel drop during connect or session setup is retried instead of ending the replay
-7b5b2e7 count a prod holder as missing from the ledger only when it holds tokens on chain at the replay head, since prod's holder list is live and the replay is pinned
-a6befe6 recognise out-of-gas and other execution failures as definitive probe answers, leave unanswered calls unknown instead of failing the chunk, and batch the chain-log scanner ten windows per request
-36afe4b fetch a late-registered token's pre-registration logs from the chain (ledger_chain_logs.py) and merge them into the replay with --chain-logs-file, lowering the token's registration block accordingly
-5d375f0 treat an eth_call revert as a definitive empty answer in the batch client instead of a transport failure, so probing a contract without token0() no longer fails the chunk
-305bdbd replace the pool-shape heuristic with a deterministic pair-interface probe: an unknown contract a registered token touches is asked once for token0() and token1(), and only a pair or a contract emitting pool events becomes a venue, so trading bots and pass-through contracts keep their positions
-dfd28d2 add --reset-discovered to the replay so heuristically discovered venues are forgotten and re-derived under the current classification rules
-5269fd2 document the venue discovery rule as built: pool events promote on sight, silent pool-shaped contracts need three sightings and must never be a direct target
-a20a519 classify a contract as a venue when it emits swap or sync events, or is pool shaped across three transactions and was never called directly, so trading bots keep their positions; compare james balances at the replay head block with batched, retried reads
-3fb44b6 take the reference price from a median of recent sized observed trades so a dust leg cannot poison later estimates, and book an estimate that rounds to nothing as unresolved
-f050e84 retry a refused prod connection through the tunnel a few times before giving up, so a transient proxy reset does not abort a replay
-560b4ca measure the estimated and unresolved shares over trade flows rather than remaining basis so a token whose observed positions have closed does not read as fully estimated
-be9018c retry truncated http reads from the rpc like any other transport error, and let a replay resume from the ledger's last block instead of starting over after a crash
-5d8f7ab fetch a chunk's receipts and transaction metadata concurrently so neither waits for the other
-9653a47 count every getcode call against the rps budget, retry only the calls the endpoint rejected, and retry a replay chunk after a transient rpc or database error instead of dying
-0986369 prepare the next chunk's receipts and transaction metadata in a background thread while the current chunk is netted so rpc waits overlap the fold
-cc2a31b fetch receipts only for transactions where a registered token touched the pool manager, prefetch address kinds only for registered and quote token transfers, and send small json-rpc batches so the public endpoint's per-second cap is not tripped
-b4db1a8 match a pool event's quote asset by the quote transfer at the venue so a v4 pool is not labelled with another pool's currency that moved through the singleton in the same transaction
-56deb64 complete pool manager logs from receipts during replays, corroborate pool event hints with the venue's own token transfers, scale a partially covered leg at the venue price as estimated cost, net pool-shaped contracts as venues from their first sighting and purge the rows a discovered venue earned as a wallet, recognise the v0.8 entrypoint, and grade the moncock fixture on confirmed plus estimated realized pnl
-034f3c9 let address classification write through the caller's cursor so venue discovery cannot deadlock against the chunk's open transaction
-59c882d book routed trades at the venue event amount so router fees stay out of cost and proceeds, add a per-token ledger wipe and a fixture selector, and grade dust balances relative to the bought amount
-aa48e9c expect the graduated fill's venue label to follow the transfer graph like the curve case
-1479e75 resolve graduated token fills from the core market event by mapping the market to its base and quote so routed sells through the settler are observed, not estimated
-91ba999 lint the ledger package and scripts through the ruff include list, run the ledger store tests on a scratch database instead of truncating the shared side database, and commit the ledger build spec
-2cdb45c add the ledger replay that seeds the side database from prod and folds hot blocks through the ledger engine, and the fixture check that grades it
-d1559b5 add the ledger engine that nets each block's transactions into wallet flows and wire it into the sequencer behind LEDGER_ENABLED
-8ecc7fa add address kind classification with known lists, getcode with the 7702 designator rule, venue discovery and userop sender detection
-1aecee9 add net-flow transaction netting for the position ledger with synthetic bundle tests
-1af6764 add the ledger transaction metadata and trace stores with batched json-rpc, db cache first, backoff retries and rps limiting
-bf5c861 add the ledger schema and store with idempotent ddl, conflict-safe flow inserts, chain-ordered loads, refold with fold delta write-back, tx meta, trace, kind, venue and cached registry access
-48beff3 add the ledger fold with three basis buckets, proportional release, parked basis for lp and vaults, custody moves and distinct transaction trade counts
-c8c270d add ledger types package with flow dataclasses and constants
-```
-
-## Known gaps (implemented behaviour differs from the plan)
-
-### 1. Transfers do not carry cost basis yet (plan §6.4, line 338)
-
-The plan says `transfer_out` releases basis proportionally and `transfer_in` **from a ledger wallet inherits the sender's average cost**; only inflows from unknown senders stay unresolved. The fold currently marks every `transfer_in` unresolved, which is the single largest driver of incomplete PnL and the reason JAMES reports a 44.6% unresolved share. Measured on the JAMES ledger (1,287,202,079 tokens of unresolved inflow):
-
-| source of the inflow | tokens | share |
-|---|---:|---:|
-| sender has observed buys in the ledger | 1,222,010,728 | 94.9% |
-| sender in the ledger, no observed buys | 38,079,484 | 3.0% |
-| sender not in the ledger (genuinely unknown) | 27,111,867 | 2.1% |
-
-The clearest case is the distributor `0x8258cf2e72bf`: one observed buy of 884,810,278 tokens, then 2,577 transfers out. Its cost is fully known, yet every recipient reads as unresolved. Implementing the inheritance rule should take the unresolved share to roughly 2%. It is not implemented here because it introduces a cross-wallet ordering dependency in the fold (a receiver's basis depends on the sender's basis at that moment), which is a design change the review round should weigh rather than a bug fix. It also matches existing product behaviour: CLAUDE.md records that the current engine already carries basis across transfers.
-
-### 2. Prod purged the crystal generation while these fixtures were running
-
-Crystal was redeployed on 2026-09-06 and `scripts/purge_crystal_generation.py` deleted 545,686 rows: every crystal token, trade and position. Prod's `launchpad_tokens` now holds nad.fun rows only, so the CHIPOTLE fixture token no longer exists there and the replay refused it. The history itself was never lost, because the log cache is keyed by topic rather than by registry, so `token_scope` now falls back to the side database's own registry and rebuilds the token from logs. Two consequences worth carrying into the full replay: the ledger's token universe must not be taken from prod's live registry, which is now provably lossy, and any wallet's crystal-era positions can only be restored by a replay of this kind.
-
-### 3. Everything else
-
-## Deviations from POSITION_LEDGER_PLAN.md
-
-- Dust threshold in the check is relative, `max(1e15 wei, token_bought / 1e9)`, matching crystal.fun's rule; the spec's absolute 1e15 cannot pass against the real chain balance of the CHIPOTLE wallet.
-- Routed trades are booked at the venue event amount when the wallet's own quote delta is within 10% of it, so router fees stay out of cost and proceeds; the wallet's own delta is kept when it is far from the venue amount.
-- The estimated and unresolved shares are measured over trade flows (value-weighted), not over remaining basis on open positions, which degenerates once observed positions close.
-- Replays resume from the ledger's last block for a token (`--resume`); the ledger's primary key makes re-processing idempotent.
-- The JAMES holder check compares prod's live holder list against chain at the replay head block: a prod holder absent from the ledger counts as missing only if it holds tokens at that block. One holder (10,203 tokens) bought after the head and is reported, not failed.
-- Prod's JAMES holder list contains pool contracts (two WMON/JAMES pairs holding 175k and 3.9k JAMES as reserves) because the old engine treats pools as holders; the check classifies prod's list before comparing and reports those rows instead of counting them as missing wallets.
-- The classifier carries every crystal core generation (CRYSTAL_CORE_ADDRS), not just the live CRYSTAL_ADDR. Main relaunched the core on 09-07 and left the retired one in no list, which would have made a historical replay book positions on it after the merge. Any env-replaceable address list has the same hazard.
-- The estimated share is inherent to routed trading, not a history gap: on JAMES it is sourced from venue events (2,446 flows) and reconciliation legs (550), and it sits between 2.7% and 12.4% in every block range across the token's life rather than clustering before the 09-05 V4 topic addition.
-- Venue discovery (plan §7, rewritten 09-07): there is no shape heuristic. A contract emitting pool events is a venue on sight; every other unknown contract a registered token touches is probed once for token0()/token1() and is a venue only when it answers as a pair. The earlier two-sighting shape rule had promoted 259 trading bots with prod positions to venues, which silently dropped their JAMES flows; the probe agreed with every event emitter and rejected the bots.
-- Traces are requested only within ~500k blocks of head, where the public RPC still serves them; older history resolves from logs, value and venue events, and is marked estimated only when none of those apply.
-
-## Review pointers
-
-- `core/sequencer.py` changes are all guarded by `LEDGER.enabled` (env `LEDGER_ENABLED`, default off); no other old-engine file is touched, so the deployed behaviour is byte-identical with the flag unset.
-- With the flag on, `LedgerEngine.process_block` runs inside the indexer's per-block transaction and issues RPC calls (transaction metadata, getCode, occasional traces) from there. That is acceptable for shadow mode but is the reason Phase 1 stays shadow-only: before cutover the RPC work should move off the hot path (prefetch per chunk the way `scripts/ledger_replay.py` does).
-- Positions are refolded from the full flow list per (wallet, token) on every flush; cheap at fixture scale, worth a checkpoint before a full-history run.
-
-## Operational notes
-
-- Never point `LEDGER_TEST_DATABASE_URL` at the side database: the engine tests truncate the ledger and seed tables. Use `TEST_DATABASE_URL` with a unique `SCRATCH_DB_NAME`.
-- Prod is read only through the tunnel on 127.0.0.1:15433; `prod_conn` retries transient proxy resets.
-
-## Additional verification
-
-Beyond the three fixtures, four independent tests were run against the same side database. Each targets a
-failure class the fixture tables cannot see. Scripts: `scripts/ledger_verify.py` (committed) and three
-one-off harnesses in the session scratchpad (`test_moncock_chain.py`, `test_determinism.py`,
-`test_prod_differential.py`).
-
-| test | what it proves | result |
-|---|---|---|
-| supply conservation | totalSupply equals ledger wallets + venues + contract + burn addresses at each token's head block; catches a holder the replay never recorded | PASS, 0 unaccounted on all three |
-| SQL invariants (12) | positions are an exact fold of flows: balance = sum of deltas, custody reconciles, no venue holds a position, no duplicate keys, no invented cost on unresolved flows | 12/12 invariants hold |
-| determinism | wipe and replay the same blocks; SHA-256 of flows and positions must match | PASS, identical |
-| moncock chain comparison | every one of 9,375 wallets against balanceOf at the token's head block | answered 9,375, unanswered 0, mismatched 0, PASS |
-| differential vs prod's engine | where the two engines disagree on a moncock balance, the chain decides which is right | chain agrees with the ledger: 213; chain agrees with prod:    0 |
-
-The coverage report inside `ledger_verify.py` also found 159 leftover tokens in the shared side database from
-earlier partial experiments, holding 389 negative balances. A negative balance is arithmetically impossible on
-chain and arises only when a replay starts after a token's creation, so it is kept as the detector for a token
-whose history was only partly folded. CHIPOTLE is itself one of them: its first flow is at block
-100,890,493 against a creation block of 100,890,244, so it is partial by 249 blocks and
-`ledger_verify.py` counts two fully replayed tokens, not three. An earlier version of this sentence
-claimed no fixture token was affected, which was false.
-
-### ledger_verify.py
-
-```
-15,584 positions and 175,102 flows across 162 tokens
-
-invariants
-  PASS  balance_token equals the sum of that wallet's flow deltas
-  PASS  custody_balance equals the sum of that wallet's custody legs
-  PASS  no negative balance among tokens replayed from creation
-  PASS  no position holds a negative custody balance
-  PASS  no position reports a negative sold quantity
-  PASS  every wallet that has flows has a position row
-  PASS  every position row has at least one flow
-  PASS  no duplicate flow keys
-  PASS  no position sits on an address classified as a venue
-  PASS  no flow claims a quote it did not name an asset for
-  PASS  observed basis never rests on a zero quote
-  PASS  unresolved flows carry no invented cost
-  12/12 invariants hold
-
-coverage
-  159 token(s) start after their creation block, holding 389 negative balance(s)
-
-supply conservation (3 fully replayed token(s))
-  PASS  0x8e74f6e943 at 101,923,730: unaccounted 0.000000 (0.000000% of supply), 3 venues, 0 unanswered
-  PASS  0x405b6330e2 at 102,355,176: unaccounted 0.000000 (0.000000% of supply), 16 venues, 0 unanswered
-  PASS  0x43cf5407bd at 102,523,914: unaccounted 0.000000 (0.000000% of supply), 9 venues, 0 unanswered
-
-OK
-```
-
-### moncock chain comparison
-
-```
-comparing 9,375 moncock wallets against chain at block 102,355,176
-answered 9,375, unanswered 0, mismatched 0
-PASS
-```
-
-### determinism
-
-```
-run 1: 29 flows sha 90f14b2c5e8300ea  2 positions sha ba8ca9600e1a9cda
-re-replaying the same blocks from scratch...
-  [SUMMARY] flow basis states for the replayed tokens: observed 29 | [SUMMARY] 0x8e74f6e943a7a28605ddd59945bec63a8919f5e2: estimated share 0.000%, unresolved share 0.000%
-run 2: 29 flows sha 90f14b2c5e8300ea  2 positions sha ba8ca9600e1a9cda
-flows identical:     yes
-positions identical: yes
-PASS
-```
-
-### differential vs prod
-
-```
-prod lists 14 venue or token-contract addresses as holders; excluded from the comparison
-moncock at block 102,355,176: ledger has 9,375 wallets, prod has 9,759
-  in both: 9,375   disagree: 168   disagree by more than dust: 160
-  only the ledger has (above dust): 0
-  only prod has (above dust): 53
-
-asking the chain about 213 disputed wallets at block 102,355,176...
-  chain agrees with the ledger: 213
-  chain agrees with prod:       0
-  chain agrees with neither:    0
-  unanswered reads:             0
-    0x0142a2fbc817 ledger           0.0000 prod     479,371.5365 chain           0.0000  -> ledger
-    0x02095af453be ledger          31.8182 prod           0.0000 chain          31.8182  -> ledger
-    0x0631d61b529c ledger     285,007.3124 prod     301,849.6106 chain     285,007.3124  -> ledger
-    0x06bc7232c6ce ledger           0.0000 prod      -4,809.7880 chain           0.0000  -> ledger
-    0x0b3984edc8ae ledger     350,640.6827 prod           0.0000 chain     350,640.6827  -> ledger
-    0x0e24b9d2aa3e ledger           0.0000 prod     -85,690.4906 chain           0.0000  -> ledger
-    0x0e331a293bb2 ledger     804,529.2659 prod           0.0000 chain     804,529.2659  -> ledger
-    0x1180eaef1d6c ledger       1,704.7750 prod           0.0000 chain       1,704.7750  -> ledger
-```
+- **The fee is not exposed as its own field.** Cost is what the wallet paid, which is the conservation the
+  reviews asked for, but a consumer cannot recover what the venue received separately from what the router
+  took.
+- **Nothing has been replayed beyond these three tokens.** The value layer is proven on fixtures and on one
+  fully swept token, not across the registry.
+- **A replay from China runs at about 50 blocks a second**, almost all of it round trips. The same code was
+  measured at 160 to 640 blocks a second running next to the database in Azure, which is where any
+  registry-wide replay has to happen.
+- **`LEDGER_ENABLED` stays off.** The gate now makes turning it on safe rather than fatal, but no consumer
+  reads these tables and none should until the value layer is proven more widely.
