@@ -12,6 +12,11 @@ MON_USD_POOL = "0x659bD0BC4167BA25c62E05656F78043E7eD4a9da".lower()
 LVMON_ADDR = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 LVMON_MON_POOL = "0xc59514136bdc9c0e735471cd650625ba0f5a634d"
 
+AUSD_ADDR = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+
+_MIN_PLAUSIBLE_AUSD_USD = Decimal("0.5")
+_MAX_PLAUSIBLE_AUSD_USD = Decimal("1.5")
+
 WMON_DECIMALS = 18
 USDC_DECIMALS = 6
 
@@ -75,4 +80,23 @@ def lvmon_rate_from_v3swap(ev: dict[str, Any]) -> Decimal | None:
     rate = Decimal(1) / ratio
     if rate <= Decimal("0.5") or rate > Decimal("1.05"):
         return None
+    return rate
+
+
+def ausd_price_from_market_price(price) -> Decimal | None:
+    """AUSD in dollars, read off the AUSD/USDC book price.
+
+    The book quotes USDC per AUSD and USDC is the dollar anchor, so the book
+    price is already the dollar price. A price outside the plausible band is a
+    thin-book print rather than a depeg worth publishing, so it is dropped and
+    the previous rate stands.
+    """
+    try:
+        rate = Decimal(price)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+
+    if not (_MIN_PLAUSIBLE_AUSD_USD <= rate <= _MAX_PLAUSIBLE_AUSD_USD):
+        return None
+
     return rate

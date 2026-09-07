@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import core.chain as h  # noqa: E402
 from core.ledger.engine import LedgerEngine, Rates  # noqa: E402
 
 DIRECT_URL = os.environ.get("LEDGER_TEST_DATABASE_URL")
@@ -18,7 +19,7 @@ TOKEN = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
 WALLET = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
 SETTLER = "0x0000000000001ff3684f28c67538d4d072c22734"
 SETTLER_EXECUTOR = "0x1ab7ea187cee63cf01bbd8fa8837c748a769f8df"
-CORE = "0x6eb2af5fc575689053ac9b413220cabfd01a2f9a"
+CORE = h.CRYSTAL_ADDR.lower()
 MARKET = "0x664fdc46471fd3b407a94e61bc18129abbee3171"
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 

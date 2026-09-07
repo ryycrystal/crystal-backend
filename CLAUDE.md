@@ -11,7 +11,9 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 - Deployed: both container apps run the image tagged with origin/main's commit SHA via
   the new CI pipeline (approval-gated). 2026-09-06: `31f9d9d` (uniswap v4 leg attribution
-  fix) was rolled to crystal-indexer then crystal-api directly with the azure cli. Verify with `az containerapp revision list`
+  fix) was rolled to crystal-indexer then crystal-api directly with the azure cli, and
+  `1a28b58` (routed order-book fill attribution) the same way on 2026-09-07; that restart
+  lost the init_db lock lottery 18 times and needed the API scaled down for a minute. Verify with `az containerapp revision list`
   vs `git rev-parse origin/main` rather than trusting this line.
 - Branches: `dev` == `main` (kept in sync by PR). `block-scoped-clear` is a stale
   Aug-28-migration-era branch, 400+ commits behind — historical, don't build on it.
@@ -827,6 +829,20 @@ side from the token-side amount's sign); `tests/test_univ4_attribution.py` pins 
 A V4-routed buy on moncock replays to 477,000.57 MON spent against a hand-derived
 477,018.49 with the fix, versus 474,059.15 without it.
 
+### Order-book fills routed through the Settler need the market's base token
+
+`_resolve_trade_user` finds the transfer graph by `(txhash, token)`. The `TR` (spot
+fill) event carries a `market`, not a token, and the emitter is the core contract, not a
+pool, so the resolver had no token, found no graph, and returned the event's user: the
+0x Settler. Every routed order-book fill of a launchpad token was therefore credited to
+the Settler (whose position writes are dropped) and the wallet got nothing, and the
+attribution invariant could not see it because it only checks wallets that were
+credited with something. Fixed 2026-09-07 by passing `addressToMarket[market].baseAddress`
+as the token (`_market_base_token`); `tests/test_market_fill_attribution.py` pins it.
+CHIPOTLE wallet `0x25afd360…f0f3` replays to 21 trades / 13,787 MON realized with the fix
+against 15 / 7,527 without (the plan's fixture says 20 / 13,850; the residual is one
+pre-existing double-booked reconciliation leg).
+
 ### `PASSTHROUGH_ADDRS` — the router list (core/chain.py)
 
 Stateless execution contracts that forward someone else's trade and never hold a
@@ -906,7 +922,10 @@ verify against the code rather than trusting either. Ideally they get merged.
 ## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
 
 ### Contract generations and the migration history
-- Gen-3 core router is `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration).
+- **The live core is `0x8e42afa92A8B0ED3eE23Db6B108419Aae47aD61F` (relaunch 2026-09-06, block
+  102,410,369)** with vault factory `0x2388208C8F39e1E5A7FfbF8a2B30c73C7009cc00`. See the
+  relaunch section near the end of this file.
+- Gen-3 core router was `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration), now retired.
   Event topics changed at that migration and the `Migrated` event was REMOVED — old
   topic assumptions silently match nothing.
 - nad.fun has two curve generations with different emitters (v1 `0xA728…/0x6F6B…`,
@@ -1016,6 +1035,15 @@ editing a shared file, verify your content actually landed —
 `git show HEAD:<file> | grep <marker>` — rather than assuming your commit is the
 one that carried it.
 
+### Stopping a background shell does not stop what it launched
+
+A harness-level "stop" ends the task, not the MSYS bash it started, and a bash retry
+loop keeps relaunching its children. On 2026-09-07 a stopped local merge wrapper kept
+merging partitions into prod from stale local databases for four more hours and silently
+overwrote rows an Azure job had just corrected (found only because a fixture wallet
+reverted). Kill by PID, then prove it with a process listing (`Get-CimInstance
+Win32_Process` filtered on the script name) before assuming nothing local can write.
+
 ## The deploy approval gate, and why not to route around it
 
 `main` auto-deploys, but the deploy job **pauses for manual approval from
@@ -1047,10 +1075,10 @@ missing a commit, **check for a run in `waiting` before debugging anything else.
 - **The live database is `crystal-prod-db-r3`.** An older `crystal-prod-db` host
   still accepts connections but is **stale and will mislead you**. Confirm
   `PGHOST` before trusting any number you pull.
-- The API sits behind Cloudflare at `api.crystal.exchange`, which requires an
-  **origin/SNI override to the Container Apps FQDN** — there is no ACA custom
-  domain configured. Getting this wrong produces a **522**, which reads like an
-  outage but is a routing misconfiguration.
+- `api.crystal.exchange` is a **DNS-only CNAME** to the container app's FQDN, bound
+  on `crystal-api` with an Azure **managed certificate** (since 2026-09-07). It is
+  deliberately NOT proxied through Cloudflare — see the section on this hostname
+  near the end of this file before touching the record.
 - Verify what is actually deployed rather than trusting the working tree; images
   are tagged with the commit SHA precisely so this is checkable:
 
@@ -1209,9 +1237,10 @@ properties.configuration.ingress.fqdn -o tsv`. Hit it several times — ingress 
 across revisions, so a single 200 does not prove every replica has your code. If you
 genuinely need to confirm the Cloudflare path, ask the human to load it in a browser.
 
-(Separately, `api.crystal.exchange` does need a Cloudflare origin/SNI override pointing
-at the ACA FQDN; there is no ACA custom domain. That misconfiguration caused a real 522
-once — but a sandbox `HTTP 000` is not evidence of it.)
+(Separately, `api.crystal.exchange` is now a DNS-only CNAME with an Azure managed
+certificate; the 522 and the redirect loop it produced while proxied are explained in
+the hostname section near the end of this file — a sandbox `HTTP 000` is not evidence
+of either.)
 
 ### `az acr build --no-logs` avoids the Windows crash entirely
 
@@ -1988,3 +2017,172 @@ vault and pool inherited it. `tests/test_price_anchors.py` covers both the sweep
 The graph change was shipped **without** bumping `VALUE_VERSION` on purpose: buckets stored
 before 2026-09-06 still value AUSD and USDC-quoted tokens at nothing, newer ones value them.
 Bump it if that step in old history ever matters enough to pay for a recompute.
+
+---
+
+## `api.crystal.exchange` — why it is DNS-only and must stay that way
+
+Fixed 2026-09-07 after the hostname had been a Cloudflare 301 loop. Both frontends call
+the ACA FQDN directly, so the vanity host only matters to third parties (DEX Screener).
+
+What Azure's ingress does for a custom hostname with **no certificate bound**:
+port 80 answers `301 Location: https://<same host>/<path>` (host preserved), and port
+443 **resets the TLS handshake** for any SNI it has no certificate for. So with the
+record orange-clouded, Cloudflare *Flexible* mode produced the self-redirect loop and
+*Full* mode produced the 522 — both symptoms of one cause, no certificate for the name.
+
+Fix applied: the `api` record is a **DNS-only CNAME** to
+`crystal-api.yellowfield-3f176fc9.japaneast.azurecontainerapps.io`, the `asuid.api` TXT
+holds the app's `customDomainVerificationId`, and a managed certificate is bound
+(`az containerapp hostname bind --validation-method CNAME`, state `SniEnabled`).
+
+Traps:
+- **Re-enabling the Cloudflare proxy on `api` breaks certificate renewal** (Azure
+  requires the CNAME to map *directly* to the app "at all times"; it names Cloudflare
+  as the blocking case) and reintroduces the loop/522. If Cloudflare must front the
+  API, the only correct shape is a Cloudflare Origin CA certificate uploaded and bound
+  on the app plus SSL mode Full (strict).
+- `az containerapp hostname bind` with `--validation-method TXT` while the record was
+  proxied created a Pending cert that Azure later withdrew with
+  `FailedARecordValidation`; the CLI then deleted and retried on its own. Check
+  `az containerapp env certificate list --managed-certificates-only` and the activity
+  log before assuming a bind "hung".
+- Testing the origin from behind the local CONNECT proxy is misleading: the proxy
+  rewrites the `Host` header on plain-HTTP requests and ignores `--resolve`. Use
+  `curl --noproxy '*' --resolve <host>:443:4.189.50.206` to talk to the ingress itself.
+- Indexer revisions report `trafficWeight` 0 (no ingress); poll `crystal-indexer` on
+  `healthState`/`runningState`, not traffic weight.
+
+### Running a replay from inside Azure (the China link is the bottleneck, not compute)
+
+The side replay through the tunnel moved 0.2–1 MB/s per connection from Japan to a
+laptop in China and dropped streams under load; ten partitions would have taken days.
+Run it next to the database instead: Container Apps jobs `replay-<partition>` in
+`crystal-prod-env` (4 vCPU / 8 GiB, `replicaTimeout` 8 h) use the backend image, install
+Postgres inside the container as the side database, pull their partition files and the
+V4 log store from blob `crystalproddump/replay-jobs` with a SAS, replay at 160–640 hot
+blocks/s, run `report_side.py` and `merge_side.py --apply`, and upload logs and the
+rollback snapshot to `out/<partition>/`. The runner script is fetched from the blob at
+start so it can be edited without rebuilding; the job definitions live in JSON specs
+(`az containerapp job create --yaml`; the CLI cannot take `-c` inside `--command`).
+Give each job's system identity `AcrPull` on the registry yourself when creating from
+YAML, and do not set `PGSSLMODE=require` in the job environment: libpq applies it to
+the local database too. Ten partitions replayed in 14–20 minutes each.
+
+Two merge facts learned on 2026-09-07:
+
+- **Parallel merges into prod collide.** Ten jobs merging at once hit `lock_timeout`
+  on shared rows (`launchpad_users`, one wallet under many tokens) and died. The
+  write transaction per token is now serialized with prod advisory lock
+  `782301944118` (taken with `lock_timeout` 0, then 5 s for the real work) and retried;
+  the slow staging upload into session temp tables stays parallel and lock-free.
+- **A "hot block" for a token is not only a block with the token's Transfer.** A V4 swap
+  settled through the PoolManager's ERC-6909 claim balances moves no ERC-20 at all, so
+  the token-transfer scan misses it while the live indexer records it. Four such trades
+  on three tokens showed up as prod rows in blocks the replay never saw; the merge's
+  guard treats those as cache holes and skips the token, and the fix is to add the
+  blocks to the token's list. A future scan should also select blocks with a `V4SWAP`
+  whose pool id maps to the token in `univ4_pools`.
+
+---
+
+## The 2026-09-06 crystal relaunch (new core, wiped crystal history)
+
+Crystal was redeployed on 2026-09-06 07:31 UTC and every old crystal row was deleted.
+**nad.fun was untouched and must stay that way in any follow-up.**
+
+| what | address | first block |
+| --- | --- | --- |
+| core / router | `0x8e42afa92A8B0ED3eE23Db6B108419Aae47aD61F` | 102,410,369 |
+| vault factory | `0x2388208C8F39e1E5A7FfbF8a2B30c73C7009cc00` | 102,410,392 |
+| market 1 WMON/USDC (AMM, canonical) | `0xF3daa78C8928447a337Bf217725B87DAe36C4aA4` | 102,410,373 |
+| market 2 WMON/USDC (non-canonical) | `0xAd523d1130E43d2548c630D43f7fA3e91681019E` | 102,410,376 |
+| market 3 AUSD/USDC | `0x6C46B8B533C957658A0A0b88Dd4e62cf0e3E731f` | 102,410,379 |
+| market 4 cbBTC/USDC | `0x13cd06343D38620e9374f24C32F0f2deE92c255C` | 102,410,382 |
+
+**Only two addresses are configured.** Every crystal event tag (`MC`, `TR`, `LT`, orderbook,
+pool, `MG`) is gated on `addr == CONTRACTS["ROUTER"]`, so markets are *discovered* from the
+core's `MarketCreated` events and must never be hardcoded. Vault tags are gated on
+`VAULT_FACTORY_ADDRS`. The event topics did not change in this relaunch — the decoder already
+knew `MARKET_CREATED_V2_TOPIC` — so no parser work was needed.
+
+**Both retired vault factories stay indexed** (`0xe35937…` gen2, `0x3dbf7D…` legacy).
+`tests/test_vault_factory_generations.py` fails if the list drops below two, because a retired
+factory still holds withdrawable user funds. Do not "clean these up" — dropping them strands
+depositors, and it has already caused one incident.
+
+### What the purge did, and what it left
+
+`scripts/purge_crystal_generation.py --before-block 102410369 --apply` removed **545,686 rows**
+across 15 tables (496,255 of them `crystal_orderbook_events`), scoped by
+`launchpad_tokens.source = 0 AND created_block < blk` and `crystal_markets.created_block < blk`.
+The script re-counts nad.fun tokens/trades/positions before and after and **rolls back if any of
+them shrink** — that guard is the reason it is safe to run against prod; keep it.
+
+Deliberately **not** purged, because the script does not cover them and they are a product call:
+`crystal_vaults` (2), `crystal_vault_users` (5), `crystal_vault_deposits`/`withdrawals` (19),
+`crystal_vault_balance_samples` (98k, unrebuildable — see the clean-reindex table above),
+`crystal_users` (12), `crystal_revenue_samples` (2.5k), `spot_graph_buckets` (4.9k),
+`referral_*` (23). They point at retired markets and are now orphaned.
+
+A full pre-purge snapshot of every crystal table (27 gzipped CSVs, 7.7 MiB) was written to the
+session scratchpad `crystal-purge-snapshot/`. The old data is also re-derivable from
+`launchpad_block_logs`, which was preserved.
+
+### AUSD floats, USDC is the dollar anchor
+
+AUSD used to be hardcoded to $1 alongside USDC. Since 2026-09-07 only **USDC** is pegged
+(`state.USD_PEGGED_TOKENS`); AUSD carries a live rate derived the same way the MON rate is:
+
+- `state.apply_market_trade` publishes it whenever the **AUSD/USDC** market prints, matched on
+  `baseAddress == AUSD and quoteAddress == USDC` rather than a hardcoded market address, so it
+  survives a market redeploy. The book quotes USDC per AUSD and USDC is the anchor, so the book
+  price *is* the dollar price.
+- `core.oracle.ausd_price_from_market_price` drops anything outside **0.5–1.5** as a thin-book
+  print; the previous rate then stands. Widen the band if a real depeg needs to show through.
+- Persisted in `launchpad_meta` under `ausd_price_usd`, restored in `rebuild_from_db`, and read
+  API-side by `api.api._ausd_price_usd()` (30s cache) via `stable_quote_usd(addr)`.
+- **Use `stable_quote_usd(addr)`, never `Decimal(1)`, for a stable quote.** `_quote_price_usd`,
+  `spot_data.spot_prices_from_markets` and `spot_graph._token_price_at` all go through it.
+
+`STABLE_USD_QUOTES` still contains both, and AUSD stays in `PINNED_PRICE_TOKENS` — that set means
+"do not reprice this from an arbitrary market", which is still true; only its *value* is dynamic.
+
+Not changed, and worth a decision: `api/routes/vaults.py::_STABLE_QUOTE_TICKERS` still counts
+`ausd` as a stable quote for **APY methodology** (constant-price basis). That is a valuation
+choice, not a price, so it was left alone.
+
+The rate only appears in `launchpad_meta` once AUSD prints away from parity — the setter skips
+no-op updates, so an empty key means "still exactly $1", and every read falls back to 1.
+
+### `crystal_vaults.market` is the pair's canonical market, not the vault's own
+
+`state.apply_market_created` calls `storage.link_crystal_vaults_for_market` whenever a
+**canonical** market is created, and that UPDATE matches vaults by **asset pair**
+(`WHERE (quote=X AND base=Y) OR (quote=Y AND base=X)`), not by vault identity. So registering
+the relaunched canonical WMON/USDC market re-pointed both retired `crystal mm` vaults at it.
+
+This is the intended design (vaults follow their pair's live market across a market upgrade) and
+the column already disagreed with chain beforehand: vault `0x581172…` reads
+`market() = 0xc8045b5d…` on chain while the DB said `0x43b1e521…`. Do not "repair" it to the
+on-chain value — pointing a vault at a market row that no longer exists risks it disappearing
+from `/vaults/list`, and **one of those vaults still has a live depositor**:
+`0x5a90e781…` holds 13,472,106,654,981 shares on chain in the closed vault `0x581172…`, which is
+still fully withdrawable. Keeping it attached to a live market is what keeps it visible.
+
+Consequence to be aware of after any relaunch: retired vaults surface under the new canonical
+market until someone deletes them, and deleting the one with a holder would hide real funds.
+
+### Two traps met while doing this
+
+- **`record_dex_tip` has no backwards guard.** It blindly `set_meta`s whatever block it is
+  handed, so running `SEQUENCER.process_chunk` over *historical* blocks rewinds the DEX Screener
+  checkpoint. Register historical events by calling the `state.apply_*` method directly inside
+  one transaction instead of replaying a chunk.
+- **`scripts/replay_addresses.py` is not address-scoped for logs.** `_hot_blocks` picks blocks
+  *containing* your addresses, but `_filter_logs` then keeps every log those blocks carry that
+  `accepts_log_for_indexing` allows — including `TF` transfers for any known launchpad token and
+  `V3SWAP` (a `PASSTHROUGH` tag that returns True for every address). Replaying the four
+  market-creation blocks would have **re-applied two nad.fun transfers and a V3 swap**; trades are
+  idempotent on `(txhash, log_index)` but transfers are not, so balances would have been
+  corrupted. Check what else lives in a block before replaying it.

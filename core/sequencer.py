@@ -415,6 +415,10 @@ class Sequencer:
             ev, blk, blk_ts, txh, lii, h.UNIV4_POOL_MANAGER_ADDR, cur=cur, batch=batch, tx_index=tx_index
         )
 
+    def _market_base_token(self, parsed: dict) -> str:
+        mi = self._state.addressToMarket.get((parsed.get("market") or "").lower())
+        return ((getattr(mi, "baseAddress", "") or "") if mi is not None else "").lower()
+
     def _resolve_trade_user(
         self,
         txh: str,
@@ -776,12 +780,9 @@ class Sequencer:
                 )
 
             elif tag == "TR":
-                # the event names whoever called the core, so a routed trade credits
-                # the settler or router rather than the trader. every other trade tag
-                # already walks the transfer graph back to the real wallet
                 real_user = self._resolve_trade_user(
                     txh,
-                    parsed,
+                    {**parsed, "token": self._market_base_token(parsed)},
                     log.get("address", "").lower(),
                     transfer_maps,
                 )

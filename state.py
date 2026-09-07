@@ -14,6 +14,7 @@ import core.storage as storage
 import models
 from core import adapters as launchpad_adapters
 from core import chain as h
+from core import oracle
 from core.adapters import nadfun as nadfun_geo
 from core.adapters import native as native_adapter_mod
 
@@ -27,6 +28,7 @@ WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
 AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+USD_PEGGED_TOKENS = (USDC,)
 STABLE_USD_TOKENS = (USDC, AUSD)
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
@@ -243,11 +245,29 @@ class State:
 
         self.mon_price_usd = Decimal("0.03")
         self.lvmon_rate = Decimal(1)
+        self.ausd_price_usd = Decimal(1)
         self._basis_overlay: dict[tuple[str, str], list] = {}
         self._basis_block: int = -1
         self._pool_fee_rates: dict[str, Decimal] = {}
         self._pool_fee_miss_block: dict[str, int] = {}
         self._seed_aux_prices()
+
+    def set_ausd_price_usd(self, value) -> None:
+        with self._lock:
+            self._set_ausd_price_usd_locked(value)
+
+    def _set_ausd_price_usd_locked(self, value) -> None:
+        rate = oracle.ausd_price_from_market_price(value)
+        if rate is None or rate == self.ausd_price_usd:
+            return
+
+        self.ausd_price_usd = rate
+        self.tokenToPrice[AUSD] = rate
+
+        try:
+            storage.set_ausd_price_usd(rate)
+        except Exception as e:
+            print(f"[State] failed to persist ausd_price_usd: {e!r}")
 
     def set_lvmon_rate(self, value) -> None:
         try:
@@ -414,8 +434,17 @@ class State:
                     self.lvmon_rate = Decimal(stored_rate)
             except Exception as e:
                 print(f"[State] Failed to load LVMON rate from DB: {e!r}")
+            try:
+                stored_ausd = storage.get_ausd_price_usd()
+                if stored_ausd is not None:
+                    restored = oracle.ausd_price_from_market_price(stored_ausd)
+                    if restored is not None:
+                        self.ausd_price_usd = restored
+            except Exception as e:
+                print(f"[State] Failed to load AUSD price from DB: {e!r}")
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
+            self.tokenToPrice[AUSD] = self.ausd_price_usd
 
             market_rows = storage.load_crystal_markets_for_state()
             for row in market_rows:
@@ -1449,8 +1478,9 @@ class State:
 
     def _seed_aux_prices_locked(self) -> None:
         self.tokenToPrice.clear()
-        for stable in STABLE_USD_TOKENS:
+        for stable in USD_PEGGED_TOKENS:
             self.tokenToPrice[stable] = Decimal(1)
+        self.tokenToPrice[AUSD] = self.ausd_price_usd
         if self.mon_price_usd > 0:
             self.tokenToPrice[WMON] = self.mon_price_usd
             self.tokenToPrice[LVMON] = self.mon_price_usd * self.lvmon_rate
@@ -2229,6 +2259,8 @@ class State:
                         updated_at=ts,
                         cur=cur,
                     )
+                    if (mi.baseAddress or "").lower() == AUSD and (mi.quoteAddress or "").lower() == USDC:
+                        self._set_ausd_price_usd_locked(mi.price)
 
             except Exception:
                 return

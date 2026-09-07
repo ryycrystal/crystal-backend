@@ -361,6 +361,14 @@ Order of evidence, first match wins, all cached in `address_kinds`:
    and the indexer only needs the current one. A historical ledger needs the union, or a
    replay classifies a retired core as an unknown contract, fails the pair probe and books
    positions on it. `CRYSTAL_CORE_ADDRS` in `core/ledger/kinds.py` carries the full list.
+   **The gate stops at the current generation too, and that blocks historical replay.**
+   `accepts_log_for_indexing` admits router events only from `CONTRACTS["ROUTER"]`, which is the single
+   live `CRYSTAL_ADDR`. Measured after the 09-07 relaunch: `accepts_log_for_indexing("TC", <gen-3 core>)`
+   and the same for `LT` both return False, so every token creation and launchpad trade emitted by a
+   retired core is now dropped before the ledger sees it. Replaying crystal-era history therefore needs
+   the gate widened to the generation list, or a replay-local override. This does not affect the live
+   indexer, which only meets the current core, and it is invisible in prod today because the 09-06 purge
+   deleted the crystal rows that would have exposed it.
    The same hazard applies to any list an env var replaces wholesale (`PASSTHROUGH_ADDRESSES`,
    `VAULT_FACTORY_ADDRESSES`): live config is not history, and the ledger should keep its own
    generation lists rather than inherit a moving pointer.

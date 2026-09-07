@@ -41,6 +41,7 @@ import time
 from decimal import Decimal
 
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,6 +51,8 @@ from env_loader import load_env  # noqa: E402
 load_env()
 
 EXPECTED_PGHOST_MARKER = "crystal-prod-db-r3"
+MERGE_LOCK_KEY = 782301944118
+WRITE_ATTEMPTS = 8
 WAD = Decimal(10) ** 18
 
 POSITION_COLS = (
@@ -109,7 +112,7 @@ def nearest(points: list[tuple[int, Decimal]], keys: list[int], ts: int) -> Deci
     return min(candidates, key=lambda p: abs(p[0] - ts))[1]
 
 
-def reprice_trades(ix, side_trades, prod_trades):
+def reprice_trades(ix, side_trades, prod_trades, hot=None):
     key = lambda r: (r[ix["txhash"]].lower(), int(r[ix["log_index"]]))  # noqa: E731
     prod_by_key = {key(r): r for r in prod_trades}
     points = sorted(
@@ -132,8 +135,18 @@ def reprice_trades(ix, side_trades, prod_trades):
                 row[ix["usd_amount"]] = (Decimal(row[ix["native_amount"]]) / WAD) * rate
         out.append(tuple(row))
     side_keys = {key(r) for r in side_trades}
-    dropped = [k for k in prod_by_key if k not in side_keys]
-    return out, new_rows, dropped
+    zero = "0x" + "0" * 40
+    synthetic = {
+        key(r)
+        for r in prod_trades
+        if ("venue" in ix and r[ix["venue"]] == "reconciliation") or (r[ix["user_address"]] or "").lower() == zero
+    }
+    unmatched = [k for k in prod_by_key if k not in side_keys and k not in synthetic]
+    if hot is None:
+        dropped = unmatched
+    else:
+        dropped = [k for k in unmatched if int(prod_by_key[k][ix["block_number"]]) not in hot]
+    return out, new_rows, dropped, len(unmatched) - len(dropped)
 
 
 def carry_mon_usd(ohlcv_cols, side_ohlcv, prod_ohlcv):
@@ -179,7 +192,7 @@ def aggregates(ix, rows):
     return agg
 
 
-def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
+def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh, hot=None):
     trade_cols = [c for c in shared_columns(sc, pc, "launchpad_trades") if c != "id"]
     ohlcv_cols = shared_columns(sc, pc, "launchpad_ohlcv")
     pos_cols = ("user_address", "balance_token", *POSITION_COLS)
@@ -212,7 +225,7 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
     prod_gt = [r for r in prod_trades if int(r[ix["block_number"]]) > cutoff]
     late_users = {r[ix["user_address"]] for r in prod_gt}
 
-    repriced, new_trades, dropped = reprice_trades(ix, side_trades, prod_le)
+    repriced, new_trades, dropped, replaced = reprice_trades(ix, side_trades, prod_le, hot)
     side_keep = [r for r in repriced if r[ix["user_address"]] not in late_users]
     prod_le_keep = [r for r in prod_le if r[ix["user_address"]] in late_users]
     final_rows = prod_gt + prod_le_keep + side_keep
@@ -238,7 +251,7 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
 
     print(
         f"{token}  trades prod {len(prod_trades):,} ({len(prod_gt)} after cutoff) -> {len(final_rows):,} "
-        f"(+{new_trades:,} new, {len(dropped)} dropped)   positions update {len(pos_update):,} "
+        f"(+{new_trades:,} new, {replaced} replaced, {len(dropped)} dropped)   positions update {len(pos_update):,} "
         f"insert {len(pos_insert):,} deferred {len(deferred)}   candles {len(prod_candles_replaced):,} -> {len(candles):,}   "
         f"volume_usd {prod_volume_usd:,.0f} -> {agg['volume_usd']:,.0f}",
         flush=True,
@@ -248,15 +261,90 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
         return
     if dropped:
         print(
-            f"   prod has {len(dropped)} pre-cutoff trades the side set lacks, e.g. {dropped[:3]}; skipping", flush=True
+            f"   prod has {len(dropped)} pre-cutoff trades in blocks the replay never saw, e.g. {dropped[:3]}; skipping",
+            flush=True,
         )
         return
     if not apply:
         return
 
+    with pc.cursor() as p:
+        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
+        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
+        p.execute("CREATE TEMP TABLE tmp_side_trades (LIKE launchpad_trades INCLUDING DEFAULTS)")
+        p.execute("CREATE TEMP TABLE tmp_side_ohlcv (LIKE launchpad_ohlcv INCLUDING DEFAULTS)")
+        psycopg2.extras.execute_values(
+            p, f"INSERT INTO tmp_side_trades ({','.join(trade_cols)}) VALUES %s", side_keep, page_size=1000
+        )
+        if candles:
+            psycopg2.extras.execute_values(
+                p, f"INSERT INTO tmp_side_ohlcv ({','.join(ohlcv_cols)}) VALUES %s", candles, page_size=1000
+            )
+    pc.commit()
+
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            write_token(
+                pc,
+                token,
+                cutoff,
+                cutoff_ts,
+                fh,
+                trade_cols,
+                ohlcv_cols,
+                pos_cols,
+                prod_le,
+                prod_positions,
+                prod_candles_replaced,
+                late_users,
+                side_keep,
+                pos_update,
+                pos_insert,
+                agg,
+                fees_usd,
+                candles,
+            )
+            break
+        except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected, psycopg2.OperationalError) as e:
+            pc.rollback()
+            wait = 5 + 7 * attempt
+            print(f"   write attempt {attempt + 1} failed ({type(e).__name__}); retrying in {wait}s", flush=True)
+            time.sleep(wait)
+    else:
+        print("   GAVE UP on this token after repeated lock timeouts", flush=True)
+        return
+    with pc.cursor() as p:
+        p.execute("DROP TABLE IF EXISTS tmp_side_trades")
+        p.execute("DROP TABLE IF EXISTS tmp_side_ohlcv")
+    pc.commit()
+    print("   committed", flush=True)
+
+
+def write_token(
+    pc,
+    token,
+    cutoff,
+    cutoff_ts,
+    fh,
+    trade_cols,
+    ohlcv_cols,
+    pos_cols,
+    prod_le,
+    prod_positions,
+    prod_candles_replaced,
+    late_users,
+    side_keep,
+    pos_update,
+    pos_insert,
+    agg,
+    fees_usd,
+    candles,
+):
     with pc:
         with pc.cursor() as p:
-            p.execute("SET lock_timeout = '5s'")
+            p.execute("SET LOCAL lock_timeout = 0")
+            p.execute("SELECT pg_advisory_xact_lock(%s)", (MERGE_LOCK_KEY,))
+            p.execute("SET LOCAL lock_timeout = '5s'")
             fh.write(
                 json.dumps(
                     {
@@ -284,11 +372,9 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 "DELETE FROM launchpad_trades WHERE token=%s AND block_number<=%s AND NOT (user_address = ANY(%s))",
                 (token, cutoff, list(late_users)),
             )
-            psycopg2.extras.execute_values(
-                p,
-                f"INSERT INTO launchpad_trades ({','.join(trade_cols)}) VALUES %s ON CONFLICT DO NOTHING",
-                side_keep,
-                page_size=1000,
+            p.execute(
+                f"INSERT INTO launchpad_trades ({','.join(trade_cols)}) "
+                f"SELECT {','.join(trade_cols)} FROM tmp_side_trades ON CONFLICT DO NOTHING"
             )
 
             if pos_update:
@@ -336,11 +422,9 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 (token, cutoff_ts),
             )
             if candles:
-                psycopg2.extras.execute_values(
-                    p,
-                    f"INSERT INTO launchpad_ohlcv ({','.join(ohlcv_cols)}) VALUES %s ON CONFLICT DO NOTHING",
-                    candles,
-                    page_size=1000,
+                p.execute(
+                    f"INSERT INTO launchpad_ohlcv ({','.join(ohlcv_cols)}) "
+                    f"SELECT {','.join(ohlcv_cols)} FROM tmp_side_ohlcv ON CONFLICT DO NOTHING"
                 )
 
             p.execute(
@@ -357,7 +441,6 @@ def merge_token(sc, pc, token, cutoff, cutoff_ts, apply, fh):
                 """,
                 (token,),
             )
-    print("   committed", flush=True)
 
 
 def main():
@@ -381,8 +464,11 @@ def main():
     if args.apply and EXPECTED_PGHOST_MARKER not in os.environ.get("PGHOST", ""):
         raise SystemExit(f"refusing to --apply: PGHOST is not {EXPECTED_PGHOST_MARKER}")
     cutoff = args.cutoff
-    if cutoff is None and args.blocks_file:
-        cutoff = max(json.load(open(args.blocks_file)))
+    hot = None
+    if args.blocks_file:
+        hot = {int(b) for b in json.load(open(args.blocks_file))}
+        if cutoff is None:
+            cutoff = max(hot)
     if cutoff is None:
         raise SystemExit("pass --cutoff or --blocks-file")
 
@@ -400,7 +486,7 @@ def main():
     with open(args.snapshot, "a", encoding="utf-8") as fh:
         for i, token in enumerate(tokens, 1):
             print(f"[{i}/{len(tokens)}] ", end="")
-            merge_token(sc, pc, token, cutoff, cutoff_ts, args.apply, fh)
+            merge_token(sc, pc, token, cutoff, cutoff_ts, args.apply, fh, hot)
     print(f"done in {time.time() - t0:.0f}s", flush=True)
 
 

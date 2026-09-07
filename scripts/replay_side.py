@@ -50,8 +50,9 @@ SEED_TABLES = (
     "crystal_markets",
     "holder_denylist",
 )
-FETCH_ATTEMPTS = 40
-FETCH_TIMEOUT = 600
+FETCH_ATTEMPTS = 100000
+FETCH_TIMEOUT = 90
+FETCH_SLICE = 25
 
 
 def prod_conn():
@@ -111,7 +112,8 @@ class LogSource:
                     )
                     return {int(n): (json.loads(v) if isinstance(v, str) else v) for n, v in cur.fetchall()}
             except (psycopg2.Error, RuntimeError, OSError) as e:
-                print(f"[FETCH] attempt {attempt + 1}/{FETCH_ATTEMPTS} failed: {e!r}"[:200], flush=True)
+                if attempt < 5 or attempt % 20 == 0:
+                    print(f"[FETCH] attempt {attempt + 1} failed: {e!r}"[:200], flush=True)
                 self._drop()
                 time.sleep(min(2**attempt, 30))
             finally:
@@ -126,10 +128,6 @@ class LogSource:
             conn.cancel()
         except Exception:
             pass
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 class ParallelFetcher:
@@ -139,9 +137,16 @@ class ParallelFetcher:
 
     def fetch(self, numbers: list[int]) -> dict[int, list[dict]]:
         n = len(self._sources)
-        parts = [numbers[i::n] for i in range(n)]
+        slices = [numbers[i : i + FETCH_SLICE] for i in range(0, len(numbers), FETCH_SLICE)]
+
+        def run(k: int) -> dict[int, list[dict]]:
+            out: dict[int, list[dict]] = {}
+            for part in slices[k::n]:
+                out.update(self._sources[k].fetch(part))
+            return out
+
         merged: dict[int, list[dict]] = {}
-        for part in self._pool.map(lambda sp: sp[0].fetch(sp[1]) if sp[1] else {}, zip(self._sources, parts)):
+        for part in self._pool.map(run, range(n)):
             merged.update(part)
         return merged
 
@@ -205,14 +210,28 @@ def wipe_side() -> None:
     print(f"[WIPE] truncated {len(tables)} side tables", flush=True)
 
 
-def seed_from_prod(pc) -> None:
-    with pc.cursor() as pcur, storage.db_cursor() as lcur:
+def seed_from_prod(pc, seed_url: str | None = None) -> None:
+    src = psycopg2.connect(seed_url) if seed_url else pc
+    if seed_url:
+        waited = 0
+        while True:
+            with src.cursor() as cur:
+                cur.execute("SELECT count(*) FROM holder_denylist")
+                ready = cur.fetchone()[0] > 0
+            src.rollback()
+            if ready:
+                break
+            if waited % 120 == 0:
+                print("[SEED] waiting for the local seed snapshot to finish", flush=True)
+            time.sleep(15)
+            waited += 15
+    with src.cursor() as pcur, storage.db_cursor() as lcur:
         for table in SEED_TABLES:
             try:
                 pcur.execute(f"SELECT * FROM {table}")
             except Exception:
-                pc.rollback()
-                print(f"[SEED] {table}: not on prod, skipped", flush=True)
+                src.rollback()
+                print(f"[SEED] {table}: not in the seed source, skipped", flush=True)
                 continue
             cols = [d[0] for d in pcur.description]
             rows = pcur.fetchall()
@@ -272,11 +291,12 @@ async def replay(
     streams: int,
     extra_url: str | None,
     required_file: str | None,
+    seed_url: str | None,
 ) -> None:
     src = LogSource()
     if wipe:
         wipe_side()
-    seed_from_prod(src.conn())
+    seed_from_prod(None if seed_url else src.conn(), seed_url)
 
     if blocks_file and os.path.exists(blocks_file):
         blocks = json.load(open(blocks_file))
@@ -339,6 +359,7 @@ def main() -> None:
     ap.add_argument("--streams", type=int, default=4, help="parallel prod connections per chunk fetch")
     ap.add_argument("--extra-logs-url", help="local store of backfilled PoolManager logs (scripts/backfill_v4_logs.py)")
     ap.add_argument("--extra-required-file", help="blocks that must be in the store before their chunk is folded")
+    ap.add_argument("--seed-from", help="copy the seed tables from this database instead of prod")
     ap.add_argument("--wipe", action="store_true", help="truncate every table in the side db before seeding")
     ap.add_argument("--fresh", action="store_true", help="side db starts empty: skip per-trade existence checks")
     args = ap.parse_args()
@@ -370,6 +391,7 @@ def main() -> None:
             args.streams,
             args.extra_logs_url,
             args.extra_required_file,
+            args.seed_from,
         )
     )
 

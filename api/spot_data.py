@@ -43,15 +43,16 @@ def spot_token_list() -> list[dict[str, Any]]:
 
 
 def spot_prices_from_markets(rows, mon_usd: Decimal) -> dict[str, Decimal | None]:
-    from api.api import STABLE_USD_QUOTES
+    from api.api import STABLE_USD_QUOTES, stable_quote_usd
 
     native_equiv = {WMON}
     prices: dict[str, Decimal | None] = {
         WMON: mon_usd if mon_usd > 0 else None,
         NATIVE: mon_usd if mon_usd > 0 else None,
     }
-    for stable in STABLE_USD_QUOTES:
-        prices[stable] = Decimal(1)
+    stable_usd = {stable: stable_quote_usd(stable) for stable in STABLE_USD_QUOTES}
+    for stable, usd in stable_usd.items():
+        prices[stable] = usd
     pinned = set(STABLE_USD_QUOTES) | native_equiv | {NATIVE}
     for base, quote, lp in rows:
         lp = Decimal(lp)
@@ -60,7 +61,7 @@ def spot_prices_from_markets(rows, mon_usd: Decimal) -> dict[str, Decimal | None
         if quote in native_equiv:
             prices[base] = (lp * mon_usd) if mon_usd > 0 else None
         elif quote in STABLE_USD_QUOTES:
-            prices[base] = lp
+            prices[base] = lp * stable_usd[quote]
     for base, quote, lp in rows:
         lp = Decimal(lp)
         if base in native_equiv and lp > 0 and mon_usd > 0 and quote not in pinned:
