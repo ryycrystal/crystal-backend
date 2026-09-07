@@ -1034,3 +1034,29 @@ def test_no_flow_is_priced_above_every_quote_that_moved_in_its_transaction():
         assert abs(f.quote_delta or 0) <= 59 * E18, (
             f"{f.wallet[:10]} {f.kind}: {f.quote_delta} exceeds every quote that moved in this transaction"
         )
+
+
+def test_a_wallets_quote_is_conserved_across_its_movements_even_when_split_oddly():
+    """Which of a wallet's own sales a payment is attached to can be wrong; the total cannot.
+
+    A wallet selling one holding across three movements in one transaction has its receipts assigned to the
+    nearest movement of opposite sign, and proximity is not always right: on JAMES transaction 0xf8f9f66354
+    a 0.48-token movement was given 5,729 MON while a 33,605-token movement was given a fraction of a wei.
+    Under average cost the position is unaffected, because realized comes from the totals; only the
+    per-movement `price_native` is distorted, and that is what a later reference price can read. Measured on
+    JAMES, the flows more than a thousandfold from the median carry 0.010% of traded value.
+    """
+    b = bundle(
+        [
+            tf(121, WMON, WALLET, POOL, 100 * E18),
+            tf(122, TOKEN, POOL, WALLET, 1000 * E18),
+            tf(130, TOKEN, WALLET, POOL, 999 * E18),
+            tf(131, WMON, POOL, WALLET, 60 * E18),
+            tf(138, TOKEN, WALLET, POOL, 1 * E18),
+            tf(139, WMON, POOL, WALLET, 90 * E18),
+        ],
+        tx_meta=meta(WALLET, POOL),
+    )
+    flows = [f for f in run(b) if f.wallet == WALLET and f.token == TOKEN]
+    assert sum(f.quote_delta or 0 for f in flows) == -100 * E18 + 60 * E18 + 90 * E18
+    assert sum(f.token_delta for f in flows) == 0
