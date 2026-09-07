@@ -171,6 +171,26 @@ CHECKS = [
         """,
     ),
     (
+        "each position's parked totals are the sum of what the individual pools and vaults hold",
+        """
+        SELECT count(*) FROM positions_v2 p
+        LEFT JOIN (
+            SELECT wallet, token, SUM(observed_tokens) AS ot, SUM(estimated_tokens) AS et,
+                   SUM(unresolved_tokens) AS ut, SUM(observed_basis) AS ob, SUM(estimated_basis) AS eb
+            FROM parked_entitlements GROUP BY wallet, token
+        ) e ON e.wallet = p.wallet AND e.token = p.token
+        WHERE COALESCE(e.ot, 0) <> p.parked_observed_tokens OR COALESCE(e.et, 0) <> p.parked_estimated_tokens
+           OR COALESCE(e.ut, 0) <> p.parked_unresolved_tokens OR COALESCE(e.ob, 0) <> p.parked_observed_basis
+           OR COALESCE(e.eb, 0) <> p.parked_estimated_basis
+        """,
+    ),
+    (
+        "no pool or vault holds basis for tokens it does not hold",
+        "SELECT count(*) FROM parked_entitlements WHERE observed_tokens < 0 OR estimated_tokens < 0 "
+        "OR unresolved_tokens < 0 OR observed_basis < 0 OR estimated_basis < 0 "
+        "OR (observed_tokens = 0 AND observed_basis <> 0) OR (estimated_tokens = 0 AND estimated_basis <> 0)",
+    ),
+    (
         "no position carries negative inventory or negative held-out basis",
         "SELECT count(*) FROM positions_v2 WHERE observed_tokens < 0 OR estimated_tokens < 0 "
         "OR unresolved_tokens < 0 OR cost_basis_native < 0 OR basis_estimated_native < 0 "

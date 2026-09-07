@@ -12,7 +12,6 @@ which is the signal to drop the marker. A test that stops failing for the wrong 
 Numbers come from feedback7.md's acceptance table, which measured the "today" column against this code.
 """
 
-from dataclasses import asdict
 from decimal import Decimal
 
 from core.ledger.fold import PositionState, fold  # noqa: E402
@@ -51,6 +50,8 @@ from tests.test_ledger_netflow import (
 
 RATES = Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1))
 FORGER = "0x" + "f0" * 20
+VAULT_A = "0x" + "a5" * 20
+VAULT_B = "0x" + "b6" * 20
 
 
 def test_02_an_unequal_round_trip_keeps_both_actions():
@@ -257,8 +258,41 @@ def test_a_position_resumed_from_its_stored_row_folds_like_one_folded_whole():
     ]
     whole, _ = fold(None, flows)
     first, _ = fold(None, flows[:1])
-    resumed = PositionState(**asdict(first.to_row()))
+    resumed = PositionState.from_row(first.to_row(), first.parked)
     second, _ = fold(resumed, flows[1:])
     assert second.realized_pnl_native == whole.realized_pnl_native == 150
     assert second.trade_count == whole.trade_count == 2
     assert second.to_row() == whole.to_row()
+
+
+def test_10b_parked_basis_belongs_to_the_place_it_was_parked_in():
+    """Park 100 at 100 in vault A and 100 at 1,000 in vault B, then withdraw from A.
+
+    Today the two are one pooled aggregate, so withdrawing from A restores the average of both: 550 instead
+    of the 100 that was actually parked there. Nothing about the withdrawal says which vault it came from
+    because the basis was never told where it went.
+    """
+    flows = [
+        fold_flow(KIND_BUY, 100, -100, block=1),
+        fold_flow("vault_deposit", -100, None, block=2, counterparty=VAULT_A),
+        fold_flow(KIND_BUY, 100, -1000, block=3),
+        fold_flow("vault_deposit", -100, None, block=4, counterparty=VAULT_B),
+        fold_flow("vault_withdraw", 100, None, block=5, counterparty=VAULT_A),
+    ]
+    state, out = fold(None, flows)
+    assert out[-1].basis_delta == 100, "the withdrawal restores what was parked in A, not the pooled average"
+    assert state.cost_basis_native == 100
+    assert state.parked_observed_basis == 1000, "B's basis stays parked in B"
+    assert state.parked_observed_tokens == 100
+
+
+def test_10c_withdrawing_from_a_place_nothing_was_parked_in_restores_nothing():
+    flows = [
+        fold_flow(KIND_BUY, 100, -100, block=1),
+        fold_flow("lp_add", -100, None, block=2, counterparty=VAULT_A),
+        fold_flow("lp_remove", 100, None, block=3, counterparty=VAULT_B),
+    ]
+    state, out = fold(None, flows)
+    assert out[-1].basis_delta == 0, "B holds nothing of this wallet's, so nothing comes back priced"
+    assert state.unresolved_tokens == 100
+    assert state.parked_observed_basis == 100, "A still holds the parked basis"

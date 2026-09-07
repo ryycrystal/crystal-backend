@@ -9,6 +9,7 @@ LEDGER_TABLES = (
     "venues",
     "token_registry",
     "token_coverage",
+    "parked_entitlements",
     "tx_meta",
     "tx_traces",
     "ledger_meta",
@@ -133,6 +134,20 @@ _STATEMENTS = (
         quote_token      TEXT,
         decimals         INTEGER NOT NULL DEFAULT 18,
         active           BOOLEAN NOT NULL DEFAULT TRUE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS parked_entitlements
+    (
+        wallet            TEXT NOT NULL,
+        token             TEXT NOT NULL,
+        venue             TEXT NOT NULL,
+        observed_tokens   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        estimated_tokens  NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        unresolved_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        observed_basis    NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        estimated_basis   NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        PRIMARY KEY (wallet, token, venue)
     )
     """,
     """

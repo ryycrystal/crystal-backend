@@ -362,21 +362,35 @@ def merge_chain_logs(cached: dict[int, list[dict]], chain: dict[int, list[dict]]
 
 def load_or_find_blocks(
     src: LogSource, addresses: list[str], from_block: int, to_block: int | None, blocks_file: str | None
-) -> list[int]:
+) -> tuple[list[int], int]:
+    """The hot blocks, and the block from which the scan can honestly claim to have seen everything.
+
+    A scan we ran ourselves covers the range we asked for. A list loaded from a file only demonstrates the
+    blocks it contains, so it certifies nothing before its own first block: a file built for a later window
+    would otherwise let a replay claim a history it never read.
+    """
     if blocks_file and os.path.exists(blocks_file):
         blocks = [int(b) for b in json.load(open(blocks_file))]
         print(f"[BLOCKS] {len(blocks):,} hot blocks loaded from {blocks_file}", flush=True)
+        scanned_from = min(blocks) if blocks else from_block
+        if scanned_from > from_block:
+            print(
+                f"[BLOCKS] the cached list starts at {scanned_from:,}, so coverage is claimed only from there, "
+                f"not from {from_block:,}",
+                flush=True,
+            )
     else:
         t0 = time.time()
         blocks = hot_blocks(src, addresses, from_block, to_block)
         print(f"[BLOCKS] {len(blocks):,} hot blocks found in {time.time() - t0:.0f}s", flush=True)
+        scanned_from = from_block
         if blocks_file:
             json.dump(blocks, open(blocks_file, "w"))
             print(f"[BLOCKS] cached to {blocks_file}", flush=True)
     kept = [b for b in blocks if b >= from_block and (to_block is None or b <= to_block)]
     if len(kept) != len(blocks):
         print(f"[BLOCKS] {len(kept):,} within {from_block:,}-{to_block if to_block else 'head'}", flush=True)
-    return kept
+    return kept, max(scanned_from, from_block)
 
 
 def block_timestamp(logs: list[dict]) -> int:
@@ -544,10 +558,11 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     for token in tokens:
         print(f"[SCOPE] {token}: created {created[token]:,}, venues {sorted(venues[token])}", flush=True)
 
-    blocks = load_or_find_blocks(src, sorted(watched), from_block, args.to_block, args.blocks_file)
+    blocks, covers_from = load_or_find_blocks(src, sorted(watched), from_block, args.to_block, args.blocks_file)
     chain_logs = load_chain_logs(args.chain_logs_file)
     if chain_logs:
         blocks = sorted(set(blocks) | set(chain_logs))
+        covers_from = min(covers_from, min(chain_logs))
         earliest = min(chain_logs)
         with storage.db_cursor() as cur:
             cur.execute(
@@ -604,7 +619,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        span = (tokens, from_block, group[-1])
+        span = (tokens, covers_from, group[-1])
         flows, refolded = process_chunk_with_retries(engine, kinds, relevant, timestamps, receipt_logs_added, span)
         total_flows += flows
         total_refolds += refolded

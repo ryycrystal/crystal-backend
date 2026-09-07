@@ -1,7 +1,7 @@
 import random
 from decimal import Decimal
 
-from core.ledger.fold import PositionState, fold, fold_position
+from core.ledger.fold import PARKED_AGGREGATES, Parked, PositionState, fold, fold_position
 from core.ledger.types import Flow
 
 WALLET = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
@@ -24,6 +24,7 @@ def _flow(
     quote_asset="native",
     mon_value=None,
     source="transfer_net",
+    counterparty=None,
 ):
     if quote is None:
         quote_asset = None
@@ -45,7 +46,7 @@ def _flow(
         usd_value=Decimal(0),
         kind=kind,
         venue=None,
-        counterparty=None,
+        counterparty=counterparty,
         origin=WALLET,
         source=source,
         basis_state=basis_state,
@@ -425,12 +426,20 @@ def test_basis_never_negative_during_random_sequence():
             assert state.parked_observed_basis >= 0 and state.parked_estimated_basis >= 0
 
 
-def test_position_state_and_row_are_the_same_record():
+def test_nothing_the_fold_carries_is_lost_on_the_way_to_storage():
+    """Every working field is persisted: the scalars in the position row, the per-venue buckets beside it."""
     from dataclasses import fields
 
+    from core.ledger.store import PARKED_COLUMNS
     from core.ledger.types import PositionRow
 
-    assert {f.name for f in fields(PositionState)} == {f.name for f in fields(PositionRow)}
+    state_fields = {f.name for f in fields(PositionState)}
+    row_fields = {f.name for f in fields(PositionRow)}
+    assert row_fields <= state_fields | set(PARKED_AGGREGATES)
+    for name in row_fields:
+        assert hasattr(PositionState(), name), name
+    assert state_fields - row_fields == {"parked"}
+    assert {f.name for f in fields(Parked)} == set(PARKED_COLUMNS)
 
 
 PARKING = ("lp_add", "lp_remove", "vault_deposit", "vault_withdraw")
@@ -471,9 +480,41 @@ def test_fold_resumes_from_a_stored_row_at_any_cut():
         head, head_out = fold(None, flows[:cut])
         row = head.to_row()
         assert isinstance(row, PositionRow)
-        tail, tail_out = fold(PositionState.from_row(row), flows[cut:])
+        tail, tail_out = fold(PositionState.from_row(row, head.parked), flows[cut:])
         assert tail.to_row() == whole.to_row(), (seed, cut)
+        assert tail.parked == whole.parked, (seed, cut)
         assert head_out + tail_out == whole_out, (seed, cut)
+
+
+def test_parking_into_two_places_keeps_each_place_at_its_own_cost():
+    a, b = "0x" + "a5" * 20, "0x" + "b6" * 20
+    flows = [
+        _flow("buy", 100, -100, block=1),
+        _flow("vault_deposit", -100, block=2, counterparty=a),
+        _flow("buy", 100, -1000, block=3),
+        _flow("vault_deposit", -100, block=4, counterparty=b),
+        _flow("vault_withdraw", 100, block=5, counterparty=a),
+        _flow("vault_withdraw", 100, block=6, counterparty=b),
+    ]
+    state, out = fold(None, flows)
+    assert out[4].basis_delta == 100 and out[5].basis_delta == 1000
+    assert state.cost_basis_native == 1100
+    assert state.parked == {}
+    assert state.observed_tokens == 200
+
+
+def test_a_partial_withdrawal_takes_a_share_of_only_that_places_basis():
+    a, b = "0x" + "a5" * 20, "0x" + "b6" * 20
+    flows = [
+        _flow("buy", 200, -400, block=1),
+        _flow("lp_add", -100, block=2, counterparty=a),
+        _flow("lp_add", -100, block=3, counterparty=b),
+        _flow("lp_remove", 40, block=4, counterparty=a),
+    ]
+    state, out = fold(None, flows)
+    assert out[3].basis_delta == 80
+    assert state.parked[a].observed_basis == 120 and state.parked[a].observed_tokens == 60
+    assert state.parked[b].observed_basis == 200 and state.parked[b].observed_tokens == 100
 
 
 def test_an_unpriced_sale_is_neither_a_loss_nor_part_of_the_running_average():

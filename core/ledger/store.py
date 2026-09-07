@@ -18,6 +18,13 @@ from core.ledger.types import (
 
 FLOW_COLUMNS = tuple(Flow.__dataclass_fields__)
 POSITION_COLUMNS = tuple(PositionRow.__dataclass_fields__)
+PARKED_COLUMNS = (
+    "observed_tokens",
+    "estimated_tokens",
+    "unresolved_tokens",
+    "observed_basis",
+    "estimated_basis",
+)
 TX_META_COLUMNS = ("txhash", "block_number", "tx_index", "from_addr", "to_addr", "value", "selector")
 REGISTRY_COLUMNS = ("token", "source", "registered_block", "quote_token", "decimals", "active")
 
@@ -180,14 +187,56 @@ def _fold_values(flow: Flow) -> tuple[int, ...]:
     return tuple(_wei(getattr(flow, column, None)) or 0 for column in FOLD_COLUMNS)
 
 
+def load_parked(cur, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """The per-venue parked buckets, without which a stored position is not a resumable checkpoint."""
+    from core.ledger.fold import Parked
+
+    out: dict[tuple[str, str], dict] = {}
+    pairs = sorted({(_lower(wallet), _lower(token)) for wallet, token in keys})
+    for start in range(0, len(pairs), _KEY_CHUNK):
+        chunk = pairs[start : start + _KEY_CHUNK]
+        cur.execute(
+            f"SELECT wallet, token, venue, {', '.join(PARKED_COLUMNS)} FROM parked_entitlements "
+            "WHERE (wallet, token) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([wallet for wallet, _ in chunk], [token for _, token in chunk]),
+        )
+        for wallet, token, venue, *values in cur.fetchall():
+            bucket = Parked(**dict(zip(PARKED_COLUMNS, (int(value) for value in values))))
+            out.setdefault((wallet, token), {})[venue] = bucket
+    return out
+
+
+def _write_parked(cur, keys: list[tuple[str, str]], parked: list[tuple]) -> None:
+    if not keys:
+        return
+    for start in range(0, len(keys), _KEY_CHUNK):
+        chunk = keys[start : start + _KEY_CHUNK]
+        cur.execute(
+            "DELETE FROM parked_entitlements WHERE (wallet, token) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([wallet for wallet, _ in chunk], [token for _, token in chunk]),
+        )
+    if parked:
+        execute_values(
+            cur,
+            f"INSERT INTO parked_entitlements (wallet, token, venue, {', '.join(PARKED_COLUMNS)}) VALUES %s",
+            parked,
+            page_size=_PAGE_SIZE,
+        )
+
+
 def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
     rows: list[PositionRow] = []
     updates: list[tuple] = []
+    parked: list[tuple] = []
+    folded_keys: list[tuple[str, str]] = []
     for (wallet, token), flows in load_flows(cur, keys).items():
         if not flows:
             continue
         state, folded = _fold_result(fold_fn(None, flows))
         rows.append(_position_row(state, wallet, token))
+        folded_keys.append((wallet, token))
+        for venue, bucket in getattr(state, "parked", {}).items():
+            parked.append((wallet, token, venue, *(int(getattr(bucket, name)) for name in PARKED_COLUMNS)))
         stored = {_flow_pk(flow): flow for flow in flows}
         for flow in folded:
             before = stored.get(_flow_pk(flow))
@@ -196,6 +245,7 @@ def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
                 updates.append((*_flow_pk(flow), *values))
     upsert_positions(cur, rows)
     _write_fold_deltas(cur, updates)
+    _write_parked(cur, folded_keys, parked)
     return len(rows)
 
 
@@ -263,6 +313,7 @@ def purge_wallets(cur, wallets) -> int:
     if not addrs:
         return 0
     cur.execute("DELETE FROM positions_v2 WHERE wallet = ANY(%s)", (addrs,))
+    cur.execute("DELETE FROM parked_entitlements WHERE wallet = ANY(%s)", (addrs,))
     cur.execute("DELETE FROM wallet_flows WHERE wallet = ANY(%s)", (addrs,))
     return cur.rowcount
 
