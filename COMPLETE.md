@@ -1,7 +1,7 @@
 # accounting-fix: the four seams, built and rebuilt on real data
 
-Status at 2026-09-08 02:35. **Not ready for review yet:** JAMES is rebuilt and clean, moncock and chipotle
-are still replaying. This document is written as they land, and the header changes to REVIEW only when all
+Status at 2026-09-08 03:20. **Not ready for review yet:** JAMES and moncock are rebuilt and swept, chipotle
+is still replaying. This document is written as they land, and the header changes to REVIEW only when all
 three fixtures pass their own checks. Nothing here has been written to production, and `LEDGER_ENABLED` must
 stay off.
 
@@ -73,38 +73,42 @@ now a test. The suite was green before every one of them.
 
 ---
 
-## JAMES, rebuilt from its creation block
+## The two rebuilt tokens
 
-153,389 flows across 5,051 wallets, blocks 85,819,844 to 102,523,914, coverage complete from creation.
+Both replayed from their creation blocks, with coverage recorded and complete.
 
-| measure | before this work | now |
+| | JAMES | moncock |
 |---|---|---|
-| inflow arriving with no price of its own | 44.617% | 35.698% |
-| inflow that still has no cost at all | not measurable | 3.424% |
-| positions holding any unresolved tokens | not measurable | 101 of 5,051 |
-| estimated share of traded value | 7.372% | 6.387% |
+| blocks | 85,819,844 - 102,523,914 | 37,719,344 - 102,355,176 |
+| flows | 153,389 | 339,693 |
+| wallets | 5,051 | 9,681 |
+| inflow arriving with no price of its own | 35.698% | 31.444% |
+| inflow that still has no cost at all | 3.424% | 10.533% |
+| positions holding any unresolved tokens | 101 of 5,051 | 105 of 9,681 |
+| estimated share of traded value | 6.387% | 11.608% |
 
-The first row counts movements that arrive without a price of their own, which a transfer never has. The
-second is the one that matters after seam 3, because a transfer now delivers the sender's cost: it is the
-share of all inflow that ends up in the unresolved bucket. Reviewer 7 predicted this would fall to roughly
-2%; it is 3.4% of inflow and 2.0% of positions.
+JAMES's uncosted inflow was 44.617% before this work, measured the only way it could then be measured.
 
-Fifteen structural checks hold on the rebuilt data, including every defect listed above: no negative
+The first of those two rows counts movements arriving without a price of their own, which a transfer
+never has. The second is the one that matters after seam 3, because a transfer now delivers the sender's
+cost: it is the share of all inflow that still ends in the unresolved bucket. Reviewer 7 predicted this
+would fall to roughly 2%; on JAMES it is 3.4% of inflow and 2.0% of positions.
+
+Fifteen structural checks hold on both, including every defect listed above: no negative
 balance, no negative inventory, every position's inventory equal to the sum of its flows' effects, every
 transfer's other half present, every transfer's cost travelling with its tokens, parked totals equal to the
 per-venue rows, and no position served without coverage from creation.
 
-### The one thing that does not hold, and its size
+### A second, smaller distortion in the same place
 
-Observed prices span more than a thousandfold from the token's median on 433 of 84,966 trade flows. Those
-flows carry **0.010% of traded value**. The cause is that a wallet making several movements of one token in
-one transaction has its receipts attached to the nearest movement of opposite sign, and proximity is
-sometimes wrong: on transaction `0xf8f9f66354` a 0.48-token movement was given 5,729 MON while a
-33,605-token movement in the same sale was given a fraction of a wei.
+A wallet making several movements of one token in one transaction has its receipts attached to the
+nearest movement of opposite sign, and proximity is sometimes wrong: on JAMES transaction
+`0xf8f9f66354` a 0.48-token movement was given 5,729 MON while a 33,605-token movement in the same sale
+was given a fraction of a wei.
 
-Under average cost this does not reach the position: realized comes from the wallet's totals, and those are
-conserved. What it distorts is `price_native` on the individual flow, which a later flow can read as a
-reference price. It is pinned as a known limitation with a test asserting the conservation that does hold.
+Under average cost this does not reach the position, because realized comes from the wallet's totals and
+those are conserved. What it distorts is `price_native` on the individual flow, which a later flow can
+read as a reference price. A test pins the conservation that does hold.
 
 ---
 
