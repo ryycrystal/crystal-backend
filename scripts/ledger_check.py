@@ -324,11 +324,16 @@ def prod_holders(cur, token: str) -> list[str]:
 def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Check]:
     name = "JAMES"
     ledger = ledger_balances(cur, JAMES)
-    kinds = wallet_kinds(cur, list(ledger))
+    prod = prod_holders(cur, JAMES)
+    kinds = wallet_kinds(cur, sorted(set(ledger) | set(prod)))
     wallets = sorted(w for w in ledger if kinds.get(w) not in VENUE_KINDS)
     checks = [check_eq(name, "positions present", bool(wallets), True)]
 
-    holders = [w for w in prod_holders(cur, JAMES) if kinds.get(w) not in VENUE_KINDS]
+    pools_on_prod = [w for w in prod if kinds.get(w) in VENUE_KINDS]
+    holders = [w for w in prod if kinds.get(w) not in VENUE_KINDS]
+    checks.append(
+        Check(name, "prod holder rows that are venues", "reported", f"{len(pools_on_prod)} {pools_on_prod[:3]}", True)
+    )
     missing = [w for w in holders if w not in ledger]
     if rpc_url is None:
         checks.append(
