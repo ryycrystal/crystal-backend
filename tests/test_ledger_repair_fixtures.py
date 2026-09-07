@@ -12,10 +12,13 @@ which is the signal to drop the marker. A test that stops failing for the wrong 
 Numbers come from feedback7.md's acceptance table, which measured the "today" column against this code.
 """
 
+from dataclasses import asdict
 from decimal import Decimal
 
+from core.ledger.fold import PositionState, fold  # noqa: E402
 from core.ledger.netflow import net_transaction  # noqa: E402
 from core.ledger.types import (  # noqa: E402
+    BASIS_ESTIMATED,
     BASIS_OBSERVED,
     BASIS_UNRESOLVED,
     KIND_BUY,
@@ -27,6 +30,7 @@ from core.ledger.types import (  # noqa: E402
     Rates,
     VenueEvent,
 )
+from tests.test_ledger_fold import _flow as fold_flow
 from tests.test_ledger_netflow import (
     CORE,
     E18,
@@ -200,3 +204,61 @@ def test_the_defects_these_fixtures_target_are_invisible_to_a_quantity_check():
     assert sum(f.token_delta for f in flows) == 40 * E18
     assert all(f.basis_state in (BASIS_OBSERVED, BASIS_UNRESOLVED) for f in flows)
     assert NATIVE or True
+
+
+def test_06_an_unpriced_disposal_holds_its_basis_out_of_the_running_average():
+    """Buy 100 at 100 observed, then sell 100 with no observable proceeds. Today: realized_estimated -100."""
+    flows = [
+        fold_flow(KIND_BUY, 100, -100, block=1),
+        fold_flow(KIND_SELL, -100, None, block=2, basis_state=BASIS_UNRESOLVED),
+    ]
+    state, _ = fold(None, flows)
+    assert state.realized_estimated_native == 0, "an unknown price is not a loss"
+    assert state.realized_pnl_native == 0
+    assert state.cost_basis_native == 0, "the basis must leave the running average"
+    assert state.observed_tokens == 0
+    assert getattr(state, "disposed_unresolved_basis_native", None) == 100
+    assert getattr(state, "disposed_unresolved_tokens", None) == 100
+
+
+def test_07_a_mixed_inventory_sale_persists_the_vector_the_fold_computed():
+    """100 observed at 100, 100 estimated at 300, 100 unresolved; sell 150 at 600. The row must carry the split."""
+    flows = [
+        fold_flow(KIND_BUY, 100, -100, block=1),
+        fold_flow(KIND_BUY, 100, -300, block=2, basis_state=BASIS_ESTIMATED),
+        fold_flow(KIND_TRANSFER_IN, 100, None, block=3, basis_state=BASIS_UNRESOLVED),
+        fold_flow(KIND_SELL, -150, 600, block=4),
+    ]
+    state, out = fold(None, flows)
+    sale = out[-1]
+    assert (state.realized_pnl_native, state.realized_estimated_native, state.unresolved_proceeds_native) == (
+        150,
+        50,
+        200,
+    )
+    assert getattr(sale, "basis_observed_delta", None) == -50
+    assert getattr(sale, "basis_estimated_delta", None) == -150
+    assert getattr(sale, "qty_observed", None) == -50
+    assert getattr(sale, "qty_estimated", None) == -50
+    assert getattr(sale, "qty_unresolved", None) == -50
+    assert getattr(sale, "realized_observed_delta", None) == 150
+    assert getattr(sale, "realized_estimated_delta", None) == 50
+    assert getattr(sale, "unresolved_proceeds_delta", None) == 200
+    assert sale.basis_delta == -200 and sale.realized_delta == 200
+
+
+def test_a_position_resumed_from_its_stored_row_folds_like_one_folded_whole():
+    """The persisted row must be a checkpoint: resuming from it gives the same result as folding everything."""
+    tx = "0x" + "ab" * 32
+    flows = [
+        fold_flow(KIND_BUY, 100, -100, block=1, log_index=3, txhash=tx),
+        fold_flow(KIND_BUY, 50, -50, block=1, log_index=7, txhash=tx),
+        fold_flow(KIND_SELL, -150, 300, block=2),
+    ]
+    whole, _ = fold(None, flows)
+    first, _ = fold(None, flows[:1])
+    resumed = PositionState(**asdict(first.to_row()))
+    second, _ = fold(resumed, flows[1:])
+    assert second.realized_pnl_native == whole.realized_pnl_native == 150
+    assert second.trade_count == whole.trade_count == 2
+    assert second.to_row() == whole.to_row()

@@ -116,6 +116,53 @@ class Flow:
     price_native: Decimal | None
     basis_delta: int = 0
     realized_delta: int = 0
+    qty_observed: int = 0
+    qty_estimated: int = 0
+    qty_unresolved: int = 0
+    basis_observed_delta: int = 0
+    basis_estimated_delta: int = 0
+    realized_observed_delta: int = 0
+    realized_estimated_delta: int = 0
+    unresolved_proceeds_delta: int = 0
+    disposed_unresolved_basis_delta: int = 0
+
+
+@dataclass
+class Effect:
+    """What one flow did to a position's inventory, in full.
+
+    A disposal can draw on observed, estimated and unresolved inventory at once and split its proceeds the
+    same way. basis_delta and realized_delta are projections of this vector and cannot be inverted, which is
+    why the flow row keeps the vector and derives the two totals from it.
+    """
+
+    qty_observed: int = 0
+    qty_estimated: int = 0
+    qty_unresolved: int = 0
+    basis_observed_delta: int = 0
+    basis_estimated_delta: int = 0
+    realized_observed_delta: int = 0
+    realized_estimated_delta: int = 0
+    unresolved_proceeds_delta: int = 0
+    disposed_unresolved_basis_delta: int = 0
+
+    @property
+    def basis_delta(self) -> int:
+        return self.basis_observed_delta + self.basis_estimated_delta
+
+    @property
+    def realized_delta(self) -> int:
+        return self.realized_observed_delta + self.realized_estimated_delta
+
+    def as_flow_fields(self) -> dict[str, int]:
+        out = {name: getattr(self, name) for name in EFFECT_COLUMNS}
+        out["basis_delta"] = self.basis_delta
+        out["realized_delta"] = self.realized_delta
+        return out
+
+
+EFFECT_COLUMNS = tuple(Effect.__dataclass_fields__)
+FOLD_COLUMNS = ("basis_delta", "realized_delta", *EFFECT_COLUMNS)
 
 
 @dataclass(frozen=True)
@@ -141,6 +188,21 @@ class PositionRow:
     last_flow_ts: int | None = None
     last_flow_block: int | None = None
     flow_count: int = 0
+    observed_tokens: int = 0
+    estimated_tokens: int = 0
+    parked_observed_tokens: int = 0
+    parked_estimated_tokens: int = 0
+    parked_unresolved_tokens: int = 0
+    parked_observed_basis: int = 0
+    parked_estimated_basis: int = 0
+    disposed_unresolved_tokens: int = 0
+    disposed_unresolved_basis_native: int = 0
+    last_trade_tx: str | None = None
+    last_buy_tx: str | None = None
+    last_sell_tx: str | None = None
+
+
+POSITION_TEXT_COLUMNS = frozenset({"wallet", "token", "last_trade_tx", "last_buy_tx", "last_sell_tx"})
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from core.ledger.types import EFFECT_COLUMNS
+
 LEDGER_TABLES = (
     "wallet_flows",
     "positions_v2",
@@ -11,8 +13,30 @@ LEDGER_TABLES = (
     "ledger_meta",
 )
 
+FLOW_EFFECT_DDL = tuple(f"{column} NUMERIC(78, 0) NOT NULL DEFAULT 0" for column in EFFECT_COLUMNS)
+POSITION_INVENTORY_DDL = (
+    "observed_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "estimated_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "parked_observed_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "parked_estimated_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "parked_unresolved_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "parked_observed_basis NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "parked_estimated_basis NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "disposed_unresolved_tokens NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "disposed_unresolved_basis_native NUMERIC(78, 0) NOT NULL DEFAULT 0",
+    "last_trade_tx TEXT",
+    "last_buy_tx TEXT",
+    "last_sell_tx TEXT",
+)
+ADDED_COLUMNS = (("wallet_flows", FLOW_EFFECT_DDL), ("positions_v2", POSITION_INVENTORY_DDL))
+
+
+def _columns(ddl: tuple[str, ...]) -> str:
+    return "".join(f",\n        {line}" for line in ddl)
+
+
 _STATEMENTS = (
-    """
+    f"""
     CREATE TABLE IF NOT EXISTS wallet_flows
     (
         block_number   BIGINT NOT NULL,
@@ -36,7 +60,7 @@ _STATEMENTS = (
         basis_state    TEXT NOT NULL,
         price_native   NUMERIC(50, 18),
         basis_delta    NUMERIC(78, 0) NOT NULL DEFAULT 0,
-        realized_delta NUMERIC(78, 0) NOT NULL DEFAULT 0,
+        realized_delta NUMERIC(78, 0) NOT NULL DEFAULT 0{_columns(FLOW_EFFECT_DDL)},
         PRIMARY KEY (block_number, tx_index, log_index, sub_index)
     )
     """,
@@ -48,7 +72,7 @@ _STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_wallet_flows_token_block
     ON wallet_flows (token, block_number)
     """,
-    """
+    f"""
     CREATE TABLE IF NOT EXISTS positions_v2
     (
         wallet                     TEXT NOT NULL,
@@ -71,7 +95,7 @@ _STATEMENTS = (
         first_flow_ts              BIGINT,
         last_flow_ts               BIGINT,
         last_flow_block            BIGINT,
-        flow_count                 INTEGER,
+        flow_count                 INTEGER{_columns(POSITION_INVENTORY_DDL)},
         PRIMARY KEY (wallet, token)
     )
     """,
@@ -138,6 +162,23 @@ _STATEMENTS = (
 )
 
 
+def missing_columns(cur, table: str, ddl: tuple[str, ...]) -> list[str]:
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s",
+        (table,),
+    )
+    present = {row[0] for row in cur.fetchall()}
+    return [line for line in ddl if line.split()[0] not in present]
+
+
 def init_ledger_schema(cur) -> None:
+    """Create the ledger tables, and widen ones an earlier version created.
+
+    The widening only runs when a column is actually absent, so a routine start takes no table lock at all.
+    """
     for statement in _STATEMENTS:
         cur.execute(statement)
+    for table, ddl in ADDED_COLUMNS:
+        missing = missing_columns(cur, table, ddl)
+        if missing:
+            cur.execute(f"ALTER TABLE {table} " + ", ".join(f"ADD COLUMN IF NOT EXISTS {line}" for line in missing))

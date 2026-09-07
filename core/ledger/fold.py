@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from core.ledger.types import (
@@ -23,6 +23,7 @@ from core.ledger.types import (
     KIND_VAULT_WITHDRAW,
     MON_FAMILY,
     WEI,
+    Effect,
     Flow,
     PositionRow,
 )
@@ -35,6 +36,14 @@ RESTORE_KINDS = frozenset({KIND_LP_REMOVE, KIND_VAULT_WITHDRAW})
 
 @dataclass
 class PositionState:
+    """The fold's working record.
+
+    Every field here is persisted in positions_v2, so a stored row is a checkpoint: folding new flows onto a
+    row read back from the database gives exactly what folding the whole history would. The transaction
+    counters rely on flows of one transaction being contiguous in chain order, which holds for one wallet and
+    token because they share a block and transaction index.
+    """
+
     wallet: str = ""
     token: str = ""
     balance_token: int = 0
@@ -63,12 +72,18 @@ class PositionState:
     parked_unresolved_tokens: int = 0
     parked_observed_basis: int = 0
     parked_estimated_basis: int = 0
-    trade_txs: set[str] = field(default_factory=set)
-    buy_txs: set[str] = field(default_factory=set)
-    sell_txs: set[str] = field(default_factory=set)
+    disposed_unresolved_tokens: int = 0
+    disposed_unresolved_basis_native: int = 0
+    last_trade_tx: str | None = None
+    last_buy_tx: str | None = None
+    last_sell_tx: str | None = None
 
     def to_row(self) -> PositionRow:
         return PositionRow(**{name: getattr(self, name) for name in PositionRow.__dataclass_fields__})
+
+    @classmethod
+    def from_row(cls, row: PositionRow) -> PositionState:
+        return cls(**{name: getattr(row, name) for name in PositionRow.__dataclass_fields__})
 
     @property
     def open_tokens(self) -> int:
@@ -131,81 +146,122 @@ def _take_open(state: PositionState, amount: int) -> tuple[list[int], int, int]:
     return taken, released_observed, released_estimated
 
 
-def _open(state: PositionState, amount: int, cost: int, basis_state: str) -> int:
+def _released(taken: list[int], released_observed: int, released_estimated: int) -> Effect:
+    return Effect(
+        qty_observed=-taken[0],
+        qty_estimated=-taken[1],
+        qty_unresolved=-taken[2],
+        basis_observed_delta=-released_observed,
+        basis_estimated_delta=-released_estimated,
+    )
+
+
+def _open(state: PositionState, amount: int, cost: int, basis_state: str) -> Effect:
     if basis_state == BASIS_OBSERVED:
         state.observed_tokens += amount
         state.cost_basis_native += cost
-        return cost
+        return Effect(qty_observed=amount, basis_observed_delta=cost)
     if basis_state == BASIS_ESTIMATED:
         state.estimated_tokens += amount
         state.basis_estimated_native += cost
-        return cost
+        return Effect(qty_estimated=amount, basis_estimated_delta=cost)
     state.unresolved_tokens += amount
-    return 0
+    return Effect(qty_unresolved=amount)
 
 
-def _apply_buy(state: PositionState, flow: Flow, amount: int) -> tuple[int, int]:
+def _record_trade(state: PositionState, flow: Flow, buy: bool) -> None:
+    if flow.txhash != state.last_trade_tx:
+        state.trade_count += 1
+        state.last_trade_tx = flow.txhash
+    if buy:
+        if flow.txhash != state.last_buy_tx:
+            state.buy_count += 1
+            state.last_buy_tx = flow.txhash
+    elif flow.txhash != state.last_sell_tx:
+        state.sell_count += 1
+        state.last_sell_tx = flow.txhash
+
+
+def _apply_buy(state: PositionState, flow: Flow, amount: int) -> Effect:
     cost = _quote_wei(flow)
     basis_state = flow.basis_state if cost > 0 or flow.basis_state == BASIS_ESTIMATED else BASIS_UNRESOLVED
     if basis_state == BASIS_UNRESOLVED:
         state.unresolved_tokens += amount
-        return 0, 0
+        return Effect(qty_unresolved=amount)
     state.token_bought += amount
     state.native_spent += cost
-    state.trade_txs.add(flow.txhash)
-    state.buy_txs.add(flow.txhash)
-    return _open(state, amount, cost, basis_state), 0
+    _record_trade(state, flow, buy=True)
+    return _open(state, amount, cost, basis_state)
 
 
-def _apply_sell(state: PositionState, flow: Flow, amount: int) -> tuple[int, int]:
+def _apply_sell(state: PositionState, flow: Flow, amount: int) -> Effect:
+    """A sale draws on every inventory state in proportion and splits its proceeds the same way.
+
+    When the proceeds are unknown the released basis is not a loss and not a gain: it leaves the running
+    average, so later sales are priced on what remains, and waits in its own bucket until the proceeds are
+    learned. Booking it as a loss was how an unpriced disposal used to read as realized_estimated of minus
+    the whole cost.
+    """
     proceeds = _quote_wei(flow)
     state.token_sold += amount
     state.native_received += proceeds
-    state.trade_txs.add(flow.txhash)
-    state.sell_txs.add(flow.txhash)
+    _record_trade(state, flow, buy=False)
     taken, released_observed, released_estimated = _take_open(state, amount)
+    effect = _released(taken, released_observed, released_estimated)
+    if proceeds <= 0:
+        held_basis = released_observed + released_estimated
+        state.disposed_unresolved_tokens += sum(taken)
+        state.disposed_unresolved_basis_native += held_basis
+        effect.disposed_unresolved_basis_delta = held_basis
+        return effect
     excess = amount - sum(taken)
     shares = _apportion(proceeds, taken + [excess])
-    realized_observed = shares[0] - released_observed
-    realized_estimated = shares[1] - released_estimated
-    state.unresolved_proceeds_native += shares[2] + shares[3]
+    gain_observed = shares[0] - released_observed
+    gain_estimated = shares[1] - released_estimated
+    effect.unresolved_proceeds_delta = shares[2] + shares[3]
     if flow.basis_state == BASIS_OBSERVED:
-        state.realized_pnl_native += realized_observed
-        state.realized_estimated_native += realized_estimated
+        effect.realized_observed_delta = gain_observed
+        effect.realized_estimated_delta = gain_estimated
     else:
-        state.realized_estimated_native += realized_observed + realized_estimated
-    return -(released_observed + released_estimated), realized_observed + realized_estimated
+        effect.realized_estimated_delta = gain_observed + gain_estimated
+    state.unresolved_proceeds_native += effect.unresolved_proceeds_delta
+    state.realized_pnl_native += effect.realized_observed_delta
+    state.realized_estimated_native += effect.realized_estimated_delta
+    return effect
 
 
-def _apply_transfer_out(state: PositionState, amount: int) -> tuple[int, int]:
-    _, released_observed, released_estimated = _take_open(state, amount)
-    return -(released_observed + released_estimated), 0
+def _apply_transfer_out(state: PositionState, amount: int) -> Effect:
+    taken, released_observed, released_estimated = _take_open(state, amount)
+    return _released(taken, released_observed, released_estimated)
 
 
-def _apply_transfer_in(state: PositionState, flow: Flow, amount: int) -> tuple[int, int]:
+def _apply_transfer_in(state: PositionState, flow: Flow, amount: int) -> Effect:
     cost = _quote_wei(flow)
     basis_state = flow.basis_state if cost > 0 else BASIS_UNRESOLVED
-    return _open(state, amount, cost, basis_state), 0
+    return _open(state, amount, cost, basis_state)
 
 
-def _apply_burn(state: PositionState, amount: int) -> tuple[int, int]:
-    _, released_observed, released_estimated = _take_open(state, amount)
+def _apply_burn(state: PositionState, amount: int) -> Effect:
+    taken, released_observed, released_estimated = _take_open(state, amount)
+    effect = _released(taken, released_observed, released_estimated)
+    effect.realized_observed_delta = -released_observed
+    effect.realized_estimated_delta = -released_estimated
     state.realized_pnl_native -= released_observed
     state.realized_estimated_native -= released_estimated
-    return -(released_observed + released_estimated), -(released_observed + released_estimated)
+    return effect
 
 
-def _apply_park(state: PositionState, amount: int) -> tuple[int, int]:
+def _apply_park(state: PositionState, amount: int) -> Effect:
     taken, released_observed, released_estimated = _take_open(state, amount)
     state.parked_observed_tokens += taken[0]
     state.parked_estimated_tokens += taken[1]
     state.parked_unresolved_tokens += taken[2]
     state.parked_observed_basis += released_observed
     state.parked_estimated_basis += released_estimated
-    return -(released_observed + released_estimated), 0
+    return _released(taken, released_observed, released_estimated)
 
 
-def _apply_restore(state: PositionState, amount: int) -> tuple[int, int]:
+def _apply_restore(state: PositionState, amount: int) -> Effect:
     taken = _split(
         amount, [state.parked_observed_tokens, state.parked_estimated_tokens, state.parked_unresolved_tokens]
     )
@@ -216,31 +272,38 @@ def _apply_restore(state: PositionState, amount: int) -> tuple[int, int]:
     state.parked_unresolved_tokens -= taken[2]
     state.parked_observed_basis -= restored_observed
     state.parked_estimated_basis -= restored_estimated
+    unresolved = taken[2] + (amount - sum(taken))
     state.observed_tokens += taken[0]
     state.estimated_tokens += taken[1]
-    state.unresolved_tokens += taken[2] + (amount - sum(taken))
+    state.unresolved_tokens += unresolved
     state.cost_basis_native += restored_observed
     state.basis_estimated_native += restored_estimated
-    return restored_observed + restored_estimated, 0
+    return Effect(
+        qty_observed=taken[0],
+        qty_estimated=taken[1],
+        qty_unresolved=unresolved,
+        basis_observed_delta=restored_observed,
+        basis_estimated_delta=restored_estimated,
+    )
 
 
-def _apply_swap_leg(state: PositionState, flow: Flow, amount: int, delta: int) -> tuple[int, int]:
+def _apply_swap_leg(state: PositionState, flow: Flow, amount: int, delta: int) -> Effect:
     if delta > 0:
         return _apply_buy(state, flow, amount)
     return _apply_sell(state, flow, amount)
 
 
-def _apply(state: PositionState, flow: Flow) -> tuple[int, int]:
+def _apply(state: PositionState, flow: Flow) -> Effect:
     delta = _wei(flow.token_delta)
     amount = abs(delta)
     kind = flow.kind
     state.balance_token += delta
     if kind == KIND_CUSTODY_DEPOSIT:
         state.custody_balance += amount
-        return 0, 0
+        return Effect()
     if kind == KIND_CUSTODY_WITHDRAW:
         state.custody_balance -= amount
-        return 0, 0
+        return Effect()
     if kind in BUY_KINDS:
         return _apply_buy(state, flow, amount)
     if kind == KIND_SELL:
@@ -257,35 +320,28 @@ def _apply(state: PositionState, flow: Flow) -> tuple[int, int]:
         return _apply_park(state, amount)
     if kind in RESTORE_KINDS:
         return _apply_restore(state, amount)
-    return 0, 0
+    return Effect()
 
 
 def _flow_key(flow: Flow) -> tuple[int, int, int, int]:
     return (flow.block_number, flow.tx_index, flow.log_index, flow.sub_index)
 
 
-def _copy(prev: PositionState) -> PositionState:
-    return replace(prev, trade_txs=set(prev.trade_txs), buy_txs=set(prev.buy_txs), sell_txs=set(prev.sell_txs))
-
-
 def fold(prev: PositionState | None, flows: list[Flow]) -> tuple[PositionState, list[Flow]]:
-    state = _copy(prev) if prev else PositionState()
+    state = replace(prev) if prev else PositionState()
     out: list[Flow] = []
     for flow in sorted(flows, key=_flow_key):
         if not state.wallet:
             state.wallet = flow.wallet
             state.token = flow.token
-        basis_delta, realized_delta = _apply(state, flow)
+        effect = _apply(state, flow)
         timestamp = int(flow.timestamp)
         if state.first_flow_ts is None or timestamp < state.first_flow_ts:
             state.first_flow_ts = timestamp
         state.last_flow_ts = timestamp
         state.last_flow_block = flow.block_number
         state.flow_count += 1
-        out.append(replace(flow, basis_delta=basis_delta, realized_delta=realized_delta))
-    state.trade_count = len(state.trade_txs)
-    state.buy_count = len(state.buy_txs)
-    state.sell_count = len(state.sell_txs)
+        out.append(replace(flow, **effect.as_flow_fields()))
     return state, out
 
 

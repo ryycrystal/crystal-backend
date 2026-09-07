@@ -5,62 +5,24 @@ from decimal import Decimal
 
 from psycopg2.extras import Json, execute_values
 
-from core.ledger.types import Flow, PositionRow, TokenReg, TraceResult, TxMeta
+from core.ledger.types import (
+    FOLD_COLUMNS,
+    POSITION_TEXT_COLUMNS,
+    Flow,
+    PositionRow,
+    TokenReg,
+    TraceResult,
+    TxMeta,
+)
 
-FLOW_COLUMNS = (
-    "block_number",
-    "tx_index",
-    "log_index",
-    "sub_index",
-    "txhash",
-    "timestamp",
-    "wallet",
-    "token",
-    "token_delta",
-    "quote_asset",
-    "quote_delta",
-    "mon_value",
-    "usd_value",
-    "kind",
-    "venue",
-    "counterparty",
-    "origin",
-    "source",
-    "basis_state",
-    "price_native",
-    "basis_delta",
-    "realized_delta",
-)
-POSITION_COLUMNS = (
-    "wallet",
-    "token",
-    "balance_token",
-    "custody_balance",
-    "token_bought",
-    "token_sold",
-    "native_spent",
-    "native_received",
-    "cost_basis_native",
-    "realized_pnl_native",
-    "basis_estimated_native",
-    "realized_estimated_native",
-    "unresolved_tokens",
-    "unresolved_proceeds_native",
-    "trade_count",
-    "buy_count",
-    "sell_count",
-    "first_flow_ts",
-    "last_flow_ts",
-    "last_flow_block",
-    "flow_count",
-)
+FLOW_COLUMNS = tuple(Flow.__dataclass_fields__)
+POSITION_COLUMNS = tuple(PositionRow.__dataclass_fields__)
 TX_META_COLUMNS = ("txhash", "block_number", "tx_index", "from_addr", "to_addr", "value", "selector")
 REGISTRY_COLUMNS = ("token", "source", "registered_block", "quote_token", "decimals", "active")
 
-_FLOW_WEI = {"token_delta", "quote_delta", "basis_delta", "realized_delta"}
+_FLOW_WEI = {"token_delta", "quote_delta", *FOLD_COLUMNS}
 _FLOW_DECIMAL = {"mon_value", "usd_value", "price_native"}
 _FLOW_ADDRESS = {"txhash", "wallet", "token", "quote_asset", "venue", "counterparty", "origin"}
-_POSITION_WEI = set(POSITION_COLUMNS[2:14])
 _KEY_CHUNK = 500
 _PAGE_SIZE = 1000
 
@@ -78,12 +40,14 @@ _UPSERT_POSITIONS_SQL = (
     "ON CONFLICT (wallet, token) DO UPDATE SET " + ", ".join(f"{col} = EXCLUDED.{col}" for col in POSITION_COLUMNS[2:])
 )
 _UPDATE_FOLD_DELTAS_SQL = (
-    "UPDATE wallet_flows AS f SET basis_delta = v.basis_delta, realized_delta = v.realized_delta "
-    "FROM (VALUES %s) AS v(block_number, tx_index, log_index, sub_index, basis_delta, realized_delta) "
+    "UPDATE wallet_flows AS f SET " + ", ".join(f"{col} = v.{col}" for col in FOLD_COLUMNS) + " "
+    f"FROM (VALUES %s) AS v(block_number, tx_index, log_index, sub_index, {', '.join(FOLD_COLUMNS)}) "
     "WHERE f.block_number = v.block_number AND f.tx_index = v.tx_index "
     "AND f.log_index = v.log_index AND f.sub_index = v.sub_index"
 )
-_UPDATE_FOLD_DELTAS_TEMPLATE = "(%s::bigint, %s::int, %s::int, %s::int, %s::numeric, %s::numeric)"
+_UPDATE_FOLD_DELTAS_TEMPLATE = (
+    "(%s::bigint, %s::int, %s::int, %s::int, " + ", ".join(["%s::numeric"] * len(FOLD_COLUMNS)) + ")"
+)
 _SELECT_TX_META_SQL = f"SELECT {', '.join(TX_META_COLUMNS)} FROM tx_meta WHERE txhash = ANY(%s)"
 _UPSERT_TX_META_SQL = (
     f"INSERT INTO tx_meta ({', '.join(TX_META_COLUMNS)}) VALUES %s "
@@ -174,10 +138,8 @@ def load_flows(cur, keys: list[tuple[str, str]]) -> dict[tuple[str, str], list[F
 
 def _position_value(row: PositionRow, column: str):
     value = getattr(row, column)
-    if column in ("wallet", "token"):
+    if column in POSITION_TEXT_COLUMNS:
         return _lower(value)
-    if column in _POSITION_WEI:
-        return _wei(value)
     if value is None:
         return None
     return int(value)
@@ -213,6 +175,10 @@ def _write_fold_deltas(cur, updates: list[tuple]) -> None:
     execute_values(cur, _UPDATE_FOLD_DELTAS_SQL, updates, template=_UPDATE_FOLD_DELTAS_TEMPLATE, page_size=_PAGE_SIZE)
 
 
+def _fold_values(flow: Flow) -> tuple[int, ...]:
+    return tuple(_wei(getattr(flow, column, None)) or 0 for column in FOLD_COLUMNS)
+
+
 def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
     rows: list[PositionRow] = []
     updates: list[tuple] = []
@@ -224,10 +190,9 @@ def refold(cur, keys: list[tuple[str, str]], fold_fn) -> int:
         stored = {_flow_pk(flow): flow for flow in flows}
         for flow in folded:
             before = stored.get(_flow_pk(flow))
-            basis_delta = _wei(flow.basis_delta) or 0
-            realized_delta = _wei(flow.realized_delta) or 0
-            if before is None or (before.basis_delta, before.realized_delta) != (basis_delta, realized_delta):
-                updates.append((*_flow_pk(flow), basis_delta, realized_delta))
+            values = _fold_values(flow)
+            if before is None or _fold_values(before) != values:
+                updates.append((*_flow_pk(flow), *values))
     upsert_positions(cur, rows)
     _write_fold_deltas(cur, updates)
     return len(rows)

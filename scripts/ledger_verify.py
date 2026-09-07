@@ -111,12 +111,61 @@ CHECKS = [
         "SELECT count(*) FROM wallet_flows WHERE quote_delta <> 0 AND (quote_asset IS NULL OR quote_asset = '')",
     ),
     (
-        "observed basis never rests on a zero quote",
-        "SELECT count(*) FROM wallet_flows WHERE basis_state = 'observed' AND kind IN ('buy','sell') AND quote_delta = 0",
+        "observed basis never rests on a missing or zero quote",
+        "SELECT count(*) FROM wallet_flows WHERE basis_state = 'observed' AND kind IN ('buy','sell') "
+        "AND COALESCE(quote_delta, 0) = 0",
     ),
     (
         "unresolved flows carry no invented cost",
-        "SELECT count(*) FROM wallet_flows WHERE basis_state = 'unresolved' AND quote_delta <> 0",
+        "SELECT count(*) FROM wallet_flows WHERE basis_state = 'unresolved' AND COALESCE(quote_delta, 0) <> 0",
+    ),
+    (
+        "an unpriced disposal books no realized result",
+        "SELECT count(*) FROM wallet_flows WHERE kind = 'sell' AND COALESCE(quote_delta, 0) = 0 "
+        "AND COALESCE(mon_value, 0) = 0 AND (realized_observed_delta <> 0 OR realized_estimated_delta <> 0)",
+    ),
+    (
+        "fold totals agree with the vector they summarize",
+        "SELECT count(*) FROM wallet_flows WHERE basis_delta <> basis_observed_delta + basis_estimated_delta "
+        "OR realized_delta <> realized_observed_delta + realized_estimated_delta",
+    ),
+    (
+        "every position's open inventory and results are the sums of its flows' effects",
+        """
+        SELECT count(*) FROM positions_v2 p JOIN (
+            SELECT wallet, token,
+                   SUM(qty_observed) AS qo, SUM(qty_estimated) AS qe, SUM(qty_unresolved) AS qu,
+                   SUM(basis_observed_delta) AS bo, SUM(basis_estimated_delta) AS be,
+                   SUM(realized_observed_delta) AS ro, SUM(realized_estimated_delta) AS re,
+                   SUM(unresolved_proceeds_delta) AS up, SUM(disposed_unresolved_basis_delta) AS du
+            FROM wallet_flows GROUP BY wallet, token
+        ) s ON s.wallet = p.wallet AND s.token = p.token
+        WHERE s.qo <> p.observed_tokens OR s.qe <> p.estimated_tokens OR s.qu <> p.unresolved_tokens
+           OR s.bo <> p.cost_basis_native OR s.be <> p.basis_estimated_native
+           OR s.ro <> p.realized_pnl_native OR s.re <> p.realized_estimated_native
+           OR s.up <> p.unresolved_proceeds_native OR s.du <> p.disposed_unresolved_basis_native
+        """,
+    ),
+    (
+        "every position's parked inventory is the sum of its park and restore flows",
+        """
+        SELECT count(*) FROM positions_v2 p JOIN (
+            SELECT wallet, token,
+                   -SUM(qty_observed) AS po, -SUM(qty_estimated) AS pe,
+                   -SUM(basis_observed_delta) AS pbo, -SUM(basis_estimated_delta) AS pbe
+            FROM wallet_flows WHERE kind IN ('lp_add', 'lp_remove', 'vault_deposit', 'vault_withdraw')
+            GROUP BY wallet, token
+        ) s ON s.wallet = p.wallet AND s.token = p.token
+        WHERE s.po <> p.parked_observed_tokens OR s.pe <> p.parked_estimated_tokens
+           OR s.pbo <> p.parked_observed_basis OR s.pbe <> p.parked_estimated_basis
+        """,
+    ),
+    (
+        "no position carries negative inventory or negative held-out basis",
+        "SELECT count(*) FROM positions_v2 WHERE observed_tokens < 0 OR estimated_tokens < 0 "
+        "OR unresolved_tokens < 0 OR cost_basis_native < 0 OR basis_estimated_native < 0 "
+        "OR parked_observed_basis < 0 OR parked_estimated_basis < 0 "
+        "OR disposed_unresolved_tokens < 0 OR disposed_unresolved_basis_native < 0",
     ),
 ]
 

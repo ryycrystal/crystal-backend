@@ -62,7 +62,11 @@ def _closed_identity(state, carried_out=0):
     assert state.estimated_tokens == 0
     assert state.unresolved_tokens == 0
     assert (
-        state.realized_pnl_native + state.realized_estimated_native + state.unresolved_proceeds_native - carried_out
+        state.realized_pnl_native
+        + state.realized_estimated_native
+        + state.unresolved_proceeds_native
+        - carried_out
+        - state.disposed_unresolved_basis_native
         == state.native_received - state.native_spent
     )
 
@@ -387,7 +391,10 @@ def test_closed_position_property_without_unresolved():
         assert state.cost_basis_native == 0 and state.basis_estimated_native == 0
         assert state.unresolved_proceeds_native == 0
         assert (
-            state.realized_pnl_native + state.realized_estimated_native - carried_out
+            state.realized_pnl_native
+            + state.realized_estimated_native
+            - carried_out
+            - state.disposed_unresolved_basis_native
             == state.native_received - state.native_spent
         ), seed
         assert sum(f.basis_delta for f in out) == 0
@@ -416,3 +423,70 @@ def test_basis_never_negative_during_random_sequence():
             assert state.cost_basis_native >= 0 and state.basis_estimated_native >= 0
             assert state.observed_tokens >= 0 and state.estimated_tokens >= 0 and state.unresolved_tokens >= 0
             assert state.parked_observed_basis >= 0 and state.parked_estimated_basis >= 0
+
+
+def test_position_state_and_row_are_the_same_record():
+    from dataclasses import fields
+
+    from core.ledger.types import PositionRow
+
+    assert {f.name for f in fields(PositionState)} == {f.name for f in fields(PositionRow)}
+
+
+PARKING = ("lp_add", "lp_remove", "vault_deposit", "vault_withdraw")
+
+
+def test_flow_effects_sum_to_the_position_inventory():
+    for seed in range(200):
+        rng = random.Random(9000 + seed)
+        flows = _random_sequence(rng, allow_unresolved=True)
+        state, out = fold(None, flows)
+        assert sum(f.qty_observed for f in out) == state.observed_tokens, seed
+        assert sum(f.qty_estimated for f in out) == state.estimated_tokens, seed
+        assert sum(f.qty_unresolved for f in out) == state.unresolved_tokens, seed
+        assert sum(f.basis_observed_delta for f in out) == state.cost_basis_native, seed
+        assert sum(f.basis_estimated_delta for f in out) == state.basis_estimated_native, seed
+        assert sum(f.realized_observed_delta for f in out) == state.realized_pnl_native, seed
+        assert sum(f.realized_estimated_delta for f in out) == state.realized_estimated_native, seed
+        assert sum(f.unresolved_proceeds_delta for f in out) == state.unresolved_proceeds_native, seed
+        assert sum(f.disposed_unresolved_basis_delta for f in out) == state.disposed_unresolved_basis_native, seed
+        parked = [f for f in out if f.kind in PARKING]
+        assert -sum(f.qty_observed for f in parked) == state.parked_observed_tokens, seed
+        assert -sum(f.qty_estimated for f in parked) == state.parked_estimated_tokens, seed
+        assert -sum(f.basis_observed_delta for f in parked) == state.parked_observed_basis, seed
+        assert -sum(f.basis_estimated_delta for f in parked) == state.parked_estimated_basis, seed
+        for f in out:
+            assert f.basis_delta == f.basis_observed_delta + f.basis_estimated_delta
+            assert f.realized_delta == f.realized_observed_delta + f.realized_estimated_delta
+
+
+def test_fold_resumes_from_a_stored_row_at_any_cut():
+    from core.ledger.types import PositionRow
+
+    for seed in range(200):
+        rng = random.Random(12000 + seed)
+        flows = _random_sequence(rng, allow_unresolved=True)
+        whole, whole_out = fold(None, flows)
+        cut = rng.randint(0, len(flows))
+        head, head_out = fold(None, flows[:cut])
+        row = head.to_row()
+        assert isinstance(row, PositionRow)
+        tail, tail_out = fold(PositionState.from_row(row), flows[cut:])
+        assert tail.to_row() == whole.to_row(), (seed, cut)
+        assert head_out + tail_out == whole_out, (seed, cut)
+
+
+def test_an_unpriced_sale_is_neither_a_loss_nor_part_of_the_running_average():
+    flows = [
+        _flow("buy", 100, -1000, block=1),
+        _flow("sell", -50, None, block=2, basis_state="unresolved"),
+        _flow("sell", -50, 900, block=3),
+    ]
+    state, out = fold(None, flows)
+    assert out[1].basis_delta == -500 and out[1].realized_delta == 0
+    assert out[1].disposed_unresolved_basis_delta == 500
+    assert state.disposed_unresolved_tokens == 50 and state.disposed_unresolved_basis_native == 500
+    assert out[2].basis_delta == -500 and out[2].realized_delta == 400
+    assert state.realized_pnl_native == 400 and state.realized_estimated_native == 0
+    assert state.trade_count == 3 and state.sell_count == 2
+    _closed_identity(state)

@@ -617,6 +617,25 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     summary(tokens)
 
 
+def refold_only(tokens: list[str], chunk: int = 2000) -> None:
+    """Recompute positions from stored flows, for a fold change that alters no flow's identity or evidence."""
+    from core.ledger import fold, store
+    from core.ledger.schema import init_ledger_schema
+
+    t0 = time.time()
+    with storage.db_cursor() as cur:
+        init_ledger_schema(cur)
+        cur.execute("SELECT DISTINCT wallet, token FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
+        keys = [(wallet, token) for wallet, token in cur.fetchall()]
+    written = 0
+    for start in range(0, len(keys), chunk):
+        with storage.db_cursor() as cur:
+            written += store.refold(cur, keys[start : start + chunk], fold.fold)
+        print(f"[REFOLD] {min(start + chunk, len(keys)):,}/{len(keys):,} positions", flush=True)
+    print(f"[REFOLD] {written:,} positions in {time.time() - t0:.0f}s", flush=True)
+    summary(tokens)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="replay tokens through the position ledger into the side database")
     ap.add_argument("--token", action="append", default=[])
@@ -658,6 +677,11 @@ def main() -> None:
         action="store_true",
         help="reference tables and the mon/usd samples are already seeded; the tokens' prod positions are still copied",
     )
+    ap.add_argument(
+        "--refold",
+        action="store_true",
+        help="fold only: recompute these tokens' positions and fold columns from the flows already stored",
+    )
     args = ap.parse_args()
 
     tokens = list(dict.fromkeys(t.lower() for t in args.token))
@@ -665,6 +689,9 @@ def main() -> None:
         raise SystemExit("pass --token")
     require_side_db()
     storage.init_pool()
+    if args.refold:
+        refold_only(tokens)
+        return
     asyncio.run(replay(args, tokens))
 
 

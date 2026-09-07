@@ -215,6 +215,37 @@ def test_ledger_schema_is_idempotent_and_never_touches_existing_tables(conn, cur
         assert head.startswith("CREATE TABLE IF NOT EXISTS") or head.startswith("CREATE INDEX IF NOT EXISTS")
 
 
+def test_ledger_schema_widens_tables_an_earlier_version_created(cur):
+    from core.ledger.schema import ADDED_COLUMNS, init_ledger_schema, missing_columns
+    from core.ledger.store import FLOW_COLUMNS, POSITION_COLUMNS
+
+    cur.execute("DROP TABLE IF EXISTS positions_v2")
+    cur.execute("DROP TABLE IF EXISTS wallet_flows")
+    cur.execute("CREATE TABLE positions_v2 (wallet TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY (wallet, token))")
+    cur.execute(
+        "CREATE TABLE wallet_flows (block_number BIGINT NOT NULL, tx_index INTEGER NOT NULL, "
+        "log_index INTEGER NOT NULL, sub_index INTEGER NOT NULL, wallet TEXT NOT NULL, token TEXT NOT NULL, "
+        "PRIMARY KEY (block_number, tx_index, log_index, sub_index))"
+    )
+    cur.execute("INSERT INTO positions_v2 (wallet, token) VALUES ('a', 'b')")
+    assert all(missing_columns(cur, table, ddl) for table, ddl in ADDED_COLUMNS)
+    init_ledger_schema(cur)
+    assert not any(missing_columns(cur, table, ddl) for table, ddl in ADDED_COLUMNS)
+    cur.execute("SELECT observed_tokens, last_trade_tx FROM positions_v2 WHERE wallet = 'a'")
+    assert cur.fetchone() == (0, None)
+    cur.execute("DROP TABLE positions_v2")
+    cur.execute("DROP TABLE wallet_flows")
+    init_ledger_schema(cur)
+    for table, columns in (("positions_v2", POSITION_COLUMNS), ("wallet_flows", FLOW_COLUMNS)):
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+        present = {row[0] for row in cur.fetchall()}
+        assert set(columns) <= present, (table, set(columns) - present)
+
+
 def test_insert_flows_ignores_primary_key_conflicts(cur):
     from core.ledger import store
 
