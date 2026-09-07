@@ -802,3 +802,50 @@ def test_a_position_resumed_from_the_database_counts_in_whole_wei(cur):
     for name in ("balance_token", "cost_basis_native", "observed_tokens", "unresolved_tokens"):
         assert isinstance(getattr(resumed, name), int), name
     assert resumed.balance_token == 3 * 10**18 and resumed.cost_basis_native == 10**18
+
+
+def _park(block, wallet, amount, venue, kind="vault_deposit", log_index=1):
+    return _flow(
+        block_number=block,
+        log_index=log_index,
+        wallet=wallet,
+        token=TOKEN_X,
+        token_delta=amount,
+        quote_asset=None,
+        quote_delta=None,
+        mon_value=Decimal(0),
+        kind=kind,
+        counterparty=venue,
+        venue=venue,
+        source="transfer_net",
+        txhash="0x" + f"{block:064x}",
+    )
+
+
+def test_parked_basis_survives_a_checkpoint_that_goes_through_the_database(cur):
+    """Resuming must restore which vault held what, or a later withdrawal is priced off the wrong one."""
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    vault_a, vault_b = "0x" + "a5" * 20, "0x" + "b6" * 20
+    _covered(cur, TOKEN_X, 900)
+    store.insert_flows(
+        cur,
+        [
+            _buy(100, WALLET_A, 200, 200),
+            _park(200, WALLET_A, -100, vault_a),
+            _park(300, WALLET_A, -100, vault_b, log_index=2),
+        ],
+    )
+    assert store.refold_tokens(cur, {TOKEN_X: 100}, fold_token) == 1
+    parked = store.load_parked(cur, [(WALLET_A, TOKEN_X)])[(WALLET_A, TOKEN_X)]
+    assert {venue: bucket.observed_tokens for venue, bucket in parked.items()} == {vault_a: 100, vault_b: 100}
+
+    store.insert_flows(cur, [_park(400, WALLET_A, 100, vault_a, kind="vault_withdraw")])
+    assert store.refold_tokens(cur, {TOKEN_X: 400}, fold_token) == 1
+    cur.execute("SELECT basis_delta FROM wallet_flows WHERE block_number = 400")
+    assert cur.fetchone()[0] == Decimal(100), "the withdrawal takes back what vault A held, resumed from storage"
+    cur.execute("SELECT venue, observed_tokens FROM parked_entitlements WHERE wallet = %s", (WALLET_A,))
+    assert cur.fetchall() == [(vault_b, Decimal(100))], "vault A is emptied and forgotten, vault B untouched"
+    cur.execute("SELECT parked_observed_basis, cost_basis_native FROM positions_v2 WHERE wallet = %s", (WALLET_A,))
+    assert cur.fetchone() == (Decimal(100), Decimal(100))

@@ -217,8 +217,7 @@ def load_parked(cur, keys: list[tuple[str, str]]) -> dict[tuple[str, str], dict]
 
 
 def _write_parked(cur, keys: list[tuple[str, str]], parked: list[tuple]) -> None:
-    if not keys:
-        return
+    """Replace the parked buckets of these positions. No keys means the caller already cleared them."""
     for start in range(0, len(keys), _KEY_CHUNK):
         chunk = keys[start : start + _KEY_CHUNK]
         cur.execute(
