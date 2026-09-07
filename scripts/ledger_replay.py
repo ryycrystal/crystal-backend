@@ -102,12 +102,15 @@ def wipe_ledger() -> None:
 
 
 def wipe_tokens(tokens: list[str]) -> tuple[int, int]:
+    """Forget everything derived for these tokens, including what a previous run claimed to have folded."""
     with storage.db_cursor() as cur:
         cur.execute("DELETE FROM wallet_flows WHERE token = ANY(%s)", (tokens,))
         flows = cur.rowcount
         cur.execute("DELETE FROM positions_v2 WHERE token = ANY(%s)", (tokens,))
         positions = cur.rowcount
+        cur.execute("DELETE FROM parked_entitlements WHERE token = ANY(%s)", (tokens,))
         cur.execute("DELETE FROM token_coverage WHERE token = ANY(%s)", (tokens,))
+        cur.execute("DELETE FROM token_fold_state WHERE token = ANY(%s)", (tokens,))
     print(f"[WIPE] {len(tokens)} token(s): {flows:,} flows and {positions:,} positions deleted", flush=True)
     return flows, positions
 
