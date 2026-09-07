@@ -1,167 +1,121 @@
-# Repair plan: what changes, at which seam, and in what order
+# Repair plan v2: three seams, one rebuild
 
-Draft for review, not yet implemented. Written 2026-09-07 against `accounting-fix` at `f9a6013`,
-responding to `feedback2.md` (14 findings), `feedback3.md` (all six accounting findings confirmed, with an
-ordering), `feedback5.md` (one new P1), `feedback6.md` (consumer contract and cutover).
+Revision of the v1 plan, which was reviewed in `feedback7.md` and found wrong in specific ways: its five
+steps were really three, its flow key could not dedupe, its action definition failed in both directions,
+its step D was a layer, its step E was 28x too slow, and it dropped four confirmed P1s while claiming their
+audit had never been delivered. All six criticisms are accepted. This version follows the sequence
+`feedback7.md` proposed, with the four dropped findings folded back in.
 
-The standing rule this plan is written under: fix the seam, do not patch the boundary. Where a step only
-converts or special-cases at a call site, it is called out as such and is not proposed.
+Sources: `feedback2.md` (14 findings), `feedback3.md` (six confirmed, ordering), `feedback4.md` and
+`feedback8.md` (findings 7-14 confirmed, verification machinery audited), `feedback5.md` (claim-settled V4),
+`feedback6.md` (consumer contract, cutover), `feedback7.md` (this plan's predecessor, rejected).
 
----
+## The rule this is built under
 
-## The five defects, grouped by the seam they actually break
-
-Fourteen findings reduce to five seams. Everything else is a consequence.
-
-| # | seam | what is wrong | findings |
-|---|---|---|---|
-| A | **flow identity** | the row key contains a position that depends on registry membership | f2-6 |
-| B | **what a flow represents** | one netted quantity per transaction, so actions inside it are erased | f2-1, f2-2 |
-| C | **what evidence a movement needs** | only an ERC-20 `Transfer` counts as economic movement | f2-9, f5-1 |
-| D | **how confidence is modelled** | one state per flow, conflating cost confidence with proceeds confidence | f2-3, f2-4, f2-12 |
-| E | **fold ordering** | each `(wallet, token)` folds independently, so basis cannot cross wallets | f2-5 |
-
-`feedback3.md` recommends repair rather than rebuild, on the grounds that the evidence each fix needs is
-already collected and then discarded. This plan accepts that and proposes the order A, C, B, D, E.
-
-That differs from `feedback3.md`'s A, B, D, E in one respect: **C moves before B**, because C changes which
-transactions exist at all, and re-deriving action grouping afterwards would mean doing B twice.
+Fix the seam, never patch the boundary. Duplicated domain knowledge across files is the tell that a seam is
+missing. And, from `feedback8.md`, the acceptance rule that should have applied from the start: **a check
+must be shown to fail on the defect it targets before it is allowed to pass on the fix.**
 
 ---
 
-## A. Flow identity comes from provenance, not position
+## Step 0: coverage, before anything else
 
-**Now.** `sub_index` is the leg's ordinal in the transaction's list sorted by `(wallet, token)`
-(`netflow.py:753`) and is part of the primary key (`schema.py:40`). Registering a token that sorts earlier
-renumbers an existing token's rows, so `ON CONFLICT DO NOTHING` inserts a duplicate rather than recognising
-the row. 357 duplicate `(txhash, wallet, token)` groups exist in the side database; in 37 of a 200-group
-sample the two copies also disagree on `kind`.
+Everything else is measured through it, and today nothing records what a replay actually covered.
+`--resume` uses the last recorded activity as if it were coverage, which on the leftover tokens would skip a
+median of 13.4 million blocks. 129 of the 159 leftovers hold flows that are purely incidental to some other
+token's replay, and 389 positions carry negative balances as a result.
 
-**Change.** Key a flow by immutable transaction provenance:
-`(txhash, wallet, token, anchor_log_index)`, where the anchor is the lowest log index among the legs that
-composed the flow. All four components come from the chain and none depends on what is registered or how
-addresses are classified. A `sub_index` remains only as a within-anchor discriminator for genuinely
-repeated movements at the same anchor, defaulting to 0.
+Per-token contiguous coverage ranges, committed with the flows in the same transaction. A token whose
+coverage is incomplete is excluded from positions rather than served partially. Until this exists the
+leftovers cannot be used as evidence and no fixture can demonstrate the identity fix working.
 
-**Open question for review.** The anchor is only well defined once B decides what a flow is. If a flow stays
-transaction-wide, the lowest log index is stable but arbitrary; if a flow becomes per-action, the anchor is
-the action's own first leg and is meaningful. This plan takes the anchor as stable-but-arbitrary now, and
-meaningful after B, with no key change between the two. **Reviewers should check that claim**, because if it
-is wrong, A must be done after B and nothing can be validated by re-replay in the meantime.
+Addresses finding 7.
 
-**Cost.** Schema change plus one clean re-replay of the side database. No consumer reads flow keys.
+## Step 1: the movement seam
 
----
+The single largest change, and the one v1 split into three. `_Leg`, one netted record per wallet and token
+per transaction, is replaced by a `Movement`:
 
-## C. Economic movement is not the same as an ERC-20 transfer
+```
+(txhash, evidence_log_index, side, wallet, token, quantity,
+ evidence_kind, counterparty, attribution_evidence)
+evidence_kind in {erc20_transfer, venue_swap, curve_trade, core_fill, custody}
+```
 
-**Now.** `process_block` marks a transaction interesting only when a registered token `Transfer` appears
-(`engine.py:249`, `:302`). A Uniswap V4 swap settled against the PoolManager's ERC-6909 claim balances moves
-no ERC-20, and an order-book fill changes custody inventory without one. Both are dropped before netting.
-Verified: transaction `0xd786059a…` is three V4 swaps on moncock with zero moncock transfers, and the ledger
-has no rows for it at all. 26 moncock and 130 JAMES wallet-transactions vanish this way.
+Identity is that tuple plus an interpretation version. No ordinal, no anchor, and `side` gives the ordered
+fold its ordering for free. `ON CONFLICT` becomes replace-if-newer-version rather than do-nothing, so a
+re-replay corrects rather than duplicates.
 
-**Change.** Admit a transaction on any of three kinds of evidence, not one: a registered token transfer, a
-venue event naming a registered token (V2/V3/V4 swap, curve trade, core fill), or a custody event on our own
-order book. Each becomes a *movement* with its own provenance, so a claim-settled swap is a first-class
-movement whose quantity comes from the swap event rather than from a transfer that does not exist.
+Three things ship together here because they are one seam:
 
-**Why before B.** B nets within an action. If C is done after B, every action boundary has to be recomputed
-once the missing movements appear.
+- **Actions are a matching over movements, not a connected component.** v1 proposed connectivity, which
+  provably fails in both directions: a wallet buying and selling one token through one pool is a single
+  component, so grouping degenerates to netting, and a gift plus an unrelated payment is also a single
+  component, so the coincidence inference survives. Matching a token movement to a quote movement is what
+  distinguishes them.
+- **Evidence other than an ERC-20 transfer counts.** A V4 swap settled in claim balances, a curve trade and
+  a core fill are movements in their own right. Attribution comes from the event's own actor field, not from
+  the transaction origin, which `feedback7.md` showed is wrong on the very transaction v1 cited.
+- **The emitter gate, widened to the generation list.** Without a gate, admitting venue events is a
+  regression: any address can emit a swap topic. With the live-address-only gate we have today, retired-core
+  history cannot be replayed at all.
 
-**Open question for review.** A venue event gives a quantity and a pool, but the wallet must still be
-resolved, and for a claim-settled swap the transfer graph that `_resolve_trade_user` walks is empty. The
-proposal is to fall back to the transaction origin (or the ERC-4337 sender), and to mark such attribution
-explicitly rather than silently. Reviewers should say whether that is sound or whether these should be
-recorded as unattributed movements.
+One schema change, one clean rebuild. Addresses findings 1, 2, 6, 9 and `feedback5.md` finding 1.
 
----
+## Step 2: the disposal shape
 
-## B. A flow is one action, not one transaction
+Persist the vector the fold already computes, rather than labelling it. A single sale can draw on observed,
+estimated and unresolved inventory at once and split its proceeds four ways; two labels cannot round-trip a
+three-by-three outcome, which is why v1's step D was a layer. Persist the full position inventory too: the
+three-state open quantities, the parked fields, and a resumable substitute for the transient transaction-hash
+sets.
 
-**Now.** `_collect` reduces the whole transaction to one signed quantity per `(wallet, token)`, and
-`net_transaction` drops zero deltas (`netflow.py:457`, `:645`). A buy of 100 and a sell of 100 in one
-transaction produces nothing; a buy of 100 and a sell of 60 becomes a net buy of 40 with the sale, its
-proceeds and its realized PnL erased. Separately, because netting is transaction-wide, an unrelated token
-receipt and an unrelated quote payment in the same transaction are read as a purchase with an invented
-price, at `observed` confidence (f2-2).
+Fold-only, no rebuild. One change unblocks both the confidence model and the checkpoint the ordered fold
+needs, which is why they are not two steps. Addresses findings 3, 4, 12's quantity half.
 
-**Change.** Group the transaction's movements into actions, and net only within an action. An action is a
-maximal set of movements connected through the transfer graph and the venue events between one wallet-facing
-start and end. Aggregator hops stay collapsed, because they are connected; a gift and an unrelated payment
-do not, because they are not. A purchase then requires a real link between a token movement and a quote
-movement inside one action, which removes the coincidence inference as a side effect rather than as a
-special case.
+## Step 3: the ordered fold, with a watermark
 
-**Open question for review.** The definition of an action is the whole of this step and the part most likely
-to be wrong. Reviewers should attack it directly: batched multi-user transactions, self-transfers,
-multi-hop cycles that return to the payer, and transactions where the same wallet legitimately trades twice.
+Fold per token in movement order to a persisted checkpoint, apply new flows incrementally, and refold fully
+only when a flow lands below the watermark. Measured, a naive per-token ordered refold per flush is 33 hours
+against today's 72 minutes, so the checkpoint is not optional. It is possible only after step 2 persists the
+state it resumes from. Addresses finding 5.
 
----
+## Step 4: the two the previous plan dropped
 
-## D. Cost confidence and proceeds confidence are separate axes
+Quote conservation (finding 8): a purchase funded with 10 WMON and 20 USDC records 20 MON today, understated
+by a third and labelled observed, and router fees inside a 10% band are erased. Per-entitlement parked basis
+(finding 10): basis parked in vaults and pools is one aggregate per wallet and token with no destination.
 
-**Now.** One `basis_state` per flow. `_quote_wei` returns 0 when proceeds are unknown, and `_apply_sell`
-books `0 - cost` as a realized loss (`fold.py:87`, `:160`), so a disposal with unknown proceeds fabricates a
-definite loss: 352 rows and −1,029.60 MON in the side data. A sale that releases estimated basis is still
-labelled `observed` because its own quote was observed, so a consumer filtering flows on
-`basis_state='observed'` reads an estimated gain as confirmed.
+## Not in scope, deliberately
 
-**Change.** Carry two independent confidences on a disposal, one for the basis released and one for the
-proceeds received, and never let "no evidence" become a number. An unresolved disposal retains its released
-basis and records unresolved proceeds; it does not realize. Positions persist the three-state inventory in
-quantity as well as in money (f2-12), so observed, estimated and unresolved holdings can be reported apart.
-
-**This is a stored-shape change, not a computation change.** It is the step where "is this the real seam"
-matters most: adding a second flag to the existing row would be the layered version. The seam is that a
-disposal is an event with two evidentiary sides, and the row should say so.
+The compatibility view, the missing serving indexes, wiring the integrity counters, the full-history replay,
+and any bulk write to production. One exception: making the ledger import lazy in `core/sequencer.py` is the
+only path by which this branch can break production with the flag off, and it should ship regardless.
 
 ---
 
-## E. The fold is ordered across wallets, per token
+## Acceptance
 
-**Now.** `refold` rebuilds each `(wallet, token)` independently (`fold.py:180`, `:185`), so a receiver has no
-sender state to inherit and every `transfer_in` is unresolved. Plan line 338 already specifies the opposite:
-a `transfer_in` from a ledger wallet inherits the sender's average cost. On JAMES this is 1,287,202,079
-tokens of unresolved inflow, of which 89.1% came from senders holding observed acquisitions.
+Twelve value-level fixtures, from `feedback7.md`, each with the number it must produce. Quantity checks
+cannot see any of these defects, which is why the existing green table coexists with all of them.
 
-**Change.** Fold a token's flows in chain order across all wallets at once, carrying basis along transfer
-edges. Requires B first, because inheritance needs the individual transfer edge, and transaction-wide
-netting has already merged it away.
+| # | shape | must produce |
+|---|---|---|
+| 1 | claim-settled V4 arbitrage cycle (`0xd786059a…`) | two movements, plus and minus 320.019831901713613752, attributed to the actor |
+| 2 | unequal round trip in one transaction | buy 100 at 100 **and** sell 60 at 72; unit cost 1.00 |
+| 3 | sell then buy, log order reversed | two flows, distinct keys; the row anchored at log 2 is the sell |
+| 4 | gift plus unrelated payment | `transfer_in`, unresolved, no quote |
+| 5 | cross-wallet basis, both address orders | identical either way |
+| 6 | unpriced disposal | realized 0, basis held out of the running average |
+| 7 | mixed-inventory sale | released 50 observed / 150 estimated; realized 150 / 50 / 200 |
+| 8 | forged emitter | `transfer_in`, unresolved |
+| 9 | mixed quote | cost 30 MON |
+| 10 | router fee | 109.90 MON, or 100.00 with 9.90 recorded as fee |
+| 11 | identity under registry change | flow count unchanged, no duplicate group |
+| 12 | replay against live valuation | identical values from both paths |
 
-**Open question for review.** This makes the fold's unit the token rather than the `(wallet, token)` pair,
-which changes both memory profile and incremental-update strategy. `feedback6.md` notes the current refold
-is already quadratic at production scale. Reviewers should say whether ordering per token is affordable at
-1.26M positions, and if not, what the checkpointing model should be.
+Each is written as a failing test first, against the current code, and only then made to pass.
 
----
-
-## Consequences that are not steps
-
-- **Quantity checks cannot validate any of this.** Every defect above preserves net token quantity per
-  wallet, which is why the wallet-by-wallet chain comparison and supply conservation pass while the value
-  layer is wrong. Acceptance for the repair needs value-level fixtures: hand-derived cost and realized PnL
-  for wallets in each of the shapes above, not more balance checks.
-- **The verification tooling is unaudited.** `feedback4.md` was commissioned and never delivered. One hole
-  is known: the duplicate invariant keys on the primary key and so cannot see A's duplicates.
-- **`accepts_log_for_indexing` admits router events only from the live `CRYSTAL_ADDR`.** After the 09-07
-  relaunch, token creations and trades from retired cores are rejected, so crystal-era history cannot be
-  replayed until the gate takes the generation list. Needed before any full-history run, independent of the
-  five seams.
-- **Not in scope here:** the compatibility view (`feedback6.md` P1-2), the missing serving indexes, wiring
-  plan §11's counters into `core/integrity.py`, and anything touching the live indexer before 9/13.
-
----
-
-## Order, and what each step is validated by
-
-| step | seam | validated by | needs re-replay |
-|---|---|---|---|
-| A | identity | re-replay twice, rows identical | yes, one clean rebuild |
-| C | movement evidence | the 26 moncock and 130 JAMES vanished transactions appear | yes |
-| B | action grouping | round-trip fixtures: buy+sell in one transaction books both | yes |
-| D | confidence | an unresolved disposal realizes nothing; estimated basis never reads confirmed | no, fold only |
-| E | fold ordering | JAMES unresolved share falls to roughly 2%; basis conserved across transfers | no, fold only |
-
-A and C change what is stored, so each needs a clean rebuild of the side database before the next step is
-measured. D and E are fold-only and can be iterated without re-replaying.
+**Case 1 forces a product decision before the code is written.** Under average-cost accounting that
+arbitrage cycle books roughly +27,666 MON of realized profit on moncock, for a transaction whose real profit
+was 645.88 USDC. Decide whether that is the intended answer at the fixture, not after.
