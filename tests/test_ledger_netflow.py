@@ -976,3 +976,34 @@ def test_a_pair_swap_that_moved_no_token_here_moved_it_somewhere_else():
     pools = {POOL: (TOKEN, WMON, True)}
     b = bundle([tf(91, WMON, POOL, WALLET, 200 * E18)], [v3swap(90, POOL, WALLET, 777 * E18, -200 * E18)], meta(WALLET, POOL))
     assert [f for f in run(b, pools=pools) if f.token == TOKEN] == [], "the tokens moved in another transaction"
+
+
+def test_a_pair_swap_naming_a_quote_that_never_moved_is_not_a_price():
+    """A pair reports both sides as ERC-20 movements, so a quote no transfer corroborates is not evidence.
+
+    Two of JAMES's flows took an uncorroborated pair amount as the price paid and booked 554 trillion MON of
+    cost between them, against a token whose median price is 0.06 MON. The amount is accepted when a real
+    movement of that size backs it, and ignored when nothing does.
+    """
+    absurd = 523_137_636_709_952_419_125_781_229_257_940
+    b = bundle(
+        [tf(216, TOKEN, POOL, WALLET, 878 * E18), tf(217, WMON, POOL, WALLET, 3 * E18)],
+        [v3swap(218, POOL, WALLET, -878 * E18, absurd)],
+        meta(WALLET, POOL),
+    )
+    f = only(run(b))
+    assert f.quote_delta is None or abs(f.quote_delta) <= 3 * E18, (
+        f"the wallet received 3 WMON; {f.quote_delta} came from the event alone"
+    )
+
+
+def test_a_pair_swap_whose_quote_did_move_is_still_a_price():
+    b = bundle(
+        [tf(4, WMON, WALLET, POOL, 3 * E18), tf(5, TOKEN, POOL, WALLET, 878 * E18)],
+        [v3swap(6, POOL, WALLET, -878 * E18, 3 * E18)],
+        meta(WALLET, POOL),
+    )
+    f = only(run(b))
+    assert f.kind == KIND_BUY
+    assert f.quote_delta == -3 * E18
+    assert f.basis_state == BASIS_OBSERVED

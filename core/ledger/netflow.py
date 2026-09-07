@@ -214,6 +214,8 @@ def _hints(
                     if not any(_within_fee_tolerance(amount, abs(token_delta)) for amount in moved):
                         continue
                     asset = _hint_quote_asset(bundle, venue, abs(quote_delta), quote_assets, singleton)
+                    if asset is None:
+                        continue
                     out.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, user))
     return out
 
@@ -226,7 +228,16 @@ def _venue_token_amounts(bundle: TxBundle, venue: str, token: str) -> set[int]:
     }
 
 
-def _hint_quote_asset(bundle: TxBundle, venue: str, quote: int, quote_assets: frozenset[str], singleton: bool) -> str:
+def _hint_quote_asset(
+    bundle: TxBundle, venue: str, quote: int, quote_assets: frozenset[str], singleton: bool
+) -> str | None:
+    """Which asset the venue's reported quote was paid in, or None when nothing moved to back it.
+
+    A pair reports both sides of its swap as ERC-20 movements, so a quote amount that matches no transfer at
+    that venue is not a price anyone paid. Taking it anyway is how an amount from a pool event became 523
+    trillion MON of cost basis. A singleton pool manager is the exception: it can settle against its own
+    claim balances, so its event really is the only record of the value that moved.
+    """
     matching: dict[str, int] = defaultdict(int)
     for leg in bundle.transfers:
         if leg.token not in quote_assets or venue not in (leg.from_addr, leg.to_addr):
@@ -237,7 +248,7 @@ def _hint_quote_asset(bundle: TxBundle, venue: str, quote: int, quote_assets: fr
         return max(matching.items(), key=lambda kv: (kv[1], kv[0]))[0]
     if singleton:
         return NATIVE
-    return _venue_quote_asset(bundle, venue, quote_assets)
+    return None
 
 
 def _own_quote(raw: dict[str, int], rates: Rates) -> tuple[str, int] | None:
