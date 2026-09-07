@@ -369,11 +369,19 @@ def _within_fee_tolerance(leg_delta: int, hint_delta: int) -> bool:
 
 
 def _counterparty_and_venue(bundle: TxBundle, leg: _Leg, kinds: _Kinds) -> None:
+    """Name the other side of this movement, then follow any routers behind it to the venue.
+
+    The movement already knows its counterparty: it is the other end of the transfer that produced it. The
+    largest neighbour of the whole transaction was the right answer only while a leg was a wallet's netted
+    position; for a single movement it names whoever the wallet happened to trade the most with, so a 0.2%
+    fee paid alongside a trade was recorded as having gone to the trading partner.
+    """
     incoming = leg.token_delta > 0
-    direct = _dominant_neighbor(bundle, leg.token, leg.wallet, incoming, exclude=set())
+    if leg.counterparty is None:
+        leg.counterparty = _dominant_neighbor(bundle, leg.token, leg.wallet, incoming, exclude=set())
+    direct = leg.counterparty
     if direct is None:
         return
-    leg.counterparty = direct
     node = direct
     visited = {leg.wallet, direct}
     hops = 0
@@ -958,7 +966,7 @@ def net_transaction(
     legs_by_wallet: dict[str, list[_Leg]] = defaultdict(list)
     own_by_leg: dict[int, tuple[tuple[str, int] | None, str]] = {}
     for move, assigned in actions:
-        leg = _Leg(move.wallet, move.token, move.delta, move.log_index)
+        leg = _Leg(move.wallet, move.token, move.delta, move.log_index, counterparty=move.counterparty or None)
         if assigned:
             asset, delta, source = _quote_total(assigned, rates)
             own_by_leg[id(leg)] = ((asset, delta), source)

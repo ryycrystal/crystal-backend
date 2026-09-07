@@ -907,3 +907,28 @@ def test_an_estimate_that_rounds_to_nothing_is_unresolved_not_a_free_trade():
     f = only(run(b, reference_price=lambda token: Decimal("0.000000001")))
     assert f.basis_state == BASIS_UNRESOLVED
     assert f.quote_delta is None
+
+
+def test_a_small_transfer_beside_a_large_one_names_its_own_recipient():
+    """A wallet paying a fee alongside a bigger transfer has two counterparties, not one.
+
+    Naming the largest neighbour of the transaction was right while a leg was the wallet's whole netted
+    position. It is wrong for a single movement, and it is what put the wrong address on 2,751 of JAMES's
+    transfer rows and would send parked basis to the wrong vault.
+    """
+    fee_taker = "0x" + "fe" * 20
+    KINDS[fee_taker] = "eoa"
+    b = bundle(
+        [
+            tf(33, TOKEN, WALLET, WALLET2, 698 * E18),
+            tf(34, TOKEN, WALLET, fee_taker, 2 * E18),
+        ],
+        tx_meta=meta(WALLET, WALLET2),
+    )
+    flows = run(b)
+    outgoing = {f.log_index: f for f in flows if f.token_delta < 0}
+    assert outgoing[33].counterparty == WALLET2
+    assert outgoing[34].counterparty == fee_taker, "the fee leg must name who received the fee"
+    incoming = {f.log_index: f for f in flows if f.token_delta > 0}
+    assert incoming[33].wallet == WALLET2 and incoming[33].counterparty == WALLET
+    assert incoming[34].wallet == fee_taker and incoming[34].counterparty == WALLET
