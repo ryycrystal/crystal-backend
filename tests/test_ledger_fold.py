@@ -654,3 +654,26 @@ def test_an_inbound_flow_the_netting_could_not_stand_behind_still_inherits():
     assert out[-1].basis_delta == 100, "the discarded price must not block the inheritance"
     assert states[receiver].cost_basis_native == 100
     assert states[receiver].observed_tokens == 100
+
+
+def test_basis_released_by_a_transfer_reaches_the_receiver_however_it_was_labelled():
+    """The two halves of a transfer cannot be a gift on one side and a purchase on the other.
+
+    A router hands 3.6 million tokens on, and the receiving contract's movement is matched to a stray dust
+    refund and called a buy at 0.163 MON. Because it is a buy, inheritance never runs and the 47,875 MON the
+    sender released is destroyed. On moncock the same chain drops the whole cost of a wallet's holding.
+    """
+    from core.ledger.fold import fold_token
+
+    sender, receiver = WALLETS[0], WALLETS[1]
+    flows = [
+        _flow("buy", 3_641_364, -47_875, block=1, wallet=sender),
+        _flow("transfer_out", -3_641_364, block=2, log_index=123, sub_index=0, wallet=sender, counterparty=receiver),
+        _flow("buy", 3_641_364, -1, block=2, log_index=123, sub_index=1, wallet=receiver, counterparty=sender),
+    ]
+    states, out = fold_token(None, flows)
+    assert out[1].basis_delta == -47_875, "the sender releases what it held"
+    assert out[2].basis_delta == 47_875, "and the receiver takes it up, whatever the label says"
+    assert states[receiver].cost_basis_native == 47_875
+    assert states[sender].cost_basis_native == 0
+    assert sum(f.basis_delta for f in out) == 47_875, "no basis is created or destroyed in the hand-off"
