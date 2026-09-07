@@ -1,15 +1,15 @@
-INCOMPLETE
+REVIEW
 
 # accounting-fix: net-flow position ledger
 
-Generated 2026-09-07 11:09 from the side database `crystal_ledger` after replaying the three fixture tokens from prod's log cache.
+Generated 2026-09-07 11:28 from the side database `crystal_ledger` after replaying the three fixture tokens from prod's log cache.
 
 ## Fixture checks
 
 ### chipotle
 
 ```
-replay head block: 102355176
+ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
 fixture    | check                        | expected               | actual            | result
 -----------+------------------------------+------------------------+-------------------+-------
 CHIPOTLE   | trade_count                  | 20                     | 20                | PASS  
@@ -30,7 +30,7 @@ invariants | 0x8e74f6e9 unresolved share  | reported               | 0.000%     
 ### moncock
 
 ```
-replay head block: 102355176
+ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
 fixture    | check                                | expected             | actual                   | result
 -----------+--------------------------------------+----------------------+--------------------------+-------
 moncock    | token_bought                         | 25719120.30 +- 0.01  | 25719120.300077          | PASS  
@@ -47,23 +47,23 @@ invariants | 0x405b6330 unresolved share          | reported             | 6.823
 ### james
 
 ```
-replay head block: 102355176
-fixture    | check                                                                    | expected     | actual                                                                                                                                                                                                                                                | result
------------+--------------------------------------------------------------------------+--------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------
-JAMES      | positions present                                                        | True         | True                                                                                                                                                                                                                                                  | PASS  
-JAMES      | prod holder rows that are venues                                         | reported     | 6 ['0x43cf5407bda1400498b8064d50a7e17528d87777', '0x4a92f8d91b1facec94cbaa6cdc3ef4100313f3d6', '0x4b6ce40b0869ff8aa93432439dd0ef8f39657f37']                                                                                                          | PASS  
-JAMES      | prod holders present (2489, holding on chain at block 102,355,176)       | 0 missing    | 0 missing []; 5 of prod's holders bought after the head                                                                                                                                                                                               | PASS  
-JAMES      | chain balanceOf == balance + custody (4936 wallets at block 102,355,176) | 0 mismatches | 137 mismatches ['0x006deba268a36081fd84fa77a244ae3bcc0064d1', '0x0142a2fbc81730608c7b4ebdf1344aada32ff6ae', '0x0244e943579b597143bc45c9f13da0607b56f6a4', '0x03831bd895a1b97750511920ec7436c5f0cb25b0', '0x0491a3cc4de46cc9ecef9e09515ae6861d5edc0f'] | FAIL  
-JAMES      | chain reads that never answered                                          | 0            | 0 []                                                                                                                                                                                                                                                  | PASS  
-invariants | positions on venue addresses                                             | 0            | 0                                                                                                                                                                                                                                                     | PASS  
-invariants | 0x43cf5407 estimated share                                               | reported     | 7.372%                                                                                                                                                                                                                                                | PASS  
-invariants | 0x43cf5407 unresolved share                                              | reported     | 44.617%                                                                                                                                                                                                                                               | PASS  
-7/8 checks passed
+ledger_meta replay_head_block: 101923730 (each token is compared at its own last folded block)
+fixture    | check                                                                    | expected     | actual                                                                                                                                       | result
+-----------+--------------------------------------------------------------------------+--------------+----------------------------------------------------------------------------------------------------------------------------------------------+-------
+JAMES      | positions present                                                        | True         | True                                                                                                                                         | PASS  
+JAMES      | prod holder rows that are venues                                         | reported     | 6 ['0x43cf5407bda1400498b8064d50a7e17528d87777', '0x4a92f8d91b1facec94cbaa6cdc3ef4100313f3d6', '0x4b6ce40b0869ff8aa93432439dd0ef8f39657f37'] | PASS  
+JAMES      | prod holders present (2489, holding on chain at block 102,523,914)       | 0 missing    | 0 missing []; 5 of prod's holders bought after the head                                                                                      | PASS  
+JAMES      | chain balanceOf == balance + custody (4936 wallets at block 102,523,914) | 0 mismatches | 0 mismatches []                                                                                                                              | PASS  
+JAMES      | chain reads that never answered                                          | 0            | 0 []                                                                                                                                         | PASS  
+invariants | positions on venue addresses                                             | 0            | 0                                                                                                                                            | PASS  
+invariants | 0x43cf5407 estimated share                                               | reported     | 7.372%                                                                                                                                       | PASS  
+invariants | 0x43cf5407 unresolved share                                              | reported     | 44.617%                                                                                                                                      | PASS  
+8/8 checks passed
 ```
 
 ## Replay runtimes
 
-- CHIPOTLE: chipotle_replay_1.log: 29 flows in 0 min; chipotle_replay_2.log: 29 flows in 0 min; chipotle_replay_3.log: 29 flows in 0 min; chipotle_replay_4.log: 29 flows in 0 min
+- CHIPOTLE: chipotle_replay_1.log: 29 flows in 0 min; chipotle_replay_2.log: 29 flows in 0 min; chipotle_replay_3.log: 29 flows in 0 min; chipotle_replay_4.log: 29 flows in 0 min; chipotle_replay_6.log: 29 flows in 0 min
 - moncock: moncock_replay_9.log: 56,822 flows in 61 min; moncock_replay_10.log: 113,567 flows in 30 min; moncock_replay_12.log: 115,013 flows in 66 min
 - JAMES: james_replay_3.log: 47,565 flows in 61 min; james_replay_6.log: 7,839 flows in 4 min
 
@@ -74,6 +74,9 @@ tests/: 705 passed, 4 skipped (pytest -q at 7b5b2e7)
 ## Commits on the branch
 
 ```
+460b809 fall back to the side database's own registry when prod no longer lists a token, so a generation prod has purged can still be replayed from the log cache
+1fe2f87 compare each fixture token against chain at its own last folded block, since the shared replay_head_block records only the token that replayed most recently
+9bcd7c0 record fixture results after the pair-probe venue classification
 210d84b document that the ledger must carry every contract generation because the indexer's live address pointers are not history
 cfab649 treat every generation of the crystal core as custody, not just the address chain.py currently points at, so a historical replay never books positions on a retired core after the relaunch
 77eb8b3 correct the chain-log scanner's premise: prod's cache is filtered by topic and not by address, so it carries every token's transfers from its first block and the real gaps are topics added later
@@ -126,7 +129,11 @@ The plan says `transfer_out` releases basis proportionally and `transfer_in` **f
 
 The clearest case is the distributor `0x8258cf2e72bf`: one observed buy of 884,810,278 tokens, then 2,577 transfers out. Its cost is fully known, yet every recipient reads as unresolved. Implementing the inheritance rule should take the unresolved share to roughly 2%. It is not implemented here because it introduces a cross-wallet ordering dependency in the fold (a receiver's basis depends on the sender's basis at that moment), which is a design change the review round should weigh rather than a bug fix. It also matches existing product behaviour: CLAUDE.md records that the current engine already carries basis across transfers.
 
-### 2. Everything else
+### 2. Prod purged the crystal generation while these fixtures were running
+
+Crystal was redeployed on 2026-09-06 and `scripts/purge_crystal_generation.py` deleted 545,686 rows: every crystal token, trade and position. Prod's `launchpad_tokens` now holds nad.fun rows only, so the CHIPOTLE fixture token no longer exists there and the replay refused it. The history itself was never lost, because the log cache is keyed by topic rather than by registry, so `token_scope` now falls back to the side database's own registry and rebuilds the token from logs. Two consequences worth carrying into the full replay: the ledger's token universe must not be taken from prod's live registry, which is now provably lossy, and any wallet's crystal-era positions can only be restored by a replay of this kind.
+
+### 3. Everything else
 
 ## Deviations from POSITION_LEDGER_PLAN.md
 
