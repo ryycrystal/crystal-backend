@@ -490,10 +490,10 @@ def test_fee_on_transfer_mismatch_still_books_the_single_wallet():
     f = only(run(b))
     assert f.kind == KIND_BUY
     assert f.token_delta == received
-    assert f.quote_delta == -native
+    assert f.quote_delta == -native * received // event_tokens
     assert f.basis_state == BASIS_OBSERVED
     assert f.source == SOURCE_VENUE_EVENT
-    assert f.price_native == Decimal(native) / Decimal(received)
+    assert f.price_native == Decimal(native) / Decimal(event_tokens)
 
 
 def test_fee_on_transfer_prefers_exact_match_over_near_match():
@@ -1662,3 +1662,28 @@ def test_a_liquidity_change_of_another_pool_does_not_turn_a_swap_into_liquidity(
     f = only(run(b, pools=other_pools))
     assert f.kind == KIND_BUY
     assert f.quote_delta == -2 * E18
+
+
+def test_a_pass_through_forwards_what_it_received_first_not_a_share_of_everything():
+    arb = "0x" + "a7" * 20
+    b = bundle(
+        [
+            tf(1, WMON, arb, EXECUTOR, 100 * E18),
+            tf(2, WMON, EXECUTOR, POOL, 100 * E18),
+            tf(3, TOKEN, POOL, EXECUTOR, 100 * E18),
+            tf(4, TOKEN, EXECUTOR, WALLET, 4 * E18),
+            tf(5, TOKEN, EXECUTOR, arb, 96 * E18),
+            tf(6, TOKEN, arb, EXECUTOR, 96 * E18),
+            tf(7, TOKEN, EXECUTOR, POOL2, 96 * E18),
+            tf(8, WMON, POOL2, arb, 101 * E18),
+        ],
+        [v3swap(3, POOL, EXECUTOR, -100 * E18, 100 * E18), v3swap(7, POOL2, EXECUTOR, 96 * E18, -101 * E18)],
+        meta(arb, EXECUTOR),
+    )
+    with with_kinds({**CONDUIT_KINDS, arb: "contract_unknown", POOL2: "venue_pool"}):
+        flows = run(b, rates=Rates(mon_usd=Decimal(1)))
+    mine = [f for f in flows if f.wallet == WALLET]
+    assert len(mine) == 1, mine
+    assert mine[0].kind == KIND_BUY and mine[0].counterparty == POOL and mine[0].venue == POOL
+    assert mine[0].token_delta == 4 * E18 and mine[0].mon_value == Decimal(4)
+    assert not [f for f in flows if f.wallet == arb], flows

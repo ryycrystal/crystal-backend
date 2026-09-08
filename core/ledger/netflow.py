@@ -517,6 +517,14 @@ class _Trace:
     kept: bool = False
 
 
+@dataclass(frozen=True)
+class _Edge:
+    other: str
+    amount: int
+    log_index: int
+    inbound: bool
+
+
 class _Paths:
     """The token transfer graph of one transaction, with every contract that only passed tokens on made
     transparent.
@@ -528,20 +536,27 @@ class _Paths:
     name the wallet it really went to. A person's wallet is never transparent, whatever it did, and neither
     is a pool or a curve, because that is where the price was made. A classified router that keeps up to a
     tenth as its fee is still looked through; the fee reached no one and is priced to no one.
+
+    What a pass-through sends is what it received first: a router that took tokens from a pool, handed a
+    few to a wallet and the rest to a bot, then received the bot's tokens back and sold them, gave the
+    wallet the pool's tokens, not a share of the bot's. Splitting every leg pro rata over everything the
+    router ever received in the transaction priced half of that wallet's purchase as a transfer from the
+    bot, which never sent it anything. Only when a pass-through forwarded tokens before it was funded
+    are later receipts matched to that earlier leg.
     """
 
     def __init__(self, moves: list[_Move], kinds: _Kinds):
-        self.inbound: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
-        self.outbound: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+        self.inbound: dict[tuple[str, str], list[_Edge]] = defaultdict(list)
+        self.outbound: dict[tuple[str, str], list[_Edge]] = defaultdict(list)
         self.received: dict[tuple[str, str], int] = defaultdict(int)
         self.sent: dict[tuple[str, str], int] = defaultdict(int)
         for m in moves:
             key = (m.token, m.wallet)
             if m.delta > 0:
-                self.inbound[key].append((m.counterparty, m.delta))
+                self.inbound[key].append(_Edge(m.counterparty, m.delta, m.log_index, True))
                 self.received[key] += m.delta
             elif m.delta < 0:
-                self.outbound[key].append((m.counterparty, -m.delta))
+                self.outbound[key].append(_Edge(m.counterparty, -m.delta, m.log_index, False))
                 self.sent[key] += -m.delta
         self.transparent: set[tuple[str, str]] = set()
         for key in set(self.received) | set(self.sent):
@@ -556,18 +571,55 @@ class _Paths:
                 self.transparent.add(key)
             elif kind == KIND_VENUE_ROUTER and 0 < kept <= received * FEE_TOLERANCE:
                 self.transparent.add(key)
+        self._matched: dict[tuple[str, str], tuple[dict, dict, dict]] = {}
 
-    def far_ends(self, token: str, addr: str, amount: int, incoming: bool, origin: str) -> list[_Trace]:
-        """Where `amount` of the token that reached the holder from `addr` came from, or went to.
+    def far_ends(self, token: str, addr: str, amount: int, incoming: bool, origin: str, log_index: int) -> list[_Trace]:
+        """Where the tokens that reached the holder from `addr` at this log came from, or went to.
 
-        Tokens that come back to the holder are its own returning, not a purchase from itself; a leg back
-        to an address already on the path is the same return seen from further along, and is not followed.
+        Tokens that come back to the holder are its own returning, not a purchase from itself.
         """
-        return _merge_traces(self._walk(token, addr, amount, incoming, origin, None, (), frozenset()))
+        return _merge_traces(self._walk(token, addr, amount, incoming, origin, None, (), frozenset(), log_index))
 
     def between(self, token: str, via: str, party: str, incoming: bool) -> int:
         legs = (self.inbound if incoming else self.outbound).get((token, via), [])
-        return sum(amount for other, amount in legs if other == party)
+        return sum(e.amount for e in legs if e.other == party)
+
+    def _matching(self, key: tuple[str, str]) -> tuple[dict, dict, dict]:
+        cached = self._matched.get(key)
+        if cached is not None:
+            return cached
+        edges = sorted(
+            self.inbound.get(key, []) + self.outbound.get(key, []), key=lambda e: (e.log_index, not e.inbound)
+        )
+        forwarded: dict[_Edge, list[tuple[_Edge, int]]] = {e: [] for e in edges if e.inbound}
+        sourced: dict[_Edge, list[tuple[_Edge, int]]] = {e: [] for e in edges if not e.inbound}
+        queue: list[list] = []
+        deficits: list[list] = []
+
+        def draw(edge: _Edge, need: int) -> int:
+            while need > 0 and queue:
+                src, remaining = queue[0]
+                take = min(remaining, need)
+                forwarded[src].append((edge, take))
+                sourced[edge].append((src, take))
+                queue[0][1] -= take
+                need -= take
+                if queue[0][1] == 0:
+                    queue.pop(0)
+            return need
+
+        for e in edges:
+            if e.inbound:
+                queue.append([e, e.amount])
+                continue
+            need = draw(e, e.amount)
+            if need > 0:
+                deficits.append([e, need])
+        for e, need in deficits:
+            draw(e, need)
+        leftover = {src: remaining for src, remaining in queue}
+        self._matched[key] = (forwarded, sourced, leftover)
+        return self._matched[key]
 
     def _walk(
         self,
@@ -578,38 +630,41 @@ class _Paths:
         origin: str,
         via: str | None,
         path: tuple[str, ...],
-        seen: frozenset[str],
+        seen: frozenset[_Edge],
+        log_index: int,
     ) -> list[_Trace]:
         key = (token, addr)
-        if key not in self.transparent or len(path) >= MAX_PATH_HOPS or addr in seen:
+        if key not in self.transparent or len(path) >= MAX_PATH_HOPS:
             return [_Trace(addr, amount, via, path)]
-        legs = (self.inbound if incoming else self.outbound).get(key, [])
+        edges = self.outbound.get(key, []) if incoming else self.inbound.get(key, [])
+        edge = next((e for e in edges if e.log_index == log_index), None)
+        if edge is None or edge in seen:
+            return [_Trace(addr, amount, via, path)]
+        forwarded, sourced, leftover = self._matching(key)
+        parts = sourced[edge] if incoming else forwarded[edge]
+        kept = 0 if incoming else leftover.get(edge, 0)
         here = path + (addr,)
-        seen = seen | {addr}
+        seen = seen | {edge}
         out: list[_Trace] = []
-        returning = min(amount, sum(a for other, a in legs if other == origin))
-        if returning > 0:
-            out.append(_Trace(origin, returning, addr, here))
-        remaining = amount - returning
-        if remaining <= 0:
-            return out
-        onward = [(other, a) for other, a in legs if other != origin and other not in seen]
-        total = sum(a for _, a in onward)
-        if total <= 0:
-            out.append(_Trace(addr, remaining, via, path))
-            return out
-        own_side = self.sent[key] if incoming else self.received[key]
-        all_legs = sum(a for _, a in legs)
-        carried = remaining if abs(all_legs - own_side) <= AMOUNT_TOLERANCE_WEI else all_legs * remaining // own_side
-        carried = min(carried, total) if carried < remaining else carried
         allocated = 0
-        for i, (other, a) in enumerate(onward):
-            share = carried - allocated if i == len(onward) - 1 else carried * a // total
+        for i, (other, part) in enumerate(parts):
+            share = part * amount // edge.amount
+            if i == len(parts) - 1 and kept == 0:
+                share = amount - allocated
             allocated += share
+            if share <= 0:
+                continue
+            if other.other == origin:
+                out.append(_Trace(origin, share, addr, here))
+            else:
+                out.extend(self._walk(token, other.other, share, incoming, origin, addr, here, seen, other.log_index))
+        if kept > 0:
+            share = min(kept * amount // edge.amount, amount - allocated)
             if share > 0:
-                out.extend(self._walk(token, other, share, incoming, origin, addr, here, seen))
-        if carried < remaining:
-            out.append(_Trace(addr, remaining - carried, None, path, kept=True))
+                out.append(_Trace(addr, share, None, path, kept=True))
+                allocated += share
+        if amount - allocated > 0:
+            out.append(_Trace(addr, amount - allocated, via, path))
         return out
 
 
@@ -651,7 +706,10 @@ def _match_actions(
 
     for wallet in sorted(by_wallet):
         wallet_moves = sorted(by_wallet[wallet], key=lambda m: (m.log_index, m.token))
-        traces = [paths.far_ends(m.token, m.counterparty, abs(m.delta), m.delta > 0, wallet) for m in wallet_moves]
+        traces = [
+            paths.far_ends(m.token, m.counterparty, abs(m.delta), m.delta > 0, wallet, m.log_index)
+            for m in wallet_moves
+        ]
         touched = [
             {m.counterparty} | {t.party for t in ts} | {node for t in ts for node in t.path}
             for m, ts in zip(wallet_moves, traces)
@@ -736,7 +794,7 @@ def _venue_quote(
     asset, received = combined
     if received == 0 or (received > 0) != incoming:
         return None
-    venue_tokens = sum(a for _, a in (paths.outbound if incoming else paths.inbound).get((token, venue), []))
+    venue_tokens = sum(e.amount for e in (paths.outbound if incoming else paths.inbound).get((token, venue), []))
     if venue_tokens <= 0:
         return None
     scaled = abs(received) * share // venue_tokens
