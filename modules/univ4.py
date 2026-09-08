@@ -2,6 +2,7 @@ from __future__ import annotations
 
 V4_SWAP_TOPIC = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
 V4_INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+V4_MODIFY_LIQUIDITY_TOPIC = "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"
 
 
 def _words(data_no0x: str) -> list[str]:
@@ -80,4 +81,26 @@ def parse_v4_swap(_addr: str, topics: list[str], data_no0x: str) -> dict | None:
         "liquidity": _unsigned(w[3]),
         "tick": _signed(w[4]),
         "fee": _unsigned(w[5]),
+    }
+
+
+def parse_v4_modify_liquidity(_addr: str, topics: list[str], data_no0x: str) -> dict | None:
+    if len(topics) < 3:
+        return None
+
+    pool_id = _pool_id(str(topics[1]))
+    if not pool_id:
+        return None
+
+    w = _words(data_no0x)
+    if len(w) < 3:
+        return None
+
+    return {
+        "pool_id": pool_id,
+        "sender": _to_addr(str(topics[2])),
+        "tick_lower": _signed(w[0]),
+        "tick_upper": _signed(w[1]),
+        "liquidity_delta": _signed(w[2]),
+        "salt": ("0x" + w[3]) if len(w) > 3 else "",
     }

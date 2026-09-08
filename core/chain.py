@@ -177,6 +177,7 @@ EVENT_SIGS = {
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef": "TF",
     u4.V4_SWAP_TOPIC: "V4SWAP",
     u4.V4_INITIALIZE_TOPIC: "V4INIT",
+    u4.V4_MODIFY_LIQUIDITY_TOPIC: "V4MODIFY",
     ob.ORDERS_UPDATED_TOPIC: "OBU",
     ob.FILL_TOPIC: "OBF",
     ob.USER_REGISTERED_TOPIC: "UR",
@@ -223,6 +224,7 @@ PARSERS = {
     "TF": _parse_transfer,
     "V4SWAP": u4.parse_v4_swap,
     "V4INIT": u4.parse_v4_initialize,
+    "V4MODIFY": u4.parse_v4_modify_liquidity,
     "OBU": ob.parse_orders_updated,
     "OBF": ob.parse_fill,
     "UR": ob.parse_user_registered,
@@ -258,7 +260,7 @@ VAULT_FACTORY_EVENT_TAGS = {"VD", "VDP", "VWD", "VLOCK", "VUNLOCK", "VCLOSE", "V
 NADFUN_EVENT_TAGS = {"NFC", "NFB", "NFS", "NFSYNC", "NFT"}
 NADFUN_AUX_EVENT_TAGS = {"NFPEN"}
 V2_PAIR_EVENT_TAGS = {"V2SWAP", "V2SYNC"}
-UNIV4_EVENT_TAGS = {"V4SWAP", "V4INIT"}
+UNIV4_EVENT_TAGS = {"V4SWAP", "V4INIT", "V4MODIFY"}
 PASSTHROUGH_EVENT_TAGS = {"TF", "V3SWAP"}
 NADFUN_V2_DIRECT_TRADE_TOPICS = {n.V2_BUY_TOPIC, n.V2_SELL_TOPIC}
 

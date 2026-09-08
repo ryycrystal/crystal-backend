@@ -914,7 +914,32 @@ def _dominant(ends: list[_End], kinds: _Kinds) -> tuple[str | None, str | None]:
     return party, venue
 
 
-def _classify(leg: _Leg, bundle: TxBundle, kinds: _Kinds, origin: str | None, reference_price: PriceFn | None) -> None:
+def _liquidity_modified(
+    bundle: TxBundle, venue: str, token: str, pools: dict[str, tuple[str, str, bool]] | None
+) -> bool:
+    """Whether the pool manager changed a position in this token in this transaction.
+
+    Liquidity in a v4 pool is a position in the position manager, not a share token, so nothing moves
+    back to the wallet to mark a deposit the way a pair's LP token does. The pool manager's own
+    ModifyLiquidity event is that mark; a pool the registry does not know is taken at its word.
+    """
+    for ev in bundle.venue_events:
+        if ev.tag != "V4MODIFY" or (ev.address or "").lower() != venue:
+            continue
+        info = (pools or {}).get(str((ev.parsed or {}).get("pool_id") or "").lower())
+        if info is None or token in {(info[0] or "").lower(), (info[1] or "").lower()}:
+            return True
+    return False
+
+
+def _classify(
+    leg: _Leg,
+    bundle: TxBundle,
+    kinds: _Kinds,
+    origin: str | None,
+    reference_price: PriceFn | None,
+    pools: dict[str, tuple[str, str, bool]] | None = None,
+) -> None:
     incoming = leg.token_delta > 0
     cp = leg.counterparty
     ck = kinds.of(cp) if cp else ""
@@ -934,6 +959,10 @@ def _classify(leg: _Leg, bundle: TxBundle, kinds: _Kinds, origin: str | None, re
             leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
         else:
             leg.kind = KIND_VAULT_WITHDRAW if incoming else KIND_VAULT_DEPOSIT
+        leg.basis_state = BASIS_OBSERVED
+        return
+    if ck == KIND_VENUE_POOL and _liquidity_modified(bundle, cp, leg.token, pools):
+        leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
         leg.basis_state = BASIS_OBSERVED
         return
     if ck == KIND_VENUE_CUSTODY:
@@ -1124,7 +1153,7 @@ def net_transaction(
     _swap_pairs(legs_by_wallet, reference_price)
     for leg in all_legs:
         if leg.kind is None:
-            _classify(leg, bundle, kinds, origin, reference_price)
+            _classify(leg, bundle, kinds, origin, reference_price, pools)
 
     sub_index = _sub_indices(all_legs)
     all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))

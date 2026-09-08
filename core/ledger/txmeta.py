@@ -4,6 +4,7 @@ import http.client
 import importlib
 import json
 import os
+import random
 import threading
 import time
 import urllib.error
@@ -16,8 +17,10 @@ from core.ledger.types import TraceResult, TxMeta
 DEFAULT_RPC_URL = "https://rpc.monad.xyz"
 DEFAULT_MAX_RPS = 20.0
 BATCH_SIZE = 50
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 12
 BACKOFF_BASE_SECONDS = 0.5
+BACKOFF_CAP_SECONDS = 30.0
+MIN_RPS = 1.0
 HTTP_TIMEOUT_SECONDS = 30.0
 VALUE_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 RETRYABLE_ERROR_CODES = frozenset({-32005, -32603, 429})
@@ -31,6 +34,14 @@ class RpcError(Exception):
 
 
 class RateLimiter:
+    """Spaces calls to the node, and yields when the node pushes back.
+
+    The public endpoint caps every client at a few dozen calls a second and counts each item of a batch,
+    so a fleet of replays sharing one egress address is throttled as one. A client that keeps its nominal
+    rate through a storm of refusals only makes the storm longer; halving on every refusal and earning the
+    rate back one call per answered batch settles the fleet at whatever the node actually serves.
+    """
+
     def __init__(
         self,
         max_rps: float | None = None,
@@ -41,6 +52,7 @@ class RateLimiter:
         self.max_rps = float(max_rps if max_rps is not None else (env_rps or DEFAULT_MAX_RPS))
         if self.max_rps <= 0:
             raise ValueError("RPC_MAX_RPS must be positive")
+        self.cap = self.max_rps
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.Lock()
@@ -55,6 +67,14 @@ class RateLimiter:
         if wait > 0:
             self._sleep(wait)
         return wait
+
+    def pushed_back(self) -> None:
+        with self._lock:
+            self.max_rps = max(MIN_RPS, self.max_rps / 2)
+
+    def answered(self) -> None:
+        with self._lock:
+            self.max_rps = min(self.cap, self.max_rps + 1)
 
 
 _default_limiter: RateLimiter | None = None
@@ -86,6 +106,17 @@ def _addr(value) -> str | None:
     return str(value).lower()
 
 
+def _backoff(attempt: int, jitter: Callable[[], float]) -> float:
+    return min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (attempt - 1) * (1 + jitter()))
+
+
+def _is_rate_limit(error: dict | None) -> bool:
+    if not isinstance(error, dict):
+        return False
+    message = str(error.get("message") or "").lower()
+    return error.get("code") in (-32007, 429) or "rate" in message or "limit" in message or "too many" in message
+
+
 def _is_retryable(error: dict | None) -> bool:
     if not isinstance(error, dict):
         return True
@@ -104,6 +135,7 @@ class RpcClient:
         max_attempts: int = MAX_ATTEMPTS,
         timeout: float = HTTP_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         self.url = url or os.getenv("RPC_HTTP") or DEFAULT_RPC_URL
         self.limiter = limiter or shared_limiter()
@@ -111,13 +143,14 @@ class RpcClient:
         self.max_attempts = max(int(max_attempts), 1)
         self.timeout = timeout
         self._sleep = sleep
+        self._jitter = jitter
 
     def _post(self, payload: list[dict]) -> list[dict]:
         body = json.dumps(payload).encode()
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
             if attempt:
-                self._sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+                self._sleep(_backoff(attempt, self._jitter))
             self.limiter.acquire(len(payload))
             request = urllib.request.Request(
                 self.url, data=body, headers={"content-type": "application/json"}, method="POST"
@@ -125,10 +158,19 @@ class RpcClient:
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     data = json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code == 429:
+                    self.limiter.pushed_back()
+                continue
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                 last_error = exc
                 continue
             if isinstance(data, list):
+                if any(isinstance(item, dict) and _is_rate_limit(item.get("error")) for item in data):
+                    self.limiter.pushed_back()
+                else:
+                    self.limiter.answered()
                 return data
             last_error = RpcError(f"batch response was not a list: {str(data)[:200]}")
         raise RpcError(f"rpc unavailable after {self.max_attempts} attempts: {last_error}")
@@ -140,7 +182,7 @@ class RpcClient:
             if not pending:
                 break
             if attempt:
-                self._sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+                self._sleep(_backoff(attempt, self._jitter))
             retry: list[int] = []
             for chunk_start in range(0, len(pending), self.batch_size):
                 chunk = pending[chunk_start : chunk_start + self.batch_size]

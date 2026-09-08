@@ -223,7 +223,7 @@ def test_get_many_chunks_large_requests(monkeypatch):
 def test_get_many_retries_transport_errors_with_backoff(monkeypatch):
     fake = FakeUrlopen(tx_handler({TX_A: rpc_tx(TX_A)}), failures=2)
     sleeps: list[float] = []
-    client = make_client(fake, monkeypatch, sleep=sleeps.append)
+    client = make_client(fake, monkeypatch, sleep=sleeps.append, jitter=lambda: 0.0)
     metas = TxMetaStore(None, rpc=client, store=None)
 
     out = metas.get_many([TX_A])
@@ -299,6 +299,12 @@ def test_rpc_client_counts_batch_items_against_the_budget(monkeypatch):
         def acquire(self, count=1):
             acquired.append(count)
             return 0.0
+
+        def answered(self):
+            return None
+
+        def pushed_back(self):
+            return None
 
     fake = FakeUrlopen(tx_handler({TX_A: rpc_tx(TX_A), TX_B: rpc_tx(TX_B)}))
     monkeypatch.setattr(txmeta, "urlopen", fake)
@@ -552,3 +558,61 @@ def test_warm_counts_only_uncached_transactions_toward_a_block_fetch(monkeypatch
 
     assert [(e["method"], e["params"][0]) for e in fake.payloads[0]] == [("eth_getTransactionByHash", TX_B)]
     assert fake.payloads[1:] == []
+
+
+def test_rate_limiter_yields_when_the_node_pushes_back_and_earns_its_rate_back():
+    clock = [0.0]
+    limiter = RateLimiter(max_rps=40, clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+
+    limiter.pushed_back()
+    assert limiter.max_rps == 20
+    limiter.pushed_back()
+    limiter.pushed_back()
+    limiter.pushed_back()
+    limiter.pushed_back()
+    limiter.pushed_back()
+    assert limiter.max_rps == 1
+    for _ in range(100):
+        limiter.answered()
+    assert limiter.max_rps == 40
+
+
+def test_rpc_client_keeps_retrying_a_rate_limited_batch_with_bounded_backoff(monkeypatch):
+    calls = {"n": 0}
+
+    def handle(entry):
+        calls["n"] += 1
+        if calls["n"] <= 8:
+            return {
+                "jsonrpc": "2.0",
+                "id": entry["id"],
+                "error": {"code": -32007, "message": "50/second request limit reached"},
+            }
+        return {"jsonrpc": "2.0", "id": entry["id"], "result": rpc_tx(TX_A, value=4)}
+
+    fake = FakeUrlopen(handle)
+    naps: list[float] = []
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    limiter = RateLimiter(max_rps=40, sleep=no_sleep)
+    client = RpcClient("http://rpc.test", limiter=limiter, sleep=naps.append)
+
+    out = client.batch([("eth_getTransactionByHash", [TX_A])])
+
+    assert out[0]["result"]["value"] == hex(4)
+    assert len(fake.payloads) == 9
+    assert len(naps) == 8 and max(naps) <= txmeta.BACKOFF_CAP_SECONDS and naps[-1] > naps[0]
+    assert limiter.max_rps < 40
+
+
+def test_rpc_client_gives_up_on_a_persistent_rate_limit_only_after_many_attempts(monkeypatch):
+    def handle(entry):
+        return {"jsonrpc": "2.0", "id": entry["id"], "error": {"code": 429, "message": "too many requests"}}
+
+    fake = FakeUrlopen(handle)
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    client = RpcClient("http://rpc.test", limiter=RateLimiter(max_rps=40, sleep=no_sleep), sleep=no_sleep)
+
+    out = client.batch([("eth_getTransactionByHash", [TX_A])])
+
+    assert "error" in out[0]
+    assert len(fake.payloads) == txmeta.MAX_ATTEMPTS >= 12

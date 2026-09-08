@@ -219,3 +219,34 @@ def test_v4_amounts_are_inverted_so_a_v4_buy_reads_as_a_buy():
     token_delta = -amount1 if not token_is_0 else -amount0
     assert native_delta > 0
     assert token_delta < 0
+
+
+MODIFY_TOPICS = [
+    "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec",
+    "0x98465de615b6b44771a4458bdee87661e157aeb2be524b1e9fdf6528688330c1",
+    "0x0000000000000000000000005b7ec4a94ff9bedb700fb82ab09d5846972f4016",
+]
+MODIFY_DATA = (
+    "00000000000000000000000000000000000000000000000000000000000036b0"
+    "0000000000000000000000000000000000000000000000000000000000006d60"
+    "0000000000000000000000000000000000000000000069b643855452874f4c14"
+    "000000000000000000000000000000000000000000000000000000000009206a"
+)
+
+
+def test_modify_liquidity_topic_is_registered_for_the_pool_manager():
+    assert h.EVENT_SIGS[univ4.V4_MODIFY_LIQUIDITY_TOPIC] == "V4MODIFY"
+    assert h.PARSERS["V4MODIFY"] is univ4.parse_v4_modify_liquidity
+    assert h.accepts_log_for_indexing("V4MODIFY", POOL_MANAGER)
+    assert not h.accepts_log_for_indexing("V4MODIFY", "0x" + "11" * 20)
+
+
+def test_decodes_a_real_modify_liquidity():
+    ev = univ4.parse_v4_modify_liquidity(POOL_MANAGER, MODIFY_TOPICS, MODIFY_DATA)
+    assert ev["pool_id"] == "0x98465de615b6b44771a4458bdee87661e157aeb2be524b1e9fdf6528688330c1"
+    assert ev["sender"] == "0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016"
+    assert (ev["tick_lower"], ev["tick_upper"]) == (14000, 28000)
+    assert ev["liquidity_delta"] == 0x69B643855452874F4C14
+    removal = MODIFY_DATA[:128] + "f" * 44 + "96" + "49" + "bc7aabad78b0b3e8" + MODIFY_DATA[192:]
+    assert univ4.parse_v4_modify_liquidity(POOL_MANAGER, MODIFY_TOPICS, removal)["liquidity_delta"] < 0
+    assert univ4.parse_v4_modify_liquidity(POOL_MANAGER, MODIFY_TOPICS[:2], MODIFY_DATA) is None

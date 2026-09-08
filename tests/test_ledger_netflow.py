@@ -9,6 +9,7 @@ from core.ledger.types import (
     KIND_BUY,
     KIND_CUSTODY_DEPOSIT,
     KIND_LP_ADD,
+    KIND_LP_REMOVE,
     KIND_MINT,
     KIND_SELL,
     KIND_SWAP_LEG,
@@ -39,6 +40,7 @@ SETTLER = "0x" + "5e" * 20
 ROUTER = "0x" + "70" * 20
 POOL = "0x" + "b0" * 20
 POOL_MANAGER = "0x" + "b4" * 20
+POSITION_MANAGER = "0x" + "b5" * 20
 CUSTODY = "0x" + "cc" * 20
 BATCHER = "0x" + "ba" * 20
 BUNDLER = "0x" + "bd" * 20
@@ -1596,3 +1598,67 @@ def test_a_payment_goes_to_the_purchase_not_to_the_wei_of_change_that_came_back_
     assert (
         change.token_delta == 1 and (change.quote_delta or 0) in (0, -1) and change.mon_value <= Decimal("0.000001")
     ), change
+
+
+V4_POOL_ID = "0x" + "9a" * 32
+V4_POOLS = {V4_POOL_ID: (TOKEN, WMON, False)}
+
+
+def v4_modify(idx: int, liquidity_delta: int) -> VenueEvent:
+    parsed = {
+        "pool_id": V4_POOL_ID,
+        "sender": POSITION_MANAGER,
+        "tick_lower": 14000,
+        "tick_upper": 28000,
+        "liquidity_delta": liquidity_delta,
+        "salt": "0x0",
+    }
+    return VenueEvent(tag="V4MODIFY", log_index=idx, parsed=parsed, address=POOL_MANAGER)
+
+
+def test_liquidity_added_to_the_pool_manager_is_parked_not_sold():
+    tokens = 100 * E18
+    b = bundle(
+        [tf(1, TOKEN, WALLET, POOL_MANAGER, tokens)],
+        events=[v4_modify(2, 5 * E18)],
+        tx_meta=meta(WALLET, POSITION_MANAGER),
+    )
+    f = only(run(b, pools=V4_POOLS, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_ADD
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == POOL_MANAGER
+    assert f.quote_delta is None and f.source == SOURCE_TRANSFER_NET
+
+
+def test_liquidity_taken_back_from_the_pool_manager_is_restored_not_bought():
+    tokens = 40 * E18
+    b = bundle(
+        [tf(1, TOKEN, POOL_MANAGER, WALLET, tokens)],
+        events=[v4_modify(2, -5 * E18)],
+        tx_meta=meta(WALLET, POSITION_MANAGER),
+    )
+    f = only(run(b, pools=V4_POOLS, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_REMOVE
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == POOL_MANAGER
+    assert f.quote_delta is None
+
+
+def test_a_liquidity_change_of_another_pool_does_not_turn_a_swap_into_liquidity():
+    tokens = 100 * E18
+    other_pools = {"0x" + "9b" * 32: (TOKEN2, WMON, False)}
+    b = bundle(
+        [tf(1, TOKEN, POOL_MANAGER, WALLET, tokens)],
+        events=[
+            VenueEvent(
+                tag="V4MODIFY",
+                log_index=2,
+                parsed={"pool_id": "0x" + "9b" * 32, "sender": POSITION_MANAGER, "liquidity_delta": E18},
+                address=POOL_MANAGER,
+            )
+        ],
+        tx_meta=meta(WALLET, POOL_MANAGER, value=2 * E18),
+    )
+    f = only(run(b, pools=other_pools))
+    assert f.kind == KIND_BUY
+    assert f.quote_delta == -2 * E18
