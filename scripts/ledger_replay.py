@@ -456,6 +456,7 @@ def process_chunk(
     with storage.db_cursor() as cur:
         engine.stats["receipt_logs"] += receipt_logs_added
         prefetch_kinds(kinds, relevant, cur, set(engine.registry(cur)) | QUOTE_ASSETS)
+        engine.prefetch_tx_meta(relevant, cur)
         for blk, logs in relevant.items():
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
         if span is not None:

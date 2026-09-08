@@ -829,3 +829,25 @@ def test_a_transfer_carries_its_cost_all_the_way_into_the_stored_positions(seede
     balance, basis, realized, unresolved = positions[WALLET2]
     assert (balance, basis, unresolved) == (0, 0, 0)
     assert realized == SELL_NATIVE - BUY_NATIVE, "the sale is priced against what the sender originally paid"
+
+
+def test_moving_transactions_lists_transfers_of_registered_tokens_per_block():
+    from core.ledger.engine import moving_transactions
+    from core.ledger.types import TRANSFER_TOPIC
+
+    token, other = "0x" + "aa" * 20, "0x" + "bb" * 20
+    wallet, pool = "0x" + "11" * 20, "0x" + "22" * 20
+    approval = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+    tx1, tx2, tx3, tx4 = ("0x" + d * 32 for d in ("01", "02", "03", "04"))
+    logs = {
+        5: [
+            _log(5, 0, 0, tx1, token, [TRANSFER_TOPIC, _ta(wallet), _ta(pool)], _w(1)),
+            _log(5, 1, 1, tx2, token, [approval, _ta(wallet), _ta(pool)], _w(1)),
+            _log(5, 2, 2, tx3, other, [TRANSFER_TOPIC, _ta(wallet), _ta(pool)], _w(1)),
+            _log(5, 3, 3, tx1, token, [TRANSFER_TOPIC, _ta(pool), _ta(wallet)], _w(1)),
+        ],
+        6: [_log(6, 0, 0, tx4, token.upper(), [TRANSFER_TOPIC, _ta(wallet), _ta(pool)], _w(1))],
+        7: [],
+    }
+
+    assert moving_transactions(logs, {token}) == {5: [tx1], 6: [tx4]}

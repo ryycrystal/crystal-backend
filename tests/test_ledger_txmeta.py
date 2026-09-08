@@ -262,38 +262,6 @@ def test_batch_retries_only_rate_limited_items(monkeypatch):
     assert [[e["params"][0] for e in p] for p in fake.payloads] == [[TX_A, TX_B], [TX_B]]
 
 
-def test_note_block_ingests_full_transactions_into_the_cache(monkeypatch):
-    fake = FakeUrlopen(tx_handler({}))
-    store = FakeStore()
-    metas = TxMetaStore(fake_cur_factory, rpc=make_client(fake, monkeypatch), store=store)
-    block = {"number": "0x60d7024", "transactions": [rpc_tx(TX_A, value=9), rpc_tx(TX_B), TX_C]}
-
-    metas.note_block(block)
-    out = metas.get_many([TX_A, TX_B])
-
-    assert [m.txhash for m in store.meta_writes[0]] == [TX_A, TX_B]
-    assert out[TX_A].value == 9
-    assert fake.payloads == []
-
-
-def test_fetch_blocks_requests_full_transactions_and_notes_them(monkeypatch):
-    def handle(entry):
-        assert entry["method"] == "eth_getBlockByNumber"
-        number, full = entry["params"]
-        assert full is True
-        return {"jsonrpc": "2.0", "id": entry["id"], "result": {"number": number, "transactions": [rpc_tx(TX_A)]}}
-
-    fake = FakeUrlopen(handle)
-    store = FakeStore()
-    metas = TxMetaStore(fake_cur_factory, rpc=make_client(fake, monkeypatch), store=store)
-
-    blocks = metas.fetch_blocks([101, 100])
-
-    assert [e["params"][0] for e in fake.payloads[0]] == ["0x64", "0x65"]
-    assert sorted(blocks) == [100, 101]
-    assert TX_A in store.metas
-
-
 def test_tx_meta_from_rpc_skips_pending_and_short_input():
     assert tx_meta_from_rpc({"hash": TX_A, "blockNumber": None}) is None
     meta = tx_meta_from_rpc(
@@ -538,3 +506,49 @@ def test_live_fixture_settler_sell_metadata():
     assert meta.tx_index == 3
     assert meta.value == 0
     assert meta.selector == "0x2213bc0b"
+
+
+def block_and_tx_handler(blocks: dict[int, list[dict]], txs: dict[str, dict]):
+    def handle(entry: dict) -> dict:
+        if entry["method"] == "eth_getBlockByNumber":
+            number, full = entry["params"]
+            assert full is True
+            block = {"number": number, "transactions": blocks[int(number, 16)]}
+            return {"jsonrpc": "2.0", "id": entry["id"], "result": block}
+        assert entry["method"] == "eth_getTransactionByHash"
+        return {"jsonrpc": "2.0", "id": entry["id"], "result": txs.get(entry["params"][0])}
+
+    return handle
+
+
+def test_warm_fetches_one_block_for_several_wanted_transactions_and_keeps_only_them(monkeypatch):
+    other = "0x" + "dd" * 32
+    blocks = {100: [rpc_tx(TX_A, value=1), rpc_tx(other), rpc_tx(TX_B, value=2)]}
+    fake = FakeUrlopen(block_and_tx_handler(blocks, {TX_C: rpc_tx(TX_C, value=3)}))
+    store = FakeStore()
+    metas = TxMetaStore(fake_cur_factory, rpc=make_client(fake, monkeypatch), store=store)
+
+    metas.warm({100: [TX_A, TX_B], 101: [TX_C]})
+
+    assert [(e["method"], e["params"][0]) for e in fake.payloads[0]] == [
+        ("eth_getBlockByNumber", "0x64"),
+        ("eth_getTransactionByHash", TX_C),
+    ]
+    assert sorted(store.metas) == sorted([TX_A, TX_B, TX_C])
+    out = metas.get_many([TX_A, TX_B, TX_C, other])
+    assert (out[TX_A].value, out[TX_B].value, out[TX_C].value) == (1, 2, 3)
+    assert len(fake.payloads) == 2 and [e["params"] for e in fake.payloads[1]] == [[other]]
+
+
+def test_warm_counts_only_uncached_transactions_toward_a_block_fetch(monkeypatch):
+    fake = FakeUrlopen(block_and_tx_handler({}, {TX_B: rpc_tx(TX_B)}))
+    store = FakeStore()
+    store.metas[TX_A] = TxMeta(
+        txhash=TX_A, block_number=100, tx_index=0, from_addr=FIXTURE_FROM, to_addr=None, value=0, selector=None
+    )
+    metas = TxMetaStore(fake_cur_factory, rpc=make_client(fake, monkeypatch), store=store)
+
+    metas.warm({100: [TX_A, TX_B]})
+
+    assert [(e["method"], e["params"][0]) for e in fake.payloads[0]] == [("eth_getTransactionByHash", TX_B)]
+    assert fake.payloads[1:] == []

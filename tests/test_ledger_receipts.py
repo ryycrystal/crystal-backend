@@ -112,3 +112,49 @@ def test_complete_leaves_unanswered_receipts_for_a_later_attempt():
     assert cur.rows == {}
     assert receipts.complete(block_logs, cur) == 0
     assert len(rpc.calls) == 2
+
+
+class FakeBlockRpc(FakeRpc):
+    def __init__(self, blocks: dict[int, list[dict]], receipts: dict):
+        super().__init__(receipts)
+        self.blocks = blocks
+
+    def batch(self, calls):
+        self.calls.append(calls)
+        out = []
+        for method, params in calls:
+            if method == "eth_getBlockReceipts":
+                out.append({"result": self.blocks[int(params[0], 16)]})
+                continue
+            assert method == "eth_getTransactionReceipt"
+            receipt = self.receipts.get(params[0])
+            out.append({"result": receipt} if receipt is not None else {"error": {"code": -32000}})
+        return out
+
+
+def test_complete_fetches_block_receipts_when_several_transactions_in_a_block_need_them():
+    tx_other = "0x" + "04" * 32
+    rpc = FakeBlockRpc(
+        {
+            7: [
+                {"transactionHash": TX_V4, "logs": [manager_log(TX_V4, 9)]},
+                {"transactionHash": tx_other, "logs": [manager_log(tx_other, 10)]},
+                {"transactionHash": TX_V3, "logs": [manager_log(TX_V3, 11), transfer(TX_V3, 12, WALLET, POOL)]},
+            ]
+        },
+        {TX_SEEN: {"logs": [manager_log(TX_SEEN, 13)]}},
+    )
+    cur = FakeCursor()
+    block_logs = {
+        7: [transfer(TX_V4, 1, MANAGER, WALLET), transfer(TX_V3, 2, WALLET, MANAGER)],
+        8: [transfer(TX_SEEN, 3, MANAGER, WALLET)],
+    }
+
+    assert ReceiptLogs(rpc, MANAGER).complete(block_logs, cur) == 3
+    assert [(m, p[0]) for calls in rpc.calls for m, p in calls] == [
+        ("eth_getBlockReceipts", "0x7"),
+        ("eth_getTransactionReceipt", TX_SEEN),
+    ]
+    assert [lg["logIndex"] for lg in block_logs[7]] == ["0x1", "0x2", "0x9", "0xb"]
+    assert sorted(cur.rows) == sorted([TX_V4, TX_V3, TX_SEEN])
+    assert cur.rows[TX_V3] == [manager_log(TX_V3, 11)]

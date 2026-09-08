@@ -1075,4 +1075,3 @@ def test_known_routers_are_seeded_so_the_netting_looks_through_them():
     assert all(kinds.get(addr) == KIND_VENUE_ROUTER for addr in KNOWN_ROUTERS), [
         a for a in KNOWN_ROUTERS if kinds.get(a) != KIND_VENUE_ROUTER
     ][:3]
-

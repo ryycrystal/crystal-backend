@@ -12,6 +12,7 @@ from core.ledger.types import (
     ENTRYPOINTS,
     KIND_VENUE_POOL,
     QUOTE_ASSETS,
+    TRANSFER_TOPIC,
     USEROP_EVENT_TOPIC,
     WMON,
     ZERO,
@@ -49,6 +50,25 @@ def _topic_addr(topic: str) -> str:
 
 def _log_position(log: dict) -> tuple[int, int]:
     return _hex_int(log.get("transactionIndex")), _hex_int(log.get("logIndex"))
+
+
+def moving_transactions(logs_by_block: dict[int, list[dict]], registry) -> dict[int, list[str]]:
+    """The transactions that transfer a registered token, per block: the ones netting asks metadata for."""
+    out: dict[int, list[str]] = {}
+    for blk, logs in logs_by_block.items():
+        seen: dict[str, None] = {}
+        for log in logs:
+            topics = log.get("topics") or []
+            if not topics or str(topics[0]).lower() != TRANSFER_TOPIC:
+                continue
+            if (log.get("address") or "").lower() not in registry:
+                continue
+            txh = (log.get("transactionHash") or "").lower()
+            if txh:
+                seen[txh] = None
+        if seen:
+            out[int(blk)] = list(seen)
+    return out
 
 
 class LedgerEngine:
@@ -202,6 +222,11 @@ class LedgerEngine:
 
             self._tx_meta = TxMetaStore(self._cur_factory, self._rpc_url)
         return self._tx_meta
+
+    def prefetch_tx_meta(self, logs_by_block: dict[int, list[dict]], cur) -> int:
+        wanted = moving_transactions(logs_by_block, self.registry(cur))
+        self._tx_meta_for().warm(wanted)
+        return sum(len(txhashes) for txhashes in wanted.values())
 
     def _trace_for(self):
         if self._traces is None:

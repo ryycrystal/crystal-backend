@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from core import chain as h
+from core.ledger.txmeta import BLOCK_FETCH_MIN
 from core.ledger.types import TRANSFER_TOPIC
 
 RECEIPT_LOG_TABLE = "ledger_receipt_logs"
@@ -57,7 +58,8 @@ class ReceiptLogs:
         if not hashes:
             return 0
         known = self._load(cur, hashes)
-        missing = [txhash for txhash in hashes if txhash not in known]
+        missing = {blk: [t for t in txhashes if t not in known] for blk, txhashes in wanted.items()}
+        missing = {blk: txhashes for blk, txhashes in missing.items() if txhashes}
         if missing:
             fetched = self._fetch(missing)
             self._save(cur, fetched)
@@ -77,16 +79,32 @@ class ReceiptLogs:
         self.added += added
         return added
 
-    def _fetch(self, hashes: list[str]) -> dict[str, list[dict]]:
+    def _fetch(self, missing: dict[int, list[str]]) -> dict[str, list[dict]]:
+        calls: list[tuple[str, list]] = []
+        singles: list[str] = []
+        for blk in sorted(missing):
+            if len(missing[blk]) >= BLOCK_FETCH_MIN:
+                calls.append(("eth_getBlockReceipts", [hex(int(blk))]))
+            else:
+                singles.extend(missing[blk])
+        calls.extend(("eth_getTransactionReceipt", [txhash]) for txhash in singles)
+        wanted = {txhash for txhashes in missing.values() for txhash in txhashes}
         out: dict[str, list[dict]] = {}
-        replies = self._rpc.batch([("eth_getTransactionReceipt", [txhash]) for txhash in hashes])
-        for txhash, reply in zip(hashes, replies):
-            receipt = reply.get("result") if "error" not in reply else None
-            if not isinstance(receipt, dict):
-                continue
-            out[txhash] = [
-                log for log in receipt.get("logs") or [] if (log.get("address") or "").lower() == self._venue
-            ]
+        for (method, params), reply in zip(calls, self._rpc.batch(calls)):
+            result = reply.get("result") if "error" not in reply else None
+            receipts = result if method == "eth_getBlockReceipts" else [result]
+            for receipt in receipts or []:
+                if not isinstance(receipt, dict):
+                    continue
+                if method == "eth_getTransactionReceipt":
+                    txhash = params[0]
+                else:
+                    txhash = (receipt.get("transactionHash") or "").lower()
+                if txhash not in wanted:
+                    continue
+                out[txhash] = [
+                    log for log in receipt.get("logs") or [] if (log.get("address") or "").lower() == self._venue
+                ]
         self.fetched += len(out)
         return out
 

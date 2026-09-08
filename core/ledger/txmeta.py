@@ -23,6 +23,7 @@ VALUE_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 RETRYABLE_ERROR_CODES = frozenset({-32005, -32603, 429})
 RETRYABLE_ERROR_WORDS = ("rate", "limit", "too many", "timeout", "timed out", "busy", "try again")
 MEMORY_CACHE_LIMIT = 100_000
+BLOCK_FETCH_MIN = 2
 
 
 class RpcError(Exception):
@@ -301,27 +302,47 @@ class TxMetaStore(_CachedStore):
             with self._cur_factory() as cur:
                 self._store.put_tx_meta(cur, metas)
 
-    def note_block(self, block: dict) -> None:
-        if not isinstance(block, dict):
-            return
-        metas: list[TxMeta] = []
-        for tx in block.get("transactions") or []:
-            if isinstance(tx, dict):
-                meta = tx_meta_from_rpc(tx)
-                if meta is not None:
-                    metas.append(meta)
-        self._persist(metas)
+    def warm(self, hashes_by_block: dict[int, list[str]]) -> None:
+        """Fetch the metadata of many blocks' transactions in as few calls as the node charges for.
 
-    def fetch_blocks(self, numbers: Iterable[int]) -> dict[int, dict]:
-        wanted = sorted({int(number) for number in numbers})
-        calls = [("eth_getBlockByNumber", [hex(number), True]) for number in wanted]
-        blocks: dict[int, dict] = {}
-        for number, item in zip(wanted, self._rpc.batch(calls)):
-            block = item.get("result") if "error" not in item else None
-            if isinstance(block, dict):
-                self.note_block(block)
-                blocks[number] = block
-        return blocks
+        Every call in a batch counts against the rate limit, so a block with several wanted transactions
+        is fetched whole with one call and only the wanted transactions are kept.
+        """
+        wanted_by_block: dict[int, list[str]] = {}
+        for number, txhashes in hashes_by_block.items():
+            missing = [txhash for txhash in _unique_lower(txhashes) if txhash not in self._memory]
+            if missing:
+                wanted_by_block[int(number)] = missing
+        if wanted_by_block and self._db_enabled():
+            with self._cur_factory() as cur:
+                found = self._store.get_tx_meta(cur, [txh for txhs in wanted_by_block.values() for txh in txhs])
+            for txhash, meta in found.items():
+                self._remember(txhash.lower(), meta)
+            wanted_by_block = {n: [txh for txh in txhs if txh not in found] for n, txhs in wanted_by_block.items()}
+        calls: list[tuple[str, list]] = []
+        singles: list[str] = []
+        for number in sorted(wanted_by_block):
+            txhashes = wanted_by_block[number]
+            if len(txhashes) >= BLOCK_FETCH_MIN:
+                calls.append(("eth_getBlockByNumber", [hex(number), True]))
+            else:
+                singles.extend(txhashes)
+        calls.extend(("eth_getTransactionByHash", [txhash]) for txhash in singles)
+        if not calls:
+            return
+        wanted = {txhash for txhashes in wanted_by_block.values() for txhash in txhashes}
+        metas: list[TxMeta] = []
+        for (method, _params), item in zip(calls, self._rpc.batch(calls)):
+            result = item.get("result") if "error" not in item else None
+            if not isinstance(result, dict):
+                continue
+            txs = (result.get("transactions") or []) if method == "eth_getBlockByNumber" else [result]
+            for tx in txs:
+                if isinstance(tx, dict) and _addr(tx.get("hash")) in wanted:
+                    meta = tx_meta_from_rpc(tx)
+                    if meta is not None:
+                        metas.append(meta)
+        self._persist(metas)
 
 
 class TraceStore(_CachedStore):
