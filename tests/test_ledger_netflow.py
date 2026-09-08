@@ -1308,3 +1308,36 @@ def test_a_wallets_own_payment_wins_over_the_venue_price_because_it_includes_the
         f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
     assert f.kind == KIND_BUY and f.mon_value == Decimal(101) and f.source == SOURCE_TRANSFER_NET
     assert f.venue == POOL and f.counterparty == POOL
+
+
+def test_a_venue_with_no_event_in_the_cache_is_priced_from_what_the_trace_shows_it_was_paid():
+    """The fourth moncock buy: 2.9 million tokens came from the v4 pool manager, whose swap event predates
+    the cache's v4 topics, and the executor paid it 68,724 MON by an internal settle call. Read from ERC-20
+    transfers alone the venue was paid nothing for those tokens, and that portion is booked apart and left
+    unresolved rather than carried at the other pool's price; read from the trace it was paid in full, and
+    that is an estimate only because no event says which of the manager's swaps it was."""
+    tokens, wmon_tokens, wmon, native = 2_917_301 * E18, 3_939_541 * E18, 88_936 * E18, 68_724 * E18
+    transfers = [
+        tf(116, TOKEN, POOL, EXECUTOR, wmon_tokens),
+        tf(117, WMON, EXECUTOR, POOL, wmon),
+        tf(125, TOKEN, POOL_MANAGER, EXECUTOR, tokens),
+        tf(126, TOKEN, EXECUTOR, ROUTER, tokens + wmon_tokens),
+        tf(128, TOKEN, ROUTER, SMART_ACCOUNT, tokens + wmon_tokens),
+    ]
+    events = [v3swap(118, POOL, EXECUTOR, -wmon_tokens, wmon)]
+    trace = TraceResult(available=True, transfers=[(EXECUTOR, POOL_MANAGER, native)])
+    with with_kinds({**CONDUIT_KINDS, ROUTER: "contract_unknown"}):
+        blind = [
+            f
+            for f in run(bundle(transfers, events, meta(SOLVER, EXECUTOR)), rates=SOLVER_RATES)
+            if f.wallet == SMART_ACCOUNT
+        ]
+        seen = only(
+            run(bundle(transfers, events, meta(SOLVER, EXECUTOR), trace=trace), rates=SOLVER_RATES), SMART_ACCOUNT
+        )
+    priced, unpriced = sorted(blind, key=lambda f: f.sub_index)
+    assert priced.kind == KIND_BUY and priced.token_delta == wmon_tokens and priced.basis_state == BASIS_OBSERVED
+    assert priced.mon_value == Decimal(wmon) / E18
+    assert unpriced.kind == KIND_BUY and unpriced.token_delta == tokens and unpriced.basis_state == BASIS_UNRESOLVED
+    assert seen.kind == KIND_BUY and seen.basis_state == BASIS_ESTIMATED and seen.source == SOURCE_VENUE_EVENT
+    assert seen.mon_value == Decimal(wmon + native) / E18, seen.mon_value

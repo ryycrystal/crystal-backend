@@ -237,15 +237,24 @@ def chipotle_checks(cur) -> list[Check]:
 
 
 def moncock_checks(cur) -> list[Check]:
-    """The moncock wallet against hand-derived figures.
+    """The moncock wallet against figures derived from the chain, transaction by transaction.
 
     This wallet never touches the money in the transactions that move its tokens: a solver pays the router
     in USDC on its buys, and the proceeds of its sale are sent to a fourth address. So its cost and its
-    proceeds are what the venues at the far end of each path were paid: the pools' WMON exactly, and the
-    over-the-counter USDC legs at the rate table's five-minute rate. The old engine measured the same thing
-    by attributing the executor's trades to the wallet, and both hand derivations agree to within the rate
-    bucketing the tolerance allows. Under a rule that stops at the wallet's own boundary the same wallet
-    reads as a conduit with no cost and no proceeds at all.
+    proceeds are what the venues at the far end of each path were paid, read off the transfer logs and,
+    where a venue was paid by an internal call, the trace:
+
+        buy  101979019   44,731.864 + 3,143.979 WMON                              =  47,875.844
+        buy  101979065   99,663.027 + 8,092.435 WMON                              = 107,755.462
+        buy  101979106  121,135.109 + 7,966.891 WMON, 801.707716 USDC at 0.024539 = 161,773.015
+        buy  101979140    4,042.605 + 88,936.902 WMON, 68,724.686 MON settled natively
+                         to the v4 pool manager                                    = 161,704.192
+        sell 102243456  261,831.999 + 20,322.597 WMON                             = 282,154.596
+
+    The earlier hand-derived 477,018.49 and -193,957 imputed the v4 leg at a tracked pool's price, 2,090
+    MON under what the trace shows was paid, and put the sale 906 MON above what the two pools paid. The
+    tolerance covers the v4 leg being an estimate, since its event is not in the cache, and the rate the
+    USDC legs are converted at.
     """
     name = "moncock"
     pos = position(cur, MONCOCK_WALLET, MONCOCK)
@@ -256,8 +265,8 @@ def moncock_checks(cur) -> list[Check]:
         check_abs(name, "token_bought", pos["token_bought"], "25719120.30", "0.01"),
         check_abs(name, "token_sold", pos["token_sold"], "25719120.30", "0.01"),
         check_eq(name, "trade_count", int(pos["trade_count"]), 5),
-        check_pct(name, "native_spent (confirmed + estimated)", pos["native_spent"], "477018.49", "0.5"),
-        check_pct(name, "realized (confirmed + estimated)", realized, "-193957", "0.5"),
+        check_pct(name, "native_spent (confirmed + estimated)", pos["native_spent"], "479108.51", "0.5"),
+        check_pct(name, "realized (confirmed + estimated)", realized, "-196953.92", "0.5"),
         Check(
             name,
             "realized split confirmed / estimated",

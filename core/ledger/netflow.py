@@ -626,7 +626,8 @@ def _venue_quote(
     matched: int,
     incoming: bool,
     hints: list[_Hint],
-    quote_assets: frozenset[str],
+    quotes_by_wallet: dict[str, list[_QuoteMove]],
+    via: str | None,
     rates: Rates,
 ) -> tuple[str, int, bool] | None:
     """What the venue was paid for, or paid out on, `matched` of the token, scaled to the holder's `share`.
@@ -634,9 +635,10 @@ def _venue_quote(
     The venue's own event is the record when there is one: a fill of exactly the holder's share is that
     holder's fill, a fill of exactly the amount that crossed the venue is shared by whoever received it, and
     otherwise the venue's fills are pooled. A fill recorded under a market rather than the contract that
-    holds the tokens is matched by amount. Failing all of that, what moved in quote assets at the venue is
-    scaled to the tokens it moved, which is exact for a single trade and an estimate otherwise, and is
-    labelled as one.
+    holds the tokens is matched by amount. Failing all of that, what the venue was paid in quote assets by
+    the address that dealt with it, native MON settled by an internal call included, is scaled to the tokens
+    it moved. That is exact for a single trade and an estimate otherwise, and is labelled as one: the v4
+    pool manager's swaps before its topics were cached are only visible this way, through the trace.
     """
     side = [h for h in hints if h.token == token and (h.token_delta > 0) == incoming]
     same = [h for h in side if h.venue == venue]
@@ -659,20 +661,11 @@ def _venue_quote(
         quote = _to_native_units(h.quote_asset, h.quote_delta, rates)
         scaled = abs(quote) * share // matched
         return h.quote_asset, (scaled if quote > 0 else -scaled), True
-    moved: dict[str, int] = defaultdict(int)
-    for leg in bundle.transfers:
-        if leg.token not in quote_assets or leg.amount <= 0:
-            continue
-        if leg.to_addr == venue:
-            moved[leg.token] += leg.amount
-        elif leg.from_addr == venue:
-            moved[leg.token] -= leg.amount
-    moved = {asset: amount for asset, amount in moved.items() if amount}
-    if not moved:
+    dealt = [q for q in quotes_by_wallet.get(venue, []) if q.delta and (via is None or q.counterparty == via)]
+    if not dealt:
         return None
-    asset = max(moved.items(), key=lambda kv: (abs(kv[1]), kv[0]))[0]
-    received = _to_native_units(asset, moved[asset], rates)
-    if (received > 0) != incoming:
+    asset, received = _combine([(q.asset, _to_native_units(q.asset, q.delta, rates)) for q in dealt], rates)
+    if received == 0 or (received > 0) != incoming:
         return None
     venue_tokens = sum(a for _, a in (paths.outbound if incoming else paths.inbound).get((token, venue), []))
     if venue_tokens <= 0:
@@ -762,7 +755,6 @@ def _resolve_ends(
     hints: list[_Hint],
     quotes_by_wallet: dict[str, list[_QuoteMove]],
     kinds: _Kinds,
-    quote_assets: frozenset[str],
     rates: Rates,
 ) -> list[_End]:
     venues = {h.venue for h in hints}
@@ -773,7 +765,9 @@ def _resolve_ends(
         priced_venue = False
         if kind in PRICE_VENUE_KINDS or party in venues:
             matched = max(paths.between(token, via or wallet, party, incoming), share)
-            quote = _venue_quote(bundle, paths, party, token, share, matched, incoming, hints, quote_assets, rates)
+            quote = _venue_quote(
+                bundle, paths, party, token, share, matched, incoming, hints, quotes_by_wallet, via or wallet, rates
+            )
             priced_venue = quote is not None
         elif via is not None and kinds.is_wallet(party):
             quote = _account_payment(paths, quotes_by_wallet, token, via, party, share, incoming, rates)
@@ -1023,7 +1017,6 @@ def net_transaction(
             hints,
             quotes_by_wallet,
             kinds,
-            quote_assets,
             rates,
         )
         own = _quote_total(assigned, rates) if assigned else None

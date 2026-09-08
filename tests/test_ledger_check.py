@@ -138,7 +138,7 @@ def _moncock_row(realized_confirmed: int, realized_estimated: int) -> tuple:
         "custody_balance": 0,
         "token_bought": 25_719_120_300_077_260_030_074_648,
         "token_sold": 25_719_120_300_077_260_030_074_648,
-        "native_spent": 477_019 * WEI,
+        "native_spent": 479_108 * WEI,
         "native_received": 282_154 * WEI,
         "cost_basis_native": 0,
         "realized_pnl_native": realized_confirmed,
@@ -156,11 +156,11 @@ def _moncock_row(realized_confirmed: int, realized_estimated: int) -> tuple:
 def test_moncock_realized_counts_the_estimated_legs_and_reports_the_split():
     from scripts.ledger_check import moncock_checks
 
-    checks = moncock_checks(_PositionCursor(_moncock_row(-40_084 * WEI, -154_780 * WEI)))
+    checks = moncock_checks(_PositionCursor(_moncock_row(-40_084 * WEI, -156_870 * WEI)))
     by_name = {c.name: c for c in checks}
     assert all_pass(checks), render_table(checks)
-    assert by_name["realized (confirmed + estimated)"].actual.startswith("-194864")
-    assert by_name["realized split confirmed / estimated"].actual == "-40084.000 / -154780.000"
+    assert by_name["realized (confirmed + estimated)"].actual.startswith("-196954")
+    assert by_name["realized split confirmed / estimated"].actual == "-40084.000 / -156870.000"
 
     checks = moncock_checks(_PositionCursor(_moncock_row(-40_084 * WEI, 0)))
     assert not by_name_ok(checks, "realized (confirmed + estimated)")
