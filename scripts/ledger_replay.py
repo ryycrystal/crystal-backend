@@ -227,9 +227,9 @@ def seed_from_prod(src: LogSource, tokens: list[str], reference_tables: bool, ev
             for table in SEED_TABLES:
                 copy_table(src, lcur, table)
             seed_mon_usd_samples(src, lcur)
-        if everything:
+        if everything and reference_tables:
             copy_table(src, lcur, "launchpad_positions")
-        else:
+        elif not everything:
             copy_table(src, lcur, "launchpad_positions", "WHERE token = ANY(%s)", (tokens,))
     print(f"[SEED] done in {time.time() - t0:.0f}s", flush=True)
 
