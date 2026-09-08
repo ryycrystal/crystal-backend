@@ -8,6 +8,7 @@ from core.ledger.types import (
     BASIS_ESTIMATED,
     BASIS_OBSERVED,
     BASIS_UNRESOLVED,
+    DUST_WEI,
     KIND_AIRDROP,
     KIND_BURN,
     KIND_BUY,
@@ -632,9 +633,11 @@ def _match_actions(
     a contract, any payment to a non-person qualifies, because a routed trade pays a different hop than it
     receives from. Where it is a person's wallet the match must be exact, which is what stops an unrelated
     payment elsewhere in the same transaction from reading as a purchase. Among the movements a payment
-    could fund, the one whose path it touched comes first, then one that ends at a venue, then the nearest:
-    a payment to a pool is for the tokens from that pool, not for an airdrop that happened to land one log
-    closer. Addresses that only passed the tokens on have no movements of their own to price.
+    could fund, the one whose path it touched comes first, then one that ends at a venue, then a movement
+    of real size before one of dust, then the nearest: a payment to a pool is for the tokens from that
+    pool, not for an airdrop that happened to land one log closer, and not for the wei of change a router
+    returned after the purchase, which priced that wei at a trillion MON and the purchase a second time.
+    Addresses that only passed the tokens on have no movements of their own to price.
     """
     actions: list[tuple[_Move, list[_QuoteMove], list[_Trace]]] = []
     by_wallet: dict[str, list[_Move]] = defaultdict(list)
@@ -667,7 +670,7 @@ def _match_actions(
                 if not kinds.is_account(m.counterparty) and kinds.is_account(q.counterparty):
                     continue
                 order = 0 if q.counterparty in touched[i] else 1 if at_venue[i] else 2
-                rank = (order, abs(q.log_index - m.log_index))
+                rank = (order, abs(m.delta) < DUST_WEI, abs(q.log_index - m.log_index))
                 if best_rank is None or rank < best_rank:
                     best = i
                     best_rank = rank

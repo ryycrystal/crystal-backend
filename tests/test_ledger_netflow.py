@@ -1566,3 +1566,33 @@ def test_a_cost_that_mixes_usdc_with_no_rate_to_convert_it_is_not_observed():
         f = only(run(b, rates=Rates(mon_usd=Decimal("0.024539"), usdc_per_mon=Decimal(0))), SMART_ACCOUNT)
     assert f.basis_state != BASIS_OBSERVED, f
     assert f.mon_value != Decimal(wmon) / E18
+
+
+def test_a_payment_goes_to_the_purchase_not_to_the_wei_of_change_that_came_back_nearer():
+    """The router delivers the purchase, then a wei of change one log closer to the payment.
+
+    Assigned by proximity alone, the payment priced the wei at a trillion MON per token and the real
+    purchase was priced again from the pool, so the cost was booked twice. A dust-sized movement never
+    takes a payment away from a real one.
+    """
+    tokens, paid = 1_000 * E18, 10 * E18
+    b = bundle(
+        [
+            tf(3, WMON, ROUTER, POOL, paid),
+            tf(4, TOKEN, POOL, ROUTER, tokens + 1),
+            tf(5, TOKEN, ROUTER, WALLET, tokens),
+            tf(7, WMON, WALLET, ROUTER, paid),
+            tf(8, TOKEN, ROUTER, WALLET, 1),
+        ],
+        [v3swap(4, POOL, ROUTER, -(tokens + 1), paid)],
+        meta(WALLET, ROUTER),
+    )
+    flows = sorted(
+        (f for f in run(b, rates=Rates(mon_usd=Decimal(1))) if f.wallet == WALLET), key=lambda f: f.log_index
+    )
+    purchase, change = flows
+    assert purchase.token_delta == tokens and purchase.kind == KIND_BUY
+    assert purchase.quote_delta == -paid and purchase.source == SOURCE_TRANSFER_NET, purchase
+    assert (
+        change.token_delta == 1 and (change.quote_delta or 0) in (0, -1) and change.mon_value <= Decimal("0.000001")
+    ), change
