@@ -6,6 +6,7 @@ from core.ledger.types import (
     BASIS_OBSERVED,
     BASIS_UNRESOLVED,
     KIND_AIRDROP,
+    KIND_BURN,
     KIND_BUY,
     KIND_CUSTODY_DEPOSIT,
     KIND_LP_ADD,
@@ -1687,3 +1688,9 @@ def test_a_pass_through_forwards_what_it_received_first_not_a_share_of_everythin
     assert mine[0].kind == KIND_BUY and mine[0].counterparty == POOL and mine[0].venue == POOL
     assert mine[0].token_delta == 4 * E18 and mine[0].mon_value == Decimal(4)
     assert not [f for f in flows if f.wallet == arb], flows
+
+
+def test_tokens_sent_to_their_own_contract_are_burned():
+    b = bundle([tf(1, TOKEN, WALLET, TOKEN, 30 * E18)], tx_meta=meta(WALLET, TOKEN))
+    f = only(run(b))
+    assert f.kind == KIND_BURN and f.basis_state == BASIS_OBSERVED and f.quote_delta is None

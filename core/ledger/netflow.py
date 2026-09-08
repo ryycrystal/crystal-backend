@@ -1004,7 +1004,7 @@ def _classify(
     leg.quote_asset = None
     leg.quote_delta = None
     leg.source = SOURCE_TRANSFER_NET
-    if cp is None or ck == KIND_ZERO:
+    if cp is None or ck == KIND_ZERO or cp == leg.token:
         if incoming:
             leg.kind = KIND_MINT if origin == leg.wallet else KIND_AIRDROP
             leg.basis_state = BASIS_UNRESOLVED
