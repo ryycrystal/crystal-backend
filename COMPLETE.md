@@ -1,9 +1,9 @@
 # accounting-fix: status
 
-Status 2026-09-08 evening. **The ledger was rewritten to the wallet-boundary model, graded once on real data,
-and is being graded a second time with the router list and chipotle.** The design is in
-[LEDGER_SPEC.md](LEDGER_SPEC.md); this file is the state of the evidence. Nothing has been written to
-production and `LEDGER_ENABLED` stays off.
+Status 2026-09-09, 03:30 China time. **The wallet-boundary ledger is built and graded on three tokens; the
+full-registry replay is running on a pool of public RPC nodes after the first attempts hit the public
+endpoint's rate cap.** The design is in [LEDGER_SPEC.md](LEDGER_SPEC.md); this file is the state of the
+evidence. Nothing has been written to production and `LEDGER_ENABLED` stays off.
 
 ## What changed today
 
@@ -18,83 +18,115 @@ that, for any block. Intermediaries get no rows. Routers, aggregators, settlers 
 list, `core/ledger/routers.py`, 143 addresses from the Monad protocols registry and our own flows, and are
 looked through even when they keep up to a tenth as a fee. Only pools are discovered.
 
-The rewrite replaced the pricing half of `core/ledger/netflow.py` and re-keyed the fold's hand-offs by
-sender and receiver. An adversarial review of it found eleven defects in the first draft, each now a test
-that failed before its fix: tokens returned through a pass-through booked as a purchase, a fee router
-inflating proceeds, a seller paid by a later hop leaving the buyer unpriced, a v4 settle paid by a real
-transfer counted twice, mixed WMON and USDC fills summed in raw units, a payment attaching to a nearer
-airdrop of another token, order-book fills never pooling, a missing USDC rate dropping legs silently, an
-observed purchase taking up cost its seller released to someone else, a pass-through forwarding before it
-was funded losing the cost, and the checker exempting contracts. The suite is green at 804.
+Reading the first JAMES grading dump overnight found four more things, each a test that failed before its
+fix, all on `accounting-fix` and pushed:
 
-## Grading, first execution
+- **Liquidity is not a trade.** Every one of the 249 JAMES transactions that fell back to a reference
+  price at the v4 pool manager was a liquidity add or removal, not a swap: the pool manager emits
+  `ModifyLiquidity`, nothing else, and a v4 position is an NFT in the position manager, so no share token
+  ever came back to mark it. Those legs are now `lp_add` / `lp_remove` with the basis parked, which is the
+  whole source of the 32 JAMES positions that were more than a tenth estimated.
+- **A pass-through forwards what it received first.** The transfer graph is walked FIFO by log index. The
+  old walk split a router's outgoing leg pro rata over everything the router received in the transaction,
+  so a wallet that bought 4.4 JAMES through a Relay executor was booked half as a purchase and half as a
+  transfer from an arbitrage bot whose round trip the same executor handled later. The three "missing
+  half" rows in verify were that. The bot itself passes everything through and has no rows.
+- **Tokens sent to their own contract are burned**, realizing the loss, instead of releasing cost that
+  nobody takes up (the one "cost did not travel" row).
+- **Fees shrink the share, not the price.** A fee-on-transfer or fee-keeping hop now charges the venue price
+  pro rata for the tokens that arrived; the old walk scaled the wallet's share up to the venue's fill.
 
-Azure Container Apps job `ledger-rebuild`, execution `ledger-rebuild-614uc1x`, image `ledger-9d40761`,
-before the router list. Moncock and JAMES replayed from creation into a Postgres inside the container,
-reading prod's log cache directly, in 75 minutes.
+The replay itself changed more than the engine. Transaction metadata and receipts are fetched per block
+ahead of netting (`eth_getBlockByNumber` and `eth_getBlockReceipts` once per block that moved two or more
+registered-token transactions), the RPC client yields to the node instead of dying (twelve attempts with a
+jittered 30 s cap, and a limiter that halves on every refusal and earns its rate back one call per answered
+batch), and metadata and receipts are spread over a pool of public nodes (`RPC_HTTP_POOL`) while traces
+stay on `rpc.monad.xyz`, the only public node that serves them.
+
+## What limits the replay
+
+`rpc.monad.xyz` is a QuickNode public endpoint capped at 50 calls per second per client, counting every
+item of a batch, and all Azure executions share one egress address. The first full-registry attempt, 48
+partitions at 40 calls a second each, died in refusal storms; the three-token runs on the same endpoint
+crawled at one to four blocks a second. Probing from Azure found two other public nodes that answer batches
+of 50 with a browser user agent: `monad-mainnet.drpc.org` served 430 transactions a second with no
+refusals and `rpc1.monad.xyz` about 300 with many; neither serves `debug_traceTransaction`. The registry
+has 5,586,441 hot blocks over 32,221 tokens and needs roughly 1.5 calls per block, so the public pool is
+the difference between days and hours. A private RPC key (QuickNode or Alchemy, a few hundred calls a
+second) would make the full replay a two-hour job; the owner should get one before the next rebuild.
+
+The registry scan itself was rewritten: the first version's `EXISTS (... JOIN launchpad_tokens)` rescans
+the 32k tokens for every one of 62 million block rows and would have run for days; a hashed `IN` subplan
+scans 86,000 blocks a second per connection and four range connections finish in four minutes.
+
+## Grading, three tokens
+
+Image `ledger-7c2007a` (before tonight's four engine fixes), one execution per token, job `ledger-rebuild`.
 
 | check | result |
 |---|---|
 | moncock token_bought / token_sold | 25,719,120.30, exact |
 | moncock trade_count | 5 |
 | moncock native_spent (confirmed + estimated) | 478,878.24 against 479,108.51 chain-derived, within 0.5% |
-| moncock realized (confirmed + estimated) | -196,723.65 against -196,953.92, within 0.5%, all of it observed |
+| moncock realized (confirmed + estimated) | -196,723.65 against -196,953.92, within 0.5%, all observed |
 | moncock balance | 0 |
-| JAMES prod holders present | 2,470 checked, 0 missing |
-| JAMES chain balanceOf == balance + custody | 4,949 wallets, every person's wallet exact, 10 unclassified contracts differ |
-| moncock estimated share / inflow with no cost | 3.85% / 0.12% |
-| JAMES estimated share / inflow with no cost | 3.52% / 0.00% |
+| JAMES prod holders present | 2,474 checked, 0 missing |
+| JAMES chain balanceOf == balance + custody | 4,951 wallets, every person's wallet exact, 9 unclassified contracts differ |
+| JAMES checks | 10 of 10 |
+| JAMES verify | 21 of 24 (the three above, all fixed since) |
+| JAMES estimated share / inflow with no cost | 3.55% / 0.00% |
+| JAMES positions with any estimate / over a tenth | 114 of 4,678 (2.4%) / 32, all liquidity, fixed since |
+| chipotle | the run died on the rate cap after its first chunks; rerunning on the pool |
 
 The moncock figures are derived from the chain transaction by transaction in the checker's docstring. The
 old hand-derived 477,018.49 imputed the v4 pool manager leg 2,090 MON low; the trace shows 68,724.686 MON
-settled natively. Under the previous model the same token read 11.4% estimated and 31.5% of inflow without
-a price of its own.
+settled natively.
 
-Verify held 20 of 24 invariants. Of the four that did not: one was written before a movement could be
-split into two legs at one chain position and has been rewritten to key on the party each leg names; three
-rows lack the other half of a transfer and 80 hand-offs released more cost than was taken up, both under
-investigation with the second execution's dump; and moncock's supply conservation shows 2.4% of supply
-held by addresses that are neither positions nor probed venues, also to be read from the dump. Observed
-prices more than a thousandfold from the median: 27 of 25,347 on JAMES, 164 of 92,916 on moncock, the
-largest an absurd 1.1e21 MON per token on what is almost certainly a dust-sized leg.
+The three tokens are being rerun on the pool image with tonight's engine fixes (`ledger-<sha>-moncock`,
+`-james`, `-chipotle` under blob `replay-jobs/out/`); their check, verify and sweep logs and a dump of the
+rebuilt tables land there when each finishes, and this table is replaced from them.
 
-The ten contracts that differ from chain are `pair_probe` negatives: other venues' pools and fee sinks
-holding between 2 wei and 2,349 JAMES. They are now reported for review rather than failing the run, and
-the sweep lists any unclassified contract among a token's top 50 holders.
+## Full registry
 
-## Grading, second execution
-
-`ledger-rebuild-c9s97hq`, image `ledger-3b18bd8`, started 15:33 UTC: the router list, the checker and
-verify changes above, chipotle added (337,308 hot blocks from creation, target 20 trades and 13,850.173
-MON realized), and a dump of the rebuilt tables uploaded to blob `replay-jobs/out/ledger-3b18bd8/` for
-local inspection. Results replace the table above when it finishes.
+Scan published `replay-jobs/ledger/all_blocks.json` (5,586,441 blocks) and 32 partition lists. Each
+partition nets its block range with `ledger_replay.py --all --no-fold` into a Postgres inside the
+container and uploads its tables as CSV; the merge execution waits for every partition's `done.txt`,
+aborts on any `failed.txt`, loads the CSVs, refolds every token, runs the checks, verify and sweeps, and
+dumps the merged database to `out/<run>/merged/`. The run in flight is the one named in the session
+scratchpad's `part_executions32.txt`.
 
 ## Acceptance
 
 The owner's criterion, printed by `scripts/ledger_sweep.py` on every rebuilt token: fewer than one position
 in ten carries any estimated cost, no such position is more than a tenth estimated, people's wallets match
-chain to the wei, and any unclassified contract among the top 50 holders is listed for a decision. On the
-first execution JAMES had 17 of 3,268 positions with any estimate, 12 of them over a tenth, on the stale
-local copy; the job's own sweep numbers come with the second execution.
+chain to the wei, and any unclassified contract among the top 50 holders is listed for a decision. JAMES on
+`ledger-7c2007a`: 2.4% of positions with any estimate, 32 over a tenth, every one of them a liquidity
+position that the `lp_add` fix reclassifies; 13 unclassified contracts among the top 50 holders, all but
+one passing tokens to nobody (lockers, vesting, multisigs).
 
 ## Open
 
-- The three missing halves and 80 hand-offs with unmatched cost, from the dump.
-- Moncock's 2.4% of supply outside positions and probed venues, from the dump.
-- The dust-leg price outliers: a leg of a few wei priced pro-rata should be labelled, not counted.
+- One bot contract on JAMES sits at -6 wei: it sent 6 wei more to the pool manager than it received in the
+  same transaction, so it held dust from somewhere the ledger did not see. Dust, on a contract, unexplained.
+- Cross-token OTC-like swaps between two contracts (JAMES against USDC between bot contracts) produce a few
+  absurd prices on contract positions; people's wallets are not affected.
 - Serving: positions exist for contracts that keep tokens so that quantities stay exact; the serving layer
   should filter them by kind so a bot's contract never appears as a user.
-- Product choices, listed at the end of the spec: fees under rule 2, traces or venue amounts, and
-  which contracts to serve.
-- The live path stays gated until the second grading passes.
+- A private RPC endpoint for rebuilds.
+- The live path stays gated until the full-registry grading is read.
 
 ## Running it
 
-The job is defined by `make_job_yaml.py` in the session scratchpad and runs `ledger_runner.sh` from blob
-`replay-jobs/ledger/`; it needs the prod read-only credentials, a container SAS, and an image built from
-the branch with `az acr build --no-logs -r crystalprodacr -t crystal-backend:ledger-<sha> .`. Locally,
-`scripts/ledger_replay.py --token <addr> --blocks-file <list> --wipe-token` rebuilds one token into the
-side database through the log cache, `scripts/ledger_check.py --fixture <name>` grades the known wallets,
-`scripts/ledger_verify.py --dsn <file>` runs the invariants, and `scripts/ledger_sweep.py <token>` prints
-the acceptance lines. The scratchpad's `explain_tx.py <block> <txhash>` re-nets one transaction, trace
-included, and prints every movement the engine saw and every row it produced.
+Everything runs as executions of the Container Apps job `ledger-rebuild` in `crystal-prod-rg` with
+per-execution overrides: `az containerapp job start --image <acr>/crystal-backend:ledger-<sha> --command
+bash /app/scripts/ledger_job_entry.sh --env-vars ... RUNNER_URL=<blob url of the runner script>`. The
+runners live in blob `replay-jobs/ledger/`: `ledger_runner_nofold.sh` for one token (`ONLY=<name>`),
+`ledger_scan.sh`, `ledger_part.sh` (`PART=all_pNN`), `ledger_merge.sh`; `RPC_HTTP_POOL` names the pool
+of public nodes and `RPC_MAX_RPS` the per-node cap. Images are built with
+`az acr build --no-logs -r crystalprodacr -t crystal-backend:ledger-<sha> .` and confirmed with
+`az acr repository show-tags`. Locally, `scripts/ledger_replay.py --token <addr> --blocks-file <list>
+--wipe-token` rebuilds one token into the side database through the log cache, `scripts/ledger_check.py
+--fixture <name>` grades the known wallets, `scripts/ledger_verify.py --dsn <file>` runs the invariants,
+and `scripts/ledger_sweep.py <token>` prints the acceptance lines. The scratchpad's `explain_tx.py <block>
+<txhash>` re-nets one transaction, trace included, and with `EXPLAIN_HINTS=1` prints the venue events and
+hints the engine saw.
