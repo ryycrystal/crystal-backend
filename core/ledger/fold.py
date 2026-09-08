@@ -286,17 +286,46 @@ def _apply_sell(state: PositionState, flow: Flow, amount: int) -> Effect:
     return effect
 
 
-def _handover(flow: Flow) -> tuple[str, int]:
-    """One transfer is one log, so its two halves name each other by their shared chain position."""
-    return (flow.txhash, flow.log_index)
+def _handover(flow: Flow) -> tuple[str, str, str]:
+    """The two halves of a hand-off name each other by who sent, within one transaction.
+
+    They do not share a chain position: with a distributor or a router between them the sender's half and
+    the receiver's half are different logs, and one sender's half can feed several receivers. What they do
+    share is the transaction and the sender, so what a sender releases is pooled under that and each
+    receiver takes its own amount out of the pool.
+    """
+    sender = flow.wallet if flow.token_delta < 0 else (flow.counterparty or "")
+    return (flow.txhash, flow.token, sender)
 
 
 def _apply_transfer_out(state: PositionState, flow: Flow, amount: int, transit: dict | None) -> Effect:
     taken, released_observed, released_estimated = _take_open(state, amount)
     effect = _released(taken, released_observed, released_estimated)
     if transit is not None:
-        transit[_handover(flow)] = effect
+        key = _handover(flow)
+        transit[key] = transit[key] + effect if key in transit else effect
     return effect
+
+
+def _take_from_transit(transit: dict, key: tuple[str, str, str], amount: int) -> Effect | None:
+    """The receiver's share of what its sender released, leaving the rest for other receivers."""
+    pooled = transit.get(key)
+    if pooled is None:
+        return None
+    arriving = -pooled
+    available = arriving.qty_observed + arriving.qty_estimated + arriving.qty_unresolved
+    if available <= amount:
+        del transit[key]
+        return pooled
+    taken = Effect(
+        qty_observed=arriving.qty_observed * amount // available,
+        qty_estimated=arriving.qty_estimated * amount // available,
+        qty_unresolved=arriving.qty_unresolved * amount // available,
+        basis_observed_delta=arriving.basis_observed_delta * amount // available,
+        basis_estimated_delta=arriving.basis_estimated_delta * amount // available,
+    )
+    transit[key] = pooled + taken
+    return -taken
 
 
 def _apply_transfer_in(state: PositionState, flow: Flow, amount: int, transit: dict | None) -> Effect:
@@ -315,7 +344,7 @@ def _apply_transfer_in(state: PositionState, flow: Flow, amount: int, transit: d
     instead destroyed 47,875 MON at a single hand-off on moncock. Where the sender released nothing, there
     is nothing to conserve and whatever the receiver paid is the better evidence.
     """
-    handed_over = transit.pop(_handover(flow), None) if transit is not None else None
+    handed_over = _take_from_transit(transit, _handover(flow), amount) if transit is not None else None
     carried = -handed_over.basis_delta if handed_over is not None else 0
     cost = _quote_wei(flow)
     if carried <= 0 and cost > 0 and flow.basis_state != BASIS_UNRESOLVED:
@@ -444,7 +473,7 @@ def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tupl
     for state in states.values():
         state.parked = {name: replace(bucket) for name, bucket in state.parked.items()}
     out: list[Flow] = []
-    transit: dict[tuple[str, int], Effect] = {}
+    transit: dict[tuple[str, str, str], Effect] = {}
     for flow in sorted(flows, key=_flow_key):
         state = states.get(flow.wallet)
         if state is None:

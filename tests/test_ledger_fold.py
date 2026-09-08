@@ -1,8 +1,8 @@
 import random
 from decimal import Decimal
 
-from core.ledger.fold import PARKED_AGGREGATES, Parked, PositionState, fold, fold_position
-from core.ledger.types import Flow
+from core.ledger.fold import PARKED_AGGREGATES, Parked, PositionState, fold, fold_position, fold_token
+from core.ledger.types import KIND_BUY, KIND_TRANSFER_IN, KIND_TRANSFER_OUT, Flow
 
 WALLET = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
 TOKEN = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
@@ -705,3 +705,27 @@ def _assert_handover_conserves(flows):
     assert taken == -released, f"the sender released {released} and the receiver took {taken}"
     assert states[flows[0].wallet].cost_basis_native == 0
     assert states[flows[2].wallet].cost_basis_native == -released
+
+
+def test_cost_travels_through_a_pass_through_whose_halves_sit_at_different_log_positions():
+    """A wallet hands tokens to a contract that hands them on in the same transaction.
+
+    The two halves the ledger keeps are the wallet's and the receiver's, and they sit at different log
+    positions with the pass-through between them. They name each other as counterparties, and that, not a
+    shared chain position, is what pairs the released cost with the tokens that arrive.
+    """
+    sender, receiver = "0x" + "a1" * 20, "0x" + "b2" * 20
+    wei = 10**18
+    flows = [
+        _flow(KIND_BUY, 100 * wei, quote=-100 * wei, block=1, log_index=10, wallet=sender, txhash="0xbuy"),
+        _flow(
+            KIND_TRANSFER_OUT, -100 * wei, block=2, log_index=20, wallet=sender, counterparty=receiver, txhash="0xhand"
+        ),
+        _flow(
+            KIND_TRANSFER_IN, 100 * wei, block=2, log_index=24, wallet=receiver, counterparty=sender, txhash="0xhand"
+        ),
+    ]
+    states, folded = fold_token(None, flows)
+    assert states[sender].balance_token == 0 and states[sender].cost_basis_native == 0
+    assert states[receiver].balance_token == 100 * wei
+    assert states[receiver].cost_basis_native == 100 * wei, folded[-1]

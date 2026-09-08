@@ -32,7 +32,6 @@ CHIPOTLE = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
 CHIPOTLE_WALLET = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
 MONCOCK = "0x405b6330e213ded490240cbcdd64790806827777"
 MONCOCK_WALLET = "0xb9e37df144f7e6a86da69642a1f01bec7d2035d2"
-MONCOCK_ROUTER = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"
 JAMES = "0x43cf5407bda1400498b8064d50a7e17528d87777"
 FIXTURE_TOKENS = (CHIPOTLE, MONCOCK, JAMES)
 FIXTURES = {"chipotle": CHIPOTLE, "moncock": MONCOCK, "james": JAMES}
@@ -237,66 +236,36 @@ def chipotle_checks(cur) -> list[Check]:
     ]
 
 
-def movement_totals(cur, wallet: str, token: str) -> dict[str, int]:
-    """What a wallet took in and handed on, summed from its flows rather than read off its position.
-
-    A wallet that only ever receives from its own router and passes the tokens back has a position row of
-    zeros. Its cost exists only as the basis its inbound movements carried in and its outbound movements
-    released, so that is where it has to be measured.
-    """
-    cur.execute(
-        """
-        SELECT
-            coalesce(sum(token_delta) FILTER (WHERE token_delta > 0), 0),
-            coalesce(sum(basis_observed_delta + basis_estimated_delta) FILTER (WHERE token_delta > 0), 0),
-            coalesce(sum(token_delta) FILTER (WHERE token_delta < 0), 0),
-            coalesce(sum(basis_observed_delta + basis_estimated_delta) FILTER (WHERE token_delta < 0), 0),
-            coalesce(sum(realized_observed_delta + realized_estimated_delta), 0)
-        FROM wallet_flows WHERE wallet = %s AND token = %s
-        """,
-        (wallet, token),
-    )
-    tokens_in, cost_in, tokens_out, cost_out, realized = cur.fetchone()
-    return {
-        "tokens_in": int(tokens_in),
-        "cost_in": int(cost_in),
-        "tokens_out": int(tokens_out),
-        "cost_out": int(cost_out),
-        "realized": int(realized),
-    }
-
-
 def moncock_checks(cur) -> list[Check]:
-    """The moncock wallet against what its movements carried.
+    """The moncock wallet against hand-derived figures.
 
-    This wallet never buys or sells moncock. Its router buys from executors and hands the tokens to it, and
-    it hands them back to the router, which sells them. So the cost that used to be measured as
-    native_spent is the cost its inbound movements inherit, the sale and its result belong to the router,
-    and the wallet itself realizes nothing.
-
-    The figures come from the chain and the rate table, not from the engine. The router paid 1,181.099671,
-    2,657.511893, 3,986.280921 and 3,986.283560 USDC for the four purchases, all inside the five-minute
-    bucket starting at 1788548700 where the rate is 0.024539 USDC per MON, and received 7,115.130693 USDC
-    for the sale in the bucket starting at 1788629100 at 0.025220. The 477,018 the old engine measured was
-    the executor's side, what the pools received plus the over-the-counter legs, which sits 0.9% under what
-    the router paid the executor. The inherited figure read 171,967 while venue events were pricing the
-    hand-offs and forwarded payments were being cancelled as wraps.
+    This wallet never touches the money in the transactions that move its tokens: a solver pays the router
+    in USDC on its buys, and the proceeds of its sale are sent to a fourth address. So its cost and its
+    proceeds are what the venues at the far end of each path were paid: the pools' WMON exactly, and the
+    over-the-counter USDC legs at the rate table's five-minute rate. The old engine measured the same thing
+    by attributing the executor's trades to the wallet, and both hand derivations agree to within the rate
+    bucketing the tolerance allows. Under a rule that stops at the wallet's own boundary the same wallet
+    reads as a conduit with no cost and no proceeds at all.
     """
     name = "moncock"
     pos = position(cur, MONCOCK_WALLET, MONCOCK)
     if pos is None:
         return [check_missing(name, "position row")]
-    moved = movement_totals(cur, MONCOCK_WALLET, MONCOCK)
-    router = movement_totals(cur, MONCOCK_ROUTER, MONCOCK)
+    realized = int(pos["realized_pnl_native"] or 0) + int(pos["realized_estimated_native"] or 0)
     return [
-        check_abs(name, "tokens taken in", moved["tokens_in"], "25719120.30", "0.01"),
-        check_abs(name, "tokens handed on", -moved["tokens_out"], "25719120.30", "0.01"),
-        check_pct(name, "cost inherited on the way in", moved["cost_in"], "481326", "0.5"),
-        check_eq(name, "cost released on the way out equals cost taken in", -moved["cost_out"], moved["cost_in"]),
-        check_eq(name, "realized by the wallet", moved["realized"], 0),
-        check_eq(name, "trade_count", int(pos["trade_count"]), 0),
-        check_pct(name, "realized by its router (confirmed + estimated)", router["realized"], "-199206", "0.5"),
-        check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(moved["tokens_in"])),
+        check_abs(name, "token_bought", pos["token_bought"], "25719120.30", "0.01"),
+        check_abs(name, "token_sold", pos["token_sold"], "25719120.30", "0.01"),
+        check_eq(name, "trade_count", int(pos["trade_count"]), 5),
+        check_pct(name, "native_spent (confirmed + estimated)", pos["native_spent"], "477018.49", "0.5"),
+        check_pct(name, "realized (confirmed + estimated)", realized, "-193957", "0.5"),
+        Check(
+            name,
+            "realized split confirmed / estimated",
+            "reported",
+            f"{from_wei(pos['realized_pnl_native']):.3f} / {from_wei(pos['realized_estimated_native']):.3f}",
+            True,
+        ),
+        check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(pos["token_bought"])),
     ]
 
 
@@ -388,9 +357,19 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
     checks = [check_eq(name, "positions present", bool(wallets), True)]
 
     pools_on_prod = [w for w in prod if kinds.get(w) in VENUE_KINDS]
-    holders = [w for w in prod if kinds.get(w) not in VENUE_KINDS]
+    contracts_on_prod = [w for w in prod if kinds.get(w) == "contract_unknown"]
+    holders = [w for w in prod if kinds.get(w) not in VENUE_KINDS and w not in contracts_on_prod]
     checks.append(
         Check(name, "prod holder rows that are venues", "reported", f"{len(pools_on_prod)} {pools_on_prod[:3]}", True)
+    )
+    checks.append(
+        Check(
+            name,
+            "prod holder rows that are contracts (fees and residue, not positions)",
+            "reported",
+            f"{len(contracts_on_prod)} {contracts_on_prod[:3]}",
+            True,
+        )
     )
     missing = [w for w in holders if w not in ledger]
     if rpc_url is None:
@@ -421,13 +400,24 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
         )
     )
     mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
+    contract_mismatches = [w for w in mismatched if kinds.get(w) == "contract_unknown"]
+    wallet_mismatches = [w for w in mismatched if w not in contract_mismatches]
     checks.append(
         Check(
             name,
             f"chain balanceOf == balance + custody ({len(targets)} wallets {where})",
             "0 mismatches",
-            f"{len(mismatched)} mismatches {mismatched[:5]}",
-            not mismatched,
+            f"{len(wallet_mismatches)} mismatches {wallet_mismatches[:5]}",
+            not wallet_mismatches,
+        )
+    )
+    checks.append(
+        Check(
+            name,
+            "contracts whose chain balance includes fees the ledger does not book",
+            "reported",
+            f"{len(contract_mismatches)} {contract_mismatches[:3]}",
+            True,
         )
     )
     checks.append(

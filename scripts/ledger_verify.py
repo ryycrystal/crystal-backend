@@ -117,22 +117,23 @@ CHECKS = [
           AND k.kind IN ('eoa', 'eoa_7702', 'wallet_4337', 'contract_unknown')
           AND NOT EXISTS (
               SELECT 1 FROM wallet_flows g
-              WHERE g.block_number = f.block_number AND g.tx_index = f.tx_index
-                AND g.log_index = f.log_index AND g.wallet = f.counterparty AND g.token = f.token
+              WHERE g.txhash = f.txhash AND g.token = f.token AND g.wallet = f.counterparty
+                AND sign(g.token_delta) = -sign(f.token_delta)
           )
         """,
     ),
     (
         "a transfer between two wallets moves its cost as well as its tokens",
         """
-        SELECT count(*) FROM wallet_flows out_leg
-        JOIN wallet_flows in_leg
-          ON in_leg.block_number = out_leg.block_number AND in_leg.tx_index = out_leg.tx_index
-         AND in_leg.log_index = out_leg.log_index AND in_leg.token = out_leg.token
-         AND in_leg.wallet = out_leg.counterparty
-        WHERE out_leg.kind = 'transfer_out' AND in_leg.token_delta > 0
-          AND out_leg.basis_delta < 0
-          AND in_leg.basis_delta <> -out_leg.basis_delta
+        SELECT count(*) FROM (
+            SELECT o.txhash, o.token, o.wallet, sum(o.basis_delta) AS released,
+                   (SELECT coalesce(sum(i.basis_delta), 0) FROM wallet_flows i
+                     WHERE i.txhash = o.txhash AND i.token = o.token AND i.counterparty = o.wallet
+                       AND i.token_delta > 0) AS taken
+            FROM wallet_flows o
+            WHERE o.kind = 'transfer_out' AND o.basis_delta < 0
+            GROUP BY o.txhash, o.token, o.wallet
+        ) pairs WHERE released <> -taken
         """,
     ),
     (

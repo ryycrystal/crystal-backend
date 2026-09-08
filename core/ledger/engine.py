@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-import time
-import urllib.request
 from collections import defaultdict
 from dataclasses import replace
 from decimal import Decimal
@@ -26,8 +23,6 @@ from core.ledger.types import (
 )
 
 __all__ = ["LedgerEngine", "Rates"]
-TRACE_WINDOW_BLOCKS = 500_000
-HEAD_TTL_SECONDS = 30.0
 TOKEN_SOURCES = {0: "crystal", 1: "nadfun_v1", 2: "nadfun_v2"}
 REGISTERING_TAGS = {"TC", "NFC", "MC"}
 TRACEABLE_KINDS = {"buy", "sell", "transfer_in", "transfer_out", "swap_leg"}
@@ -66,7 +61,6 @@ class LedgerEngine:
         trace_store=None,
         kinds=None,
         rates_fn=None,
-        head_fn=None,
     ):
         self._cur_factory = cur_factory
         self._rpc_url = rpc_url or os.getenv("RPC_HTTP") or "https://rpc.monad.xyz"
@@ -78,14 +72,12 @@ class LedgerEngine:
         self._kinds = kinds
         self._kinds_loaded = False
         self._rates_fn = rates_fn
-        self._head_fn = head_fn
         self._registry: dict | None = None
         self._market_tokens: dict[str, str] = {}
         self._market_pairs: dict[str, tuple[str, str]] = {}
         self._pools: dict[str, tuple[str, str, bool]] = {}
         self.scope: frozenset[str] | None = None
         self._affected: dict[str, int] = {}
-        self._head: tuple[int, float] | None = None
         self._price_cache: dict[tuple[str, int], Decimal | None] = {}
         self.stats: dict[str, int] = defaultdict(int)
 
@@ -368,7 +360,7 @@ class LedgerEngine:
                 flows = [f for f in flows if f.wallet not in discovered]
                 self.stats["purged"] += len(discovered)
             tx_flows = net(bundle)
-            if self._needs_trace(tx_flows) and self._within_trace_window(blk):
+            if self._needs_trace(tx_flows):
                 trace = self._trace_for().native_transfers(bundle.txhash)
                 self.stats["traces"] += 1
                 if trace is not None and trace.available:
@@ -426,30 +418,13 @@ class LedgerEngine:
 
     @staticmethod
     def _needs_trace(flows: list[Flow]) -> bool:
+        """A movement nothing visible paid for may have been paid in native MON by an internal call.
+
+        Those leave no log, and without the trace a purchase paid that way is indistinguishable from a
+        gift. The trace is fetched for any block: the archive serves call traces all the way back, and it is
+        state reads at old blocks that it does not.
+        """
         return any(f.basis_state != BASIS_OBSERVED and f.kind in TRACEABLE_KINDS for f in flows)
-
-    def _within_trace_window(self, blk: int) -> bool:
-        head = self._head_block()
-        return head is not None and head - int(blk) <= TRACE_WINDOW_BLOCKS
-
-    def _head_block(self) -> int | None:
-        now = time.monotonic()
-        if self._head is not None and now - self._head[1] < HEAD_TTL_SECONDS:
-            return self._head[0]
-        try:
-            head = self._head_fn() if self._head_fn is not None else self._rpc_block_number()
-        except Exception:
-            head = None
-        if head is not None:
-            self._head = (int(head), now)
-            return int(head)
-        return self._head[0] if self._head is not None else None
-
-    def _rpc_block_number(self) -> int:
-        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode()
-        req = urllib.request.Request(self._rpc_url, data=payload, headers={"content-type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return int(json.loads(resp.read())["result"], 16)
 
     def _rates_at(self, blk: int, ts: int, cur) -> Rates:
         if self._rates_fn is None:

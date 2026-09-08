@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from core.ledger.types import (
+    ACCOUNT_KINDS,
     BASIS_ESTIMATED,
     BASIS_OBSERVED,
     BASIS_UNRESOLVED,
@@ -17,10 +18,12 @@ from core.ledger.types import (
     KIND_MINT,
     KIND_SELL,
     KIND_SWAP_LEG,
+    KIND_TOKEN,
     KIND_TRANSFER_IN,
     KIND_TRANSFER_OUT,
     KIND_VAULT_DEPOSIT,
     KIND_VAULT_WITHDRAW,
+    KIND_VENUE_CURVE,
     KIND_VENUE_CUSTODY,
     KIND_VENUE_POOL,
     KIND_VENUE_ROUTER,
@@ -56,9 +59,10 @@ at all and the event is the only evidence there is. A V2 or V3 pair has no such 
 ERC-20 in the same transaction, so an event with no transfer means the tokens were sent in an earlier one
 and that movement is already recorded."""
 CORE_FILL_TAGS = frozenset({"TR"})
+PRICE_VENUE_KINDS = frozenset({KIND_VENUE_POOL, KIND_VENUE_CURVE})
 AMOUNT_TOLERANCE_WEI = 1
 FEE_TOLERANCE = Decimal("0.10")
-MAX_ROUTER_HOPS = 4
+MAX_PATH_HOPS = 6
 USD_UNIT = Decimal(10) ** USD_DECIMALS
 
 PriceFn = Callable[[str], Decimal | None]
@@ -111,7 +115,12 @@ class _Kinds:
         return cached
 
     def is_wallet(self, addr: str) -> bool:
+        """May hold a position: a person's wallet, or a contract not known to be anything else."""
         return self.of(addr) in WALLET_KINDS
+
+    def is_account(self, addr: str) -> bool:
+        """A person's wallet: an EOA, a delegated EOA or a smart account. Never a venue, never a relay."""
+        return self.of(addr) in ACCOUNT_KINDS
 
 
 def _same_sign(a: int, b: int) -> bool:
@@ -129,16 +138,6 @@ def _curve_quote_asset(reg: TokenReg | None, quote_assets: frozenset[str]) -> st
     if qt in quote_assets and qt != NATIVE and qt != WMON:
         return qt
     return NATIVE
-
-
-def _venue_quote_asset(bundle: TxBundle, venue: str, quote_assets: frozenset[str]) -> str:
-    seen: dict[str, int] = defaultdict(int)
-    for leg in bundle.transfers:
-        if leg.token in quote_assets and venue in (leg.from_addr, leg.to_addr):
-            seen[leg.token] += leg.amount
-    if not seen:
-        return NATIVE
-    return max(seen.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 def _trusted_emitter(venue: str, kinds: _Kinds) -> bool:
@@ -251,26 +250,6 @@ def _hint_quote_asset(
     return None
 
 
-def _own_quote(raw: dict[str, int], rates: Rates) -> tuple[str, int] | None:
-    mon_parts = {a: _to_native_units(a, v, rates) for a, v in raw.items() if a in MON_FAMILY and v}
-    usd_parts = {a: v for a, v in raw.items() if a not in MON_FAMILY and v}
-    mon = sum(mon_parts.values())
-    usd = sum(usd_parts.values())
-    if mon == 0 and usd == 0:
-        return None
-    use_mon = usd == 0
-    if mon != 0 and usd != 0:
-        usd_as_mon = Decimal(0)
-        if rates.usdc_per_mon > 0:
-            usd_as_mon = Decimal(abs(usd)) / USD_UNIT / rates.usdc_per_mon * WEI
-        use_mon = Decimal(abs(mon)) >= usd_as_mon
-    if use_mon:
-        asset = next(iter(mon_parts)) if len(mon_parts) == 1 else NATIVE
-        return asset, mon
-    asset = next(iter(usd_parts)) if len(usd_parts) == 1 else USDC
-    return asset, usd
-
-
 def _values(asset: str | None, quote_delta: int | None, rates: Rates) -> tuple[Decimal, Decimal]:
     if asset is None or not quote_delta:
         return Decimal(0), Decimal(0)
@@ -288,28 +267,8 @@ def _price(mon_value: Decimal, token_delta: int) -> Decimal | None:
     return mon_value * WEI / Decimal(abs(token_delta))
 
 
-def _hint_price(hints: list[_Hint], rates: Rates) -> Decimal | None:
-    tokens = sum(abs(h.token_delta) for h in hints)
-    if tokens == 0:
-        return None
-    mon = Decimal(0)
-    for h in hints:
-        m, _ = _values(h.quote_asset, _to_native_units(h.quote_asset, h.quote_delta, rates), rates)
-        mon += m
-    return _price(mon, tokens)
-
-
 def _is_mon(asset: str) -> bool:
     return asset in MON_FAMILY
-
-
-def _same_family(hints: list[_Hint]) -> list[_Hint]:
-    mon = _is_mon(hints[0].quote_asset)
-    seen: dict[int, _Hint] = {}
-    for h in hints:
-        if _is_mon(h.quote_asset) == mon and h.log_index not in seen:
-            seen[h.log_index] = h
-    return list(seen.values())
 
 
 def _sum_hints(hints: list[_Hint], rates: Rates) -> tuple[str, int]:
@@ -321,111 +280,10 @@ def _sum_hints(hints: list[_Hint], rates: Rates) -> tuple[str, int]:
     return asset, sum(_to_native_units(h.quote_asset, h.quote_delta, rates) for h in hints)
 
 
-def _assign_hints(leg: _Leg, hints: list[_Hint], rates: Rates, basis_state: str, single: bool) -> None:
-    asset, quote = _sum_hints(hints, rates)
-    if quote == 0 or _same_sign(quote, leg.token_delta):
-        return
-    leg.quote_asset = asset
-    leg.quote_delta = quote
-    leg.source = SOURCE_VENUE_EVENT
-    leg.basis_state = basis_state
-    leg.hint_price = _hint_price(hints, rates)
-    if single and leg.venue is None:
-        leg.venue = hints[0].venue
-
-
-def _assign_scaled(leg: _Leg, hints: list[_Hint], rates: Rates, single: bool) -> None:
-    asset, quote = _sum_hints(hints, rates)
-    hint_tokens = sum(abs(h.token_delta) for h in hints)
-    if quote == 0 or hint_tokens == 0 or _same_sign(quote, leg.token_delta):
-        return
-    scaled = abs(quote) * abs(leg.token_delta) // hint_tokens
-    leg.quote_asset = asset
-    leg.quote_delta = scaled if quote > 0 else -scaled
-    leg.source = SOURCE_VENUE_EVENT
-    leg.basis_state = BASIS_ESTIMATED
-    leg.hint_price = _hint_price(hints, rates)
-    if single and leg.venue is None:
-        leg.venue = hints[0].venue
-
-
-def _closest_hint(leg: _Leg, candidates: list[_Hint]) -> _Hint | None:
-    if not candidates:
-        return None
-    return min(candidates, key=lambda h: (abs(h.token_delta - leg.token_delta), h.log_index))
-
-
-def _exact_hints(leg: _Leg, hints: list[_Hint], used: set[int]) -> list[_Hint]:
-    same_side = [
-        h
-        for h in hints
-        if h.log_index not in used and h.token == leg.token and _same_sign(h.token_delta, leg.token_delta)
-    ]
-    exact = [h for h in same_side if abs(h.token_delta - leg.token_delta) <= AMOUNT_TOLERANCE_WEI]
-    if exact:
-        return [min(exact, key=lambda h: h.log_index)]
-    if same_side and abs(sum(h.token_delta for h in same_side) - leg.token_delta) <= AMOUNT_TOLERANCE_WEI:
-        return sorted(same_side, key=lambda h: h.log_index)
-    return []
-
-
-def _prefer_venue_quote(leg: _Leg, matched: list[_Hint], own_asset: str, own_delta: int, rates: Rates) -> None:
-    asset, quote = _sum_hints(matched, rates)
-    if quote == 0 or _same_sign(quote, leg.token_delta) or _is_mon(asset) != _is_mon(own_asset):
-        return
-    if Decimal(abs(quote - own_delta)) > Decimal(abs(quote)) * FEE_TOLERANCE:
-        return
-    leg.hint_price = _hint_price(matched, rates)
-    if leg.venue is None:
-        leg.venue = matched[0].venue
-
-
 def _within_fee_tolerance(leg_delta: int, hint_delta: int) -> bool:
     return abs(leg_delta - hint_delta) <= AMOUNT_TOLERANCE_WEI or (
         Decimal(abs(leg_delta - hint_delta)) <= Decimal(abs(hint_delta)) * FEE_TOLERANCE
     )
-
-
-def _counterparty_and_venue(bundle: TxBundle, leg: _Leg, kinds: _Kinds) -> None:
-    """Name the other side of this movement, then follow any routers behind it to the venue.
-
-    The movement already knows its counterparty: it is the other end of the transfer that produced it. The
-    largest neighbour of the whole transaction was the right answer only while a leg was a wallet's netted
-    position; for a single movement it names whoever the wallet happened to trade the most with, so a 0.2%
-    fee paid alongside a trade was recorded as having gone to the trading partner.
-    """
-    incoming = leg.token_delta > 0
-    if leg.counterparty is None:
-        leg.counterparty = _dominant_neighbor(bundle, leg.token, leg.wallet, incoming, exclude=set())
-    direct = leg.counterparty
-    if direct is None:
-        return
-    node = direct
-    visited = {leg.wallet, direct}
-    hops = 0
-    while kinds.of(node) == KIND_VENUE_ROUTER and hops < MAX_ROUTER_HOPS:
-        nxt = _dominant_neighbor(bundle, leg.token, node, incoming, exclude=visited)
-        if nxt is None:
-            break
-        visited.add(nxt)
-        node = nxt
-        hops += 1
-    if kinds.of(node) in VENUE_KINDS:
-        leg.venue = node
-
-
-def _dominant_neighbor(bundle: TxBundle, token: str, addr: str, incoming: bool, exclude: set[str]) -> str | None:
-    totals: dict[str, int] = defaultdict(int)
-    for t in bundle.transfers:
-        if t.token != token or t.amount <= 0:
-            continue
-        if incoming and t.to_addr == addr and t.from_addr not in exclude:
-            totals[t.from_addr] += t.amount
-        elif not incoming and t.from_addr == addr and t.to_addr not in exclude:
-            totals[t.to_addr] += t.amount
-    if not totals:
-        return None
-    return max(totals.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 def _shares_moved(bundle: TxBundle, wallet: str, issuer: str, incoming_tokens: bool) -> bool:
@@ -437,42 +295,6 @@ def _shares_moved(bundle: TxBundle, wallet: str, issuer: str, incoming_tokens: b
         if not incoming_tokens and t.to_addr == wallet:
             return True
     return False
-
-
-def _classify_unpriced(
-    leg: _Leg, bundle: TxBundle, kinds: _Kinds, origin: str | None, reference_price: PriceFn | None
-) -> None:
-    incoming = leg.token_delta > 0
-    cp = leg.counterparty
-    ck = kinds.of(cp) if cp else ""
-    leg.quote_asset = None
-    leg.quote_delta = None
-    leg.source = SOURCE_TRANSFER_NET
-    if cp is None or ck == KIND_ZERO:
-        if incoming:
-            leg.kind = KIND_MINT if origin == leg.wallet else KIND_AIRDROP
-            leg.basis_state = BASIS_UNRESOLVED
-        else:
-            leg.kind = KIND_BURN
-            leg.basis_state = BASIS_OBSERVED
-        return
-    if ck not in WALLET_KINDS and _shares_moved(bundle, leg.wallet, cp, incoming):
-        if ck == KIND_VENUE_POOL:
-            leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
-        else:
-            leg.kind = KIND_VAULT_WITHDRAW if incoming else KIND_VAULT_DEPOSIT
-        leg.basis_state = BASIS_OBSERVED
-        return
-    if ck == KIND_VENUE_CUSTODY:
-        leg.kind = KIND_CUSTODY_WITHDRAW if incoming else KIND_CUSTODY_DEPOSIT
-        leg.basis_state = BASIS_OBSERVED
-        return
-    if leg.venue is not None or ck in VENUE_KINDS:
-        leg.kind = KIND_BUY if incoming else KIND_SELL
-        _price_by_reference(leg, reference_price)
-        return
-    leg.kind = KIND_TRANSFER_IN if incoming else KIND_TRANSFER_OUT
-    leg.basis_state = BASIS_UNRESOLVED if incoming else BASIS_OBSERVED
 
 
 def _price_by_reference(leg: _Leg, reference_price: PriceFn | None) -> None:
@@ -489,52 +311,6 @@ def _price_by_reference(leg: _Leg, reference_price: PriceFn | None) -> None:
     leg.source = SOURCE_RECONCILE
     leg.basis_state = BASIS_ESTIMATED
     leg.hint_price = price
-
-
-def _collect(bundle: TxBundle, tokens: set[str], quote_assets: frozenset[str]):
-    token_deltas: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    first_log: dict[tuple[str, str], int] = {}
-    quote_raw: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    quote_sources: dict[str, set[str]] = defaultdict(set)
-    for leg in bundle.transfers:
-        if leg.amount <= 0:
-            continue
-        if leg.token in tokens:
-            for addr in (leg.from_addr, leg.to_addr):
-                key = (addr, leg.token)
-                first_log[key] = min(first_log.get(key, leg.log_index), leg.log_index)
-            token_deltas[leg.token][leg.from_addr] -= leg.amount
-            token_deltas[leg.token][leg.to_addr] += leg.amount
-        elif leg.token in quote_assets:
-            quote_raw[leg.from_addr][leg.token] -= leg.amount
-            quote_raw[leg.to_addr][leg.token] += leg.amount
-            quote_sources[leg.from_addr].add(SOURCE_TRANSFER_NET)
-            quote_sources[leg.to_addr].add(SOURCE_TRANSFER_NET)
-    meta = bundle.meta
-    top = None
-    if meta and meta.value and meta.value > 0:
-        top = ((meta.from_addr or "").lower(), (meta.to_addr or "").lower(), int(meta.value))
-        if top[0]:
-            quote_raw[top[0]][NATIVE] -= top[2]
-            quote_sources[top[0]].add(SOURCE_TRANSFER_NET)
-        if top[1]:
-            quote_raw[top[1]][NATIVE] += top[2]
-            quote_sources[top[1]].add(SOURCE_TRANSFER_NET)
-    trace = bundle.trace
-    if trace and trace.available:
-        skipped_top = False
-        for src, dst, value in trace.transfers:
-            src, dst, value = (src or "").lower(), (dst or "").lower(), int(value or 0)
-            if value <= 0:
-                continue
-            if not skipped_top and top is not None and (src, dst, value) == top:
-                skipped_top = True
-                continue
-            quote_raw[src][NATIVE] -= value
-            quote_raw[dst][NATIVE] += value
-            quote_sources[src].add(SOURCE_TRACE)
-            quote_sources[dst].add(SOURCE_TRACE)
-    return token_deltas, first_log, quote_raw, quote_sources
 
 
 @dataclass
@@ -598,19 +374,21 @@ def _venue_movements(
     tokens: set[str],
     pools: dict[str, tuple[str, str, bool]] | None,
     kinds: _Kinds,
-) -> tuple[list[_Move], list[_QuoteMove]]:
+) -> tuple[list[_Move], list[_QuoteMove], list[_Hint]]:
     """Movements a swap event reports when no ERC-20 carried them.
 
     Uniswap V4 can settle a swap against the pool manager's internal claim balances, so a real trade can
     leave no transfer at all. Those transactions are invisible to any rule that starts from transfers, and
     on moncock alone 26 wallet-transactions vanish that way. The pool's own registration says which token
     it trades, so the event is sufficient evidence on its own. The actor comes from the event, never from
-    the transaction origin, which is a bundler or a relayer as often as it is the trader.
+    the transaction origin, which is a bundler or a relayer as often as it is the trader. The event also
+    stands as the venue's price, so a wallet the actor hands the tokens on to is priced from it.
     """
     t_moves: list[_Move] = []
     q_moves: list[_QuoteMove] = []
+    hints: list[_Hint] = []
     if not pools:
-        return t_moves, q_moves
+        return t_moves, q_moves, hints
     for ev in bundle.venue_events:
         if ev.tag not in SETTLING_TAGS:
             continue
@@ -633,27 +411,33 @@ def _venue_movements(
             continue
         token_delta, quote_delta = (a0, a1) if token_is_0 else (a1, a0)
         actor = (parsed.get("user") or parsed.get("sender") or "").lower()
-        if not actor or not kinds.is_wallet(actor):
+        if not actor or kinds.of(actor) in PRICE_VENUE_KINDS or kinds.of(actor) in (KIND_ZERO, KIND_TOKEN):
             continue
+        asset = (quote or NATIVE).lower()
         t_moves.append(_Move(ev.log_index, actor, token, token_delta, venue))
-        q_moves.append(_QuoteMove(ev.log_index, actor, (quote or NATIVE).lower(), quote_delta, venue))
-    return t_moves, q_moves
+        q_moves.append(_QuoteMove(ev.log_index, actor, asset, quote_delta, venue))
+        hints.append(_Hint(ev.log_index, venue, token, token_delta, quote_delta, asset, actor))
+    return t_moves, q_moves, hints
+
+
+def _combine(parts: list[tuple[str, int]], rates: Rates) -> tuple[str, int]:
+    """Conserve every quote leg; mixed currencies collapse to their MON equivalent, never to one family."""
+    assets = {asset for asset, _ in parts}
+    if len(assets) == 1:
+        return next(iter(assets)), sum(delta for _, delta in parts)
+    total = Decimal(0)
+    for asset, delta in parts:
+        if asset in MON_FAMILY:
+            total += Decimal(delta)
+        elif rates.usdc_per_mon > 0:
+            total += Decimal(delta) / USD_UNIT / rates.usdc_per_mon * WEI
+    return NATIVE, int(total)
 
 
 def _quote_total(assigned: list[_QuoteMove], rates: Rates) -> tuple[str, int, str]:
-    """Conserve every quote leg; mixed currencies collapse to their MON equivalent, never to one family."""
-    assets = {q.asset for q in assigned}
     source = SOURCE_TRACE if {q.source for q in assigned} == {SOURCE_TRACE} else SOURCE_TRANSFER_NET
-    if len(assets) == 1:
-        asset = next(iter(assets))
-        return asset, _to_native_units(asset, sum(q.delta for q in assigned), rates), source
-    total = Decimal(0)
-    for q in assigned:
-        if q.asset in MON_FAMILY:
-            total += Decimal(_to_native_units(q.asset, q.delta, rates))
-        elif rates.usdc_per_mon > 0:
-            total += Decimal(q.delta) / USD_UNIT / rates.usdc_per_mon * WEI
-    return NATIVE, int(total), source
+    asset, delta = _combine([(q.asset, _to_native_units(q.asset, q.delta, rates)) for q in assigned], rates)
+    return asset, delta, source
 
 
 def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds: _Kinds) -> list[_QuoteMove]:
@@ -661,11 +445,9 @@ def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds
 
     Receiving WMON from the zero address and then spending it is one payment, not income plus a payment,
     so an unmatched inbound leg offsets a matched outbound leg of the same asset. A sale's proceeds are
-    never spare, because they were matched to the disposal that earned them. Only a movement from the zero
-    address, a token contract or a venue can be a conversion. The same asset passing to or from another
-    wallet is a payment being forwarded, and cancelling it took the cost off a router's purchase and most
-    of the proceeds off the executor's sale that funded it, on every routed buy that paid one hop and
-    received from another.
+    never spare, because they were matched to the disposal that earned them. The same asset passing to or
+    from a person's wallet is never a conversion: it is a payment, and cancelling it took the cost off a
+    purchase that was paid on one hop and received from another.
     """
     if not spare or not assigned:
         return assigned
@@ -675,7 +457,7 @@ def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds
         for other in spare:
             if other.asset != q.asset or _same_sign(other.delta, remaining) or not remaining:
                 continue
-            if kinds.is_wallet(other.counterparty):
+            if kinds.is_account(other.counterparty):
                 continue
             take = min(abs(remaining), abs(other.delta))
             remaining += take if remaining < 0 else -take
@@ -707,18 +489,101 @@ def _payment_reaches(quote: _QuoteMove, party: str, quotes: list[_QuoteMove]) ->
     return False
 
 
-def _match_actions(moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, rates: Rates):
-    """Pair each token movement with the payment that funded it.
+class _Paths:
+    """The token transfer graph of one transaction, with every contract that only passed tokens on made
+    transparent.
 
-    A payment counts only when it reached the party the tokens came from. Where that party is a venue or a
-    router, any non-wallet counterparty qualifies, because a routed trade pays a different hop than it
-    receives from. Where it is an ordinary wallet the match must be exact, which is what stops an unrelated
-    payment elsewhere in the same transaction from reading as a purchase.
+    A router, an executor, a settlement contract or a relayer that ends the transaction holding exactly
+    what it started with did not trade. Following a movement through such addresses to the venue or the
+    wallet at the far end is what lets a purchase a solver paid for, or a sale whose proceeds went to a
+    fourth address, be priced at what the venue was paid, and what lets a hand-off through a distributor
+    name the wallet it really went to. A person's wallet is never transparent, whatever it did, and neither
+    is a pool or a curve, because that is where the price was made.
+    """
+
+    def __init__(self, moves: list[_Move], kinds: _Kinds):
+        self.inbound: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+        self.outbound: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+        self.received: dict[tuple[str, str], int] = defaultdict(int)
+        self.sent: dict[tuple[str, str], int] = defaultdict(int)
+        for m in moves:
+            key = (m.token, m.wallet)
+            if m.delta > 0:
+                self.inbound[key].append((m.counterparty, m.delta))
+                self.received[key] += m.delta
+            elif m.delta < 0:
+                self.outbound[key].append((m.counterparty, -m.delta))
+                self.sent[key] += -m.delta
+        self.transparent: set[tuple[str, str]] = set()
+        for key in set(self.received) | set(self.sent):
+            kind = kinds.of(key[1])
+            if kind in ACCOUNT_KINDS or kind in PRICE_VENUE_KINDS or kind == KIND_ZERO:
+                continue
+            received, sent = self.received[key], self.sent[key]
+            if received <= 0:
+                continue
+            kept = received - sent
+            if abs(kept) <= AMOUNT_TOLERANCE_WEI:
+                self.transparent.add(key)
+            elif kind == KIND_VENUE_ROUTER and 0 < kept <= received * FEE_TOLERANCE:
+                self.transparent.add(key)
+
+    def far_ends(self, token: str, addr: str, amount: int, incoming: bool) -> list[tuple[str, int, str | None]]:
+        """Where `amount` of the token that came from (or went to) `addr` really came from (or went to).
+
+        Each entry is the party at the far end, the share of the amount that traces to it, and the
+        transparent address adjacent to it, which is who paid or was paid on that leg.
+        """
+        return _merge_ends(self._walk(token, addr, amount, incoming, None, 0, frozenset()))
+
+    def between(self, token: str, via: str, party: str, incoming: bool) -> int:
+        legs = (self.inbound if incoming else self.outbound).get((token, via), [])
+        return sum(amount for other, amount in legs if other == party)
+
+    def _walk(
+        self, token: str, addr: str, amount: int, incoming: bool, via: str | None, depth: int, seen: frozenset[str]
+    ) -> list[tuple[str, int, str | None]]:
+        key = (token, addr)
+        if key not in self.transparent or depth >= MAX_PATH_HOPS or addr in seen:
+            return [(addr, amount, via)]
+        legs = (self.inbound if incoming else self.outbound).get(key, [])
+        total = sum(a for _, a in legs)
+        if total <= 0:
+            return [(addr, amount, via)]
+        own_side = self.sent[key] if incoming else self.received[key]
+        carried = amount if abs(total - own_side) <= AMOUNT_TOLERANCE_WEI else total * amount // own_side
+        out: list[tuple[str, int, str | None]] = []
+        allocated = 0
+        for i, (other, a) in enumerate(legs):
+            share = carried - allocated if i == len(legs) - 1 else carried * a // total
+            allocated += share
+            if share > 0:
+                out.extend(self._walk(token, other, share, incoming, addr, depth + 1, seen | {addr}))
+        return out
+
+
+def _merge_ends(ends: list[tuple[str, int, str | None]]) -> list[tuple[str, int, str | None]]:
+    merged: dict[tuple[str, str | None], int] = {}
+    for party, amount, via in ends:
+        merged[(party, via)] = merged.get((party, via), 0) + amount
+    return [(party, amount, via) for (party, via), amount in merged.items() if amount > 0]
+
+
+def _match_actions(
+    moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, paths: _Paths, rates: Rates
+) -> list[tuple[_Move, list[_QuoteMove]]]:
+    """Pair each token movement of a holder with the payment that funded it.
+
+    A payment counts only when it reached the party the tokens came from. Where that party is a venue or
+    a contract, any payment to a non-person qualifies, because a routed trade pays a different hop than it
+    receives from. Where it is a person's wallet the match must be exact, which is what stops an unrelated
+    payment elsewhere in the same transaction from reading as a purchase. Addresses that only passed the
+    tokens on have no movements of their own to price.
     """
     actions: list[tuple[_Move, list[_QuoteMove]]] = []
     by_wallet: dict[str, list[_Move]] = defaultdict(list)
     for m in moves:
-        if m.delta and kinds.is_wallet(m.wallet):
+        if m.delta and kinds.is_wallet(m.wallet) and (m.token, m.wallet) not in paths.transparent:
             by_wallet[m.wallet].append(m)
     quotes_by_wallet: dict[str, list[_QuoteMove]] = defaultdict(list)
     for q in quotes:
@@ -735,9 +600,9 @@ def _match_actions(moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, 
             for i, m in enumerate(wallet_moves):
                 if _same_sign(q.delta, m.delta):
                     continue
-                if kinds.is_wallet(m.counterparty) and not _payment_reaches(q, m.counterparty, quotes):
+                if kinds.is_account(m.counterparty) and not _payment_reaches(q, m.counterparty, quotes):
                     continue
-                if not kinds.is_wallet(m.counterparty) and kinds.is_wallet(q.counterparty):
+                if not kinds.is_account(m.counterparty) and kinds.is_account(q.counterparty):
                     continue
                 gap = abs(q.log_index - m.log_index)
                 if best_gap is None or gap < best_gap:
@@ -752,170 +617,289 @@ def _match_actions(moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, 
     return actions
 
 
-def _resolve_wallet(
-    legs: list[_Leg],
-    own: tuple[str, int] | None,
-    own_source: str,
+def _venue_quote(
+    bundle: TxBundle,
+    paths: _Paths,
+    venue: str,
+    token: str,
+    share: int,
+    matched: int,
+    incoming: bool,
     hints: list[_Hint],
-    used: set[int],
+    quote_assets: frozenset[str],
     rates: Rates,
-    kinds: _Kinds | None = None,
-) -> None:
-    """Price a wallet's movement from its own payment, and from venue events only if it touched a venue.
+) -> tuple[str, int, bool] | None:
+    """What the venue was paid for, or paid out on, `matched` of the token, scaled to the holder's `share`.
 
-    A movement whose other side is another wallet is a hand-off or a direct trade. Its own payment, if
-    there is one, is evidence about it; a venue's event is not, however exactly the amounts happen to line
-    up, because those tokens were bought from the venue one movement earlier by someone else. Matched on
-    amount alone, a pool event priced the executor's hand-off to a router as a sale and the router's
-    receipt as a purchase, on top of the real purchase from the pool that sat one log before.
+    The venue's own event is the record when there is one: a fill of exactly the holder's share is that
+    holder's fill, a fill of exactly the amount that crossed the venue is shared by whoever received it, and
+    otherwise the venue's fills are pooled. A fill recorded under a market rather than the contract that
+    holds the tokens is matched by amount. Failing all of that, what moved in quote assets at the venue is
+    scaled to the tokens it moved, which is exact for a single trade and an estimate otherwise, and is
+    labelled as one.
     """
-    if kinds is not None and any(leg.counterparty and kinds.is_wallet(leg.counterparty) for leg in legs):
-        hints = []
-    event_quotes: dict[str, _Hint] = {}
-    for leg in legs:
-        open_hints = [
-            h
-            for h in hints
-            if h.log_index not in used and h.token == leg.token and _same_sign(h.token_delta, leg.token_delta)
-        ]
-        hint = _closest_hint(leg, [h for h in open_hints if h.user == leg.wallet])
-        if hint is None:
-            exact = [h for h in open_hints if abs(h.token_delta - leg.token_delta) <= AMOUNT_TOLERANCE_WEI]
-            hint = _closest_hint(leg, exact)
-        if hint is not None:
-            used.add(hint.log_index)
-            event_quotes[leg.token] = hint
-    own_asset, own_delta = own if own else (None, 0)
-    if len(legs) == 1:
-        leg = legs[0]
-        if own_delta and not _same_sign(own_delta, leg.token_delta):
-            leg.quote_asset, leg.quote_delta = own_asset, own_delta
-            leg.source = own_source
-            leg.basis_state = BASIS_OBSERVED
-            hint = event_quotes.get(leg.token)
-            if hint is None:
-                matched = _exact_hints(leg, hints, used)
-            elif abs(hint.token_delta - leg.token_delta) <= AMOUNT_TOLERANCE_WEI:
-                matched = [hint]
-            else:
-                matched = []
-            if matched:
-                for h in matched:
-                    used.add(h.log_index)
-                _prefer_venue_quote(leg, matched, own_asset, own_delta, rates)
-                return
-            if hint is None:
-                near = [
-                    h
-                    for h in hints
-                    if h.log_index not in used
-                    and h.token == leg.token
-                    and _same_sign(h.token_delta, leg.token_delta)
-                    and _within_fee_tolerance(leg.token_delta, h.token_delta)
-                ]
-                hint = _closest_hint(leg, near)
-                if hint is not None:
-                    used.add(hint.log_index)
-            if hint is not None:
-                leg.hint_price = _hint_price([hint], rates)
-                if leg.venue is None:
-                    leg.venue = hint.venue
-        elif leg.token in event_quotes:
-            _assign_hints(leg, [event_quotes[leg.token]], rates, BASIS_OBSERVED, single=True)
-        return
-    spent = 0
-    for leg in legs:
-        hint = event_quotes.get(leg.token)
-        if hint is not None:
-            _assign_hints(leg, [hint], rates, BASIS_OBSERVED, single=True)
-            if leg.resolved and own_asset is not None and leg.quote_asset == own_asset:
-                spent += leg.quote_delta or 0
-    remaining = [leg for leg in legs if not leg.resolved]
-    if own_delta and len(remaining) == 1:
-        residual = own_delta - spent
-        leg = remaining[0]
-        if residual and not _same_sign(residual, leg.token_delta):
-            leg.quote_asset, leg.quote_delta = own_asset, residual
-            leg.source = own_source
-            leg.basis_state = BASIS_OBSERVED
-        return
-    if (
-        not own_delta
-        and len(legs) == 2
-        and len(remaining) == 1
-        and not _same_sign(legs[0].token_delta, legs[1].token_delta)
-    ):
-        done = next(leg for leg in legs if leg.resolved)
-        leg = remaining[0]
-        if done.quote_delta and not _same_sign(-done.quote_delta, leg.token_delta):
-            leg.quote_asset = done.quote_asset
-            leg.quote_delta = -done.quote_delta
-            leg.source = SOURCE_VENUE_EVENT
-            leg.basis_state = BASIS_ESTIMATED
-            leg.hint_price = None
+    side = [h for h in hints if h.token == token and (h.token_delta > 0) == incoming]
+    same = [h for h in side if h.venue == venue]
+    for pool, tokens in ((same, share), (same, matched)):
+        exact = [h for h in pool if abs(abs(h.token_delta) - tokens) <= AMOUNT_TOLERANCE_WEI]
+        if exact:
+            h = min(exact, key=lambda h: h.log_index)
+            quote = _to_native_units(h.quote_asset, h.quote_delta, rates)
+            scaled = abs(quote) * share // tokens
+            return h.quote_asset, (scaled if quote > 0 else -scaled), True
+    if same:
+        asset, total_quote = _sum_hints(same, rates)
+        total_tokens = sum(abs(h.token_delta) for h in same)
+        if total_quote and total_tokens:
+            scaled = abs(total_quote) * share // total_tokens
+            return asset, (scaled if total_quote > 0 else -scaled), _within_fee_tolerance(matched, total_tokens)
+    elsewhere = [h for h in side if abs(abs(h.token_delta) - matched) <= AMOUNT_TOLERANCE_WEI]
+    if elsewhere:
+        h = min(elsewhere, key=lambda h: h.log_index)
+        quote = _to_native_units(h.quote_asset, h.quote_delta, rates)
+        scaled = abs(quote) * share // matched
+        return h.quote_asset, (scaled if quote > 0 else -scaled), True
+    moved: dict[str, int] = defaultdict(int)
+    for leg in bundle.transfers:
+        if leg.token not in quote_assets or leg.amount <= 0:
+            continue
+        if leg.to_addr == venue:
+            moved[leg.token] += leg.amount
+        elif leg.from_addr == venue:
+            moved[leg.token] -= leg.amount
+    moved = {asset: amount for asset, amount in moved.items() if amount}
+    if not moved:
+        return None
+    asset = max(moved.items(), key=lambda kv: (abs(kv[1]), kv[0]))[0]
+    received = _to_native_units(asset, moved[asset], rates)
+    if (received > 0) != incoming:
+        return None
+    venue_tokens = sum(a for _, a in (paths.outbound if incoming else paths.inbound).get((token, venue), []))
+    if venue_tokens <= 0:
+        return None
+    scaled = abs(received) * share // venue_tokens
+    return asset, (-scaled if incoming else scaled), False
 
 
-def _resolve_across_wallets(
-    legs: list[_Leg], hints: list[_Hint], used: set[int], rates: Rates, kinds: _Kinds | None = None
-) -> None:
-    """Spread what the venues reported over the movements that are still unpriced and touched a venue.
+def _account_payment(
+    paths: _Paths,
+    quotes_by_wallet: dict[str, list[_QuoteMove]],
+    token: str,
+    via: str,
+    party: str,
+    share: int,
+    incoming: bool,
+    rates: Rates,
+) -> tuple[str, int, bool] | None:
+    """What the transparent address paid the wallet at the far end, or was paid by it, for these tokens."""
+    paid = [
+        q for q in quotes_by_wallet.get(via, []) if q.counterparty == party and q.delta and (q.delta < 0) == incoming
+    ]
+    if not paid:
+        return None
+    asset, total, _ = _quote_total(paid, rates)
+    between = paths.between(token, via, party, incoming)
+    if between <= 0 or total == 0:
+        return None
+    scaled = abs(total) * share // between
+    return asset, (scaled if total > 0 else -scaled), True
 
-    A movement between two wallets touched no venue, so no venue's quote is evidence about it. Given one
-    anyway, an executor's hand-off to a router became a sale at the pool's price and the router's receipt a
-    purchase at the same price, while the real purchase from the pool sat one log earlier. The executor
-    booked a gain it never made, the cost never reached the wallet the tokens were for, and on moncock that
-    destroyed 56.5 million MON of basis across 6,275 hand-offs. A hand-off carries its cost by inheritance.
+
+@dataclass
+class _End:
+    party: str
+    amount: int
+    via: str | None
+    quote: tuple[str, int, bool] | None
+    priced_venue: bool
+
+
+@dataclass
+class _Share:
+    """One holder's pro-rata slice of a venue's fills, kept so the slices can be made to sum exactly."""
+
+    leg: _Leg
+    venue: str
+    tokens: int
+    quote: int
+    asset: str
+
+
+def _settle_rounding(shares: list[_Share], hints: list[_Hint], rates: Rates) -> None:
+    """Slices of one venue's fills sum to the fills' quote to the wei, whatever rounding did to each.
+
+    Each holder's slice is floored on its own, so three equal slices of a quote of 10**18 + 1 came to a
+    wei short of it. When the slices account for every token the venue filled, the largest slice takes the
+    difference.
     """
-    groups: dict[tuple[str, bool], list[_Leg]] = defaultdict(list)
-    for leg in legs:
-        if leg.resolved:
+    groups: dict[tuple[str, str, bool], list[_Share]] = defaultdict(list)
+    for share in shares:
+        groups[(share.venue, share.leg.token, share.leg.token_delta > 0)].append(share)
+    for (venue, token, incoming), members in groups.items():
+        same = [h for h in hints if h.venue == venue and h.token == token and (h.token_delta > 0) == incoming]
+        if not same or len({s.asset for s in members}) != 1:
             continue
-        if kinds is not None and leg.counterparty and kinds.is_wallet(leg.counterparty):
+        asset, total_quote = _sum_hints(same, rates)
+        if asset != members[0].asset or sum(s.tokens for s in members) != sum(abs(h.token_delta) for h in same):
             continue
-        groups[(leg.token, leg.token_delta > 0)].append(leg)
-    for (token, incoming), members in sorted(groups.items()):
-        open_hints = [
-            h for h in hints if h.log_index not in used and h.token == token and (h.token_delta > 0) == incoming
-        ]
-        if not open_hints:
+        gap = total_quote - sum(s.quote for s in members)
+        if gap == 0:
             continue
-        picked = _same_family(open_hints)
-        for h in picked:
-            used.add(h.log_index)
-        members.sort(key=lambda leg: leg.wallet)
-        if len(members) == 1:
-            leg = members[0]
-            hint_tokens = sum(abs(h.token_delta) for h in picked)
-            covered = (
-                _within_fee_tolerance(abs(leg.token_delta), hint_tokens)
-                and abs(leg.token_delta) <= hint_tokens + AMOUNT_TOLERANCE_WEI
-            )
-            if covered:
-                _assign_hints(leg, picked, rates, BASIS_OBSERVED, single=len(picked) == 1)
-            else:
-                _assign_scaled(leg, picked, rates, single=len(picked) == 1)
+        largest = max(members, key=lambda s: (s.tokens, s.leg.wallet))
+        if largest.leg.quote_asset != asset or largest.leg.quote_delta is None:
             continue
-        asset, total_quote = _sum_hints(picked, rates)
-        total_tokens = sum(abs(leg.token_delta) for leg in members)
-        if total_quote == 0 or total_tokens == 0 or _same_sign(total_quote, members[0].token_delta):
+        largest.leg.quote_delta += gap
+        largest.quote += gap
+
+
+def _resolve_ends(
+    wallet: str,
+    token: str,
+    incoming: bool,
+    ends: list[tuple[str, int, str | None]],
+    bundle: TxBundle,
+    paths: _Paths,
+    hints: list[_Hint],
+    quotes_by_wallet: dict[str, list[_QuoteMove]],
+    kinds: _Kinds,
+    quote_assets: frozenset[str],
+    rates: Rates,
+) -> list[_End]:
+    venues = {h.venue for h in hints}
+    out: list[_End] = []
+    for party, share, via in ends:
+        kind = kinds.of(party)
+        quote = None
+        priced_venue = False
+        if kind in PRICE_VENUE_KINDS or party in venues:
+            matched = max(paths.between(token, via or wallet, party, incoming), share)
+            quote = _venue_quote(bundle, paths, party, token, share, matched, incoming, hints, quote_assets, rates)
+            priced_venue = quote is not None
+        elif via is not None and kinds.is_wallet(party):
+            quote = _account_payment(paths, quotes_by_wallet, token, via, party, share, incoming, rates)
+        out.append(_End(party, share, via, quote, priced_venue))
+    return out
+
+
+def _price_from_ends(leg: _Leg, ends: list[_End], kinds: _Kinds, rates: Rates, shares: list[_Share]) -> bool:
+    """Price a movement by what the venues and wallets at the far end were paid. True when it could be.
+
+    Tokens that trace to the zero address cost nothing and are counted at nothing. A portion that traces
+    somewhere unpriced is carried at the price of the rest, and the result is an estimate.
+    """
+    parts: list[tuple[str, int]] = []
+    covered = 0
+    free = 0
+    exact = True
+    venues: dict[str, int] = defaultdict(int)
+    for end in ends:
+        if kinds.of(end.party) == KIND_ZERO:
+            free += end.amount
             continue
-        price = _hint_price(picked, rates)
-        allocated = 0
-        for i, leg in enumerate(members):
-            if i == len(members) - 1:
-                share = total_quote - allocated
-            else:
-                share = total_quote * abs(leg.token_delta) // total_tokens
-            allocated += share
-            if share == 0:
-                continue
-            leg.quote_asset = asset
-            leg.quote_delta = share
-            leg.source = SOURCE_VENUE_EVENT
-            leg.basis_state = BASIS_ESTIMATED
-            leg.hint_price = price
-            if leg.venue is None and len(picked) == 1:
-                leg.venue = picked[0].venue
+        if end.quote is None:
+            continue
+        asset, delta, is_exact = end.quote
+        parts.append((asset, delta))
+        covered += end.amount
+        exact = exact and is_exact
+        if end.priced_venue:
+            venues[end.party] += end.amount
+            shares.append(_Share(leg, end.party, end.amount, delta, asset))
+    if covered == 0:
+        return False
+    asset, delta = _combine(parts, rates)
+    if delta == 0 or _same_sign(delta, leg.token_delta):
+        return False
+    missing = abs(leg.token_delta) - covered - free
+    if missing > 0:
+        scaled = abs(delta) * (covered + missing) // covered
+        delta = scaled if delta > 0 else -scaled
+        exact = False
+    leg.quote_asset = asset
+    leg.quote_delta = delta
+    leg.source = SOURCE_VENUE_EVENT
+    leg.basis_state = BASIS_OBSERVED if exact else BASIS_ESTIMATED
+    mon, _ = _values(asset, delta, rates)
+    leg.hint_price = _price(mon, leg.token_delta)
+    if venues:
+        leg.venue = max(venues.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return True
+
+
+def _dominant(ends: list[_End], kinds: _Kinds) -> tuple[str | None, str | None]:
+    """The party most of the tokens trace to, and the price venue among them if there is one."""
+    if not ends:
+        return None, None
+    party = max(ends, key=lambda e: (e.amount, e.party)).party
+    venues = [e for e in ends if kinds.of(e.party) in VENUE_KINDS]
+    priced = [e for e in venues if kinds.of(e.party) in PRICE_VENUE_KINDS] or venues
+    venue = max(priced, key=lambda e: (e.amount, e.party)).party if priced else None
+    return party, venue
+
+
+def _classify(leg: _Leg, bundle: TxBundle, kinds: _Kinds, origin: str | None, reference_price: PriceFn | None) -> None:
+    incoming = leg.token_delta > 0
+    cp = leg.counterparty
+    ck = kinds.of(cp) if cp else ""
+    leg.quote_asset = None
+    leg.quote_delta = None
+    leg.source = SOURCE_TRANSFER_NET
+    if cp is None or ck == KIND_ZERO:
+        if incoming:
+            leg.kind = KIND_MINT if origin == leg.wallet else KIND_AIRDROP
+            leg.basis_state = BASIS_UNRESOLVED
+        else:
+            leg.kind = KIND_BURN
+            leg.basis_state = BASIS_OBSERVED
+        return
+    if ck not in WALLET_KINDS and _shares_moved(bundle, leg.wallet, cp, incoming):
+        if ck == KIND_VENUE_POOL:
+            leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
+        else:
+            leg.kind = KIND_VAULT_WITHDRAW if incoming else KIND_VAULT_DEPOSIT
+        leg.basis_state = BASIS_OBSERVED
+        return
+    if ck == KIND_VENUE_CUSTODY:
+        leg.kind = KIND_CUSTODY_WITHDRAW if incoming else KIND_CUSTODY_DEPOSIT
+        leg.basis_state = BASIS_OBSERVED
+        return
+    if leg.venue is not None or ck in VENUE_KINDS:
+        leg.kind = KIND_BUY if incoming else KIND_SELL
+        _price_by_reference(leg, reference_price)
+        return
+    leg.kind = KIND_TRANSFER_IN if incoming else KIND_TRANSFER_OUT
+    leg.basis_state = BASIS_UNRESOLVED if incoming else BASIS_OBSERVED
+
+
+def _split_legs(move: _Move, ends: list[_End]) -> list[tuple[_Leg, list[_End]]]:
+    """One movement becomes one leg per distinct destination.
+
+    A hand-off through a distributor to several wallets names each of them, and a movement that was partly
+    sold and partly given away books the two apart. Everything that traces to a venue, or to a wallet that
+    was paid through the path, is one trade leg.
+    """
+    incoming = move.delta > 0
+    traded = [e for e in ends if e.quote is not None]
+    groups: list[list[_End]] = [traded] if traded else []
+    by_party: dict[str, list[_End]] = {}
+    for e in ends:
+        if e.quote is None:
+            by_party.setdefault(e.party, []).append(e)
+    groups.extend(by_party.values())
+    if len(groups) <= 1:
+        return [(_Leg(move.wallet, move.token, move.delta, move.log_index, counterparty=move.counterparty), ends)]
+    total = sum(e.amount for e in ends)
+    whole = abs(move.delta)
+    out: list[tuple[_Leg, list[_End]]] = []
+    allocated = 0
+    for i, group in enumerate(groups):
+        amount = whole - allocated if i == len(groups) - 1 else whole * sum(e.amount for e in group) // total
+        allocated += amount
+        if amount <= 0:
+            continue
+        delta = amount if incoming else -amount
+        out.append((_Leg(move.wallet, move.token, delta, move.log_index, counterparty=move.counterparty), group))
+    return out
 
 
 def _swap_pairs(legs_by_wallet: dict[str, list[_Leg]], reference_price: PriceFn | None) -> None:
@@ -984,42 +968,6 @@ def _flow(bundle: TxBundle, leg: _Leg, sub_index: int, origin: str | None, rates
     )
 
 
-def _sold_by(moves: list[_Move]) -> dict[str, dict[str, int]]:
-    """How much of each token each wallet actually sent, which is not the same as its net position."""
-    out: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for move in moves:
-        if move.delta < 0:
-            out[move.token][move.wallet] += -move.delta
-    return out
-
-
-def _seller_hints(
-    moves: list[_Move],
-    quote_raw: dict[str, dict[str, int]],
-    tx_tokens: set[str],
-    kinds: _Kinds,
-    rates: Rates,
-) -> list[_Hint]:
-    """What a wallet with no venue event of its own implies about the price, from what it was paid.
-
-    The quantity has to be what the wallet sent, not what it was left holding. A relayer that
-    forwards everything it receives nets to dust, and pairing that dust with the whole payment it
-    collected implies a price twelve orders of magnitude too high, which then prices the movement
-    that really passed through it.
-    """
-    sold = _sold_by(moves)
-    out: list[_Hint] = []
-    for token in sorted(tx_tokens):
-        for addr, quantity in sorted(sold.get(token, {}).items()):
-            if quantity <= 0 or not kinds.is_wallet(addr):
-                continue
-            own = _own_quote(quote_raw.get(addr, {}), rates)
-            if own is None or own[1] <= 0:
-                continue
-            out.append(_Hint(-(len(out) + 1), addr, token, quantity, -own[1], own[0], None))
-    return out
-
-
 def net_transaction(
     bundle: TxBundle,
     registry: dict[str, TokenReg],
@@ -1030,54 +978,82 @@ def net_transaction(
     markets: dict[str, tuple[str, str]] | None = None,
     pools: dict[str, tuple[str, str, bool]] | None = None,
 ) -> list[Flow]:
+    """Net one transaction into flows: one per movement of a holder, per place it really went.
+
+    A holder's own payment prices its movement, fees and all. Failing that, the movement is followed
+    through every contract that only passed it on, and what the venues and wallets at the far end were paid
+    is the price. Failing that too, it is a transfer, a mint, a burn or a deposit, and never a number that
+    nothing on chain backs.
+    """
     rates = rates or Rates()
     quote_assets = frozenset(a.lower() for a in quote_assets)
     tokens = {t.lower() for t, reg in registry.items() if reg.active and t.lower() not in quote_assets}
     kinds = _Kinds(kind_of)
-    token_deltas, first_log, quote_raw, quote_sources = _collect(bundle, tokens, quote_assets)
     origin = (bundle.userop_sender or (bundle.meta.from_addr if bundle.meta else None) or "").lower() or None
 
     moves, quote_moves = _movements(bundle, tokens, quote_assets)
-    extra_moves, extra_quotes = _venue_movements(bundle, tokens, pools, kinds)
+    extra_moves, extra_quotes, extra_hints = _venue_movements(bundle, tokens, pools, kinds)
     moves += extra_moves
     quote_moves += extra_quotes
-    actions = _match_actions(moves, quote_moves, kinds, rates)
-    legs_by_wallet: dict[str, list[_Leg]] = defaultdict(list)
-    own_by_leg: dict[int, tuple[tuple[str, int] | None, str]] = {}
-    for move, assigned in actions:
-        leg = _Leg(move.wallet, move.token, move.delta, move.log_index, counterparty=move.counterparty or None)
-        if assigned:
-            asset, delta, source = _quote_total(assigned, rates)
-            own_by_leg[id(leg)] = ((asset, delta), source)
-        else:
-            own_by_leg[id(leg)] = (None, SOURCE_TRANSFER_NET)
-        legs_by_wallet[move.wallet].append(leg)
-    if not legs_by_wallet:
+    paths = _Paths(moves, kinds)
+    actions = _match_actions(moves, quote_moves, kinds, paths, rates)
+    if not actions:
         return []
 
-    tx_tokens = {leg.token for legs in legs_by_wallet.values() for leg in legs}
-    hints = _hints(bundle, tx_tokens, registry, quote_assets, kinds, markets)
-    hints += _seller_hints(moves, quote_raw, tx_tokens, kinds, rates)
-    used: set[int] = set()
-    all_legs = [leg for legs in legs_by_wallet.values() for leg in legs]
-    for leg in all_legs:
-        _counterparty_and_venue(bundle, leg, kinds)
+    tx_tokens = {move.token for move, _ in actions}
+    hints = _hints(bundle, tx_tokens, registry, quote_assets, kinds, markets) + extra_hints
+    quotes_by_wallet: dict[str, list[_QuoteMove]] = defaultdict(list)
+    for q in quote_moves:
+        if q.delta:
+            quotes_by_wallet[q.wallet].append(q)
 
-    for wallet in sorted(legs_by_wallet):
-        for leg in legs_by_wallet[wallet]:
-            own, own_source = own_by_leg[id(leg)]
-            _resolve_wallet([leg], own, own_source, hints, used, rates, kinds)
-
-    _resolve_across_wallets(all_legs, hints, used, rates, kinds)
-    _swap_pairs(legs_by_wallet, reference_price)
-
-    for leg in all_legs:
-        if leg.kind is not None:
-            continue
-        if leg.resolved:
-            leg.kind = KIND_BUY if leg.token_delta > 0 else KIND_SELL
+    legs_by_wallet: dict[str, list[_Leg]] = defaultdict(list)
+    all_legs: list[_Leg] = []
+    shares: list[_Share] = []
+    for move, assigned in actions:
+        incoming = move.delta > 0
+        raw_ends = paths.far_ends(move.token, move.counterparty, abs(move.delta), incoming)
+        ends = _resolve_ends(
+            move.wallet,
+            move.token,
+            incoming,
+            raw_ends,
+            bundle,
+            paths,
+            hints,
+            quotes_by_wallet,
+            kinds,
+            quote_assets,
+            rates,
+        )
+        own = _quote_total(assigned, rates) if assigned else None
+        if own is not None and _same_sign(own[1], move.delta):
+            own = None
+        if own is not None:
+            pieces = [(_Leg(move.wallet, move.token, move.delta, move.log_index, counterparty=move.counterparty), ends)]
         else:
-            _classify_unpriced(leg, bundle, kinds, origin, reference_price)
+            pieces = _split_legs(move, ends)
+        for leg, leg_ends in pieces:
+            party, venue = _dominant(leg_ends, kinds)
+            leg.venue = venue
+            if own is not None:
+                leg.quote_asset, leg.quote_delta, leg.source = own
+                leg.basis_state = BASIS_OBSERVED
+                leg.kind = KIND_BUY if incoming else KIND_SELL
+                leg.counterparty = venue or move.counterparty
+            elif _price_from_ends(leg, leg_ends, kinds, rates, shares):
+                leg.kind = KIND_BUY if incoming else KIND_SELL
+                leg.counterparty = leg.venue or party or move.counterparty
+            else:
+                leg.counterparty = party or move.counterparty
+            legs_by_wallet[move.wallet].append(leg)
+            all_legs.append(leg)
+
+    _settle_rounding(shares, hints, rates)
+    _swap_pairs(legs_by_wallet, reference_price)
+    for leg in all_legs:
+        if leg.kind is None:
+            _classify(leg, bundle, kinds, origin, reference_price)
 
     sub_index = _sub_indices(all_legs)
     all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))

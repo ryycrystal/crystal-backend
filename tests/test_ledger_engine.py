@@ -340,7 +340,6 @@ def fixture_engine(db_cursor, metas=None, kinds=None):
         trace_store=FakeTrace(),
         kinds=kinds or fixture_kinds(),
         rates_fn=fixed_rates,
-        head_fn=lambda: SELL_BLOCK + 1_000_000,
     )
 
 
@@ -423,7 +422,6 @@ def test_engine_folds_curve_buy_and_settler_sell_into_one_closed_position(seeded
         trace_store=traces,
         kinds=kinds,
         rates_fn=fixed_rates,
-        head_fn=lambda: SELL_BLOCK + 1_000_000,
     )
 
     with db_cursor() as cur:
@@ -532,7 +530,6 @@ def test_reprocessing_a_block_is_idempotent(seeded):
         trace_store=FakeTrace(),
         kinds=fixture_kinds(),
         rates_fn=fixed_rates,
-        head_fn=lambda: SELL_BLOCK + 1_000_000,
     )
     with db_cursor() as cur:
         first = engine.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, buy_block_logs(), cur)
@@ -602,7 +599,6 @@ def test_token_created_in_the_same_block_is_registered_before_its_first_trade(se
         trace_store=FakeTrace(),
         kinds=fixture_kinds(),
         rates_fn=fixed_rates,
-        head_fn=lambda: blk + 1_000_000,
     )
     with db_cursor() as cur:
         inserted = engine.process_block(blk, 1_757_000_000 + blk, logs, cur)
@@ -625,7 +621,12 @@ def test_token_created_in_the_same_block_is_registered_before_its_first_trade(se
 
 
 @pytestmark_db
-def test_trace_is_requested_only_inside_the_archive_window(seeded):
+def test_a_trace_is_requested_however_old_the_block_is(seeded):
+    """The archive serves call traces all the way back; only state reads at old blocks fail.
+
+    So a movement that nothing visible paid for gets its trace whether the block is ten behind the head or
+    a million, and history is priced the same way live blocks are.
+    """
     from core.storage import db_cursor
 
     class UnresolvedMeta(FakeTxMeta):
@@ -655,7 +656,6 @@ def test_trace_is_requested_only_inside_the_archive_window(seeded):
         trace_store=traces_near,
         kinds=fixture_kinds(),
         rates_fn=fixed_rates,
-        head_fn=lambda: BUY_BLOCK + 10,
     )
     traces_far = FakeTrace()
     far = LedgerEngine(
@@ -665,7 +665,6 @@ def test_trace_is_requested_only_inside_the_archive_window(seeded):
         trace_store=traces_far,
         kinds=fixture_kinds(),
         rates_fn=fixed_rates,
-        head_fn=lambda: BUY_BLOCK + 1_000_000,
     )
     with db_cursor() as cur:
         near.process_block(BUY_BLOCK, 1_757_000_000 + BUY_BLOCK, logs, cur)
@@ -675,7 +674,7 @@ def test_trace_is_requested_only_inside_the_archive_window(seeded):
         far.flush(cur)
 
     assert traces_near.requested == [BUY_TX]
-    assert traces_far.requested == []
+    assert traces_far.requested == [BUY_TX]
 
 
 @pytestmark_db
@@ -691,7 +690,6 @@ def test_discovering_a_venue_purges_the_rows_it_earned_as_a_wallet(seeded):
         trace_store=FakeTrace(),
         kinds=kinds,
         rates_fn=fixed_rates,
-        head_fn=lambda: SELL_BLOCK + 1_000_000,
     )
 
     with db_cursor() as cur:
@@ -724,7 +722,6 @@ def test_pool_shaped_contracts_of_the_transaction_are_netted_as_venues(seeded):
         trace_store=FakeTrace(),
         kinds=kinds,
         rates_fn=fixed_rates,
-        head_fn=lambda: SELL_BLOCK + 1_000_000,
     )
     with db_cursor() as cur:
         assert engine.process_block(SELL_BLOCK, 1_757_000_000 + SELL_BLOCK, sell_block_logs(), cur) == 1

@@ -163,7 +163,7 @@ def test_curve_sell_via_settler_amount_match():
     assert f.quote_delta == native
     assert f.basis_state == BASIS_OBSERVED
     assert f.source == SOURCE_VENUE_EVENT
-    assert f.counterparty == SETTLER
+    assert f.counterparty == CORE
     assert f.venue == CORE
     assert f.log_index == 3
 
@@ -231,7 +231,7 @@ def test_graduated_fill_buy_through_router_marks_venue_and_price_from_the_fill()
     assert f.venue in (CORE, MARKET)
 
 
-def test_routed_buy_via_router_names_router():
+def test_routed_buy_via_router_names_the_venue_behind_it():
     tokens, native = 500 * E18, 3 * E18
     b = bundle(
         [tf(2, TOKEN, CORE, ROUTER, tokens), tf(3, TOKEN, ROUTER, WALLET, tokens)],
@@ -245,7 +245,7 @@ def test_routed_buy_via_router_names_router():
     assert f.quote_delta == -native
     assert f.basis_state == BASIS_OBSERVED
     assert f.source == SOURCE_TRANSFER_NET
-    assert f.counterparty == ROUTER
+    assert f.counterparty == CORE
     assert f.venue == CORE
 
 
@@ -312,7 +312,10 @@ def test_v4_native_pool_uses_inverted_sign_convention():
     assert f.venue == POOL_MANAGER
 
 
-def test_multi_wallet_batch_is_pro_rata_estimated():
+def test_multi_wallet_batch_is_pro_rata_at_the_venue_price():
+    """One wallet pays for the batch and is priced by its own payment; the others got their tokens through
+    the batcher from the same fill and are priced by their share of it, which is exact, because the fill
+    covered every token the batcher handed on."""
     total, native = 1_000 * E18, 100 * E18
     b = bundle(
         [
@@ -333,9 +336,9 @@ def test_multi_wallet_batch_is_pro_rata_estimated():
     for w, share in ((WALLET2, 300), (WALLET3, 200)):
         f = by_wallet[w]
         assert f.kind == KIND_BUY
-        assert f.basis_state == BASIS_ESTIMATED
+        assert f.basis_state == BASIS_OBSERVED
         assert f.source == SOURCE_VENUE_EVENT
-        assert f.quote_delta == -(native * share // 500)
+        assert f.quote_delta == -(native * share // 1000)
         assert f.price_native == Decimal(native) / Decimal(total)
         assert f.venue == CORE
     assert [f.sub_index for f in flows] == [0, 0, 0]
@@ -355,7 +358,7 @@ def test_pro_rata_remainder_sums_exactly():
         meta(BUNDLER, BATCHER, native),
     )
     flows = run(b)
-    assert all(f.basis_state == BASIS_ESTIMATED for f in flows)
+    assert all(f.basis_state == BASIS_OBSERVED for f in flows)
     assert sum(f.quote_delta for f in flows) == -native
 
 
@@ -781,7 +784,13 @@ def test_pool_event_orientation_needs_a_matching_transfer_at_the_venue():
     assert f.venue == POOL
 
 
-def test_partially_covered_single_leg_is_scaled_at_the_venue_price():
+def test_a_movement_partly_from_a_venue_and_partly_from_a_wallet_is_two_legs():
+    """The router bought 600 from the pool and was handed 200 by another wallet, then passed all 800 on.
+
+    Scaling the pool's price over all 800 invented a cost for the 200, which were a gift as far as anything
+    on chain says. The two portions are booked apart: 600 bought at what the pool was paid, and 200
+    received from the wallet that sent them, carrying whatever cost that wallet releases.
+    """
     from_pool, otc, wmon = 600 * E18, 200 * E18, 6 * E18
     swap = VenueEvent(
         "V3SWAP", 5, {"pool": POOL, "sender": ROUTER, "user": ROUTER, "amount0": -from_pool, "amount1": wmon}, POOL
@@ -796,15 +805,16 @@ def test_partially_covered_single_leg_is_scaled_at_the_venue_price():
         [swap],
         meta(BUNDLER, ROUTER),
     )
-    f = only(run(b))
-    assert f.kind == KIND_BUY
-    assert f.token_delta == from_pool + otc
-    assert f.quote_asset == WMON
-    assert f.quote_delta == -8 * E18
-    assert f.basis_state == BASIS_ESTIMATED
-    assert f.source == SOURCE_VENUE_EVENT
-    assert f.price_native == Decimal(wmon) / Decimal(from_pool)
-    assert f.venue == POOL
+    flows = run(b)
+    mine = sorted((f for f in flows if f.wallet == WALLET), key=lambda f: f.sub_index)
+    assert [f.token_delta for f in mine] == [from_pool, otc]
+    bought, given = mine
+    assert bought.kind == KIND_BUY and bought.quote_asset == WMON and bought.quote_delta == -wmon
+    assert bought.basis_state == BASIS_OBSERVED and bought.venue == POOL and bought.counterparty == POOL
+    assert bought.price_native == Decimal(wmon) / Decimal(from_pool)
+    assert given.kind == KIND_TRANSFER_IN and given.quote_delta is None and given.counterparty == WALLET2
+    theirs = only(flows, WALLET2)
+    assert theirs.kind == KIND_TRANSFER_OUT and theirs.counterparty == WALLET
 
 
 def test_routed_buy_sourced_from_two_pools_and_an_otc_seller_sums_to_an_observed_cost():
@@ -1091,80 +1101,210 @@ SMART_ACCOUNT = "0x" + "b9" * 20
 CONVERTER = "0x" + "1a" * 20
 
 
-def test_a_venue_hint_prices_the_movement_that_touched_the_venue_not_the_hand_offs_after_it():
-    """An executor buys from a pool and hands the tokens to a router, which hands them to the wallet.
+def flows_by_wallet(flows) -> dict[tuple[str, int], object]:
+    return {(f.wallet, f.log_index): f for f in flows}
 
-    The pool's event says what the executor paid. It says nothing about the two hand-offs downstream,
-    which touched no venue: they carry the executor's cost across by inheritance. Assigned to them anyway,
-    the same quote became sale proceeds on the executor's hand-off and purchase cost on both receipts, so
-    the executor booked a gain it never made and 56.5 million MON of basis was destroyed on moncock alone,
-    across 6,275 such hand-offs.
+
+class with_kinds:
+    def __init__(self, extra: dict[str, str]):
+        self.extra = extra
+
+    def __enter__(self):
+        self.saved = {addr: KINDS.get(addr) for addr in self.extra}
+        KINDS.update(self.extra)
+
+    def __exit__(self, *_):
+        for addr, kind in self.saved.items():
+            if kind is None:
+                KINDS.pop(addr, None)
+            else:
+                KINDS[addr] = kind
+
+
+SOLVER = "0x" + "f7" * 20
+SELLER1 = "0x" + "a5" * 20
+SELLER2 = "0x" + "2c" * 20
+POOL2 = "0x" + "02" * 20
+CONDUIT_KINDS = {
+    EXECUTOR: "contract_unknown",
+    CONVERTER: "contract_unknown",
+    SMART_ACCOUNT: "eoa_7702",
+    POOL2: "venue_pool",
+}
+SOLVER_RATES = Rates(mon_usd=Decimal("0.024539"), usdc_per_mon=Decimal("0.024539"))
+
+
+def solver_filled_buy():
+    """The moncock wallet's third purchase, as it sits on chain.
+
+    A solver pays a router in USDC, the router pays an executor, the executor converts part of it to WMON,
+    buys from two pools and two sellers, and hands everything to the router, which hands it to the wallet.
+    The wallet itself pays nothing in this transaction.
     """
-    KINDS[EXECUTOR] = "contract_unknown"
-    KINDS[SMART_ACCOUNT] = "wallet_4337"
-    tokens, paid = 8_147_672 * E18, 801_707_716
+    pool_a, pool_b = 6_181_531 * E18, 405_774 * E18
+    otc_a, otc_b = 486_546 * E18, 1_073_819 * E18
+    tokens = pool_a + pool_b + otc_a + otc_b
+    wmon_a, wmon_b = 121_135 * E18, 7_966 * E18
+    usdc_a, usdc_b = 218_946_037, 582_761_679
+    price, converted = 3_986_280_921, 3_183_771_496
+    transfers = [
+        tf(47, USDC, SOLVER, ROUTER, price),
+        tf(50, USDC, ROUTER, EXECUTOR, price),
+        tf(62, USDC, EXECUTOR, CONVERTER, converted),
+        tf(67, WMON, CONVERTER, EXECUTOR, wmon_a + wmon_b),
+        tf(82, TOKEN, SELLER1, EXECUTOR, otc_a),
+        tf(85, USDC, EXECUTOR, SELLER1, usdc_a),
+        tf(87, TOKEN, SELLER2, EXECUTOR, otc_b),
+        tf(90, USDC, EXECUTOR, SELLER2, usdc_b),
+        tf(93, TOKEN, POOL, EXECUTOR, pool_a),
+        tf(94, WMON, EXECUTOR, POOL, wmon_a),
+        tf(97, TOKEN, POOL2, EXECUTOR, pool_b),
+        tf(98, WMON, EXECUTOR, POOL2, wmon_b),
+        tf(103, TOKEN, EXECUTOR, ROUTER, tokens),
+        tf(108, TOKEN, ROUTER, SMART_ACCOUNT, tokens),
+    ]
+    events = [v3swap(95, POOL, EXECUTOR, -pool_a, wmon_a), v3swap(99, POOL2, EXECUTOR, -pool_b, wmon_b)]
+    return bundle(transfers, events, meta(SOLVER, CONVERTER)), tokens, wmon_a + wmon_b, usdc_a + usdc_b
+
+
+def test_a_solver_paid_buy_costs_what_the_venues_received():
+    """Nothing left the wallet, so the cost is what the pools and the sellers were paid for its tokens.
+
+    Every contract in between passed the tokens straight through and gets no row. The venue events and
+    the executor's payments to the two sellers are the only record of what the tokens cost, and they are
+    summed at the rate table's USDC rate, six decimals and all.
+    """
+    b, tokens, wmon, usdc = solver_filled_buy()
+    with with_kinds({**CONDUIT_KINDS, ROUTER: "contract_unknown"}):
+        flows = run(b, rates=SOLVER_RATES)
+    by = flows_by_wallet(flows)
+    assert {f.wallet for f in flows} == {SMART_ACCOUNT, SELLER1, SELLER2}, sorted(f.wallet[:8] for f in flows)
+    got = by[(SMART_ACCOUNT, 108)]
+    assert got.kind == KIND_BUY and got.token_delta == tokens
+    assert got.basis_state == BASIS_OBSERVED
+    expected_mon = Decimal(wmon) / E18 + Decimal(usdc) / Decimal(10**6) / SOLVER_RATES.usdc_per_mon
+    assert abs(got.mon_value - expected_mon) <= Decimal("0.001"), (got.mon_value, expected_mon)
+    assert got.venue == POOL and got.counterparty == POOL
+    for seller, log_index in ((SELLER1, 82), (SELLER2, 87)):
+        sale = by[(seller, log_index)]
+        assert sale.kind == KIND_SELL and sale.quote_asset == USDC and sale.basis_state == BASIS_OBSERVED
+
+
+def test_a_sale_whose_proceeds_went_elsewhere_books_what_the_venues_paid():
+    """The wallet hands its tokens to its router, the executor sells them to two pools, and the USDC that
+    comes back is sent to a fourth address. At the wallet's own boundary that is a gift; through the
+    contracts that only passed the tokens on, it is a sale for what the pools paid."""
+    sold_a, sold_b = 23_790_186 * E18, 1_928_934 * E18
+    tokens = sold_a + sold_b
+    wmon_a, wmon_b = 261_831 * E18, 20_322 * E18
+    usdc = 7_115_130_693
+    third = "0x" + "4c" * 20
     b = bundle(
         [
-            tf(62, USDC, EXECUTOR, POOL, paid),
-            tf(93, TOKEN, POOL, EXECUTOR, tokens),
-            tf(103, TOKEN, EXECUTOR, ROUTER, tokens),
-            tf(108, TOKEN, ROUTER, SMART_ACCOUNT, tokens),
+            tf(134, TOKEN, SMART_ACCOUNT, ROUTER, tokens),
+            tf(139, TOKEN, ROUTER, EXECUTOR, tokens),
+            tf(140, WMON, POOL, EXECUTOR, wmon_a),
+            tf(141, TOKEN, EXECUTOR, POOL, sold_a),
+            tf(143, WMON, POOL2, EXECUTOR, wmon_b),
+            tf(144, TOKEN, EXECUTOR, POOL2, sold_b),
+            tf(167, WMON, EXECUTOR, CONVERTER, wmon_a + wmon_b),
+            tf(169, USDC, CONVERTER, EXECUTOR, usdc),
+            tf(183, USDC, EXECUTOR, ROUTER, usdc),
+            tf(186, USDC, ROUTER, third, usdc),
         ],
-        [v3swap(95, POOL, EXECUTOR, -tokens, paid)],
-        meta(WALLET, ROUTER),
+        [v3swap(142, POOL, EXECUTOR, sold_a, -wmon_a), v3swap(145, POOL2, EXECUTOR, sold_b, -wmon_b)],
+        meta(BUNDLER, ROUTER),
+        userop_sender=SMART_ACCOUNT,
     )
-    KINDS[ROUTER] = "contract_unknown"
-    try:
-        flows = {(f.wallet, f.log_index): f for f in run(b, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1)))}
-    finally:
-        KINDS[ROUTER] = "venue_router"
-    executor_buy = flows[(EXECUTOR, 93)]
-    assert executor_buy.kind == KIND_BUY and abs(executor_buy.quote_delta) == paid
-    for wallet, log_index in ((EXECUTOR, 103), (ROUTER, 103), (ROUTER, 108), (SMART_ACCOUNT, 108)):
-        f = flows[(wallet, log_index)]
-        assert f.kind in (KIND_TRANSFER_OUT, KIND_TRANSFER_IN), f"{wallet[:8]} at {log_index} is {f.kind}"
-        assert f.quote_delta is None, (
-            f"{wallet[:8]} at {log_index} was priced {f.quote_delta} by a venue it never touched"
-        )
+    with with_kinds({**CONDUIT_KINDS, ROUTER: "contract_unknown", third: "contract_unknown"}):
+        flows = run(b, rates=SOLVER_RATES)
+    assert [f.wallet for f in flows] == [SMART_ACCOUNT], [f.wallet[:8] for f in flows]
+    sale = flows[0]
+    assert sale.kind == KIND_SELL and sale.token_delta == -tokens
+    assert sale.basis_state == BASIS_OBSERVED
+    assert sale.mon_value == Decimal(wmon_a + wmon_b) / E18
+    assert sale.venue == POOL
 
 
-def test_a_payment_forwarded_between_wallets_is_not_a_wrap():
-    """A buyer pays a router, the router pays an executor, and the tokens travel back the same way.
-
-    The router's receipt from the buyer and its payment to the executor are the same money passing
-    through, and the executor's onward payment to a converter is the cost of what it bought from the pool,
-    already counted through the WMON that came back. Cancelled against each other as wraps, the router's
-    purchase had no cost and the executor's sale kept a fifth of its proceeds, so the wallet the router
-    delivered to inherited nothing. Only a movement from the zero address, a token contract or a venue is
-    a conversion; a payment to or from another wallet never is.
-    """
-    KINDS[EXECUTOR] = "contract_unknown"
-    KINDS[SMART_ACCOUNT] = "wallet_4337"
-    KINDS[CONVERTER] = "contract_unknown"
-    tokens, price, converted, wmon = 8_147_672 * E18, 3_986_280_921, 3_183_771_496, 121_135 * E18
+def test_two_wallets_served_by_one_executor_each_pay_their_share_of_the_venue_price():
+    pooled, wmon = 300 * E18, 30 * E18
     b = bundle(
         [
-            tf(47, USDC, WALLET, ROUTER, price),
-            tf(50, USDC, ROUTER, EXECUTOR, price),
-            tf(62, USDC, EXECUTOR, CONVERTER, converted),
-            tf(93, TOKEN, POOL, EXECUTOR, tokens),
-            tf(94, WMON, EXECUTOR, POOL, wmon),
-            tf(103, TOKEN, EXECUTOR, ROUTER, tokens),
-            tf(108, TOKEN, ROUTER, SMART_ACCOUNT, tokens),
+            tf(10, WMON, EXECUTOR, POOL, wmon),
+            tf(11, TOKEN, POOL, EXECUTOR, pooled),
+            tf(12, TOKEN, EXECUTOR, WALLET, 100 * E18),
+            tf(13, TOKEN, EXECUTOR, WALLET2, 200 * E18),
         ],
-        [v3swap(95, POOL, EXECUTOR, -tokens, wmon)],
-        meta(WALLET, ROUTER),
+        [v3swap(11, POOL, EXECUTOR, -pooled, wmon)],
+        meta(SOLVER, EXECUTOR),
     )
-    KINDS[ROUTER] = "contract_unknown"
-    try:
-        flows = {(f.wallet, f.log_index): f for f in run(b, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1)))}
-    finally:
-        KINDS[ROUTER] = "venue_router"
-    assert flows[(EXECUTOR, 93)].kind == KIND_BUY and flows[(EXECUTOR, 93)].quote_delta == -wmon
-    executor_sale = flows[(EXECUTOR, 103)]
-    assert executor_sale.kind == KIND_SELL and executor_sale.quote_delta == price, executor_sale
-    router_purchase = flows[(ROUTER, 103)]
-    assert router_purchase.kind == KIND_BUY and router_purchase.quote_delta == -price, router_purchase
-    assert flows[(ROUTER, 108)].kind == KIND_TRANSFER_OUT, flows[(ROUTER, 108)]
-    delivered = flows[(SMART_ACCOUNT, 108)]
-    assert delivered.kind == KIND_TRANSFER_IN and delivered.quote_delta is None, delivered
+    with with_kinds(CONDUIT_KINDS):
+        by = flows_by_wallet(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert set(by) == {(WALLET, 12), (WALLET2, 13)}
+    assert by[(WALLET, 12)].kind == KIND_BUY and by[(WALLET, 12)].mon_value == Decimal(10)
+    assert by[(WALLET2, 13)].kind == KIND_BUY and by[(WALLET2, 13)].mon_value == Decimal(20)
+    assert by[(WALLET, 12)].basis_state == by[(WALLET2, 13)].basis_state == BASIS_OBSERVED
+
+
+def test_a_contract_that_passes_everything_through_has_no_row_but_one_that_keeps_some_does():
+    tokens, kept, paid = 100 * E18, 1 * E18, 10 * E18
+    through = bundle(
+        [
+            tf(1, WMON, WALLET, EXECUTOR, paid),
+            tf(2, WMON, EXECUTOR, POOL, paid),
+            tf(3, TOKEN, POOL, EXECUTOR, tokens),
+            tf(4, TOKEN, EXECUTOR, WALLET, tokens),
+        ],
+        [v3swap(3, POOL, EXECUTOR, -tokens, paid)],
+        meta(WALLET, EXECUTOR),
+    )
+    keeps = bundle(
+        [
+            tf(1, WMON, WALLET, EXECUTOR, paid),
+            tf(2, WMON, EXECUTOR, POOL, paid),
+            tf(3, TOKEN, POOL, EXECUTOR, tokens),
+            tf(4, TOKEN, EXECUTOR, WALLET, tokens - kept),
+        ],
+        [v3swap(3, POOL, EXECUTOR, -tokens, paid)],
+        meta(WALLET, EXECUTOR),
+    )
+    with with_kinds(CONDUIT_KINDS):
+        clean = run(through, rates=Rates(mon_usd=Decimal(1)))
+        residue = run(keeps, rates=Rates(mon_usd=Decimal(1)))
+    assert [f.wallet for f in clean] == [WALLET] and clean[0].kind == KIND_BUY and clean[0].mon_value == Decimal(10)
+    mine = only(residue)
+    assert mine.kind == KIND_BUY and mine.mon_value == Decimal(10) and mine.token_delta == tokens - kept
+    theirs = [f for f in residue if f.wallet == EXECUTOR]
+    assert theirs and sum(f.token_delta for f in theirs) == kept
+
+
+def test_a_transfer_through_a_pass_through_names_the_wallet_at_the_far_end():
+    tokens = 50 * E18
+    b = bundle(
+        [tf(5, TOKEN, WALLET, EXECUTOR, tokens), tf(9, TOKEN, EXECUTOR, WALLET2, tokens)],
+        tx_meta=meta(WALLET, EXECUTOR),
+    )
+    with with_kinds(CONDUIT_KINDS):
+        by = flows_by_wallet(run(b))
+    assert set(by) == {(WALLET, 5), (WALLET2, 9)}
+    out, inbound = by[(WALLET, 5)], by[(WALLET2, 9)]
+    assert out.kind == KIND_TRANSFER_OUT and out.counterparty == WALLET2
+    assert inbound.kind == KIND_TRANSFER_IN and inbound.counterparty == WALLET and inbound.quote_delta is None
+
+
+def test_a_wallets_own_payment_wins_over_the_venue_price_because_it_includes_the_fee():
+    tokens, paid, venue_got = 100 * E18, 101 * E18, 100 * E18
+    b = bundle(
+        [
+            tf(1, WMON, WALLET, EXECUTOR, paid),
+            tf(2, WMON, EXECUTOR, POOL, venue_got),
+            tf(3, TOKEN, POOL, EXECUTOR, tokens),
+            tf(4, TOKEN, EXECUTOR, WALLET, tokens),
+        ],
+        [v3swap(3, POOL, EXECUTOR, -tokens, venue_got)],
+        meta(WALLET, EXECUTOR),
+    )
+    with with_kinds(CONDUIT_KINDS):
+        f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY and f.mon_value == Decimal(101) and f.source == SOURCE_TRANSFER_NET
+    assert f.venue == POOL and f.counterparty == POOL
