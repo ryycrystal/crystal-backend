@@ -1,6 +1,6 @@
 # accounting-fix: status
 
-Status 2026-09-09, 03:30 China time. **The wallet-boundary ledger is built and graded on three tokens; the
+Status 2026-09-09, 06:40 China time. **The wallet-boundary ledger is built and graded on three tokens; the
 full-registry replay is running on a pool of public RPC nodes after the first attempts hit the public
 endpoint's rate cap.** The design is in [LEDGER_SPEC.md](LEDGER_SPEC.md); this file is the state of the
 evidence. Nothing has been written to production and `LEDGER_ENABLED` stays off.
@@ -55,6 +55,8 @@ has 5,586,441 hot blocks over 32,221 tokens and needs roughly 1.5 calls per bloc
 the difference between days and hours. A private RPC key (QuickNode or Alchemy, a few hundred calls a
 second) would make the full replay a two-hour job; the owner should get one before the next rebuild.
 
+Two of the public nodes turned out to be worse than useless: `monad-mainnet.drpc.org` and `api.zan.top` answer null, not an error, for any transaction, receipt or block older than a few hours, and the first pool run took those nulls as answers and lost half its receipts (JAMES went from 2.4% to 11.9% of positions with an estimate on nothing but that). The client now treats a null answer for history as a node that has forgotten, cools it down and asks another; the pool in use is `rpc1.monad.xyz` and `monad.rpc.thirdweb.com`, both checked against blocks back to 37.8M. Every run that touched the two bad nodes was stopped and relaunched on image `ledger-9ba4888`.
+
 The registry scan itself was rewritten: the first version's `EXISTS (... JOIN launchpad_tokens)` rescans
 the 32k tokens for every one of 62 million block rows and would have run for days; a hashed `IN` subplan
 scans 86,000 blocks a second per connection and four range connections finish in four minutes.
@@ -82,8 +84,8 @@ The moncock figures are derived from the chain transaction by transaction in the
 old hand-derived 477,018.49 imputed the v4 pool manager leg 2,090 MON low; the trace shows 68,724.686 MON
 settled natively.
 
-The three tokens are being rerun on the pool image with tonight's engine fixes (`ledger-<sha>-moncock`,
-`-james`, `-chipotle` under blob `replay-jobs/out/`); their check, verify and sweep logs and a dump of the
+Moncock and JAMES are being rerun on `ledger-9ba4888` with tonight's engine fixes (`ledger-9ba4888-moncock`
+and `-james` under blob `replay-jobs/out/`), and chipotle comes out of the registry merge, which grades all three; their check, verify and sweep logs and a dump of the
 rebuilt tables land there when each finishes, and this table is replaced from them.
 
 ## Full registry
@@ -92,8 +94,9 @@ Scan published `replay-jobs/ledger/all_blocks.json` (5,586,441 blocks) and 32 pa
 partition nets its block range with `ledger_replay.py --all --no-fold` into a Postgres inside the
 container and uploads its tables as CSV; the merge execution waits for every partition's `done.txt`,
 aborts on any `failed.txt`, loads the CSVs, refolds every token, runs the checks, verify and sweeps, and
-dumps the merged database to `out/<run>/merged/`. The run in flight is the one named in the session
-scratchpad's `part_executions32.txt`.
+dumps the merged database to `out/<run>/merged/`. The run in flight is `ledger-9ba4888-all5`: 34 partitions (the launch-era range split in three) on the
+two good public nodes, expected to net in about four hours and merge in one or two more, so the merged
+grading lands around noon China time on 2026-09-09.
 
 ## Acceptance
 
