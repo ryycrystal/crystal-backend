@@ -285,6 +285,32 @@ def hot_blocks(src: LogSource, addresses: list[str], from_block: int, to_block: 
     return [int(r[0]) for r in rows]
 
 
+def cached_block_logs(blocks: list[int]) -> dict[int, list[dict]]:
+    """Blocks whose logs the side database already holds, so a second replay of a token reads nothing remote.
+
+    Almost all of a replay's time through the tunnel is fetching logs; the netting is CPU and every lookup
+    it makes is already cached. Prod's log cache for a past block never changes, so a copy taken once is
+    good forever, and a change to the netting can be re-run against a token in minutes instead of hours.
+    """
+    if not blocks:
+        return {}
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT number, logs FROM launchpad_block_logs WHERE number = ANY(%s)", (blocks,))
+        return {int(n): (json.loads(v) if isinstance(v, str) else v) for n, v in cur.fetchall()}
+
+
+def remember_block_logs(rows: dict[int, list[dict]]) -> None:
+    if not rows:
+        return
+    with storage.db_cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO launchpad_block_logs (number, logs) VALUES %s ON CONFLICT (number) DO NOTHING",
+            [(int(n), psycopg2.extras.Json(v)) for n, v in rows.items()],
+            page_size=200,
+        )
+
+
 def load_chain_logs(path: str | None) -> dict[int, list[dict]]:
     """Logs fetched straight from the chain by scripts/ledger_chain_logs.py, keyed by block."""
     if not path:
@@ -551,7 +577,12 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     prepare_pool = ThreadPoolExecutor(max_workers=1)
 
     def fetch_group(group: list[int]) -> dict[int, list[dict]]:
-        rows = fetcher.fetch(group)
+        rows = cached_block_logs(group)
+        missing = [blk for blk in group if blk not in rows]
+        if missing:
+            fetched = fetcher.fetch(missing)
+            remember_block_logs(fetched)
+            rows.update(fetched)
         merge_chain_logs(rows, chain_logs, group)
         return rows
 
