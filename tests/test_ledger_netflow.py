@@ -1084,3 +1084,87 @@ def test_two_halves_that_agree_on_the_price_are_a_trade():
     assert halves[WALLET].kind == KIND_SELL and halves[WALLET2].kind == KIND_BUY
     assert halves[WALLET].quote_delta == 500_000_000
     assert halves[WALLET2].quote_delta == -500_000_000
+
+
+EXECUTOR = "0x" + "8f" * 20
+SMART_ACCOUNT = "0x" + "b9" * 20
+CONVERTER = "0x" + "1a" * 20
+
+
+def test_a_venue_hint_prices_the_movement_that_touched_the_venue_not_the_hand_offs_after_it():
+    """An executor buys from a pool and hands the tokens to a router, which hands them to the wallet.
+
+    The pool's event says what the executor paid. It says nothing about the two hand-offs downstream,
+    which touched no venue: they carry the executor's cost across by inheritance. Assigned to them anyway,
+    the same quote became sale proceeds on the executor's hand-off and purchase cost on both receipts, so
+    the executor booked a gain it never made and 56.5 million MON of basis was destroyed on moncock alone,
+    across 6,275 such hand-offs.
+    """
+    KINDS[EXECUTOR] = "contract_unknown"
+    KINDS[SMART_ACCOUNT] = "wallet_4337"
+    tokens, paid = 8_147_672 * E18, 801_707_716
+    b = bundle(
+        [
+            tf(62, USDC, EXECUTOR, POOL, paid),
+            tf(93, TOKEN, POOL, EXECUTOR, tokens),
+            tf(103, TOKEN, EXECUTOR, ROUTER, tokens),
+            tf(108, TOKEN, ROUTER, SMART_ACCOUNT, tokens),
+        ],
+        [v3swap(95, POOL, EXECUTOR, -tokens, paid)],
+        meta(WALLET, ROUTER),
+    )
+    KINDS[ROUTER] = "contract_unknown"
+    try:
+        flows = {(f.wallet, f.log_index): f for f in run(b, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1)))}
+    finally:
+        KINDS[ROUTER] = "venue_router"
+    executor_buy = flows[(EXECUTOR, 93)]
+    assert executor_buy.kind == KIND_BUY and abs(executor_buy.quote_delta) == paid
+    for wallet, log_index in ((EXECUTOR, 103), (ROUTER, 103), (ROUTER, 108), (SMART_ACCOUNT, 108)):
+        f = flows[(wallet, log_index)]
+        assert f.kind in (KIND_TRANSFER_OUT, KIND_TRANSFER_IN), f"{wallet[:8]} at {log_index} is {f.kind}"
+        assert f.quote_delta is None, (
+            f"{wallet[:8]} at {log_index} was priced {f.quote_delta} by a venue it never touched"
+        )
+
+
+def test_a_payment_forwarded_between_wallets_is_not_a_wrap():
+    """A buyer pays a router, the router pays an executor, and the tokens travel back the same way.
+
+    The router's receipt from the buyer and its payment to the executor are the same money passing
+    through, and the executor's onward payment to a converter is the cost of what it bought from the pool,
+    already counted through the WMON that came back. Cancelled against each other as wraps, the router's
+    purchase had no cost and the executor's sale kept a fifth of its proceeds, so the wallet the router
+    delivered to inherited nothing. Only a movement from the zero address, a token contract or a venue is
+    a conversion; a payment to or from another wallet never is.
+    """
+    KINDS[EXECUTOR] = "contract_unknown"
+    KINDS[SMART_ACCOUNT] = "wallet_4337"
+    KINDS[CONVERTER] = "contract_unknown"
+    tokens, price, converted, wmon = 8_147_672 * E18, 3_986_280_921, 3_183_771_496, 121_135 * E18
+    b = bundle(
+        [
+            tf(47, USDC, WALLET, ROUTER, price),
+            tf(50, USDC, ROUTER, EXECUTOR, price),
+            tf(62, USDC, EXECUTOR, CONVERTER, converted),
+            tf(93, TOKEN, POOL, EXECUTOR, tokens),
+            tf(94, WMON, EXECUTOR, POOL, wmon),
+            tf(103, TOKEN, EXECUTOR, ROUTER, tokens),
+            tf(108, TOKEN, ROUTER, SMART_ACCOUNT, tokens),
+        ],
+        [v3swap(95, POOL, EXECUTOR, -tokens, wmon)],
+        meta(WALLET, ROUTER),
+    )
+    KINDS[ROUTER] = "contract_unknown"
+    try:
+        flows = {(f.wallet, f.log_index): f for f in run(b, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1)))}
+    finally:
+        KINDS[ROUTER] = "venue_router"
+    assert flows[(EXECUTOR, 93)].kind == KIND_BUY and flows[(EXECUTOR, 93)].quote_delta == -wmon
+    executor_sale = flows[(EXECUTOR, 103)]
+    assert executor_sale.kind == KIND_SELL and executor_sale.quote_delta == price, executor_sale
+    router_purchase = flows[(ROUTER, 103)]
+    assert router_purchase.kind == KIND_BUY and router_purchase.quote_delta == -price, router_purchase
+    assert flows[(ROUTER, 108)].kind == KIND_TRANSFER_OUT, flows[(ROUTER, 108)]
+    delivered = flows[(SMART_ACCOUNT, 108)]
+    assert delivered.kind == KIND_TRANSFER_IN and delivered.quote_delta is None, delivered

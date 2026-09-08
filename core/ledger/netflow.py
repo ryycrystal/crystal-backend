@@ -656,12 +656,16 @@ def _quote_total(assigned: list[_QuoteMove], rates: Rates) -> tuple[str, int, st
     return NATIVE, int(total), source
 
 
-def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove]) -> list[_QuoteMove]:
+def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds: _Kinds) -> list[_QuoteMove]:
     """Cancel a wrap against the payment it funded.
 
     Receiving WMON from the zero address and then spending it is one payment, not income plus a payment,
     so an unmatched inbound leg offsets a matched outbound leg of the same asset. A sale's proceeds are
-    never spare, because they were matched to the disposal that earned them.
+    never spare, because they were matched to the disposal that earned them. Only a movement from the zero
+    address, a token contract or a venue can be a conversion. The same asset passing to or from another
+    wallet is a payment being forwarded, and cancelling it took the cost off a router's purchase and most
+    of the proceeds off the executor's sale that funded it, on every routed buy that paid one hop and
+    received from another.
     """
     if not spare or not assigned:
         return assigned
@@ -670,6 +674,8 @@ def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove]) -> li
         remaining = q.delta
         for other in spare:
             if other.asset != q.asset or _same_sign(other.delta, remaining) or not remaining:
+                continue
+            if kinds.is_wallet(other.counterparty):
                 continue
             take = min(abs(remaining), abs(other.delta))
             remaining += take if remaining < 0 else -take
@@ -742,7 +748,7 @@ def _match_actions(moves: list[_Move], quotes: list[_QuoteMove], kinds: _Kinds, 
             else:
                 spare.append(q)
         for i, m in enumerate(wallet_moves):
-            actions.append((m, _less_conversions(assigned[i], spare)))
+            actions.append((m, _less_conversions(assigned[i], spare, kinds)))
     return actions
 
 
@@ -753,7 +759,18 @@ def _resolve_wallet(
     hints: list[_Hint],
     used: set[int],
     rates: Rates,
+    kinds: _Kinds | None = None,
 ) -> None:
+    """Price a wallet's movement from its own payment, and from venue events only if it touched a venue.
+
+    A movement whose other side is another wallet is a hand-off or a direct trade. Its own payment, if
+    there is one, is evidence about it; a venue's event is not, however exactly the amounts happen to line
+    up, because those tokens were bought from the venue one movement earlier by someone else. Matched on
+    amount alone, a pool event priced the executor's hand-off to a router as a sale and the router's
+    receipt as a purchase, on top of the real purchase from the pool that sat one log before.
+    """
+    if kinds is not None and any(leg.counterparty and kinds.is_wallet(leg.counterparty) for leg in legs):
+        hints = []
     event_quotes: dict[str, _Hint] = {}
     for leg in legs:
         open_hints = [
@@ -838,11 +855,24 @@ def _resolve_wallet(
             leg.hint_price = None
 
 
-def _resolve_across_wallets(legs: list[_Leg], hints: list[_Hint], used: set[int], rates: Rates) -> None:
+def _resolve_across_wallets(
+    legs: list[_Leg], hints: list[_Hint], used: set[int], rates: Rates, kinds: _Kinds | None = None
+) -> None:
+    """Spread what the venues reported over the movements that are still unpriced and touched a venue.
+
+    A movement between two wallets touched no venue, so no venue's quote is evidence about it. Given one
+    anyway, an executor's hand-off to a router became a sale at the pool's price and the router's receipt a
+    purchase at the same price, while the real purchase from the pool sat one log earlier. The executor
+    booked a gain it never made, the cost never reached the wallet the tokens were for, and on moncock that
+    destroyed 56.5 million MON of basis across 6,275 hand-offs. A hand-off carries its cost by inheritance.
+    """
     groups: dict[tuple[str, bool], list[_Leg]] = defaultdict(list)
     for leg in legs:
-        if not leg.resolved:
-            groups[(leg.token, leg.token_delta > 0)].append(leg)
+        if leg.resolved:
+            continue
+        if kinds is not None and leg.counterparty and kinds.is_wallet(leg.counterparty):
+            continue
+        groups[(leg.token, leg.token_delta > 0)].append(leg)
     for (token, incoming), members in sorted(groups.items()):
         open_hints = [
             h for h in hints if h.log_index not in used and h.token == token and (h.token_delta > 0) == incoming
@@ -1036,9 +1066,9 @@ def net_transaction(
     for wallet in sorted(legs_by_wallet):
         for leg in legs_by_wallet[wallet]:
             own, own_source = own_by_leg[id(leg)]
-            _resolve_wallet([leg], own, own_source, hints, used, rates)
+            _resolve_wallet([leg], own, own_source, hints, used, rates, kinds)
 
-    _resolve_across_wallets(all_legs, hints, used, rates)
+    _resolve_across_wallets(all_legs, hints, used, rates, kinds)
     _swap_pairs(legs_by_wallet, reference_price)
 
     for leg in all_legs:
