@@ -1694,3 +1694,39 @@ def test_tokens_sent_to_their_own_contract_are_burned():
     b = bundle([tf(1, TOKEN, WALLET, TOKEN, 30 * E18)], tx_meta=meta(WALLET, TOKEN))
     f = only(run(b))
     assert f.kind == KIND_BURN and f.basis_state == BASIS_OBSERVED and f.quote_delta is None
+
+
+def test_both_assets_leaving_a_pool_to_the_wallet_is_liquidity_taken_back():
+    tokens, wmon = 10_389 * E18, 2_290 * E18
+    b = bundle(
+        [tf(29, WMON, POOL, WALLET, wmon), tf(30, TOKEN, POOL, WALLET, tokens)],
+        tx_meta=meta(WALLET, POOL),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_REMOVE
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == POOL and f.counterparty == POOL
+    assert f.quote_delta is None
+
+
+def test_both_assets_entering_a_pool_from_the_wallet_is_liquidity_added_even_without_a_share_token():
+    tokens, wmon = 500 * E18, 100 * E18
+    b = bundle(
+        [tf(1, TOKEN, WALLET, POOL, tokens), tf(2, WMON, WALLET, POOL, wmon)],
+        tx_meta=meta(WALLET, ROUTER),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_ADD
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.venue == POOL
+    assert f.quote_delta is None
+
+
+def test_a_pool_paying_the_wallet_for_tokens_it_received_is_still_a_sale():
+    tokens, wmon = 500 * E18, 100 * E18
+    b = bundle(
+        [tf(1, TOKEN, WALLET, POOL, tokens), tf(2, WMON, POOL, WALLET, wmon)],
+        tx_meta=meta(WALLET, ROUTER),
+    )
+    f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_SELL and f.basis_state == BASIS_OBSERVED and f.quote_delta == wmon

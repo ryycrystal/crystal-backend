@@ -972,6 +972,25 @@ def _dominant(ends: list[_End], kinds: _Kinds) -> tuple[str | None, str | None]:
     return party, venue
 
 
+def _quote_moved_alongside(
+    bundle: TxBundle, wallet: str, venue: str, incoming: bool, quote_assets: frozenset[str]
+) -> bool:
+    """Whether a quote asset crossed between the wallet and the pool in the same direction as the token.
+
+    A pool that pays for tokens sends the quote the other way. Both assets travelling together, in and out
+    alike, is liquidity: a nad.fun pair emits no share token the cache knows and its own events are not
+    indexed, so the pair's two-legged withdrawal read as an unpriced purchase before.
+    """
+    for leg in bundle.transfers:
+        if leg.token not in quote_assets or leg.amount <= 0:
+            continue
+        if incoming and leg.from_addr == venue and leg.to_addr == wallet:
+            return True
+        if not incoming and leg.from_addr == wallet and leg.to_addr == venue:
+            return True
+    return False
+
+
 def _liquidity_modified(
     bundle: TxBundle, venue: str, token: str, pools: dict[str, tuple[str, str, bool]] | None
 ) -> bool:
@@ -997,6 +1016,7 @@ def _classify(
     origin: str | None,
     reference_price: PriceFn | None,
     pools: dict[str, tuple[str, str, bool]] | None = None,
+    quote_assets: frozenset[str] = QUOTE_ASSETS,
 ) -> None:
     incoming = leg.token_delta > 0
     cp = leg.counterparty
@@ -1019,7 +1039,10 @@ def _classify(
             leg.kind = KIND_VAULT_WITHDRAW if incoming else KIND_VAULT_DEPOSIT
         leg.basis_state = BASIS_OBSERVED
         return
-    if ck == KIND_VENUE_POOL and _liquidity_modified(bundle, cp, leg.token, pools):
+    if ck == KIND_VENUE_POOL and (
+        _liquidity_modified(bundle, cp, leg.token, pools)
+        or _quote_moved_alongside(bundle, leg.wallet, cp, incoming, quote_assets)
+    ):
         leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
         leg.basis_state = BASIS_OBSERVED
         return
@@ -1211,7 +1234,7 @@ def net_transaction(
     _swap_pairs(legs_by_wallet, reference_price)
     for leg in all_legs:
         if leg.kind is None:
-            _classify(leg, bundle, kinds, origin, reference_price, pools)
+            _classify(leg, bundle, kinds, origin, reference_price, pools, quote_assets)
 
     sub_index = _sub_indices(all_legs)
     all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))
