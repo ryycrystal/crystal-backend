@@ -2,7 +2,7 @@ import random
 from decimal import Decimal
 
 from core.ledger.fold import PARKED_AGGREGATES, Parked, PositionState, fold, fold_position, fold_token
-from core.ledger.types import KIND_BUY, KIND_TRANSFER_IN, KIND_TRANSFER_OUT, Flow
+from core.ledger.types import KIND_BUY, KIND_SELL, KIND_TRANSFER_IN, KIND_TRANSFER_OUT, Flow
 
 WALLET = "0x25afd36012fa25336cc56a1b26c56e92dd77f0f3"
 TOKEN = "0x8e74f6e943a7a28605ddd59945bec63a8919f5e2"
@@ -729,3 +729,87 @@ def test_cost_travels_through_a_pass_through_whose_halves_sit_at_different_log_p
     assert states[sender].balance_token == 0 and states[sender].cost_basis_native == 0
     assert states[receiver].balance_token == 100 * wei
     assert states[receiver].cost_basis_native == 100 * wei, folded[-1]
+
+
+def test_an_observed_purchase_from_a_wallet_keeps_its_own_price_whatever_that_wallet_released_elsewhere():
+    """S pays a 5-token fee into the token contract and sells 95 to W for 10 WMON in the same transaction.
+
+    S's fee is a hand-off nobody takes up; it must not be taken up by W's purchase, which has its own
+    observed price and would otherwise inherit the fee's cost for 5 tokens and hold 90 with no cost at all.
+    """
+    s, w, sink = "0x" + "5a" * 20, "0x" + "6b" * 20, "0x" + "ee" * 20
+    wei = 10**18
+    flows = [
+        _flow(KIND_BUY, 100 * wei, quote=-100 * wei, block=1, log_index=0, wallet=s, txhash="0xbuy"),
+        _flow(KIND_TRANSFER_OUT, -5 * wei, block=2, log_index=1, wallet=s, counterparty=sink, txhash="0xotc"),
+        _flow(KIND_SELL, -95 * wei, quote=10 * wei, block=2, log_index=2, wallet=s, counterparty=w, txhash="0xotc"),
+        _flow(
+            KIND_BUY,
+            95 * wei,
+            quote=-10 * wei,
+            block=2,
+            log_index=2,
+            sub_index=1,
+            wallet=w,
+            counterparty=s,
+            txhash="0xotc",
+        ),
+    ]
+    states, _ = fold_token(None, flows)
+    assert states[w].balance_token == 95 * wei
+    assert states[w].cost_basis_native == 10 * wei, states[w]
+    assert states[w].unresolved_tokens == 0
+
+
+def test_a_pass_through_that_forwards_before_it_is_funded_still_carries_the_cost():
+    sender, receiver = "0x" + "a1" * 20, "0x" + "b2" * 20
+    wei = 10**18
+    flows = [
+        _flow(KIND_BUY, 100 * wei, quote=-100 * wei, block=1, log_index=10, wallet=sender, txhash="0xbuy"),
+        _flow(KIND_TRANSFER_IN, 100 * wei, block=2, log_index=1, wallet=receiver, counterparty=sender, txhash="0xhand"),
+        _flow(
+            KIND_TRANSFER_OUT, -100 * wei, block=2, log_index=2, wallet=sender, counterparty=receiver, txhash="0xhand"
+        ),
+    ]
+    states, _ = fold_token(None, flows)
+    assert states[sender].balance_token == 0 and states[sender].cost_basis_native == 0
+    assert states[receiver].balance_token == 100 * wei
+    assert states[receiver].cost_basis_native == 100 * wei and states[receiver].unresolved_tokens == 0, states[receiver]
+
+
+def test_receivers_of_one_pooled_hand_off_take_every_wei_of_what_was_released():
+    sender, r1, r2 = "0x" + "a1" * 20, "0x" + "b2" * 20, "0x" + "c3" * 20
+    wei = 10**18
+    flows = [
+        _flow(KIND_BUY, 100 * wei + 1, quote=-(100 * wei + 7), block=1, log_index=0, wallet=sender, txhash="0xa"),
+        _flow(
+            KIND_BUY,
+            100 * wei,
+            quote=-(50 * wei + 3),
+            basis_state="estimated",
+            block=1,
+            log_index=1,
+            wallet=sender,
+            txhash="0xa",
+        ),
+        _flow(KIND_TRANSFER_OUT, -100 * wei, block=2, log_index=1, wallet=sender, counterparty=r1, txhash="0xhand"),
+        _flow(
+            KIND_TRANSFER_OUT,
+            -(50 * wei + 1),
+            block=2,
+            log_index=1,
+            sub_index=1,
+            wallet=sender,
+            counterparty=r2,
+            txhash="0xhand",
+        ),
+        _flow(KIND_TRANSFER_IN, 100 * wei, block=2, log_index=2, wallet=r1, counterparty=sender, txhash="0xhand"),
+        _flow(KIND_TRANSFER_IN, 50 * wei + 1, block=2, log_index=3, wallet=r2, counterparty=sender, txhash="0xhand"),
+    ]
+    states, _ = fold_token(None, flows)
+    assert states[r1].unresolved_tokens == 0 and states[r2].unresolved_tokens == 0, (states[r1], states[r2])
+    kept = states[sender].cost_basis_native + states[sender].basis_estimated_native
+    released = 100 * wei + 7 + 50 * wei + 3 - kept
+    taken = sum(states[r].cost_basis_native + states[r].basis_estimated_native for r in (r1, r2))
+    assert taken == released, (taken, released)
+    assert states[sender].balance_token == 50 * wei and kept > 0

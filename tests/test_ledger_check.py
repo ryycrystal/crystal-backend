@@ -169,3 +169,62 @@ def test_moncock_realized_counts_the_estimated_legs_and_reports_the_split():
 
 def by_name_ok(checks, name: str) -> bool:
     return next(c for c in checks if c.name == name).ok
+
+
+class _ScriptedCursor:
+    def __init__(self, answers: dict[str, list]):
+        self.answers = answers
+        self._rows: list = []
+
+    def execute(self, sql, params=None):
+        for needle, rows in self.answers.items():
+            if needle in sql:
+                self._rows = list(rows)
+                return
+        self._rows = []
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+def test_a_contract_holding_more_on_chain_than_the_ledger_books_fails_the_balance_check(monkeypatch):
+    """A contract that keeps tokens is a holder like any other: its balance has to match chain."""
+    import scripts.ledger_check as lc
+
+    bot, missing_bot = "0x" + "b0" * 20, "0x" + "b1" * 20
+    cur = _ScriptedCursor(
+        {
+            "FROM positions_v2": [(bot, 0, 0)],
+            "FROM launchpad_positions": [(missing_bot,)],
+            "FROM address_kinds": [(bot, "contract_unknown"), (missing_bot, "contract_unknown")],
+            "FROM venues": [],
+        }
+    )
+    monkeypatch.setattr(
+        lc, "chain_balances", lambda rpc, token, wallets, block: ({w: 1_000_000 * WEI for w in wallets}, [])
+    )
+    checks = lc.james_checks(cur, "http://rpc", 100)
+    by_name = {c.name.split(" (")[0]: c for c in checks}
+    assert not by_name["chain balanceOf == balance + custody"].ok, render_table(checks)
+    assert not by_name["prod holders present"].ok, render_table(checks)
+
+
+def test_chain_reads_that_never_answered_do_not_let_the_balance_check_pass(monkeypatch):
+    import scripts.ledger_check as lc
+
+    holder = "0x" + "11" * 20
+    cur = _ScriptedCursor(
+        {
+            "FROM positions_v2": [(holder, 5 * WEI, 0)],
+            "FROM launchpad_positions": [(holder,)],
+            "FROM address_kinds": [(holder, "eoa")],
+            "FROM venues": [],
+        }
+    )
+    monkeypatch.setattr(lc, "chain_balances", lambda rpc, token, wallets, block: ({}, list(wallets)))
+    checks = lc.james_checks(cur, "http://rpc", 100)
+    by_name = {c.name.split(" (")[0]: c for c in checks}
+    assert not by_name["chain balanceOf == balance + custody"].ok, render_table(checks)

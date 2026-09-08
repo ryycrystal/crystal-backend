@@ -111,29 +111,34 @@ CHECKS = [
     (
         "both halves of a wallet-to-wallet transfer are stored",
         """
+        WITH halves AS (
+            SELECT DISTINCT txhash, token, wallet, sign(token_delta) AS side FROM wallet_flows
+        )
         SELECT count(*) FROM wallet_flows f
         JOIN address_kinds k ON k.address = f.counterparty
+        LEFT JOIN halves g
+          ON g.txhash = f.txhash AND g.token = f.token AND g.wallet = f.counterparty
+         AND g.side = -sign(f.token_delta)
         WHERE f.kind IN ('transfer_in', 'transfer_out')
           AND k.kind IN ('eoa', 'eoa_7702', 'wallet_4337', 'contract_unknown')
-          AND NOT EXISTS (
-              SELECT 1 FROM wallet_flows g
-              WHERE g.txhash = f.txhash AND g.token = f.token AND g.wallet = f.counterparty
-                AND sign(g.token_delta) = -sign(f.token_delta)
-          )
+          AND g.wallet IS NULL
         """,
     ),
     (
         "a transfer between two wallets moves its cost as well as its tokens",
         """
-        SELECT count(*) FROM (
-            SELECT o.txhash, o.token, o.wallet, sum(o.basis_delta) AS released,
-                   (SELECT coalesce(sum(i.basis_delta), 0) FROM wallet_flows i
-                     WHERE i.txhash = o.txhash AND i.token = o.token AND i.counterparty = o.wallet
-                       AND i.token_delta > 0) AS taken
-            FROM wallet_flows o
-            WHERE o.kind = 'transfer_out' AND o.basis_delta < 0
-            GROUP BY o.txhash, o.token, o.wallet
-        ) pairs WHERE released <> -taken
+        WITH released AS (
+            SELECT txhash, token, wallet AS sender, sum(basis_delta) AS released
+            FROM wallet_flows WHERE kind = 'transfer_out' AND basis_delta < 0
+            GROUP BY txhash, token, wallet
+        ), taken AS (
+            SELECT txhash, token, counterparty AS sender, sum(basis_delta) AS taken
+            FROM wallet_flows WHERE token_delta > 0 AND counterparty IS NOT NULL
+            GROUP BY txhash, token, counterparty
+        )
+        SELECT count(*) FROM released r
+        LEFT JOIN taken t ON t.txhash = r.txhash AND t.token = r.token AND t.sender = r.sender
+        WHERE r.released <> -coalesce(t.taken, 0)
         """,
     ),
     (

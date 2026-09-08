@@ -366,19 +366,9 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
     checks = [check_eq(name, "positions present", bool(wallets), True)]
 
     pools_on_prod = [w for w in prod if kinds.get(w) in VENUE_KINDS]
-    contracts_on_prod = [w for w in prod if kinds.get(w) == "contract_unknown"]
-    holders = [w for w in prod if kinds.get(w) not in VENUE_KINDS and w not in contracts_on_prod]
+    holders = [w for w in prod if kinds.get(w) not in VENUE_KINDS]
     checks.append(
         Check(name, "prod holder rows that are venues", "reported", f"{len(pools_on_prod)} {pools_on_prod[:3]}", True)
-    )
-    checks.append(
-        Check(
-            name,
-            "prod holder rows that are contracts (fees and residue, not positions)",
-            "reported",
-            f"{len(contracts_on_prod)} {contracts_on_prod[:3]}",
-            True,
-        )
     )
     missing = [w for w in holders if w not in ledger]
     if rpc_url is None:
@@ -409,24 +399,15 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
         )
     )
     mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
-    contract_mismatches = [w for w in mismatched if kinds.get(w) == "contract_unknown"]
-    wallet_mismatches = [w for w in mismatched if w not in contract_mismatches]
+    contracts = [w for w in mismatched if kinds.get(w) == "contract_unknown"]
     checks.append(
         Check(
             name,
             f"chain balanceOf == balance + custody ({len(targets)} wallets {where})",
-            "0 mismatches",
-            f"{len(wallet_mismatches)} mismatches {wallet_mismatches[:5]}",
-            not wallet_mismatches,
-        )
-    )
-    checks.append(
-        Check(
-            name,
-            "contracts whose chain balance includes fees the ledger does not book",
-            "reported",
-            f"{len(contract_mismatches)} {contract_mismatches[:3]}",
-            True,
+            "0 mismatches, every wallet answered",
+            f"{len(mismatched)} mismatches {mismatched[:5]} ({len(contracts)} of them contracts); "
+            f"{len(unreachable)} never answered",
+            not mismatched and not unreachable,
         )
     )
     checks.append(

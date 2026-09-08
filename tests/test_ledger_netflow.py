@@ -1341,3 +1341,228 @@ def test_a_venue_with_no_event_in_the_cache_is_priced_from_what_the_trace_shows_
     assert unpriced.kind == KIND_BUY and unpriced.token_delta == tokens and unpriced.basis_state == BASIS_UNRESOLVED
     assert seen.kind == KIND_BUY and seen.basis_state == BASIS_ESTIMATED and seen.source == SOURCE_VENUE_EVENT
     assert seen.mon_value == Decimal(wmon + native) / E18, seen.mon_value
+
+
+THIRD = "0x" + "4c" * 20
+
+
+def test_tokens_returned_through_a_pass_through_are_a_round_trip_not_a_purchase():
+    """The wallet hands 100 to a contract that sells 80 and returns the 20 it did not use, with the 8 WMON.
+
+    The 20 that came back were the wallet's own tokens: booking them as a purchase priced out of the sale's
+    proceeds invents cost, and pricing the whole 100 as sold overstates the sale. The sale is 80 for 8, and
+    the 20 are a hand-off to the wallet itself that nets to nothing.
+    """
+    b = bundle(
+        [
+            tf(1, TOKEN, WALLET, EXECUTOR, 100 * E18),
+            tf(2, TOKEN, EXECUTOR, POOL, 80 * E18),
+            tf(3, WMON, POOL, EXECUTOR, 8 * E18),
+            tf(4, TOKEN, EXECUTOR, WALLET, 20 * E18),
+            tf(5, WMON, EXECUTOR, WALLET, 8 * E18),
+        ],
+        [v3swap(2, POOL, EXECUTOR, 80 * E18, -8 * E18)],
+        meta(WALLET, EXECUTOR),
+    )
+    with with_kinds(CONDUIT_KINDS):
+        flows = [f for f in run(b, rates=Rates(mon_usd=Decimal(1))) if f.wallet == WALLET]
+    assert sum(f.token_delta for f in flows) == -80 * E18
+    sales = [f for f in flows if f.kind == KIND_SELL]
+    assert len(sales) == 1 and sales[0].token_delta == -80 * E18 and sales[0].quote_delta == 8 * E18, flows
+    assert sales[0].basis_state == BASIS_OBSERVED and sales[0].venue == POOL
+    assert not [f for f in flows if f.kind == KIND_BUY], flows
+    returned = [f for f in flows if f.kind in (KIND_TRANSFER_IN, KIND_TRANSFER_OUT)]
+    assert sorted(f.token_delta for f in returned) == [-20 * E18, 20 * E18]
+    assert all(f.counterparty == WALLET and f.quote_delta is None for f in returned), returned
+
+
+def test_a_cycle_through_two_pass_throughs_still_sells_only_what_reached_the_pool():
+    b = bundle(
+        [
+            tf(1, TOKEN, WALLET, EXECUTOR, 100 * E18),
+            tf(2, TOKEN, EXECUTOR, CONVERTER, 100 * E18),
+            tf(3, TOKEN, CONVERTER, POOL, 80 * E18),
+            tf(4, WMON, POOL, CONVERTER, 8 * E18),
+            tf(5, TOKEN, CONVERTER, EXECUTOR, 20 * E18),
+            tf(6, TOKEN, EXECUTOR, WALLET, 20 * E18),
+            tf(7, WMON, CONVERTER, THIRD, 8 * E18),
+        ],
+        [v3swap(3, POOL, CONVERTER, 80 * E18, -8 * E18)],
+        meta(BUNDLER, EXECUTOR),
+        userop_sender=WALLET,
+    )
+    with with_kinds({**CONDUIT_KINDS, THIRD: "contract_unknown"}):
+        flows = [f for f in run(b, rates=Rates(mon_usd=Decimal(1))) if f.wallet == WALLET]
+    assert sum(f.token_delta for f in flows) == -80 * E18
+    sales = [f for f in flows if f.kind == KIND_SELL]
+    assert len(sales) == 1 and sales[0].token_delta == -80 * E18 and sales[0].mon_value == Decimal(8), flows
+    assert sales[0].basis_state == BASIS_OBSERVED and sales[0].venue == POOL
+    others = [f for f in flows if f is not sales[0]]
+    assert sorted(f.token_delta for f in others) == [-20 * E18, 20 * E18]
+    assert all(f.counterparty == WALLET and f.quote_delta is None for f in others), others
+
+
+def test_a_path_of_many_pass_throughs_is_still_followed_to_the_pool():
+    hops = ["0x" + f"d{i}" * 20 for i in range(8)]
+    tokens, wmon = 100 * E18, 10 * E18
+    transfers = [tf(1, WMON, hops[0], POOL, wmon), tf(2, TOKEN, POOL, hops[0], tokens)]
+    for i in range(1, 8):
+        transfers.append(tf(2 + i, TOKEN, hops[i - 1], hops[i], tokens))
+    transfers.append(tf(20, TOKEN, hops[-1], WALLET, tokens))
+    b = bundle(transfers, [v3swap(2, POOL, hops[0], -tokens, wmon)], meta(BUNDLER, hops[0]))
+    with with_kinds({h: "contract_unknown" for h in hops}):
+        f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY and f.mon_value == Decimal(10) and f.basis_state == BASIS_OBSERVED, f
+
+
+def test_a_v4_settle_paid_with_a_real_transfer_counts_the_quote_once():
+    """A wallet takes the token as a claim balance but settles the WMON with an ordinary transfer.
+
+    The event's quote and the transfer are the same payment; adding a synthetic quote movement on top of
+    the transfer doubled the cost, and the mirror sale's proceeds.
+    """
+    tokens, wmon = 300 * E18, 7 * E18
+    pools = {POOL_MANAGER: (TOKEN, WMON, True)}
+    buy = bundle(
+        [tf(3, WMON, WALLET, POOL_MANAGER, wmon)],
+        [VenueEvent("V4SWAP", 5, {"amount0": tokens, "amount1": -wmon, "sender": WALLET}, POOL_MANAGER)],
+        meta(WALLET, POOL_MANAGER),
+    )
+    f = only(run(buy, pools=pools, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY and f.token_delta == tokens and f.quote_delta == -wmon, f
+    sell = bundle(
+        [tf(3, WMON, POOL_MANAGER, WALLET, wmon)],
+        [VenueEvent("V4SWAP", 5, {"amount0": -tokens, "amount1": wmon, "sender": WALLET}, POOL_MANAGER)],
+        meta(WALLET, POOL_MANAGER),
+    )
+    f = only(run(sell, pools=pools, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_SELL and f.token_delta == -tokens and f.quote_delta == wmon, f
+
+
+def test_two_fills_at_one_venue_in_wmon_and_usdc_are_summed_in_mon():
+    pools = {"0x01": (TOKEN, WMON, True), "0x02": (TOKEN, USDC, True)}
+    b = bundle(
+        [
+            tf(1, WMON, EXECUTOR, POOL_MANAGER, 30 * E18),
+            tf(2, USDC, EXECUTOR, POOL_MANAGER, 20 * 10**6),
+            tf(3, TOKEN, POOL_MANAGER, EXECUTOR, 300 * E18),
+            tf(4, TOKEN, POOL_MANAGER, EXECUTOR, 200 * E18),
+            tf(9, TOKEN, EXECUTOR, WALLET, 500 * E18),
+        ],
+        [
+            VenueEvent(
+                "V4SWAP",
+                5,
+                {"amount0": 300 * E18, "amount1": -30 * E18, "sender": EXECUTOR, "pool_id": "0x01"},
+                POOL_MANAGER,
+            ),
+            VenueEvent(
+                "V4SWAP",
+                7,
+                {"amount0": 200 * E18, "amount1": -20 * 10**6, "sender": EXECUTOR, "pool_id": "0x02"},
+                POOL_MANAGER,
+            ),
+        ],
+        meta(BUNDLER, EXECUTOR),
+    )
+    with with_kinds(CONDUIT_KINDS):
+        f = only(run(b, pools=pools, rates=Rates(mon_usd=Decimal(1), usdc_per_mon=Decimal(1))))
+    assert f.kind == KIND_BUY and f.token_delta == 500 * E18
+    assert f.mon_value == Decimal(50), f.mon_value
+
+
+def test_a_sale_through_a_router_that_keeps_a_fee_books_what_the_pool_paid():
+    b = bundle(
+        [
+            tf(1, TOKEN, WALLET, ROUTER, 1000 * E18),
+            tf(2, TOKEN, ROUTER, POOL, 900 * E18),
+            tf(3, WMON, POOL, ROUTER, 9 * E18),
+            tf(4, WMON, ROUTER, THIRD, 9 * E18),
+        ],
+        [v3swap(2, POOL, ROUTER, 900 * E18, -9 * E18)],
+        meta(BUNDLER, ROUTER),
+        userop_sender=WALLET,
+    )
+    with with_kinds({THIRD: "contract_unknown"}):
+        f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_SELL and f.token_delta == -1000 * E18
+    assert f.quote_delta == 9 * E18 and f.basis_state == BASIS_OBSERVED, f
+
+
+def test_a_seller_paid_by_a_later_hop_on_the_path_still_prices_the_buyer():
+    b, tokens, wmon, usdc = solver_filled_buy()
+    paid_by_router = [
+        tf(
+            t.log_index,
+            t.token,
+            ROUTER if t.token == USDC and t.from_addr == EXECUTOR and t.to_addr in (SELLER1, SELLER2) else t.from_addr,
+            t.to_addr,
+            t.amount,
+        )
+        for t in b.transfers
+    ]
+    b = bundle(paid_by_router, b.venue_events, b.meta)
+    with with_kinds({**CONDUIT_KINDS, ROUTER: "contract_unknown"}):
+        flows = run(b, rates=SOLVER_RATES)
+    mine = [f for f in flows if f.wallet == SMART_ACCOUNT]
+    assert len(mine) == 1 and mine[0].kind == KIND_BUY and mine[0].basis_state == BASIS_OBSERVED, mine
+    expected_mon = Decimal(wmon) / E18 + Decimal(usdc) / Decimal(10**6) / SOLVER_RATES.usdc_per_mon
+    assert abs(mine[0].mon_value - expected_mon) <= Decimal("0.001"), (mine[0].mon_value, expected_mon)
+
+
+def test_a_payment_for_one_token_is_not_taken_by_a_nearer_airdrop_of_another():
+    distributor = "0x" + "d1" * 20
+    b = bundle(
+        [
+            tf(5, TOKEN, ZERO, distributor, 100 * E18),
+            tf(6, TOKEN, distributor, WALLET, 100 * E18),
+            tf(10, WMON, WALLET, POOL, 4 * E18),
+            tf(16, TOKEN2, POOL, WALLET, 400 * E18),
+        ],
+        [v3swap(16, POOL, WALLET, -400 * E18, 4 * E18)],
+        meta(WALLET, POOL),
+    )
+    with with_kinds({distributor: "contract_unknown"}):
+        flows = run(b, rates=Rates(mon_usd=Decimal(1)))
+    gift = only(flows, WALLET, TOKEN)
+    bought = only(flows, WALLET, TOKEN2)
+    assert gift.kind in (KIND_AIRDROP, KIND_MINT) and gift.quote_delta is None, gift
+    assert bought.kind == KIND_BUY and bought.quote_delta == -4 * E18 and bought.basis_state == BASIS_OBSERVED, bought
+
+
+def test_two_order_book_fills_for_one_movement_are_pooled():
+    t1, t2, m1, m2 = 1_346_767 * E18, 5_123_708 * E18, 20 * E18, 79 * E18
+    b = bundle(
+        [tf(120, TOKEN, CORE, ROUTER, t1), tf(130, TOKEN, CORE, ROUTER, t2), tf(140, TOKEN, ROUTER, WALLET, t1 + t2)],
+        [tr(127, ROUTER, True, m1, t1), tr(133, ROUTER, True, m2, t2)],
+        meta(BUNDLER, ROUTER),
+        trace=TraceResult(available=True, transfers=[(ROUTER, CORE, m1), (ROUTER, CORE, m2)]),
+        userop_sender=WALLET,
+    )
+    f = only(run(b, markets=MARKETS, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY and f.token_delta == t1 + t2
+    assert f.quote_delta == -(m1 + m2) and f.basis_state == BASIS_OBSERVED, f
+
+
+def test_slices_of_one_order_book_fill_sum_to_the_fill():
+    total, native = 3 * E18, 10**18 + 1
+    b = bundle(
+        [
+            tf(1, TOKEN, CORE, BATCHER, total),
+            tf(2, TOKEN, BATCHER, WALLET2, E18),
+            tf(3, TOKEN, BATCHER, WALLET3, E18),
+            tf(4, TOKEN, BATCHER, SEVEN, E18),
+        ],
+        [tr(5, BATCHER, True, native, total)],
+        meta(BUNDLER, BATCHER, native),
+    )
+    flows = run(b, markets=MARKETS)
+    assert sum(f.quote_delta for f in flows) == -native, [f.quote_delta for f in flows]
+
+
+def test_a_cost_that_mixes_usdc_with_no_rate_to_convert_it_is_not_observed():
+    b, tokens, wmon, usdc = solver_filled_buy()
+    with with_kinds({**CONDUIT_KINDS, ROUTER: "contract_unknown"}):
+        f = only(run(b, rates=Rates(mon_usd=Decimal("0.024539"), usdc_per_mon=Decimal(0))), SMART_ACCOUNT)
+    assert f.basis_state != BASIS_OBSERVED, f
+    assert f.mon_value != Decimal(wmon) / E18

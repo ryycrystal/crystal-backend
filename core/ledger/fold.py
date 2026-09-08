@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
@@ -286,16 +287,17 @@ def _apply_sell(state: PositionState, flow: Flow, amount: int) -> Effect:
     return effect
 
 
-def _handover(flow: Flow) -> tuple[str, str, str]:
-    """The two halves of a hand-off name each other by who sent, within one transaction.
+def _handover(flow: Flow) -> tuple[str, str, str, str]:
+    """The two halves of a hand-off name each other by sender and receiver, within one transaction.
 
     They do not share a chain position: with a distributor or a router between them the sender's half and
-    the receiver's half are different logs, and one sender's half can feed several receivers. What they do
-    share is the transaction and the sender, so what a sender releases is pooled under that and each
-    receiver takes its own amount out of the pool.
+    the receiver's half are different logs. What they share is the transaction and the pair of wallets,
+    because the netting writes one sending leg per receiver, so what a sender released to one receiver is
+    never taken up by a purchase from that sender by another, or by a fee it paid into a sink.
     """
-    sender = flow.wallet if flow.token_delta < 0 else (flow.counterparty or "")
-    return (flow.txhash, flow.token, sender)
+    if flow.token_delta < 0:
+        return (flow.txhash, flow.token, flow.wallet, flow.counterparty or "")
+    return (flow.txhash, flow.token, flow.counterparty or "", flow.wallet)
 
 
 def _apply_transfer_out(state: PositionState, flow: Flow, amount: int, transit: dict | None) -> Effect:
@@ -307,7 +309,7 @@ def _apply_transfer_out(state: PositionState, flow: Flow, amount: int, transit: 
     return effect
 
 
-def _take_from_transit(transit: dict, key: tuple[str, str, str], amount: int) -> Effect | None:
+def _take_from_transit(transit: dict, key: tuple[str, str, str, str], amount: int) -> Effect | None:
     """The receiver's share of what its sender released, leaving the rest for other receivers."""
     pooled = transit.get(key)
     if pooled is None:
@@ -317,12 +319,14 @@ def _take_from_transit(transit: dict, key: tuple[str, str, str], amount: int) ->
     if available <= amount:
         del transit[key]
         return pooled
+    quantities = [arriving.qty_observed, arriving.qty_estimated, arriving.qty_unresolved]
+    take = _apportion(amount, quantities)
     taken = Effect(
-        qty_observed=arriving.qty_observed * amount // available,
-        qty_estimated=arriving.qty_estimated * amount // available,
-        qty_unresolved=arriving.qty_unresolved * amount // available,
-        basis_observed_delta=arriving.basis_observed_delta * amount // available,
-        basis_estimated_delta=arriving.basis_estimated_delta * amount // available,
+        qty_observed=take[0],
+        qty_estimated=take[1],
+        qty_unresolved=take[2],
+        basis_observed_delta=arriving.basis_observed_delta * take[0] // quantities[0] if quantities[0] else 0,
+        basis_estimated_delta=arriving.basis_estimated_delta * take[1] // quantities[1] if quantities[1] else 0,
     )
     transit[key] = pooled + taken
     return -taken
@@ -340,7 +344,7 @@ def _apply_transfer_in(state: PositionState, flow: Flow, amount: int, transit: d
     nothing. The confidence of what the receiver now holds is in the effect vector, not that label.
 
     A sender that released real basis wins over the receiver's own quote, because the two halves of one
-    transfer cannot be a gift on one side and a purchase on the other. Letting a stray dust quote win
+    hand-off cannot be a gift on one side and a purchase on the other. Letting a stray dust quote win
     instead destroyed 47,875 MON at a single hand-off on moncock. Where the sender released nothing, there
     is nothing to conserve and whatever the receiver paid is the better evidence.
     """
@@ -462,6 +466,45 @@ def _flow_key(flow: Flow) -> tuple[int, int, int, int]:
     return (flow.block_number, flow.tx_index, flow.log_index, flow.sub_index)
 
 
+def _fold_order(flows: list[Flow]) -> list[Flow]:
+    """Chain order, except that within one transaction a hand-off is released before it is taken.
+
+    A contract that forwards tokens before it is funded puts the receiver's half ahead of the sender's in
+    the log, and folded in that order the receiver finds nothing to inherit and the sender's release goes
+    to nobody. The transaction is atomic, so the sender's half can move ahead of that receiver's, as long
+    as it stays behind anything the sender itself received first in the same transaction.
+    """
+    ordered = sorted(flows, key=_flow_key)
+    keys = [float(i) for i in range(len(ordered))]
+    by_tx: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for i, flow in enumerate(ordered):
+        by_tx[(flow.block_number, flow.tx_index)].append(i)
+    for group in by_tx.values():
+        for i in group:
+            flow = ordered[i]
+            if flow.kind != KIND_TRANSFER_OUT:
+                continue
+            key = _handover(flow)
+            takers = [
+                j
+                for j in group
+                if j < i
+                and ordered[j].token_delta > 0
+                and ordered[j].kind in HANDOVER_KINDS
+                and _handover(ordered[j]) == key
+            ]
+            if not takers:
+                continue
+            own_inbound = [
+                j for j in group if j < i and ordered[j].wallet == flow.wallet and ordered[j].token_delta > 0
+            ]
+            floor = max(own_inbound) if own_inbound else -1
+            target = min(takers)
+            if target > floor:
+                keys[i] = target - 0.5
+    return [ordered[i] for i in sorted(range(len(ordered)), key=lambda i: keys[i])]
+
+
 def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tuple[dict[str, PositionState], list[Flow]]:
     """Fold every wallet of one token together, in chain order.
 
@@ -473,8 +516,8 @@ def fold_token(prev: dict[str, PositionState] | None, flows: list[Flow]) -> tupl
     for state in states.values():
         state.parked = {name: replace(bucket) for name, bucket in state.parked.items()}
     out: list[Flow] = []
-    transit: dict[tuple[str, str, str], Effect] = {}
-    for flow in sorted(flows, key=_flow_key):
+    transit: dict[tuple[str, str, str, str], Effect] = {}
+    for flow in _fold_order(flows):
         state = states.get(flow.wallet)
         if state is None:
             state = states[flow.wallet] = PositionState(wallet=flow.wallet, token=flow.token)
