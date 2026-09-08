@@ -306,6 +306,9 @@ def test_rpc_client_counts_batch_items_against_the_budget(monkeypatch):
         def pushed_back(self):
             return None
 
+        def eta(self):
+            return 0.0
+
     fake = FakeUrlopen(tx_handler({TX_A: rpc_tx(TX_A), TX_B: rpc_tx(TX_B)}))
     monkeypatch.setattr(txmeta, "urlopen", fake)
     client = RpcClient("http://rpc.test", limiter=Limiter(), sleep=no_sleep)
@@ -616,3 +619,64 @@ def test_rpc_client_gives_up_on_a_persistent_rate_limit_only_after_many_attempts
 
     assert "error" in out[0]
     assert len(fake.payloads) == txmeta.MAX_ATTEMPTS >= 12
+
+
+def test_pool_urls_come_from_the_environment(monkeypatch):
+    monkeypatch.setenv("RPC_HTTP_POOL", "https://a.test, https://b.test")
+    assert txmeta.pool_urls("https://c.test") == ["https://a.test", "https://b.test"]
+    monkeypatch.delenv("RPC_HTTP_POOL")
+    assert txmeta.pool_urls("https://c.test") == ["https://c.test"]
+
+
+class PoolUrlopen:
+    def __init__(self, refusing: set[str]) -> None:
+        self.refusing = refusing
+        self.hits: list[str] = []
+        self.agents: list[str] = []
+
+    def __call__(self, request, timeout=None):
+        self.hits.append(request.full_url)
+        self.agents.append(request.get_header("User-agent") or "")
+        if request.full_url in self.refusing:
+            raise urllib.error.HTTPError(request.full_url, 429, "too many", {}, None)
+        payload = json.loads(request.data)
+        items = [{"jsonrpc": "2.0", "id": e["id"], "result": rpc_tx(e["params"][0])} for e in payload]
+        return FakeResponse(json.dumps(items).encode())
+
+
+def test_rpc_client_spreads_chunks_over_the_pool_and_leaves_a_refusing_url_alone(monkeypatch):
+    fake = PoolUrlopen(refusing=set())
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    monkeypatch.setattr(txmeta, "_limiters", {})
+    client = RpcClient("http://a.test", urls=["http://a.test", "http://b.test"], batch_size=1, sleep=no_sleep)
+
+    out = client.batch(
+        [
+            ("eth_getTransactionByHash", [TX_A]),
+            ("eth_getTransactionByHash", [TX_B]),
+            ("eth_getTransactionByHash", [TX_C]),
+        ]
+    )
+
+    assert len(out) == 3 and all("result" in item for item in out)
+    assert set(fake.hits) == {"http://a.test", "http://b.test"}
+    assert all(agent.startswith("Mozilla/5.0") for agent in fake.agents)
+
+    fake = PoolUrlopen(refusing={"http://a.test"})
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    monkeypatch.setattr(txmeta, "_limiters", {})
+    client = RpcClient("http://a.test", urls=["http://a.test", "http://b.test"], batch_size=1, sleep=no_sleep)
+    out = client.batch([("eth_getTransactionByHash", [TX_A]) for _ in range(6)])
+    assert all("result" in item for item in out)
+    assert fake.hits.count("http://a.test") <= 2 and fake.hits.count("http://b.test") >= 6
+    assert client.limiters["http://a.test"].max_rps < client.limiters["http://b.test"].max_rps
+
+
+def test_traces_stay_on_the_base_url_while_metadata_uses_the_pool(monkeypatch):
+    monkeypatch.setenv("RPC_HTTP_POOL", "https://a.test,https://b.test")
+    monkeypatch.setattr(txmeta, "_limiters", {})
+    assert TxMetaStore(fake_cur_factory, "https://base.test", store=FakeStore()).rpc.urls == [
+        "https://a.test",
+        "https://b.test",
+    ]
+    assert TraceStore(fake_cur_factory, "https://base.test", store=FakeStore()).rpc.urls == ["https://base.test"]

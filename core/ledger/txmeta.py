@@ -15,12 +15,14 @@ from urllib.request import urlopen
 from core.ledger.types import TraceResult, TxMeta
 
 DEFAULT_RPC_URL = "https://rpc.monad.xyz"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
 DEFAULT_MAX_RPS = 20.0
 BATCH_SIZE = 50
 MAX_ATTEMPTS = 12
 BACKOFF_BASE_SECONDS = 0.5
 BACKOFF_CAP_SECONDS = 30.0
 MIN_RPS = 1.0
+COOLDOWN_SECONDS = 1.0
 HTTP_TIMEOUT_SECONDS = 30.0
 VALUE_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 RETRYABLE_ERROR_CODES = frozenset({-32005, -32603, 429})
@@ -71,22 +73,43 @@ class RateLimiter:
     def pushed_back(self) -> None:
         with self._lock:
             self.max_rps = max(MIN_RPS, self.max_rps / 2)
+            self._next_slot = max(self._next_slot, self._clock() + COOLDOWN_SECONDS)
 
     def answered(self) -> None:
         with self._lock:
             self.max_rps = min(self.cap, self.max_rps + 1)
 
+    def eta(self) -> float:
+        with self._lock:
+            return max(0.0, self._next_slot - self._clock())
 
-_default_limiter: RateLimiter | None = None
-_default_limiter_lock = threading.Lock()
+
+_limiters: dict[str, RateLimiter] = {}
+_limiters_lock = threading.Lock()
+
+
+def limiter_for(url: str) -> RateLimiter:
+    """One limiter per endpoint for the whole process, so every store shares each node's budget."""
+    with _limiters_lock:
+        limiter = _limiters.get(url)
+        if limiter is None:
+            limiter = _limiters[url] = RateLimiter()
+        return limiter
 
 
 def shared_limiter() -> RateLimiter:
-    global _default_limiter
-    with _default_limiter_lock:
-        if _default_limiter is None:
-            _default_limiter = RateLimiter()
-        return _default_limiter
+    return limiter_for(os.getenv("RPC_HTTP") or DEFAULT_RPC_URL)
+
+
+def pool_urls(url: str | None = None) -> list[str]:
+    """The endpoints that share the metadata and receipt traffic: `RPC_HTTP_POOL`, else the base url alone.
+
+    The public QuickNode endpoint caps a client at fifty calls a second and is the only one that serves
+    traces, so traces stay on the base url while the far heavier metadata and receipt calls are spread
+    over whatever other public nodes answer.
+    """
+    configured = [u.strip() for u in os.getenv("RPC_HTTP_POOL", "").split(",") if u.strip()]
+    return configured or [url or os.getenv("RPC_HTTP") or DEFAULT_RPC_URL]
 
 
 def _hex_int(value) -> int:
@@ -136,9 +159,14 @@ class RpcClient:
         timeout: float = HTTP_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
+        urls: list[str] | None = None,
     ) -> None:
         self.url = url or os.getenv("RPC_HTTP") or DEFAULT_RPC_URL
-        self.limiter = limiter or shared_limiter()
+        self.urls = list(urls) if urls else [self.url]
+        self.limiters = {u: limiter_for(u) for u in self.urls}
+        if limiter is not None:
+            self.limiters[self.urls[0]] = limiter
+        self.limiter = self.limiters[self.urls[0]]
         self.batch_size = max(int(batch_size), 1)
         self.max_attempts = max(int(max_attempts), 1)
         self.timeout = timeout
@@ -151,9 +179,14 @@ class RpcClient:
         for attempt in range(self.max_attempts):
             if attempt:
                 self._sleep(_backoff(attempt, self._jitter))
-            self.limiter.acquire(len(payload))
+            url = min(self.urls, key=lambda u: self.limiters[u].eta())
+            limiter = self.limiters[url]
+            limiter.acquire(len(payload))
             request = urllib.request.Request(
-                self.url, data=body, headers={"content-type": "application/json"}, method="POST"
+                url,
+                data=body,
+                headers={"content-type": "application/json", "user-agent": USER_AGENT},
+                method="POST",
             )
             try:
                 with urlopen(request, timeout=self.timeout) as response:
@@ -161,16 +194,16 @@ class RpcClient:
             except urllib.error.HTTPError as exc:
                 last_error = exc
                 if exc.code == 429:
-                    self.limiter.pushed_back()
+                    limiter.pushed_back()
                 continue
             except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
                 last_error = exc
                 continue
             if isinstance(data, list):
                 if any(isinstance(item, dict) and _is_rate_limit(item.get("error")) for item in data):
-                    self.limiter.pushed_back()
+                    limiter.pushed_back()
                 else:
-                    self.limiter.answered()
+                    limiter.answered()
                 return data
             last_error = RpcError(f"batch response was not a list: {str(data)[:200]}")
         raise RpcError(f"rpc unavailable after {self.max_attempts} attempts: {last_error}")
@@ -268,9 +301,9 @@ def _unique_lower(txhashes: Iterable[str]) -> list[str]:
 
 
 class _CachedStore:
-    def __init__(self, cur_factory, rpc_url, rpc, store, memory_limit) -> None:
+    def __init__(self, cur_factory, rpc_url, rpc, store, memory_limit, pooled: bool = True) -> None:
         self._cur_factory = cur_factory
-        self._rpc = rpc or RpcClient(rpc_url)
+        self._rpc = rpc or RpcClient(rpc_url, urls=pool_urls(rpc_url) if pooled else None)
         self._store = store if store is not None else _load_store()
         self._memory: dict = {}
         self._memory_limit = memory_limit
@@ -396,7 +429,7 @@ class TraceStore(_CachedStore):
         store=None,
         memory_limit: int = MEMORY_CACHE_LIMIT,
     ) -> None:
-        super().__init__(cur_factory, rpc_url, rpc, store, memory_limit)
+        super().__init__(cur_factory, rpc_url, rpc, store, memory_limit, pooled=False)
 
     def native_transfers(self, txhash: str) -> TraceResult:
         key = str(txhash).lower()

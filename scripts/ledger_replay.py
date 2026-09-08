@@ -48,7 +48,7 @@ from core.ledger.kinds import AddressKinds  # noqa: E402
 from core.ledger.rates import SAMPLE_TABLE, SEED_SAMPLES, RateBook, from_samples  # noqa: E402
 from core.ledger.receipts import RECEIPT_LOG_DDL, ReceiptLogs  # noqa: E402
 from core.ledger.schema import LEDGER_TABLES, init_ledger_schema  # noqa: E402
-from core.ledger.txmeta import RpcClient, RpcError, TxMetaStore  # noqa: E402
+from core.ledger.txmeta import RpcClient, RpcError, TxMetaStore, pool_urls  # noqa: E402
 from core.ledger.types import QUOTE_ASSETS  # noqa: E402
 from core.storage import schema  # noqa: E402
 
@@ -569,7 +569,9 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         print("[REPLAY] nothing to replay", flush=True)
         return
 
-    tx_meta = TxMetaStore(storage.db_cursor, args.rpc, rpc=RpcClient(args.rpc, batch_size=args.rpc_batch))
+    pool = RpcClient(args.rpc, batch_size=args.rpc_batch, urls=pool_urls(args.rpc))
+    print(f"[RPC] traces on {args.rpc}; metadata and receipts over {pool.urls}", flush=True)
+    tx_meta = TxMetaStore(storage.db_cursor, args.rpc, rpc=pool)
     kinds = AddressKinds(storage.db_cursor, args.rpc)
     engine = LedgerEngine(
         storage.db_cursor,
@@ -583,7 +585,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
     with storage.db_cursor() as cur:
         registry = engine.refresh_registry(cur)
         kinds.load_known(cur)
-    receipts = ReceiptLogs(RpcClient(args.rpc, batch_size=args.rpc_batch), tokens=set(registry))
+    receipts = ReceiptLogs(pool, tokens=set(registry))
 
     groups = [blocks[i : i + args.batch] for i in range(0, len(blocks), args.batch)]
     fetcher = ParallelFetcher(args.streams)
