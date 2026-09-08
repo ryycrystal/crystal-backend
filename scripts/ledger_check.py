@@ -270,10 +270,17 @@ def moncock_checks(cur) -> list[Check]:
     """The moncock wallet against what its movements carried.
 
     This wallet never buys or sells moncock. Its router buys from executors and hands the tokens to it, and
-    it hands them back to the router, which sells them. So the 477,018 MON that used to be measured as
+    it hands them back to the router, which sells them. So the cost that used to be measured as
     native_spent is the cost its inbound movements inherit, the sale and its result belong to the router,
-    and the wallet itself realizes nothing. The inherited figure read 171,967 while venue events were
-    pricing the hand-offs and forwarded payments were being cancelled as wraps.
+    and the wallet itself realizes nothing.
+
+    The figures come from the chain and the rate table, not from the engine. The router paid 1,181.099671,
+    2,657.511893, 3,986.280921 and 3,986.283560 USDC for the four purchases, all inside the five-minute
+    bucket starting at 1788548700 where the rate is 0.024539 USDC per MON, and received 7,115.130693 USDC
+    for the sale in the bucket starting at 1788629100 at 0.025220. The 477,018 the old engine measured was
+    the executor's side, what the pools received plus the over-the-counter legs, which sits 0.9% under what
+    the router paid the executor. The inherited figure read 171,967 while venue events were pricing the
+    hand-offs and forwarded payments were being cancelled as wraps.
     """
     name = "moncock"
     pos = position(cur, MONCOCK_WALLET, MONCOCK)
@@ -284,11 +291,11 @@ def moncock_checks(cur) -> list[Check]:
     return [
         check_abs(name, "tokens taken in", moved["tokens_in"], "25719120.30", "0.01"),
         check_abs(name, "tokens handed on", -moved["tokens_out"], "25719120.30", "0.01"),
-        check_pct(name, "cost inherited on the way in", moved["cost_in"], "477018", "0.5"),
+        check_pct(name, "cost inherited on the way in", moved["cost_in"], "481326", "0.5"),
         check_eq(name, "cost released on the way out equals cost taken in", -moved["cost_out"], moved["cost_in"]),
         check_eq(name, "realized by the wallet", moved["realized"], 0),
         check_eq(name, "trade_count", int(pos["trade_count"]), 0),
-        check_pct(name, "realized by its router (confirmed + estimated)", router["realized"], "-193957", "0.5"),
+        check_pct(name, "realized by its router (confirmed + estimated)", router["realized"], "-199206", "0.5"),
         check_le(name, "balance_token", int(pos["balance_token"]), dust_limit(moved["tokens_in"])),
     ]
 
