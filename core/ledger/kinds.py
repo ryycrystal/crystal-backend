@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 
 from core import chain as h
+from core.ledger.routers import KNOWN_ROUTERS
 from core.ledger.types import (
     AUSD,
     ENTRYPOINTS,
@@ -178,7 +179,14 @@ class JsonRpc:
 
 
 def known_address_kinds() -> dict[str, str]:
+    """Every address whose role is known before the chain is read.
+
+    Routers and aggregators are seeded first so that anything the lists below know more precisely, a
+    curve, a custody contract, the pool manager, keeps its own kind.
+    """
     kinds = {ZERO: KIND_ZERO}
+    for addr in KNOWN_ROUTERS:
+        kinds[addr] = KIND_VENUE_ROUTER
     for addr in QUOTE_TOKENS:
         kinds[addr] = KIND_TOKEN
     for addr in h.NADFUN_ADDRS:

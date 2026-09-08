@@ -1060,3 +1060,19 @@ def test_a_contract_that_emits_a_swap_event_is_a_venue_on_first_sight():
     assert kinds.observe_tx(b, registry, _Cur()) == [pool]
     assert pool in kinds.tx_venues
     assert kinds.kind(pool, _Cur()) == "venue_pool"
+
+
+def test_known_routers_are_seeded_so_the_netting_looks_through_them():
+    """Relay's v3 router carried the moncock wallet's tokens and served 914 wallets; unclassified it was a
+    holder in the graph, and every path through it ended one hop short of the venue."""
+    from core.ledger.kinds import known_address_kinds
+    from core.ledger.routers import KNOWN_ROUTERS
+    from core.ledger.types import KIND_VENUE_ROUTER
+
+    kinds = known_address_kinds()
+    relay_v3 = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"
+    assert relay_v3 in KNOWN_ROUTERS
+    assert all(kinds.get(addr) == KIND_VENUE_ROUTER for addr in KNOWN_ROUTERS), [
+        a for a in KNOWN_ROUTERS if kinds.get(a) != KIND_VENUE_ROUTER
+    ][:3]
+
