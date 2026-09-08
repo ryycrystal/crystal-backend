@@ -220,14 +220,17 @@ def seed_mon_usd_samples(src: LogSource, lcur) -> int:
     return len(rows)
 
 
-def seed_from_prod(src: LogSource, tokens: list[str], reference_tables: bool) -> None:
+def seed_from_prod(src: LogSource, tokens: list[str], reference_tables: bool, everything: bool = False) -> None:
     t0 = time.time()
     with storage.db_cursor() as lcur:
         if reference_tables:
             for table in SEED_TABLES:
                 copy_table(src, lcur, table)
             seed_mon_usd_samples(src, lcur)
-        copy_table(src, lcur, "launchpad_positions", "WHERE token = ANY(%s)", (tokens,))
+        if everything:
+            copy_table(src, lcur, "launchpad_positions")
+        else:
+            copy_table(src, lcur, "launchpad_positions", "WHERE token = ANY(%s)", (tokens,))
     print(f"[SEED] done in {time.time() - t0:.0f}s", flush=True)
 
 
@@ -440,7 +443,8 @@ def process_chunk(
     relevant: dict[int, list[dict]],
     timestamps: dict[int, int],
     receipt_logs_added: int,
-    span: tuple[list[str], int, int] | None = None,
+    span: tuple[list[str] | None, int, int] | None = None,
+    fold: bool = True,
 ) -> tuple[int, int]:
     """Fold one chunk, recording its coverage in the same transaction as the flows it produced.
 
@@ -456,7 +460,7 @@ def process_chunk(
             flows += engine.process_block(blk, timestamps[blk], logs, cur)
         if span is not None:
             engine.cover(cur, span[0], span[1], span[2])
-        refolded = engine.flush(cur)
+        refolded = engine.flush(cur) if fold else 0
     return flows, refolded
 
 
@@ -466,11 +470,12 @@ def process_chunk_with_retries(
     relevant: dict[int, list[dict]],
     timestamps: dict[int, int],
     receipt_logs_added: int,
-    span: tuple[list[str], int, int] | None = None,
+    span: tuple[list[str] | None, int, int] | None = None,
+    fold: bool = True,
 ) -> tuple[int, int]:
     for attempt in range(CHUNK_ATTEMPTS):
         try:
-            return process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added, span)
+            return process_chunk(engine, kinds, relevant, timestamps, receipt_logs_added, span, fold)
         except (RuntimeError, RpcError, psycopg2.OperationalError, psycopg2.errors.DeadlockDetected) as exc:
             if attempt + 1 == CHUNK_ATTEMPTS:
                 raise
@@ -479,7 +484,7 @@ def process_chunk_with_retries(
     raise RuntimeError("unreachable")
 
 
-def summary(tokens: list[str]) -> None:
+def summary(tokens: list[str], per_token: bool = True) -> None:
     from ledger_check import token_shares
 
     with storage.db_cursor() as cur:
@@ -487,17 +492,20 @@ def summary(tokens: list[str]) -> None:
         flows = cur.fetchone()[0]
         cur.execute("SELECT count(*) FROM positions_v2")
         positions = cur.fetchone()[0]
-        cur.execute(
-            "SELECT basis_state, count(*) FROM wallet_flows WHERE token = ANY(%s) GROUP BY basis_state ORDER BY 1",
-            (tokens,),
-        )
+        if per_token:
+            cur.execute(
+                "SELECT basis_state, count(*) FROM wallet_flows WHERE token = ANY(%s) GROUP BY basis_state ORDER BY 1",
+                (tokens,),
+            )
+        else:
+            cur.execute("SELECT basis_state, count(*) FROM wallet_flows GROUP BY basis_state ORDER BY 1")
         states = cur.fetchall()
-        shares = token_shares(cur, tokens)
+        shares = token_shares(cur, tokens) if per_token else {}
     print(f"[SUMMARY] {flows:,} flows, {positions:,} positions", flush=True)
     print(
         "[SUMMARY] flow basis states for the replayed tokens: " + ", ".join(f"{s} {n:,}" for s, n in states), flush=True
     )
-    for token in tokens:
+    for token in tokens if per_token else []:
         est, unres, unpriced = shares.get(token, (None, None, None))
         print(
             f"[SUMMARY] {token}: estimated share {_pct(est)}, inflow still without a cost {_pct(unres)}, "
@@ -519,7 +527,12 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         wipe_tokens(tokens)
     if args.reset_discovered:
         reset_discovered()
-    seed_from_prod(src, tokens, reference_tables=not args.skip_seed)
+    seed_from_prod(src, tokens, reference_tables=not args.skip_seed, everything=args.all)
+    if args.all:
+        with storage.db_cursor() as cur:
+            cur.execute("SELECT token FROM launchpad_tokens WHERE token IS NOT NULL ORDER BY token")
+            tokens = [row[0].lower() for row in cur.fetchall()]
+        print(f"[SCOPE] every registered token: {len(tokens):,}", flush=True)
 
     created, venues = token_scope(src, tokens)
     watched = set(tokens)
@@ -533,7 +546,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         if last:
             from_block = max(from_block, int(last))
             print(f"[RESUME] continuing from block {from_block:,} (last ledger block for these tokens)", flush=True)
-    for token in tokens:
+    for token in tokens if not args.all else []:
         print(f"[SCOPE] {token}: created {created[token]:,}, venues {sorted(venues[token])}", flush=True)
 
     blocks, covers_from = load_or_find_blocks(src, sorted(watched), from_block, args.to_block, args.blocks_file)
@@ -565,7 +578,7 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
         kinds=kinds,
         rates_fn=RateBook(from_samples),
     )
-    engine.scope = frozenset(tokens)
+    engine.scope = None if args.all else frozenset(tokens)
     with storage.db_cursor() as cur:
         registry = engine.refresh_registry(cur)
         kinds.load_known(cur)
@@ -607,8 +620,10 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             prepared[gi + 1] = prepared_for(gi + 1)
         await backfill.ensure_block_timestamps(cached)
         timestamps = await timestamps_for(group, cached)
-        span = (tokens, covers_from, group[-1])
-        flows, refolded = process_chunk_with_retries(engine, kinds, relevant, timestamps, receipt_logs_added, span)
+        span = (None if args.all else tokens, covers_from, group[-1])
+        flows, refolded = process_chunk_with_retries(
+            engine, kinds, relevant, timestamps, receipt_logs_added, span, fold=not args.no_fold
+        )
         total_flows += flows
         total_refolds += refolded
         done += len(group)
@@ -630,10 +645,10 @@ async def replay(args: argparse.Namespace, tokens: list[str]) -> None:
             (str(blocks[-1]),),
         )
     print(f"[REPLAY] {total_flows:,} flows in {time.time() - t0:.0f}s, head block {blocks[-1]:,}", flush=True)
-    summary(tokens)
+    summary(tokens, per_token=not args.all)
 
 
-def refold_only(tokens: list[str]) -> None:
+def refold_only(tokens: list[str], per_token: bool = True) -> None:
     """Recompute positions from stored flows, for a fold change that alters no flow's identity or evidence."""
     from core.ledger import fold, store
     from core.ledger.schema import init_ledger_schema
@@ -646,12 +661,14 @@ def refold_only(tokens: list[str]) -> None:
     if skipped:
         print(f"[REFOLD] no coverage from creation, positions left alone: {skipped}", flush=True)
     written = 0
-    for token in [token for token in tokens if token in covered]:
+    folded = [token for token in tokens if token in covered]
+    for i, token in enumerate(folded, 1):
         with storage.db_cursor() as cur:
             written += store.refold_tokens(cur, {token: 0}, fold.fold_token)
-        print(f"[REFOLD] {token}: folded", flush=True)
+        if per_token or i % 500 == 0 or i == len(folded):
+            print(f"[REFOLD] {i:,}/{len(folded):,} tokens, {written:,} positions, {time.time() - t0:.0f}s", flush=True)
     print(f"[REFOLD] {written:,} positions in {time.time() - t0:.0f}s", flush=True)
-    summary(tokens)
+    summary(tokens, per_token=per_token)
 
 
 def backfill_coverage(tokens: list[str]) -> None:
@@ -725,6 +742,16 @@ def main() -> None:
         help="fold only: recompute these tokens' positions and fold columns from the flows already stored",
     )
     ap.add_argument(
+        "--all",
+        action="store_true",
+        help="every registered token, unscoped: a block-range partition of the whole history, coverage recorded for all tokens",
+    )
+    ap.add_argument(
+        "--no-fold",
+        action="store_true",
+        help="net flows only; the fold runs once over the merged partitions with --refold",
+    )
+    ap.add_argument(
         "--backfill-coverage",
         action="store_true",
         help="record coverage for tokens replayed before coverage existed, from the span their flows already prove",
@@ -732,14 +759,19 @@ def main() -> None:
     args = ap.parse_args()
 
     tokens = list(dict.fromkeys(t.lower() for t in args.token))
-    if not tokens:
-        raise SystemExit("pass --token")
+    if not tokens and not args.all:
+        raise SystemExit("pass --token or --all")
     require_side_db()
     storage.init_pool()
     if args.backfill_coverage:
         backfill_coverage(tokens)
     if args.refold:
-        refold_only(tokens)
+        if args.all:
+            with storage.db_cursor() as cur:
+                cur.execute("SELECT DISTINCT token FROM wallet_flows ORDER BY token")
+                tokens = [row[0] for row in cur.fetchall()]
+            print(f"[REFOLD] every token with flows: {len(tokens):,}", flush=True)
+        refold_only(tokens, per_token=not args.all)
         return
     asyncio.run(replay(args, tokens))
 
