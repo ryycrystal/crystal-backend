@@ -96,45 +96,13 @@ only path by which this branch can break production with the flag off, and it sh
 
 ## Status
 
-All four seams and step 0 are built, and the full suite is green at 756 tests. What each one changed:
-
-**Step 0, coverage.** A replay now records, in the same transaction as the flows, which block range it
-actually read for each token, and a position is only served for a token whose coverage reaches back to
-its registration. A token seen in passing keeps its flows as evidence and gets no position, which is
-where the leftovers' 389 negative balances came from. A cached block list only certifies coverage from
-its own first block, so a list built for a later window cannot claim a history it never read.
-
-**Seam 1, the movement.** Flows are built from individual movements matched to the payment that funded
-them, a venue event counts only from a classified venue, and a claim-settled swap produces movements
-from the event and the pool's own registration. Two consequences worth knowing:
-
-- Router fees are no longer removed from cost. A wallet paying 8,684.93 for tokens the pool received
-  8,598.08 for used to have the 86.85 deleted. Cost is now what the wallet paid and proceeds are what it
-  kept, so cost basis rises slightly on every routed trade and realized falls by the same amount.
-- A movement's identity now carries its side. Keyed on the log index alone, the two halves of one
-  transfer collided on the primary key and one was dropped on insert: 65,791 of 72,690 wallet-to-wallet
-  transfer rows in the side database had lost their counterparty half. The netflow tests never wrote to a
-  database, so only a test that stored its result caught it. Ordering the outgoing half first is also what
-  lets seam 3 release a sender's basis before the receiver inherits it.
-
-**Seam 2, the disposal shape.** Each flow stores the whole vector the fold computed rather than two
-totals, so a sale drawing on observed, estimated and unresolved inventory at once is recoverable from its
-row. An unpriced disposal no longer books the released basis as a loss: it leaves the running average and
-waits in its own bucket. Every field the fold carries is now persisted, so a stored position is a
-checkpoint a later fold can resume from.
-
-**Seam 3, the ordered fold.** A token is folded as one pass across all its wallets in chain order, so a
-transfer hands its cost to the receiver instead of destroying it. The fold resumes from the persisted
-checkpoint and only loads the wallets in the new flows; a flow landing at or below the watermark folds
-the whole token again, which is the correction path and stays off the common one.
-
-**Seam 4, parked basis.** Basis parked in a pool or vault is recorded against that pool or vault. Pooled
-into one aggregate, withdrawing 100 from a vault that held it at 100 returned 550, the average of every
-vault the wallet had used.
-
-**Also shipped:** the sequencer reaches the ledger through a gate that imports nothing from `core.ledger`
-while the flag is off, and refuses to start against a database without the ledger tables instead of
-raising inside the block transaction.
+Superseded on 2026-09-08. The four seams below were built and rebuilt on real data, and then the model
+they served, pricing every address by matching venue events to movements, was ruled out of scope by the
+owner. The netting was rewritten to the wallet-boundary model described in [LEDGER_SPEC.md](LEDGER_SPEC.md):
+a person's wallet is priced by its own payment, else by what the venues at the far end of the token's path
+were paid, else it is a transfer; intermediaries get no rows. Coverage, the disposal vector, the ordered fold
+and parked basis survived the rewrite unchanged in purpose; the fold's hand-offs are now keyed by sender and
+receiver. The state of the evidence is in [COMPLETE.md](COMPLETE.md).
 
 ## What the rebuilt data found that the tests did not
 
@@ -156,8 +124,9 @@ rebuilding JAMES and asking the stored rows questions no test had asked, and eac
 The common shape: all six conserve net token quantity per wallet, which is why the balance, supply and
 coverage checks stayed green through every one of them.
 
-Next: rebuild the three fixtures on this code and re-run `ledger_check` and `ledger_verify`, then the
-next review round.
+These defects were found under the previous model. Eleven more were found in the rewrite by an
+adversarial review before it was graded; they are listed in COMPLETE.md and each is a test that failed
+before its fix.
 
 ## Acceptance
 
