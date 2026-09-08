@@ -72,9 +72,9 @@ CHECKS = [
         " (SELECT 1 FROM address_kinds k WHERE k.address=p.wallet AND k.kind LIKE 'venue%%')",
     ),
     (
-        "one wallet with two movements of one token, one side, one chain position",
-        "SELECT count(*) FROM (SELECT block_number,tx_index,log_index,sub_index"
-        " FROM wallet_flows WHERE token=%(t)s GROUP BY 1,2,3,4 HAVING count(*)>1) d",
+        "one wallet with two legs of one token to the same party at one chain position",
+        "SELECT count(*) FROM (SELECT block_number,tx_index,log_index,wallet,sign(token_delta),counterparty"
+        " FROM wallet_flows WHERE token=%(t)s GROUP BY 1,2,3,4,5,6 HAVING count(*)>1) d",
     ),
     (
         "wallet-to-wallet transfer missing its other half",

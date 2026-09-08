@@ -103,8 +103,8 @@ CHECKS = [
         "no wallet holds two movements of one token at a single chain position",
         """
         SELECT count(*) FROM (
-            SELECT block_number, tx_index, log_index, wallet, token, sign(token_delta)
-            FROM wallet_flows GROUP BY 1,2,3,4,5,6 HAVING count(*) > 1
+            SELECT block_number, tx_index, log_index, wallet, token, sign(token_delta), counterparty
+            FROM wallet_flows GROUP BY 1,2,3,4,5,6,7 HAVING count(*) > 1
         ) dupes
         """,
     ),

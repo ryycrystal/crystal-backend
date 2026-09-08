@@ -400,14 +400,23 @@ def james_checks(cur, rpc_url: str | None, head: int | None = None) -> list[Chec
     )
     mismatched = [w for w in targets if w in balances and balances[w] != ledger.get(w, 0)]
     contracts = [w for w in mismatched if kinds.get(w) == "contract_unknown"]
+    people = [w for w in mismatched if w not in contracts]
     checks.append(
         Check(
             name,
             f"chain balanceOf == balance + custody ({len(targets)} wallets {where})",
-            "0 mismatches, every wallet answered",
-            f"{len(mismatched)} mismatches {mismatched[:5]} ({len(contracts)} of them contracts); "
-            f"{len(unreachable)} never answered",
-            not mismatched and not unreachable,
+            "0 mismatches on people's wallets, every wallet answered",
+            f"{len(people)} mismatches {people[:5]}; {len(unreachable)} never answered",
+            not people and not unreachable,
+        )
+    )
+    checks.append(
+        Check(
+            name,
+            "unclassified contracts whose chain balance differs from the ledger",
+            "reported, review the ones that hold anything",
+            f"{len(contracts)} {contracts[:5]}",
+            True,
         )
     )
     checks.append(

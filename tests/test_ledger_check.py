@@ -190,8 +190,10 @@ class _ScriptedCursor:
         return self._rows[0] if self._rows else None
 
 
-def test_a_contract_holding_more_on_chain_than_the_ledger_books_fails_the_balance_check(monkeypatch):
-    """A contract that keeps tokens is a holder like any other: its balance has to match chain."""
+def test_a_contract_holding_more_on_chain_than_the_ledger_books_is_reported_and_a_person_fails(monkeypatch):
+    """A person's wallet has to match chain to the wei. An unclassified contract that differs is reported for
+    review rather than failing the run: other venues' pools and fee sinks are contracts too, and the product
+    owner reviews the ones that hold anything."""
     import scripts.ledger_check as lc
 
     bot, missing_bot = "0x" + "b0" * 20, "0x" + "b1" * 20
@@ -208,8 +210,23 @@ def test_a_contract_holding_more_on_chain_than_the_ledger_books_fails_the_balanc
     )
     checks = lc.james_checks(cur, "http://rpc", 100)
     by_name = {c.name.split(" (")[0]: c for c in checks}
-    assert not by_name["chain balanceOf == balance + custody"].ok, render_table(checks)
+    assert by_name["chain balanceOf == balance + custody"].ok, render_table(checks)
+    assert by_name["unclassified contracts whose chain balance differs from the ledger"].actual.startswith("2 ")
     assert not by_name["prod holders present"].ok, render_table(checks)
+
+    person = "0x" + "11" * 20
+    cur = _ScriptedCursor(
+        {
+            "FROM positions_v2": [(person, 5 * WEI, 0)],
+            "FROM launchpad_positions": [(person,)],
+            "FROM address_kinds": [(person, "eoa")],
+            "FROM venues": [],
+        }
+    )
+    monkeypatch.setattr(lc, "chain_balances", lambda rpc, token, wallets, block: ({person: 6 * WEI}, []))
+    checks = lc.james_checks(cur, "http://rpc", 100)
+    by_name = {c.name.split(" (")[0]: c for c in checks}
+    assert not by_name["chain balanceOf == balance + custody"].ok, render_table(checks)
 
 
 def test_chain_reads_that_never_answered_do_not_let_the_balance_check_pass(monkeypatch):
