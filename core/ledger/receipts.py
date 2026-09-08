@@ -23,25 +23,56 @@ def _hex_int(raw) -> int:
 
 
 def txs_missing_venue_logs(logs: list[dict], venue: str, tokens: set[str] | None = None) -> list[str]:
+    """Transactions whose cached logs cannot explain what moved between a registered token and the venue.
+
+    The cache holds the pool manager's swaps and initializations, never its liquidity changes, so a
+    transaction with a cached swap can still hide a deposit: the tokens that crossed the venue are only
+    accounted for when a cached swap moved that amount, and a cached liquidity event settles it.
+    """
     venue = venue.lower()
-    have: set[str] = set()
-    need: set[str] = set()
+    swapped: dict[str, list[int]] = {}
+    settled: set[str] = set()
+    crossed: dict[str, list[int]] = {}
     for log in logs:
         txhash = (log.get("transactionHash") or "").lower()
         if not txhash:
             continue
         address = (log.get("address") or "").lower()
+        topics = log.get("topics") or []
+        topic0 = str(topics[0]).lower() if topics else ""
         if address == venue:
-            have.add(txhash)
+            tag = h.EVENT_SIGS.get(topic0)
+            if tag == "V4SWAP":
+                parsed = h.PARSERS[tag](address, topics, str(log.get("data") or "").removeprefix("0x")) or {}
+                swapped.setdefault(txhash, []).extend(
+                    abs(int(parsed.get(name) or 0)) for name in ("amount0", "amount1")
+                )
+            elif tag == "V4MODIFY":
+                settled.add(txhash)
+            else:
+                settled.add(txhash)
             continue
         if tokens is not None and address not in tokens:
             continue
-        topics = log.get("topics") or []
-        if len(topics) < 3 or str(topics[0]).lower() != TRANSFER_TOPIC:
+        if len(topics) < 3 or topic0 != TRANSFER_TOPIC:
             continue
         if venue in (_topic_addr(topics[1]), _topic_addr(topics[2])):
+            crossed.setdefault(txhash, []).append(_hex_int(log.get("data")))
+    need = set()
+    for txhash, amounts in crossed.items():
+        if txhash in settled:
+            continue
+        fills = swapped.get(txhash)
+        if fills is None:
             need.add(txhash)
-    return sorted(need - have)
+            continue
+        if any(not any(_close(amount, fill) for fill in fills) for amount in amounts):
+            need.add(txhash)
+    return sorted(need)
+
+
+def _close(amount: int, fill: int) -> bool:
+    return abs(amount - fill) <= max(1, fill // 100)
 
 
 class ReceiptLogs:

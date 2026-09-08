@@ -2,6 +2,7 @@ import json
 
 from core.ledger.receipts import RECEIPT_LOG_TABLE, ReceiptLogs, txs_missing_venue_logs
 from core.ledger.types import TRANSFER_TOPIC
+from modules import univ4
 
 MANAGER = "0x" + "b4" * 20
 POOL = "0x" + "b0" * 20
@@ -158,3 +159,34 @@ def test_complete_fetches_block_receipts_when_several_transactions_in_a_block_ne
     assert [lg["logIndex"] for lg in block_logs[7]] == ["0x1", "0x2", "0x9", "0xb"]
     assert sorted(cur.rows) == sorted([TX_V4, TX_V3, TX_SEEN])
     assert cur.rows[TX_V3] == [manager_log(TX_V3, 11)]
+
+
+def v4_swap_log(txhash: str, log_index: int, amount0: int, amount1: int) -> dict:
+    def word(v: int) -> str:
+        return (v % (1 << 256)).to_bytes(32, "big").hex()
+
+    data = "0x" + word(amount0) + word(amount1) + word(1) + word(1) + word(0) + word(3000)
+    return {
+        "address": MANAGER,
+        "topics": [univ4.V4_SWAP_TOPIC, "0x" + "9a" * 32, _topic(WALLET)],
+        "data": data,
+        "transactionHash": txhash,
+        "logIndex": hex(log_index),
+    }
+
+
+def test_a_liquidity_change_hidden_behind_a_cached_swap_still_wants_the_receipt():
+    swapped = [transfer(TX_V4, 1, MANAGER, WALLET), v4_swap_log(TX_V4, 2, -1, 1)]
+    assert txs_missing_venue_logs(swapped, MANAGER, {TOKEN}) == []
+    deposited = [transfer(TX_V3, 3, WALLET, MANAGER), v4_swap_log(TX_V3, 4, -5, 5)]
+    assert txs_missing_venue_logs(deposited, MANAGER, {TOKEN}) == [TX_V3]
+    modified = deposited + [
+        {
+            "address": MANAGER,
+            "topics": [univ4.V4_MODIFY_LIQUIDITY_TOPIC],
+            "data": "0x",
+            "transactionHash": TX_V3,
+            "logIndex": "0x5",
+        }
+    ]
+    assert txs_missing_venue_logs(modified, MANAGER, {TOKEN}) == []

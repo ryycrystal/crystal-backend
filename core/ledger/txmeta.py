@@ -26,6 +26,9 @@ COOLDOWN_SECONDS = 1.0
 HTTP_TIMEOUT_SECONDS = 30.0
 VALUE_CALL_TYPES = frozenset({"CALL", "CREATE", "CREATE2", "SELFDESTRUCT"})
 RETRYABLE_ERROR_CODES = frozenset({-32005, -32603, 429})
+HISTORY_METHODS = frozenset(
+    {"eth_getTransactionByHash", "eth_getTransactionReceipt", "eth_getBlockByNumber", "eth_getBlockReceipts"}
+)
 RETRYABLE_ERROR_WORDS = ("rate", "limit", "too many", "timeout", "timed out", "busy", "try again")
 MEMORY_CACHE_LIMIT = 100_000
 BLOCK_FETCH_MIN = 2
@@ -173,7 +176,7 @@ class RpcClient:
         self._sleep = sleep
         self._jitter = jitter
 
-    def _post(self, payload: list[dict]) -> list[dict]:
+    def _post(self, payload: list[dict]) -> tuple[list[dict], str]:
         body = json.dumps(payload).encode()
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
@@ -204,11 +207,18 @@ class RpcClient:
                     limiter.pushed_back()
                 else:
                     limiter.answered()
-                return data
+                return data, url
             last_error = RpcError(f"batch response was not a list: {str(data)[:200]}")
         raise RpcError(f"rpc unavailable after {self.max_attempts} attempts: {last_error}")
 
     def batch(self, calls: list[tuple[str, list]]) -> list[dict]:
+        """Answer every call, asking again elsewhere when a node refuses or has forgotten.
+
+        A public node that answers null for a transaction or block that certainly exists simply does
+        not hold that history; taking the null as an answer silently dropped half of one replay's
+        receipts. Such a node is cooled down and the item asked again, of another node when there is
+        one, until the attempts run out.
+        """
         results: list[dict | None] = [None] * len(calls)
         pending = list(range(len(calls)))
         for attempt in range(self.max_attempts):
@@ -223,14 +233,26 @@ class RpcClient:
                     {"jsonrpc": "2.0", "id": rid, "method": calls[idx][0], "params": calls[idx][1]}
                     for rid, idx in enumerate(chunk, start=1)
                 ]
-                by_id = {item.get("id"): item for item in self._post(payload) if isinstance(item, dict)}
+                answered, url = self._post(payload)
+                by_id = {item.get("id"): item for item in answered if isinstance(item, dict)}
+                forgotten = False
                 for rid, idx in enumerate(chunk, start=1):
                     item = by_id.get(rid)
                     if item is None:
                         item = {"error": {"code": -32603, "message": "missing response for request"}}
                     if "error" in item and _is_retryable(item.get("error")):
                         retry.append(idx)
+                    elif (
+                        "error" not in item
+                        and item.get("result") is None
+                        and calls[idx][0] in HISTORY_METHODS
+                        and len(self.urls) > 1
+                    ):
+                        retry.append(idx)
+                        forgotten = True
                     results[idx] = item
+                if forgotten:
+                    self.limiters[url].pushed_back()
             pending = retry
         return [item if item is not None else {"error": {"message": "no response"}} for item in results]
 

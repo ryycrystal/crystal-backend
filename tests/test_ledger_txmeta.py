@@ -680,3 +680,47 @@ def test_traces_stay_on_the_base_url_while_metadata_uses_the_pool(monkeypatch):
         "https://b.test",
     ]
     assert TraceStore(fake_cur_factory, "https://base.test", store=FakeStore()).rpc.urls == ["https://base.test"]
+
+
+class ForgetfulUrlopen:
+    def __init__(self, forgetful: set[str]) -> None:
+        self.forgetful = forgetful
+        self.hits: list[str] = []
+
+    def __call__(self, request, timeout=None):
+        self.hits.append(request.full_url)
+        payload = json.loads(request.data)
+        if request.full_url in self.forgetful:
+            items = [{"jsonrpc": "2.0", "id": e["id"], "result": None} for e in payload]
+        else:
+            items = [{"jsonrpc": "2.0", "id": e["id"], "result": rpc_tx(e["params"][0])} for e in payload]
+        return FakeResponse(json.dumps(items).encode())
+
+
+def test_a_null_answer_for_history_is_asked_again_of_another_url(monkeypatch):
+    fake = ForgetfulUrlopen(forgetful={"http://a.test"})
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    monkeypatch.setattr(txmeta, "_limiters", {})
+    client = RpcClient("http://a.test", urls=["http://a.test", "http://b.test"], batch_size=1, sleep=no_sleep)
+
+    out = client.batch(
+        [("eth_getTransactionByHash", [TX_A]) for _ in range(4)] + [("eth_getTransactionReceipt", [TX_B])]
+    )
+
+    assert all(item.get("result") for item in out)
+    assert fake.hits.count("http://a.test") <= 2
+    assert client.limiters["http://a.test"].max_rps < client.limiters["http://b.test"].max_rps
+
+
+def test_a_null_answer_from_every_url_is_returned_after_the_attempts_run_out(monkeypatch):
+    fake = ForgetfulUrlopen(forgetful={"http://a.test", "http://b.test"})
+    monkeypatch.setattr(txmeta, "urlopen", fake)
+    monkeypatch.setattr(txmeta, "_limiters", {})
+    client = RpcClient(
+        "http://a.test", urls=["http://a.test", "http://b.test"], batch_size=1, sleep=no_sleep, max_attempts=3
+    )
+
+    out = client.batch([("eth_getTransactionReceipt", [TX_A])])
+
+    assert out[0].get("result") is None and "error" not in out[0]
+    assert len(fake.hits) == 3
