@@ -1751,3 +1751,48 @@ def test_tokens_taken_back_from_a_pool_against_a_burnt_position_token_are_liquid
     )
     f = only(run(b, reference_price=lambda t: Decimal("0.02")))
     assert f.kind == KIND_LP_REMOVE and f.basis_state == BASIS_OBSERVED and f.venue == POOL
+
+
+def test_an_unrelated_inflow_of_the_quote_asset_does_not_pay_for_the_purchase():
+    """A third party sending the wallet the quote asset is funding, not a discount on what it then spends.
+
+    Taken from a real transaction: the wallet received 97 USDC from one contract, sent 100 USDC into a
+    router, and an executor paid the pool 3,480 MON for the tokens. Netting the two priced a purchase the
+    pool was paid 3,480 MON for at 95 MON, and turned a 2,834 MON loss into a 550 MON profit.
+    """
+    funder = "0x" + "de" * 20
+    tokens, paid, unrelated = 3_000 * E18, 100 * E18, 97 * E18
+    b = bundle(
+        [
+            tf(1, WMON, funder, WALLET, unrelated),
+            tf(2, WMON, WALLET, ROUTER, paid),
+            tf(3, WMON, ROUTER, POOL, paid),
+            tf(4, TOKEN, POOL, ROUTER, tokens),
+            tf(5, TOKEN, ROUTER, WALLET, tokens),
+        ],
+        tx_meta=meta(WALLET, ROUTER),
+    )
+    with with_kinds({funder: "contract_unknown"}):
+        f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY
+    assert f.quote_delta == -paid
+    assert f.mon_value == Decimal(100)
+    assert f.basis_state == BASIS_OBSERVED
+
+
+def test_change_returned_by_the_party_that_was_paid_still_reduces_the_cost():
+    tokens, paid, change = 3_000 * E18, 100 * E18, 3 * E18
+    b = bundle(
+        [
+            tf(1, WMON, WALLET, ROUTER, paid),
+            tf(2, WMON, ROUTER, POOL, paid - change),
+            tf(3, WMON, ROUTER, WALLET, change),
+            tf(4, TOKEN, POOL, ROUTER, tokens),
+            tf(5, TOKEN, ROUTER, WALLET, tokens),
+        ],
+        tx_meta=meta(WALLET, ROUTER),
+    )
+    f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
+    assert f.kind == KIND_BUY
+    assert f.quote_delta == -(paid - change)
+    assert f.mon_value == Decimal(97)

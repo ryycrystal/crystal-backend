@@ -453,14 +453,27 @@ def _quote_total(assigned: list[_QuoteMove], rates: Rates) -> tuple[str, int, st
     return combined[0], combined[1], source
 
 
-def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds: _Kinds) -> list[_QuoteMove]:
-    """Cancel a wrap against the payment it funded.
+def _is_conversion(inbound: _QuoteMove, payment: _QuoteMove, kinds: _Kinds) -> bool:
+    """Whether an inbound leg is the same money as the payment rather than income of its own.
 
-    Receiving WMON from the zero address and then spending it is one payment, not income plus a payment,
-    so an unmatched inbound leg offsets a matched outbound leg of the same asset. A sale's proceeds are
-    never spare, because they were matched to the disposal that earned them. The same asset passing to or
-    from a person's wallet is never a conversion: it is a payment, and cancelling it took the cost off a
-    purchase that was paid on one hop and received from another.
+    Wrapping mints the quote asset from the zero address or its own contract, and a router hands back what
+    it did not spend, so both are one payment seen twice. Anything else arriving from a third party funds
+    the wallet; treating it as a discount priced a purchase the pool was paid 3,480 MON for at 95 MON,
+    which turned a real loss into a profit.
+    """
+    counterparty = (inbound.counterparty or "").lower()
+    if not counterparty or kinds.is_account(counterparty):
+        return False
+    return counterparty in (ZERO, (inbound.asset or "").lower()) or counterparty == (payment.counterparty or "").lower()
+
+
+def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds: _Kinds) -> list[_QuoteMove]:
+    """Cancel a wrap, or a router's change, against the payment it funded.
+
+    Receiving the quote asset from its own contract and then spending it is one payment, not income plus
+    a payment, and so is a router returning what it did not spend. Only those cancel: an inbound leg
+    from anywhere else is the wallet being funded, and offsetting it understates what the purchase cost.
+    A sale's proceeds are never spare, because they were matched to the disposal that earned them.
     """
     if not spare or not assigned:
         return assigned
@@ -470,7 +483,7 @@ def _less_conversions(assigned: list[_QuoteMove], spare: list[_QuoteMove], kinds
         for other in spare:
             if other.asset != q.asset or _same_sign(other.delta, remaining) or not remaining:
                 continue
-            if kinds.is_account(other.counterparty):
+            if not _is_conversion(other, q, kinds):
                 continue
             take = min(abs(remaining), abs(other.delta))
             remaining += take if remaining < 0 else -take
