@@ -1244,6 +1244,16 @@ def _init_db_once() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS token_decimals
+            (
+                token TEXT PRIMARY KEY,
+                decimals INTEGER NOT NULL,
+                fetched_at BIGINT NOT NULL DEFAULT 0
+            );
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS launchpad_pair_fees
             (
                 pair TEXT PRIMARY KEY,
