@@ -221,6 +221,31 @@ That fix cannot be applied to a slice, because the cancelled leg is never writte
 say which transactions it touched. Repairing history means re-netting the whole registry, about four hours.
 Until then the tables loaded in prod carry the defect.
 
+## What the reference-priced flows actually were
+
+Level two was going to decode the nad.fun pair fork's own swap event so those trades could be priced
+exactly. Reading the fork's logs against the transfers changed the diagnosis. At the largest such pool,
+every normally priced transaction was a swap, one asset in and one out, and every reference-priced one
+was a liquidity withdrawal, both assets out and nothing in. Followed to the end, the pool paid both assets
+to a router, a second contract gave the token to one wallet and split the WMON between two other
+addresses, and that wallet paid nobody. The engine had called it a purchase at 2.43 MON because the tokens
+traced back to a pool, and `_classify` treated any venue-adjacent movement with no payment as a trade to
+be priced at the token's market rate.
+
+So the decoder was the wrong tool: there was no trade to price. The fix, commit a8ee6a9, is structural.
+Before inventing a price, the engine asks whether the pool both took something in and paid something out
+in that transaction, counting ERC-20 legs, the transaction's own value, and native movements in the trace.
+A pool that moved assets one way only was handing liquidity back or accepting it, and the movement is
+booked as `lp_remove` or `lp_add`: parked cost is restored where this wallet parked some, and otherwise the
+tokens arrive with no cost, exactly as an airdrop does. The rule waits until the trace has been consulted,
+because the v4 pool manager settles in native MON by internal call and would otherwise look one-way on a
+real swap; the trace was already being fetched for every one of these flows, so nothing new is spent.
+
+Together with the third-party-inflow fix (54702ba), this is what the next full re-net carries. Both are
+netting changes, so the registry is re-netted from the log cache on image `ledger-a8ee6a9` rather than
+patched: the cancelled leg of the first bug is never written down, so its reach cannot be read from the
+flows.
+
 ## Cutover
 
 Measured on 2026-09-09 before starting: prod holds **none** of the ledger tables, so the load is purely
