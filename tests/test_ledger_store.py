@@ -923,3 +923,48 @@ def test_a_large_token_refolds_in_block_windows_to_the_same_positions(cur, monke
     monkeypatch.setattr(store, "REFOLD_WINDOW_FLOWS", 2)
     assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 2
     assert positions() == whole
+
+
+def test_the_fold_projects_every_position_onto_the_served_table(cur):
+    """launchpad_positions is what the API reads; once the ledger is live it is the fold's projection,
+    not the legacy accumulator's, or the overwrite drifts again from the first new trade."""
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    flows = [
+        _flow(
+            block_number=100,
+            log_index=1,
+            token_delta=10**18,
+            quote_delta=-(2 * 10**18),
+            mon_value=Decimal(2),
+            kind="buy",
+        ),
+        _flow(
+            block_number=101,
+            log_index=1,
+            token_delta=-(10**18) // 2,
+            quote_delta=3 * 10**18,
+            mon_value=Decimal(3),
+            kind="sell",
+            txhash=TX_2,
+        ),
+    ]
+    assert store.insert_flows(cur, flows) == 2
+    cur.execute("DELETE FROM launchpad_positions WHERE user_address = %s AND token = %s", (WALLET_A, TOKEN_X))
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 1
+    cur.execute(
+        "SELECT token_bought, token_sold, native_spent, native_received, balance_token, realized_pnl_native, "
+        "cost_basis_native, trade_count, buy_count, sell_count, unrealized_pnl_native, total_pnl_native "
+        "FROM launchpad_positions WHERE user_address = %s AND token = %s",
+        (WALLET_A, TOKEN_X),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    bought, sold, spent, received, balance, realized, basis, trades, buys, sells, unrealized, total = (
+        int(v) for v in row
+    )
+    assert (bought, sold, spent, received, balance) == (10**18, 10**18 // 2, 2 * 10**18, 3 * 10**18, 10**18 // 2)
+    assert realized == 2 * 10**18 and basis == 10**18
+    assert (trades, buys, sells) == (2, 1, 1)
+    assert unrealized == 0 and total == realized

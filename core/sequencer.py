@@ -155,10 +155,12 @@ class BatchAccumulator:
         self.snipers.append((token.lower(), user.lower()))
 
     def flush(self, cur):
+        """Once the ledger is on, its fold owns launchpad_positions and the legacy accumulator stands down."""
         storage.insert_trades_batch(self.trades, cur)
         storage.update_tokens_batch(self.token_updates, cur)
         storage.update_users_batch(self.user_updates, cur)
-        storage.upsert_positions_batch(self.position_updates, cur)
+        if not LEDGER.enabled:
+            storage.upsert_positions_batch(self.position_updates, cur)
         storage.upsert_ohlcv_batch(self.ohlcv_data, cur)
         storage.add_snipers_batch(self.snipers, cur)
 

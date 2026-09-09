@@ -82,3 +82,33 @@ def test_gate_runs_the_engine_and_covers_each_block_when_the_tables_exist(monkey
         ("flush",),
     ]
     assert len(cur.executed) == 1, "the table check runs once, not per block"
+
+
+def test_the_batch_flush_leaves_the_served_positions_to_the_ledger_once_it_is_on(monkeypatch):
+    import core.sequencer as sequencer
+
+    calls = []
+    for name in (
+        "insert_trades_batch",
+        "update_tokens_batch",
+        "update_users_batch",
+        "upsert_ohlcv_batch",
+        "add_snipers_batch",
+    ):
+        monkeypatch.setattr(sequencer.storage, name, lambda *a, _n=name, **k: calls.append(_n))
+    monkeypatch.setattr(
+        sequencer.storage, "upsert_positions_batch", lambda *a, **k: calls.append("upsert_positions_batch")
+    )
+    batch = sequencer.BatchAccumulator()
+    batch.position_updates[("0xab", "0xcd")] = {"token_bought_delta": 1}
+
+    monkeypatch.setattr(sequencer.LEDGER, "enabled", True)
+    batch.flush(cur=None)
+    assert "upsert_positions_batch" not in calls
+    assert not batch.position_updates
+
+    calls.clear()
+    batch.position_updates[("0xab", "0xcd")] = {"token_bought_delta": 1}
+    monkeypatch.setattr(sequencer.LEDGER, "enabled", False)
+    batch.flush(cur=None)
+    assert "upsert_positions_batch" in calls

@@ -178,6 +178,67 @@ def upsert_positions(cur, rows: list[PositionRow]) -> None:
     execute_values(cur, _UPSERT_POSITIONS_SQL, values, page_size=_PAGE_SIZE)
 
 
+_PROJECT_POSITIONS_SQL = """
+INSERT INTO launchpad_positions (
+    user_address, token, token_bought, token_sold, native_spent, native_received, balance_token,
+    realized_pnl_native, unrealized_pnl_native, total_pnl_native, trade_count, buy_count, sell_count,
+    cost_basis_native)
+SELECT v.wallet, v.token, v.token_bought, v.token_sold, v.native_spent, v.native_received, v.balance_token,
+       v.realized,
+       CASE WHEN coalesce(t.last_price_native, 0) <= 0 THEN 0
+            ELSE crystal_unrealized_pnl(v.balance_token, v.token_bought, v.token_sold, v.basis, t.last_price_native) END,
+       v.realized + CASE WHEN coalesce(t.last_price_native, 0) <= 0 THEN 0
+            ELSE crystal_unrealized_pnl(v.balance_token, v.token_bought, v.token_sold, v.basis, t.last_price_native) END,
+       v.trade_count, v.buy_count, v.sell_count, v.basis
+FROM (VALUES %s) AS v(wallet, token, token_bought, token_sold, native_spent, native_received, balance_token,
+                      realized, basis, trade_count, buy_count, sell_count)
+LEFT JOIN launchpad_tokens t ON t.token = v.token
+ON CONFLICT (user_address, token) DO UPDATE SET
+    token_bought = EXCLUDED.token_bought, token_sold = EXCLUDED.token_sold,
+    native_spent = EXCLUDED.native_spent, native_received = EXCLUDED.native_received,
+    balance_token = EXCLUDED.balance_token, realized_pnl_native = EXCLUDED.realized_pnl_native,
+    unrealized_pnl_native = EXCLUDED.unrealized_pnl_native, total_pnl_native = EXCLUDED.total_pnl_native,
+    trade_count = EXCLUDED.trade_count, buy_count = EXCLUDED.buy_count, sell_count = EXCLUDED.sell_count,
+    cost_basis_native = EXCLUDED.cost_basis_native
+"""
+_PROJECT_POSITIONS_TEMPLATE = (
+    "(%s, %s, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, %s::numeric, "
+    "%s::int, %s::int, %s::int)"
+)
+
+
+def project_positions(cur, rows: list[PositionRow]) -> None:
+    """Write each folded position onto launchpad_positions, the table the API serves.
+
+    One fold, two projections: positions_v2 keeps the ledger's full state and launchpad_positions keeps the
+    legacy shape the API reads, so the served numbers can never lag the fold or be re-accumulated by the
+    path the ledger replaced. Estimated basis and realized are folded into the legacy totals, unrealized
+    comes from the same function and last price the legacy path used, and a token with no price yet
+    carries no unrealized figure rather than a full loss, and so does one whose last price is zero.
+    """
+    if not rows:
+        return
+    by_key = {(_lower(row.wallet), _lower(row.token)): row for row in rows}
+    values = [
+        (
+            _lower(row.wallet),
+            _lower(row.token),
+            _wei(row.token_bought) or 0,
+            _wei(row.token_sold) or 0,
+            _wei(row.native_spent) or 0,
+            _wei(row.native_received) or 0,
+            _wei(row.balance_token) or 0,
+            (_wei(row.realized_pnl_native) or 0) + (_wei(row.realized_estimated_native) or 0),
+            (_wei(row.cost_basis_native) or 0) + (_wei(row.basis_estimated_native) or 0),
+            int(row.trade_count or 0),
+            int(row.buy_count or 0),
+            int(row.sell_count or 0),
+        )
+        for row in by_key.values()
+    ]
+    execute_values(cur, _PROJECT_POSITIONS_SQL, values, template=_PROJECT_POSITIONS_TEMPLATE, page_size=_PAGE_SIZE)
+
+
 def _position_row(state, wallet: str, token: str) -> PositionRow:
     if isinstance(state, PositionRow):
         row = state
@@ -320,6 +381,7 @@ def _write_fold(cur, token: str, states: dict, folded: list[Flow], stored: dict,
         if before is None or _fold_values(before) != values:
             updates.append((*_flow_pk(flow), *values))
     upsert_positions(cur, rows)
+    project_positions(cur, rows)
     _write_fold_deltas(cur, updates)
     _write_parked(cur, [] if full else keys, parked)
 
