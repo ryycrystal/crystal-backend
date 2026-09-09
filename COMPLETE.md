@@ -278,6 +278,20 @@ Step 4 is the one with a production cost worth watching: netting each block fetc
 sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. The chain produces about
 2.5 blocks a second and the replay sustained 8 to 27, so it should keep up.
 
+## Serving-side fixes that ride with the flip
+
+- `2dedb6b` the sequencer's attribution reconciler stands down once the ledger is on. It invented a trade
+  for whatever a venue's amount and the wallet's transfers disagreed by, stamped 1970 when it lacked the
+  block's timestamp, about a thousand rows an hour. 207,698 of them were removed from `launchpad_trades`
+  (snapshot `launchpad_trades_reconciliation_20260910`); they never touched the ledger's balances.
+- `ea34686` the portfolio's daily series is a slice of `wallet_flows`, so the graph and the headline are one
+  source. Until the flip and catch-up the series ends at the ledger's head and says so in `as_of_block`.
+- `ae28f3a` the spot graph ends on the live total the same response reports, marked `live`, instead of the
+  last stored hourly bucket, which a background fill used to refresh only after the first response.
+
+Still on the legacy trade rows: the activity feed (`portfolio_history`, `portfolio_last_trades`) and the
+users-table aggregates behind the leaderboard.
+
 ## Interim overwrite, 2026-09-10 19:50 UTC
 
 At the co-founder's request, relayed and confirmed by the owner, `launchpad_positions` was overwritten from
