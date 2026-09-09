@@ -2450,6 +2450,12 @@ def record_dex_tip(number: int, block_timestamp: int, cur=None) -> None:
 
 
 def wallet_has_crystal_activity(wallet: str) -> bool:
+    """Whether a wallet has traded with us, and so has earned the spot graph's per-bucket RPC.
+
+    The spot AMM was missing from this list, so a wallet that only ever swapped on a market got no
+    performance series at all: balances rendered and the graph sat flat at zero. Every venue a person can
+    reach has to be here, or the same hole reopens for the next one.
+    """
     addr = (wallet or "").lower()
     if not addr:
         return False
@@ -2457,6 +2463,7 @@ def wallet_has_crystal_activity(wallet: str) -> bool:
         cur.execute(
             """
             SELECT EXISTS (SELECT 1 FROM launchpad_positions WHERE user_address = %(a)s)
+                OR EXISTS (SELECT 1 FROM crystal_market_trades WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_orderbook_events WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_pool_lp_users WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_vault_users WHERE user_address = %(a)s)
