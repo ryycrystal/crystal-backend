@@ -210,7 +210,8 @@ def held_tokens_with_handles(wallets: list[str]) -> list[dict]:
         cur.execute(
             """
             SELECT t.token, t.symbol, t.name, t.metadata_cid, t.source, t.last_price_native,
-                   t.migrated, t.circulating_supply, t.social1, t.social2, t.social3, t.social4
+                   t.migrated, t.circulating_supply, t.social1, t.social2, t.social3, t.social4,
+                   t.created_at
             FROM launchpad_positions p
             JOIN launchpad_tokens t ON t.token = p.token
             WHERE p.user_address = ANY(%s) AND p.balance_token > 0
@@ -220,7 +221,7 @@ def held_tokens_with_handles(wallets: list[str]) -> list[dict]:
         )
         rows = cur.fetchall()
     out = []
-    for token, symbol, name, cid, source, price, migrated, supply, s1, s2, s3, s4 in rows:
+    for token, symbol, name, cid, source, price, migrated, supply, s1, s2, s3, s4, created_at in rows:
         handle = next((h for h in (handle_from_social_url(x) for x in (s1, s2, s3, s4)) if h), None)
         if not handle:
             continue
@@ -235,6 +236,9 @@ def held_tokens_with_handles(wallets: list[str]) -> list[dict]:
                 "last_price_native": str(price or 0),
                 "migrated": bool(migrated),
                 "circulating_supply": str(int(supply or 0)),
+                # the alert card renders an age, and without this it read the
+                # missing timestamp as an age since the epoch
+                "created_at": int(created_at or 0),
             }
         )
     return out

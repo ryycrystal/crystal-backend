@@ -1314,6 +1314,16 @@ def _handle_expr(col: str) -> str:
     )
 
 
+def _host_like(host: str) -> tuple[str, ...]:
+    """LIKE patterns that match `host` only where it is really the host.
+
+    A bare "%x.com/%" also matches bitmex.com, roblox.com and monstarx.com, and "%t.me/%"
+    matches anything ending in "t.me/". The host has to sit after "//", after a subdomain
+    dot, or at the very start of a link written without a scheme.
+    """
+    return (f"%//{host}/%", f"%.{host}/%", f"{host}/%")
+
+
 def blacklist_clauses(ex: dict | None, alias: str = "t") -> tuple[list[str], list]:
     ex = ex or {}
     a = f"{alias}." if alias else ""
@@ -1443,11 +1453,12 @@ def search_tokens_filtered(
             params += [f"%{term}%", f"%{term}%"]
 
     cols = ("t.social1", "t.social2", "t.social3", "t.social4")
-    for key, hosts in (
-        ("has_twitter", ("%x.com/%", "%twitter.com/%")),
-        ("has_telegram", ("%t.me/%",)),
-        ("has_discord", ("%discord.gg/%", "%discord.com/%")),
-    ):
+    social_hosts = {
+        "has_twitter": _host_like("x.com") + _host_like("twitter.com"),
+        "has_telegram": _host_like("t.me"),
+        "has_discord": _host_like("discord.gg") + _host_like("discord.com"),
+    }
+    for key, hosts in social_hosts.items():
         if not f.get(key):
             continue
         ors = []
@@ -1458,9 +1469,19 @@ def search_tokens_filtered(
         where.append("(" + " OR ".join(ors) + ")")
 
     if f.get("has_website"):
-        ors = [f"({c} IS NOT NULL AND {c} <> '' AND LOWER({c}) LIKE %s)" for c in cols]
+        # a website is a link to something that is not one of the networks above. testing
+        # only for a dot made this mean "has any social at all", since every x.com and t.me
+        # url has one: 11,596 tokens whose links were purely social passed a website filter
+        not_social = [h for hosts in social_hosts.values() for h in hosts]
+        ors = []
+        for c in cols:
+            conds = [f"{c} IS NOT NULL", f"{c} <> ''", f"LOWER({c}) LIKE %s"]
+            params.append("%.%")
+            for h in not_social:
+                conds.append(f"LOWER({c}) NOT LIKE %s")
+                params.append(h)
+            ors.append("(" + " AND ".join(conds) + ")")
         where.append("(" + " OR ".join(ors) + ")")
-        params += ["%.%"] * len(cols)
 
     where_sql = " AND ".join(where) if where else "TRUE"
 
@@ -2450,6 +2471,12 @@ def record_dex_tip(number: int, block_timestamp: int, cur=None) -> None:
 
 
 def wallet_has_crystal_activity(wallet: str) -> bool:
+    """Whether a wallet has traded with us, and so has earned the spot graph's per-bucket RPC.
+
+    The spot AMM was missing from this list, so a wallet that only ever swapped on a market got no
+    performance series at all: balances rendered and the graph sat flat at zero. Every venue a person can
+    reach has to be here, or the same hole reopens for the next one.
+    """
     addr = (wallet or "").lower()
     if not addr:
         return False
@@ -2457,6 +2484,7 @@ def wallet_has_crystal_activity(wallet: str) -> bool:
         cur.execute(
             """
             SELECT EXISTS (SELECT 1 FROM launchpad_positions WHERE user_address = %(a)s)
+                OR EXISTS (SELECT 1 FROM crystal_market_trades WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_orderbook_events WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_pool_lp_users WHERE user_address = %(a)s)
                 OR EXISTS (SELECT 1 FROM crystal_vault_users WHERE user_address = %(a)s)

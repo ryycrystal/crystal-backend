@@ -31,6 +31,7 @@ AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
 USD_PEGGED_TOKENS = (USDC,)
 STABLE_USD_TOKENS = (USDC, AUSD)
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
+QUOTE_DECIMALS = {WMON: 18, LVMON: 18, USDC: 6, AUSD: 6}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 PINNED_PRICE_TOKENS = frozenset(STABLE_USD_TOKENS) | frozenset(NATIVE_EQUIV_QUOTES)
 
@@ -1024,6 +1025,18 @@ class State:
                 if native_amt <= 0 or token_amt <= 0:
                     return
 
+                quote_addr = (pi.native_addr or WMON).lower()
+                quote_is_native = quote_addr in NATIVE_EQUIV_QUOTES
+                if not quote_is_native:
+                    converted = self._native_wei_from_quote(native_amt, quote_addr)
+                    if converted is None or converted <= 0:
+                        print(
+                            f"[State] {pool_addr} swap in {quote_addr} not priced, trade skipped",
+                            flush=True,
+                        )
+                        return
+                    native_amt = converted
+
                 is_buy_flag = is_buy
                 amount_in = native_amt if is_buy_flag else token_amt
                 amount_out = token_amt if is_buy_flag else native_amt
@@ -1036,7 +1049,9 @@ class State:
                 else:
                     pair_token_res, pair_native_res = sync_r1, sync_r0
 
-                if pair_native_res > 0 and pair_token_res > 0:
+                if not quote_is_native:
+                    price_native = Decimal(native_amt) / Decimal(token_amt)
+                elif pair_native_res > 0 and pair_token_res > 0:
                     price_native = Decimal(pair_native_res) / Decimal(pair_token_res)
                 else:
                     price_raw = ev.get("sqrt_price_x96") or 0
@@ -1733,6 +1748,21 @@ class State:
         entry[0] = open_tokens - sold
         entry[1] = cost_basis - released
         return released
+
+    def _native_wei_from_quote(self, amount: int, quote_token: str) -> int | None:
+        """Convert a raw quote-currency amount into MON wei, or None when it cannot be priced."""
+        quote = (quote_token or WMON).lower()
+        if quote in NATIVE_EQUIV_QUOTES:
+            return amount
+        decimals = QUOTE_DECIMALS.get(quote)
+        if decimals is None:
+            return None
+        quote_usd = self._quote_price_usd(quote)
+        mon_usd = self.mon_price_usd
+        if quote_usd <= 0 or mon_usd <= 0:
+            return None
+        native = Decimal(amount) * quote_usd * Decimal(10**18) / (Decimal(10**decimals) * mon_usd)
+        return int(native)
 
     def _quote_price_usd(self, quote_token: str) -> Decimal:
         quote = (quote_token or WMON).lower()
