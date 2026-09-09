@@ -1039,6 +1039,27 @@ def _liquidity_modified(
     return False
 
 
+def _venue_traded(bundle: TxBundle, venue: str) -> bool:
+    """Whether a venue both took something in and paid something out in this transaction.
+
+    A swap moves assets both ways through a pool. A pool that only paid out, or only took in, was handing
+    liquidity back or accepting it, and a wallet at the far end of that did not buy or sell anything.
+    Pricing such a movement at the token's market rate invented a cost nobody paid: a wallet handed 338
+    tokens from a liquidity withdrawal, with the WMON going to two other addresses, was booked as a 2.43
+    MON purchase. Native MON reaches a pool by an internal call as often as by transfer, so the trace and
+    the transaction's own value count alongside the ERC-20 legs.
+    """
+    received = any(t.to_addr == venue for t in bundle.transfers)
+    emitted = any(t.from_addr == venue for t in bundle.transfers)
+    meta = bundle.meta
+    if meta is not None and meta.to_addr == venue and (meta.value or 0) > 0:
+        received = True
+    if bundle.trace is not None:
+        received = received or any(dst == venue and value > 0 for _, dst, value in bundle.trace.transfers)
+        emitted = emitted or any(src == venue and value > 0 for src, _, value in bundle.trace.transfers)
+    return received and emitted
+
+
 def _classify(
     leg: _Leg,
     bundle: TxBundle,
@@ -1083,6 +1104,12 @@ def _classify(
         leg.basis_state = BASIS_OBSERVED
         return
     if leg.venue is not None or ck in VENUE_KINDS:
+        venue = leg.venue or cp
+        consulted = bundle.trace is not None and bundle.trace.available
+        if consulted and kinds.of(venue) == KIND_VENUE_POOL and not _venue_traded(bundle, venue):
+            leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
+            leg.basis_state = BASIS_OBSERVED
+            return
         leg.kind = KIND_BUY if incoming else KIND_SELL
         _price_by_reference(leg, reference_price)
         return

@@ -1796,3 +1796,59 @@ def test_change_returned_by_the_party_that_was_paid_still_reduces_the_cost():
     assert f.kind == KIND_BUY
     assert f.quote_delta == -(paid - change)
     assert f.mon_value == Decimal(97)
+
+
+def test_a_pool_that_only_paid_out_was_not_swapping_so_nothing_is_priced():
+    """Taken from a real transaction: the pool sent both of its assets to a router, a second contract
+    handed the token to one wallet and the WMON to two others, and nothing entered the pool. The wallet
+    paid nobody, yet the engine called it a purchase and priced it at the token's market rate.
+    """
+    other = "0x" + "bf" * 20
+    splitter = "0x" + "ae" * 20
+    tokens, wmon = 338 * E18, 33 * E18
+    b = bundle(
+        [
+            tf(1, WMON, POOL, ROUTER, wmon),
+            tf(2, TOKEN, POOL, ROUTER, tokens),
+            tf(3, WMON, ROUTER, splitter, wmon),
+            tf(4, TOKEN, ROUTER, splitter, tokens),
+            tf(5, TOKEN, splitter, WALLET, tokens),
+            tf(6, WMON, splitter, "0x" + "4a" * 20, wmon // 2),
+            tf(7, WMON, splitter, "0x" + "42" * 20, wmon - wmon // 2),
+        ],
+        tx_meta=meta(other, ROUTER),
+        trace=TraceResult(available=True, transfers=[]),
+    )
+    with with_kinds({splitter: "contract_unknown"}):
+        f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_REMOVE
+    assert f.basis_state != BASIS_ESTIMATED
+    assert f.quote_delta is None
+    assert f.source != SOURCE_RECONCILE
+
+
+def test_a_pool_that_received_something_did_swap_so_the_estimate_stays():
+    tokens, wmon = 100 * E18, 3 * E18
+    other = "0x" + "bf" * 20
+    b = bundle(
+        [tf(1, WMON, other, POOL, wmon), tf(2, TOKEN, POOL, ROUTER, tokens), tf(3, TOKEN, ROUTER, WALLET, tokens)],
+        tx_meta=meta(other, ROUTER),
+        trace=TraceResult(available=True, transfers=[]),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_BUY
+    assert f.basis_state == BASIS_ESTIMATED
+    assert f.source == SOURCE_RECONCILE
+
+
+def test_tokens_sent_into_a_pool_that_paid_nothing_out_are_parked_not_sold():
+    tokens = 100 * E18
+    b = bundle(
+        [tf(1, TOKEN, WALLET, ROUTER, tokens), tf(2, TOKEN, ROUTER, POOL, tokens)],
+        tx_meta=meta(WALLET, ROUTER),
+        trace=TraceResult(available=True, transfers=[]),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_ADD
+    assert f.basis_state == BASIS_OBSERVED
+    assert f.quote_delta is None
