@@ -183,6 +183,44 @@ quote asset that level two would price exactly. That puts the floor at roughly 4
 means the criterion is better stated as no position more than a tenth estimated except where the trade
 itself had no MON price.
 
+## Ten thousand positions against prod, and the bug it found
+
+Ten thousand random traded positions were compared with prod, with every balance settled against the
+chain rather than against either system's opinion.
+
+| balances at block 103,098,148 | |
+|---|---|
+| identical | 9,921 |
+| the chain agrees with the ledger, not prod | 55 |
+| the chain agrees with prod, not the ledger | 0 |
+
+Every other difference falls into a known bucket: 3,803 differ only by the fee convention, where prod
+books the venue's leg and the ledger books what the wallet actually paid; 383 carry one of prod's synthetic
+`reconciliation` legs; 176 are sales prod never attributed to the wallet at all, its documented router
+attribution bug, with the balances agreeing; 364 are identical; 24 are absent from the ledger; 2 traded
+after the ledger's head.
+
+Realized looks far worse than it is. Of 1,483 positions where both systems recorded a sale, 98.7% have
+realized moving no more than its own components moved: the median absolute gap on proceeds is 6.84 MON and
+on realized 7.30 MON, nearly the same MON, but proceeds is a large number and realized is the small
+difference of two large ones, so the same gap reads as 1% against one and 34% against the other.
+
+Ten positions moved more than their components could explain and each was traced: one where prod's realized
+contradicts its own spend and proceeds, four where basis legitimately travelled with transferred tokens,
+four differing under one percent through basis allocation on partial sales, and one where the ledger's
+realized is exactly proceeds minus spend while prod's is not.
+
+**The sweep found one real defect, now fixed.** `_less_conversions` cancelled any unmatched inbound leg of
+the quote asset against the payment, testing only that it did not come from a person's wallet. So a wallet
+that received 97 USDC from an unrelated contract and sent 100 USDC into a router had its purchase priced
+at 2.75 USDC, about 95 MON, against a pool that was paid 3,480 MON, turning a 2,834 MON loss into a 550 MON
+profit. The rule now cancels only a genuine conversion: the asset minted from the zero address or its own
+contract, or change handed back by the party that was paid. Commit 54702ba, test-first.
+
+That fix cannot be applied to a slice, because the cancelled leg is never written down, so the flows cannot
+say which transactions it touched. Repairing history means re-netting the whole registry, about four hours.
+Until then the tables loaded in prod carry the defect.
+
 ## Cutover
 
 Measured on 2026-09-09 before starting: prod holds **none** of the ledger tables, so the load is purely
