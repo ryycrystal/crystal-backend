@@ -257,23 +257,26 @@ The gap between the registry's last block, 103,098,148, and the live head is 189
 **2,393 are hot**, about three minutes of replay, growing by roughly 2,700 hot blocks a day. Catch-up is
 therefore not the obstacle it looked like.
 
-Order of operations, all but the last step invisible to users:
+Order of operations, decided with the owner on 2026-09-10. The API keeps reading `launchpad_positions`;
+what changes is who writes it.
 
-1. Load the rebuilt registry into prod's new ledger tables from the partition CSVs already in blob, with
-   the re-net applied on top (`scratchpad/ledger_prodload.sh`, an Azure job so the data never crosses the
-   China link). It refuses to run twice unless forced.
-2. Refold in prod, sharded, about 25 minutes.
-3. Replay the catch-up blocks, three minutes.
-4. Set `LEDGER_ENABLED=1` on `crystal-indexer` so the live path keeps the ledger current. Overlap with
-   step 3 is harmless: a scoped block is deleted and rewritten, so replaying a block the live path has
-   already seen is idempotent.
-5. Point the API at `positions_v2`, filtering by address kind so a bot's contract never appears as a user.
+1. Re-net the registry on `ledger-a8ee6a9`, which carries both pricing fixes, and merge it locally: load,
+   refold in four shards, checks, verify, sweeps, and the ten-thousand-position sweep against prod. The
+   residue must collapse to the fee convention and prod's own bugs before anything below runs.
+2. Reload prod's ledger tables from those partitions (`ledger_prodload.sh MODE=replace`) and refold in
+   prod on `ledger-8130a83`, whose fold is identical but predates the projection, so the refold fills
+   `positions_v2` without touching the served table while the legacy accumulator is still live.
+3. Replay the catch-up blocks, a few minutes.
+4. Merge to `main`, build, roll `crystal-indexer` with the CLI, set `LEDGER_ENABLED=1`. From that block the
+   fold writes `launchpad_positions` and `BatchAccumulator.flush` no longer does (commit 05209fb).
+5. Immediately run `overwrite_positions.py` with `APPLY=1`: snapshot the table, upsert every ledger
+   position onto it, remove the 37,724 router, pool and contract rows the ledger never saw move, leave the
+   273 people's rows it lacks for the catch-up. Dry-run validated against prod.
+6. Watch the `[SQ]` lag for a day. The V2-acceptance widening follows later on its own branch.
 
 Step 4 is the one with a production cost worth watching: netting each block fetches transaction metadata,
 sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. The chain produces about
-2.5 blocks a second and the replay sustained 8 to 27, so it should keep up, but watch the `[SQ]` lag after
-enabling it. Step 5 is the only step users can see, and it is the one that still needs writing: nothing in
-`api/` reads `positions_v2` today.
+2.5 blocks a second and the replay sustained 8 to 27, so it should keep up.
 
 ## Running it
 
