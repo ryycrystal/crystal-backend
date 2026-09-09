@@ -119,24 +119,68 @@ def test_unmerged_batch_shape_unchanged(db):
     assert "merged" not in body
 
 
-def test_daily_pnl_matches_position_realized(db):
-    from api.routes.launchpad import portfolio_daily, user_portfolio
-    from modules import launchpad as lp_mod
+def _ledger_flow(**overrides):
+    from core.ledger.types import Flow
 
-    buy_ts = _today_ts(3600)
-    sell_ts = _today_ts(7200)
+    values = {
+        "block_number": 101,
+        "tx_index": 1,
+        "log_index": 2,
+        "sub_index": 0,
+        "txhash": "0x" + "d1" * 32,
+        "timestamp": _today_ts(3600),
+        "wallet": USER,
+        "token": TOKEN,
+        "token_delta": 100 * 10**18,
+        "quote_asset": "native",
+        "quote_delta": -(10**18),
+        "mon_value": Decimal(1),
+        "usd_value": Decimal(2),
+        "kind": "buy",
+        "venue": _router(),
+        "counterparty": _router(),
+        "origin": USER,
+        "source": "venue_event",
+        "basis_state": "observed",
+        "price_native": Decimal("0.01"),
+        "basis_delta": 0,
+        "realized_delta": 0,
+    }
+    values.update(overrides)
+    return Flow(**values)
+
+
+def test_daily_pnl_matches_position_realized(db):
+    """The graph and the headline are one source: the day's realized is a slice of the fold's realized."""
+    from api.routes.launchpad import portfolio_daily, user_portfolio
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+    from core.ledger.schema import init_ledger_schema
+    from core.storage import db_cursor
 
     st = _new_state()
-    _create(st, blk=100, ts=buy_ts - 100)
-    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=buy_ts, txh="0xd1", log_idx=0)
-
-    sell_reserve = 1100 * 10**18 - 5 * 10**17
-    sell = lp_mod.parse_launchpad_trade(
-        _router(),
-        ["0x", _ta(TOKEN), _ta(USER)],
-        _lt_data(False, 10**20, 5 * 10**17, sell_reserve, _reserve_for(sell_reserve)),
-    )
-    st.apply_launchpad_trade(sell, 102, sell_ts, "0xd2", 0, _router())
+    _create(st, blk=100, ts=_today_ts(3500))
+    with db_cursor() as cur:
+        init_ledger_schema(cur)
+        cur.execute("DELETE FROM wallet_flows WHERE wallet = %s", (USER,))
+        cur.execute("DELETE FROM positions_v2 WHERE wallet = %s", (USER,))
+        cur.execute("DELETE FROM token_fold_state WHERE token = %s", (TOKEN,))
+        cur.execute("DELETE FROM launchpad_positions WHERE user_address = %s", (USER,))
+        flows = [
+            _ledger_flow(),
+            _ledger_flow(
+                block_number=102,
+                txhash="0x" + "d2" * 32,
+                timestamp=_today_ts(7200),
+                token_delta=-(50 * 10**18),
+                quote_delta=8 * 10**17,
+                mon_value=Decimal("0.8"),
+                usd_value=Decimal("1.6"),
+                kind="sell",
+            ),
+        ]
+        assert store.insert_flows(cur, flows) == 2
+        assert store.refold_tokens(cur, {TOKEN: 0}, fold_token) == 1
 
     pos = user_portfolio(USER)["positions"][0]
     body = portfolio_daily(USER, days=7)
@@ -144,11 +188,13 @@ def test_daily_pnl_matches_position_realized(db):
     day = body["rows"][0]
 
     assert Decimal(day["realized_pnl_native"]) == Decimal(pos["realized_pnl_native"])
+    assert Decimal(pos["realized_pnl_native"]) == Decimal(3 * 10**17)
     assert day["trade_count"] == 2
     assert day["buy_count"] == 1
     assert day["sell_count"] == 1
     assert int(day["buy_volume_native"]) == 10**18
-    assert int(day["sell_volume_native"]) == 5 * 10**17
+    assert int(day["sell_volume_native"]) == 8 * 10**17
+    assert body["as_of_block"] >= 0
 
 
 def test_volume_reports_usd(db):

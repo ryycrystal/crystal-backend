@@ -2083,6 +2083,14 @@ def portfolio_daily(
     days: int = Query(90, ge=1, le=365, description="trailing days to return"),
     tz: str = "UTC",
 ) -> dict[str, Any]:
+    """The wallet's day-by-day series, read from the ledger's flows.
+
+    The served positions are the fold of these same flows, so a day's realized here is a slice of the
+    headline's realized rather than a second opinion of it. Reading the legacy trade rows instead gave the
+    graph one accumulator's figures and the headline another's, and the last point jumped on load by the
+    difference; on the moncock fixture wallet that was 17,330 MON. Coverage is the ledger's, and the block
+    it is good to is reported as such.
+    """
     user_addr = address.lower()
     zone = _safe_timezone(tz)
     since_day = datetime.now(ZoneInfo(zone)).date() - timedelta(days=days - 1)
@@ -2091,16 +2099,16 @@ def portfolio_daily(
         cur.execute(
             """
             SELECT (to_timestamp(timestamp) AT TIME ZONE %s)::date AS day,
-                   SUM(realized_native) AS realized,
-                   SUM(native_amount::numeric) AS volume_native,
-                   SUM(COALESCE(usd_amount, 0)) AS volume_usd,
-                   SUM(CASE WHEN is_buy THEN native_amount::numeric ELSE 0 END) AS buy_native,
-                   SUM(CASE WHEN NOT is_buy THEN native_amount::numeric ELSE 0 END) AS sell_native,
-                   COUNT(*) AS trade_count,
-                   COUNT(*) FILTER (WHERE is_buy) AS buy_count,
-                   COUNT(*) FILTER (WHERE NOT is_buy) AS sell_count
-            FROM launchpad_trades
-            WHERE user_address = %s
+                   SUM(COALESCE(realized_delta, 0)) AS realized,
+                   SUM(CASE WHEN kind IN ('buy', 'sell') THEN COALESCE(mon_value, 0) ELSE 0 END) * 1e18 AS volume_native,
+                   SUM(CASE WHEN kind IN ('buy', 'sell') THEN COALESCE(usd_value, 0) ELSE 0 END) AS volume_usd,
+                   SUM(CASE WHEN kind = 'buy' THEN COALESCE(mon_value, 0) ELSE 0 END) * 1e18 AS buy_native,
+                   SUM(CASE WHEN kind = 'sell' THEN COALESCE(mon_value, 0) ELSE 0 END) * 1e18 AS sell_native,
+                   COUNT(*) FILTER (WHERE kind IN ('buy', 'sell')) AS trade_count,
+                   COUNT(*) FILTER (WHERE kind = 'buy') AS buy_count,
+                   COUNT(*) FILTER (WHERE kind = 'sell') AS sell_count
+            FROM wallet_flows
+            WHERE wallet = %s
             GROUP BY 1
             HAVING (to_timestamp(timestamp) AT TIME ZONE %s)::date >= %s
             ORDER BY 1
@@ -2108,6 +2116,8 @@ def portfolio_daily(
             (zone, user_addr, zone, since_day),
         )
         rows = cur.fetchall()
+        cur.execute("SELECT COALESCE(MAX(to_block), 0) FROM ledger_token_coverage")
+        as_of_block = int(cur.fetchone()[0] or 0)
 
     out_rows = []
     for day, realized, vol_native, vol_usd, buy_native, sell_native, trade_count, buy_count, sell_count in rows:
@@ -2129,7 +2139,7 @@ def portfolio_daily(
         "user": user_addr,
         "days": days,
         "rows": out_rows,
-        "as_of_block": storage.get_last_processed_block() or 0,
+        "as_of_block": as_of_block,
     }
 
 
