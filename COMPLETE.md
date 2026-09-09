@@ -150,6 +150,35 @@ adding a case, and one re-net can carry both whenever it lands.
 - A private RPC endpoint for rebuilds.
 - The live path stays gated until the full-registry grading is read.
 
+## Cutover
+
+Measured on 2026-09-09 before starting: prod holds **none** of the ledger tables, so the load is purely
+additive. It creates `wallet_flows`, `positions_v2`, `ledger_token_coverage`, `address_kinds`, `venues`,
+`parked_entitlements`, `token_fold_state`, `tx_meta`, `tx_traces` and `ledger_receipt_logs`, and touches
+no `launchpad_*` or `crystal_*` table. It is reversible by dropping them.
+
+The gap between the registry's last block, 103,098,148, and the live head is 189,717 blocks of which only
+**2,393 are hot**, about three minutes of replay, growing by roughly 2,700 hot blocks a day. Catch-up is
+therefore not the obstacle it looked like.
+
+Order of operations, all but the last step invisible to users:
+
+1. Load the rebuilt registry into prod's new ledger tables from the partition CSVs already in blob, with
+   the re-net applied on top (`scratchpad/ledger_prodload.sh`, an Azure job so the data never crosses the
+   China link). It refuses to run twice unless forced.
+2. Refold in prod, sharded, about 25 minutes.
+3. Replay the catch-up blocks, three minutes.
+4. Set `LEDGER_ENABLED=1` on `crystal-indexer` so the live path keeps the ledger current. Overlap with
+   step 3 is harmless: a scoped block is deleted and rewritten, so replaying a block the live path has
+   already seen is idempotent.
+5. Point the API at `positions_v2`, filtering by address kind so a bot's contract never appears as a user.
+
+Step 4 is the one with a production cost worth watching: netting each block fetches transaction metadata,
+sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. The chain produces about
+2.5 blocks a second and the replay sustained 8 to 27, so it should keep up, but watch the `[SQ]` lag after
+enabling it. Step 5 is the only step users can see, and it is the one that still needs writing: nothing in
+`api/` reads `positions_v2` today.
+
 ## Running it
 
 Everything runs as executions of the Container Apps job `ledger-rebuild` in `crystal-prod-rg` with
