@@ -278,6 +278,16 @@ Step 4 is the one with a production cost worth watching: netting each block fetc
 sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. The chain produces about
 2.5 blocks a second and the replay sustained 8 to 27, so it should keep up.
 
+## Interim overwrite, 2026-09-10 19:50 UTC
+
+At the co-founder's request, relayed and confirmed by the owner, `launchpad_positions` was overwritten from
+the ledger as it stood in prod before the two pricing fixes: the level-one netting with the third-party
+inflow bug and the one-way pool prices still in it. Snapshot `launchpad_positions_pre_ledger_20260910a`,
+1,231,183 rows upserted, 37,725 router, pool and contract rows the ledger never saw move removed, 299
+people's rows the ledger lacks kept, 1,056 rows for uncovered tokens untouched. The indexer was not
+flipped, so the legacy accumulator keeps adding onto these rows until the flip; the reload chain in Azure
+is unaffected and the fixed data replaces this table in the same flip-then-overwrite step as before.
+
 ## Running it
 
 Everything runs as executions of the Container Apps job `ledger-rebuild` in `crystal-prod-rg` with
