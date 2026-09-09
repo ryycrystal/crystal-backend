@@ -361,3 +361,44 @@ def test_pool_reserves_follow_token_ordering(db):
     with storage.db_cursor() as cur:
         cur.execute("SELECT reserve_token FROM launchpad_pools WHERE pool = '0xpool0'")
         assert int(cur.fetchone()[0]) == 1000, "a stale sync is ignored"
+
+
+def test_spot_graph_ends_on_the_live_total_not_the_last_stored_bucket(db, monkeypatch):
+    """Buckets are hourly and filled by a background thread after the response is built, so a first load
+    used to draw an hour-old last point and the next refresh a fresh one. The live total the same response
+    already carries is the last point."""
+    import time
+
+    import api.spot_data as spot_data
+    import api.spot_graph as spot_graph
+    from api.routes.launchpad import spot_portfolio
+
+    wallet = "0x" + "ce" * 20
+    stale = int(time.time()) - 7200
+
+    def body(w, include_zero=False):
+        return {
+            "wallet": wallet,
+            "wallets": [wallet],
+            "supported": True,
+            "rows": [],
+            "vaults": [],
+            "liquidity": [],
+            "orders": [],
+            "summary": {"totalAccountValue": "275.00000000", "walletValue": "200.00000000"},
+            "balance_block": 5,
+            "stale": False,
+        }
+
+    monkeypatch.setattr(spot_data, "spot_body", body)
+    monkeypatch.setattr(spot_graph, "ensure_fill", lambda w: None)
+    monkeypatch.setattr(
+        spot_graph, "graph_for", lambda w: {"resolution": 3600, "points": [{"t": stale, "v": 230.0}], "complete": True}
+    )
+
+    out = spot_portfolio(wallet)
+    points = out["graph"]["points"]
+    assert points[0] == {"t": stale, "v": 230.0}
+    assert points[-1]["v"] == 275.0
+    assert points[-1]["t"] >= int(time.time()) - 5
+    assert points[-1]["live"] is True

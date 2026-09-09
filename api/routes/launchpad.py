@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import traceback
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -2536,6 +2536,7 @@ def spot_portfolio(
     if body["supported"]:
         ensure_fill(wallet)
         graph = graph_for(wallet)
+        graph["points"] = [*graph.get("points", []), _live_point(body)]
     else:
         graph = {"resolution": RESOLUTION, "points": [], "complete": True}
 
@@ -2544,6 +2545,21 @@ def spot_portfolio(
         "graph": graph,
         "as_of_block": storage.get_last_processed_block() or 0,
     }
+
+
+def _live_point(body: dict[str, Any]) -> dict[str, Any]:
+    """The graph's last point is the total this same response reports, never a stored bucket.
+
+    Buckets are hourly and are filled by a background thread after the response is built, so the first
+    load of a wallet drew a bucket up to an hour old and the next refresh a fresh one: $230, then $275,
+    for the same wallet a second apart. The live total is already computed for the summary, so it ends
+    the series, marked so a client can tell it from a stored bucket.
+    """
+    try:
+        value = float(Decimal(str(body["summary"]["totalAccountValue"])))
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        value = 0.0
+    return {"t": int(time.time()), "v": value, "live": True}
 
 
 @router.get("/volume/{user_addr}")
