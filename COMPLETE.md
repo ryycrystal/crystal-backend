@@ -63,30 +63,27 @@ scans 86,000 blocks a second per connection and four range connections finish in
 
 ## Grading, three tokens
 
-Image `ledger-7c2007a` (before tonight's four engine fixes), one execution per token, job `ledger-rebuild`.
+Image `ledger-638fbec` (every fix in this file), one execution per token on the two good public nodes, job
+`ledger-rebuild`, runs `ledger-638fbec-moncock` and `ledger-638fbec-james` under blob `replay-jobs/out/`
+with their check, verify and sweep logs and a dump of the rebuilt tables.
 
 | check | result |
 |---|---|
-| moncock token_bought / token_sold | 25,719,120.30, exact |
-| moncock trade_count | 5 |
-| moncock native_spent (confirmed + estimated) | 478,878.24 against 479,108.51 chain-derived, within 0.5% |
-| moncock realized (confirmed + estimated) | -196,723.65 against -196,953.92, within 0.5%, all observed |
-| moncock balance | 0 |
-| JAMES prod holders present | 2,474 checked, 0 missing |
-| JAMES chain balanceOf == balance + custody | 4,951 wallets, every person's wallet exact, 9 unclassified contracts differ |
-| JAMES checks | 10 of 10 |
-| JAMES verify | 21 of 24 (the three above, all fixed since) |
-| JAMES estimated share / inflow with no cost | 3.55% / 0.00% |
-| JAMES positions with any estimate / over a tenth | 114 of 4,678 (2.4%) / 32, all liquidity, fixed since |
-| chipotle | the run died on the rate cap after its first chunks; rerunning on the pool |
+| moncock checks | 11 of 11: bought / sold 25,719,120.30 exact, 5 trades, native_spent and realized within 0.5% of the chain-derived 479,108.51 and -196,953.92, balance 0 |
+| moncock verify | 22 of 24: two bot contracts a few hundred wei negative, and five hand-off rows where a 7702 wallet passed tokens through itself in the transaction it sold in |
+| moncock positions with any estimate / over a tenth | 365 of 9,100 (4.0%) / 273, almost all of them liquidity in the nad.fun pair whose events the cache does not hold |
+| moncock estimated share / inflow with no cost | 1.73% / 0.00% |
+| JAMES checks | 10 of 10: 2,471 prod holders present, 4,948 wallets compared to chain, every person's wallet exact, 9 unclassified contracts reported |
+| JAMES verify | 23 of 24: one bot contract at -6 wei |
+| JAMES positions with any estimate / over a tenth | 87 of 4,676 (1.9%) / 9 |
+| JAMES estimated share / inflow with no cost | 2.25% / 0.00% |
+| chipotle | graded by the registry merge (its standalone run at 337k blocks is the registry's own work) |
 
 The moncock figures are derived from the chain transaction by transaction in the checker's docstring. The
 old hand-derived 477,018.49 imputed the v4 pool manager leg 2,090 MON low; the trace shows 68,724.686 MON
-settled natively.
-
-Moncock and JAMES are being rerun on `ledger-9ba4888` with tonight's engine fixes (`ledger-9ba4888-moncock`
-and `-james` under blob `replay-jobs/out/`), and chipotle comes out of the registry merge, which grades all three; their check, verify and sweep logs and a dump of the
-rebuilt tables land there when each finishes, and this table is replaced from them.
+settled natively. The earlier image `ledger-7c2007a` graded moncock 11 of 11 and JAMES 10 of 10 as well;
+what the night's fixes changed is the estimate counts (JAMES 32 positions over a tenth to 9, moncock 340 to
+273) and the invariants (JAMES 21 of 24 to 23 of 24).
 
 ## Full registry
 
