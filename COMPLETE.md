@@ -87,55 +87,57 @@ what the night's fixes changed is the estimate counts (JAMES 32 positions over a
 
 ## Full registry
 
-Scan published `replay-jobs/ledger/all_blocks.json` (5,586,441 hot blocks over 32,221 tokens) and 34
-partition lists (the launch-era range split in three). Every partition netted its range with
-`ledger_replay.py --all --no-fold` on image `ledger-9ba4888` into a Postgres inside the container and
-uploaded its tables as CSV: 9,372,608 flows in all, 862 MB gzipped, no partition failed. The merge loads
-the CSVs, refolds every token, dumps the merged database to `out/ledger-9ba4888-all5/merged/`, then runs
-the checks (moncock, JAMES, chipotle), verify, the sweeps and the acceptance query.
+Scan published 5,586,441 hot blocks over 32,221 tokens, split into 34 partitions. Every partition netted
+its range with `ledger_replay.py --all --no-fold` on image `ledger-9ba4888`, 9,372,608 flows in all, no
+partition failed. Both attempts to merge inside an Azure job then died on the container's 20 GB disk, so
+the merge runs on the owner's machine: load the partition CSVs, refold every token, grade. Two fixes came
+out of those failures, both committed: a full refold now folds a token in block windows and carries the
+state across, because loading a large token's flows at once was killed for memory, and the merge dumps
+before it verifies.
 
-The first merge attempt taught two things about the merge container, both fixed: folding a token by
-loading all of its flows at once was killed for memory 1,500 tokens into the registry (the largest tokens
-carry millions of flows), so a full refold now folds in windows that end on block boundaries and carries
-the state across (`store._refold_in_windows`, test-first, commit 8130a83); and verify's joins over nine
-million flows filled the container's 20 GB disk before the dump was written, so the merge now dumps first,
-caps temp files at 3 GB and drops the CSVs after loading. The second merge is running on `ledger-8130a83`;
-its outputs replace this paragraph.
+The refold of 31,518 tokens took 90 minutes across four shards and produced 1,231,183 positions.
 
-What that merge cannot fix by itself: the flows were netted by `ledger-9ba4888`, which predates the nad.fun
-pair-liquidity rule (638fbec) and the position-token rule (769c8d0). Tokens with liquidity in nad.fun
-pairs will show those legs as reference-priced trades until the registry is netted again on the newest
-image, which is a rerun of the 34 partitions (about four hours on the two public nodes, two on a private
-RPC).
-
-## Random sample against chain
-
-Before trusting the merge, the partitions' flows were checked directly: for 100 tokens drawn at random
-(seed 7) from the 9,293 registered tokens with ten or more positions, every holder's balance was summed
-from the 34 partition files and read from chain at the scan head, block 103,098,188.
-
-| random 100 tokens | result |
+| registry check | result |
 |---|---|
-| tokens where every person's wallet matches chain | 100 of 100 |
-| holder balances compared | 3,297 |
-| exact to the wei | 3,296 |
-| people's wallets off | 0 |
-| contracts off | 1, a bot contract 308 wei apart |
-| chain reads unanswered | 0 |
+| fixture checks | 23 of 24 |
+| moncock | bought and sold 25,719,120.30 exact, 5 trades, spent 478,878.24 and realized -196,723.65 against the chain-derived 479,108.51 and -196,953.92, balance 0 |
+| JAMES | 2,468 prod holders all present, 4,967 wallets compared to chain, 0 mismatches on people's wallets, 0 unanswered |
+| verify | 21 of 24 invariants |
+| negative balances | 38 of 1,231,183: 34 bot contracts, 4 people's wallets at a few thousand wei |
+| missing transfer halves | 4 of 9,372,608 flows |
+| cost did not travel | 580 of 9,372,608 flows, 0.006% |
 
-The sample is 98 nad.fun v1 tokens and 2 nad.fun v2 tokens, which is what the registry mostly is. This is
-the gate to run before any future full replay: `scratchpad/sample_balance_check.py` does it in about
-half an hour from the partition files, and would have caught this week's defects before a night was spent
-on 5.6 million blocks. It checks balances only; cost and PnL need the fold.
+The one failing check is a stale fixture, not the ledger. The checker's CHIPOTLE is token `0x8e74f6e9…`,
+which the 2026-09-06 crystal relaunch purged from `launchpad_tokens`, so the registry replay never had it
+in scope; and the job scripts define `CHIPOTLE` as `0x350035555e…`, which is CHOG, a nad.fun token. Every
+"chipotle" figure in earlier runs was CHOG. Grading the real Chipotle needs a token-scoped replay of an
+address the registry no longer lists.
 
 ## Acceptance
 
-The owner's criterion, printed by `scripts/ledger_sweep.py` on every rebuilt token: fewer than one position
-in ten carries any estimated cost, no such position is more than a tenth estimated, people's wallets match
-chain to the wei, and any unclassified contract among the top 50 holders is listed for a decision. JAMES on
-`ledger-7c2007a`: 2.4% of positions with any estimate, 32 over a tenth, every one of them a liquidity
-position that the `lp_add` fix reclassifies; 13 unclassified contracts among the top 50 holders, all but
-one passing tokens to nobody (lockers, vesting, multisigs).
+The owner's criterion, counted over people's wallets only: fewer than one position in ten carries any
+estimated cost, and none is more than a tenth estimated.
+
+| | registry |
+|---|---|
+| people's positions with cost | 1,199,453 |
+| carrying any estimate | 33,706, 2.81% |
+| more than a tenth estimated | 30,178, 2.52% |
+
+The first half passes with room. The second does not, and the cause is concentrated rather than diffuse:
+85% of all estimated flows are reference-priced trades at pools, 170,848 flows over 373 venues, of which
+35 venues carry 80%. Two factories account for 94% of them. `0x6b5f5643…` is a Uniswap V3 fork whose
+pools answer `slot0`, `liquidity` and `fee` but emit their own event signatures, so we never decoded
+their fills. `0x182a9271…` is plain Uniswap V2 pairs emitting the standard `Swap` and `Sync`, which we
+already decode and throw away at ingest, because `accepts_log_for_indexing` admits V2 pair events only
+from a hardcoded address list while V3 swaps are admitted from any address.
+
+That gives two levels of repair. Level one is the transfer-graph rules already committed here, which
+reclassify liquidity as liquidity without decoding anything; it needs only a re-net of the affected
+116,349 blocks across 257 tokens, 2% of the registry. Level two collapses the double trust gate at ingest
+and adds the fork's decoder, which makes those trades exactly priced; it is deferred until after launch
+by the owner's decision. Neither is a hotfix on top of the other: level two removes a gate rather than
+adding a case, and one re-net can carry both whenever it lands.
 
 ## Open
 
