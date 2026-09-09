@@ -289,6 +289,16 @@ sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. T
 - `ae28f3a` the spot graph ends on the live total the same response reports, marked `live`, instead of the
   last stored hourly bucket, which a background fill used to refresh only after the first response.
 
+- `e1f1b5a` a fee claim in the activity feed carries its price and dollar value: one MON per MON for a
+  WMON claim, the token's last trade before the claim otherwise, and the dollars MON was worth when it
+  landed, by the same rule the rate book uses.
+- `d940711` AUSD is priced off its own USDC book instead of at par. The API reads the canonical AUSD/USDC
+  market's last price through the plausibility band the oracle already had (the stored meta key nothing
+  published is now only a fallback), and the ledger's `Rates` carry `ausd_usd` from that book's last print
+  before the bucket, so a dollar leg paid in AUSD is worth the book's price. The registry now in flight
+  was netted before this landed; its 2,950 AUSD-quoted flows across 2,589 blocks value AUSD at par, which
+  is where the book has sat, and they are enumerable for a targeted re-net.
+
 Still on the legacy trade rows: the activity feed (`portfolio_history`, `portfolio_last_trades`) and the
 users-table aggregates behind the leaderboard.
 
