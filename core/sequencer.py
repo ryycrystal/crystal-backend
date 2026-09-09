@@ -290,8 +290,13 @@ class Sequencer:
         return transfer_maps
 
     def _verify_attribution(self, blk: int, transfer_maps: dict, cur=None, batch=None) -> None:
+        """Patch the legacy accumulator where a venue's amount and the wallet's transfers disagree.
+
+        Once the ledger is on the fold owns every position from the transfer graph itself, so the
+        invented trade would only pollute the feed; the buffer is still drained so it cannot grow.
+        """
         attributed = self._state.take_attributed_token_deltas()
-        if not attributed:
+        if not attributed or LEDGER.enabled:
             return
 
         for (txh, token, user), (amount, native_total) in attributed.items():

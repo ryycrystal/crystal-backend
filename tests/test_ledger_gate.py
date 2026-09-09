@@ -112,3 +112,44 @@ def test_the_batch_flush_leaves_the_served_positions_to_the_ledger_once_it_is_on
     monkeypatch.setattr(sequencer.LEDGER, "enabled", False)
     batch.flush(cur=None)
     assert "upsert_positions_batch" in calls
+
+
+def test_the_attribution_reconciler_stands_down_once_the_ledger_is_on(monkeypatch):
+    """The reconciler invents a trade for whatever the venue's amount and the wallet's transfers disagree
+    by, which patched the legacy accumulator. With the fold owning positions those rows only pollute the
+    feed, dated 1970 when the block's timestamp is unknown. The buffer it drains must still be drained."""
+    import core.sequencer as sequencer
+
+    class State:
+        def __init__(self):
+            self.drained = 0
+            self.reconciled = []
+
+        def take_attributed_token_deltas(self):
+            self.drained += 1
+            return {("0xtx", "0xtoken", "0xuser"): (10**18, 5 * 10**18)}
+
+        def apply_reconciliation_trade(self, **kw):
+            self.reconciled.append(kw)
+            return True
+
+    seq = object.__new__(sequencer.Sequencer)
+    seq._state = State()
+    seq._block_timestamps = {}
+    seq.attribution_mismatches = 0
+    maps = {
+        ("0xtx", "0xtoken"): {
+            "ordered": [{"to": "0xuser", "from": "0xpool", "amount": 3 * 10**18, "log_idx": 7, "tx_index": 1}]
+        }
+    }
+
+    monkeypatch.setattr(sequencer.LEDGER, "enabled", True)
+    seq._verify_attribution(100, maps)
+    assert seq._state.drained == 1
+    assert seq._state.reconciled == []
+    assert seq.attribution_mismatches == 0
+
+    monkeypatch.setattr(sequencer.LEDGER, "enabled", False)
+    seq._verify_attribution(100, maps)
+    assert seq._state.drained == 2
+    assert len(seq._state.reconciled) == 1
