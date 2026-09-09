@@ -402,3 +402,55 @@ def test_spot_graph_ends_on_the_live_total_not_the_last_stored_bucket(db, monkey
     assert points[-1]["v"] == 275.0
     assert points[-1]["t"] >= int(time.time()) - 5
     assert points[-1]["live"] is True
+
+
+def test_a_fee_claim_in_the_activity_feed_carries_its_price_and_dollar_value(db):
+    """A referral fee paid in WMON is worth one MON per MON and the dollars MON was worth when it landed;
+    a claim paid in a launchpad token is priced at that token's last trade before the claim. Both used to
+    come through as zero."""
+    import core.storage as storage
+    from core.storage import db_cursor
+
+    WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xf1", log_idx=0)
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT usd_amount / (native_amount / 1e18), price_native FROM launchpad_trades WHERE user_address = %s ORDER BY timestamp DESC LIMIT 1",
+            (USER,),
+        )
+        mon_usd, token_price = (Decimal(str(v)) for v in cur.fetchone())
+        assert mon_usd > 0 and token_price > 0
+        cur.execute("DELETE FROM referral_claims WHERE user_address = %s", (USER,))
+        cur.execute(
+            "INSERT INTO referral_claims (txhash, log_index, claim_index, block_number, timestamp, user_address, token, amount) VALUES (%s, %s, %s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                "0xfeeclaim1",
+                3,
+                0,
+                102,
+                2000,
+                USER,
+                WMON,
+                2 * 10**18,
+                "0xfeeclaim2",
+                4,
+                0,
+                102,
+                2000,
+                USER,
+                TOKEN,
+                5 * 10**18,
+            ),
+        )
+
+    items = {i["txhash"]: i for i in storage.wallet_activity([USER], limit=50) if i["type"] == "fee_claim"}
+    wmon = items["0xfeeclaim1"]
+    assert wmon["amountNative"] == str(2 * 10**18)
+    assert Decimal(wmon["priceNative"]) == Decimal(1)
+    assert Decimal(wmon["usdAmount"]) == (Decimal(2) * mon_usd).quantize(Decimal("1e-18"))
+    token = items["0xfeeclaim2"]
+    assert token["amountToken"] == str(5 * 10**18)
+    assert Decimal(token["priceNative"]) == token_price
+    assert Decimal(token["usdAmount"]) == (Decimal(5) * token_price * mon_usd).quantize(Decimal("1e-18"))

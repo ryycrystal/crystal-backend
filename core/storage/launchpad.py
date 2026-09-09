@@ -2730,9 +2730,23 @@ def wallet_activity(
                        CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 'Wrapped MON' ELSE COALESCE(k2.name, '') END,
                        CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN c.amount ELSE 0 END,
                        CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 0 ELSE c.amount END,
-                       0, 0
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a' THEN 1
+                            ELSE COALESCE(cp.price_native, k2.last_price_native, 0) END,
+                       CASE WHEN c.token = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a'
+                            THEN c.amount / 1e18 * COALESCE(cr.mon_usd, 0)
+                            ELSE c.amount / 1e18 * COALESCE(cp.price_native, k2.last_price_native, 0) * COALESCE(cr.mon_usd, 0) END
                 FROM referral_claims c
                 LEFT JOIN launchpad_tokens k2 ON k2.token = c.token
+                LEFT JOIN LATERAL (
+                    SELECT usd_amount / (native_amount / 1e18) AS mon_usd FROM launchpad_trades
+                    WHERE timestamp <= c.timestamp AND native_amount >= 1e18 AND usd_amount > 0
+                    ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1
+                ) cr ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT price_native FROM launchpad_trades
+                    WHERE token = c.token AND timestamp <= c.timestamp AND price_native > 0
+                    ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1
+                ) cp ON TRUE
                 WHERE c.user_address = ANY(%(u)s){cut_c}
                 UNION ALL
                 SELECT CASE WHEN e.kind = 'mint' THEN 'lp_deposit' ELSE 'lp_withdraw' END,
