@@ -851,3 +851,32 @@ def test_moving_transactions_lists_transfers_of_registered_tokens_per_block():
     }
 
     assert moving_transactions(logs, {token}) == {5: [tx1], 6: [tx4]}
+
+
+def test_the_engine_prices_in_the_units_the_registry_and_the_markets_describe(seeded):
+    """A spot market quoted in an eight-decimal base and a six-decimal dollar is described on chain and
+    recorded in crystal_markets; the engine's rates must carry those units, over whatever rate source it
+    was handed, so the valuation never assumes eighteen."""
+    from core.ledger.types import USDC
+    from core.storage import db_cursor
+
+    base = "0x" + "d1" * 20
+    market = "0x" + "d2" * 20
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO crystal_markets (market, is_canonical, quote_asset, base_asset, quote_address, quote_decimals,
+                                         quote_ticker, quote_name, base_address, base_decimals, base_ticker, base_name,
+                                         market_id, market_type, scale_factor, tick_size, max_price, min_size,
+                                         taker_fee, maker_rebate, is_amm_enabled, created_block, created_at)
+            VALUES (%s, TRUE, %s, %s, %s, 6, 'USDC', 'USDC', %s, 8, 'CBBTC', 'cbBTC', 9, 0, 3, 1, 1, 1, 0, 0, FALSE, 1, 1)
+            ON CONFLICT (market) DO NOTHING
+            """,
+            (market, USDC, base, USDC, base),
+        )
+        engine = fixture_engine(db_cursor)
+        engine.refresh_registry(cur)
+        rates = engine._rates_at(5, 1_700_000_000, cur)
+    assert rates.units[base] == 8
+    assert rates.units[USDC] == 6
+    assert rates.mon_usd == fixed_rates(5, 1_700_000_000, None).mon_usd, "the rate source is untouched"

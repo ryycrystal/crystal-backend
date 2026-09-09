@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from core.ledger.types import Rates
+from core.ledger.types import QUOTE_DECIMALS, Rates
 
 BUCKET_SECONDS = 300
 MIN_SAMPLE_WEI = 10**18
@@ -108,9 +108,10 @@ def from_samples(cur, at: int) -> Decimal | None:
 class RateBook:
     """One bucket size, one minimum, one fallback, whichever store the samples come from."""
 
-    def __init__(self, lookup=from_trades, ausd_lookup=ausd_from_market) -> None:
+    def __init__(self, lookup=from_trades, ausd_lookup=ausd_from_market, units=None) -> None:
         self._lookup = lookup
         self._ausd_lookup = ausd_lookup
+        self._units = {**QUOTE_DECIMALS, **(units or {})}
         self._cache: dict[int, Rates] = {}
 
     def __call__(self, blk: int, ts: int, cur) -> Rates:
@@ -126,6 +127,7 @@ class RateBook:
             lvmon_rate=meta_decimal(cur, "lvmon_mon_rate", Decimal(1)),
             usdc_per_mon=mon_usd,
             ausd_usd=self._ausd_lookup(cur, at) or Decimal(1),
+            units=self._units,
         )
         if len(self._cache) > CACHE_LIMIT:
             self._cache.clear()

@@ -38,7 +38,6 @@ from core.ledger.types import (
     SOURCE_TRACE,
     SOURCE_TRANSFER_NET,
     SOURCE_VENUE_EVENT,
-    USD_DECIMALS,
     VENUE_KINDS,
     WALLET_KINDS,
     WEI,
@@ -64,7 +63,6 @@ PRICE_VENUE_KINDS = frozenset({KIND_VENUE_POOL, KIND_VENUE_CURVE})
 AMOUNT_TOLERANCE_WEI = 1
 FEE_TOLERANCE = Decimal("0.10")
 MAX_PATH_HOPS = 12
-USD_UNIT = Decimal(10) ** USD_DECIMALS
 
 PriceFn = Callable[[str], Decimal | None]
 KindFn = Callable[[str], str]
@@ -257,13 +255,25 @@ def _hint_quote_asset(
     return None
 
 
+def _unit(asset: str | None, rates: Rates) -> Decimal | None:
+    """One whole of a quote asset in its raw units, from the registry the rates carry, or None.
+
+    A dollar leg is six decimals and a MON leg eighteen, but that is a fact about each asset, not a
+    constant of the engine: an asset the registry does not describe is not priced rather than assumed to
+    be eighteen, which is how a six-decimal quote read as eighteen became nine months of broken charts.
+    """
+    decimals = rates.units.get(asset) if asset else None
+    return None if decimals is None else Decimal(10) ** int(decimals)
+
+
 def _values(asset: str | None, quote_delta: int | None, rates: Rates) -> tuple[Decimal, Decimal]:
-    if asset is None or not quote_delta:
+    unit = _unit(asset, rates)
+    if asset is None or not quote_delta or unit is None:
         return Decimal(0), Decimal(0)
     if asset in MON_FAMILY:
-        mon = Decimal(abs(quote_delta)) / WEI
+        mon = Decimal(abs(quote_delta)) / unit
         return mon, mon * rates.mon_usd
-    usd = Decimal(abs(quote_delta)) / USD_UNIT * (rates.ausd_usd if asset == AUSD else Decimal(1))
+    usd = Decimal(abs(quote_delta)) / unit * (rates.ausd_usd if asset == AUSD else Decimal(1))
     mon = usd / rates.usdc_per_mon if rates.usdc_per_mon > 0 else Decimal(0)
     return mon, usd
 
@@ -285,11 +295,14 @@ def _combine(parts: list[tuple[str, int]], rates: Rates) -> tuple[str, int] | No
         return next(iter(assets)), sum(delta for _, delta in parts)
     total = Decimal(0)
     for asset, delta in parts:
+        unit = _unit(asset, rates)
+        if unit is None:
+            return None
         if asset in MON_FAMILY:
-            total += Decimal(delta)
+            total += Decimal(delta) * WEI / unit
         elif rates.usdc_per_mon > 0:
             dollars = rates.ausd_usd if asset == AUSD else Decimal(1)
-            total += Decimal(delta) / USD_UNIT * dollars / rates.usdc_per_mon * WEI
+            total += Decimal(delta) / unit * dollars / rates.usdc_per_mon * WEI
         else:
             return None
     return NATIVE, int(total)

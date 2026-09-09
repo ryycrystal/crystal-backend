@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ QUOTE_ASSETS = frozenset({NATIVE, WMON, LVMON, USDC, AUSD})
 MON_FAMILY = frozenset({NATIVE, WMON, LVMON})
 USD_FAMILY = frozenset({USDC, AUSD})
 USD_DECIMALS = 6
+QUOTE_DECIMALS = {NATIVE: 18, WMON: 18, LVMON: 18, USDC: USD_DECIMALS, AUSD: USD_DECIMALS}
 ZERO = "0x0000000000000000000000000000000000000000"
 ENTRYPOINT_V06 = "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789"
 ENTRYPOINT_V07 = "0x0000000071727de22e5e9d8baf0edac6f37da032"
@@ -278,3 +280,4 @@ class Rates:
     lvmon_rate: Decimal = Decimal(1)
     usdc_per_mon: Decimal = Decimal(0)
     ausd_usd: Decimal = Decimal(1)
+    units: Mapping[str, int] = field(default_factory=lambda: dict(QUOTE_DECIMALS))

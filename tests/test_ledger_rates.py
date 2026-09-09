@@ -113,3 +113,14 @@ def test_ausd_is_priced_off_its_own_book_and_falls_back_to_par():
         0, 1_700_000_000, AusdCursor(TRADES, meta, [(1_699_999_000, 30_000)])
     )
     assert rates.ausd_usd == Decimal(1), "a print outside the plausible band is a thin-book tick, not a depeg"
+
+
+def test_the_rate_book_carries_the_registry_units_and_defaults_to_the_known_quotes():
+    from core.ledger.types import QUOTE_DECIMALS, USDC
+
+    meta = {"mon_price_usd": Decimal("0.03")}
+    plain = RateBook(from_trades)(0, 1_700_000_000, FakeCursor(TRADES, meta))
+    assert plain.units == QUOTE_DECIMALS
+    extra = "0x" + "cb" * 20
+    book = RateBook(from_trades, units={extra: 8})(0, 1_700_000_000, FakeCursor(TRADES, meta))
+    assert book.units[extra] == 8 and book.units[USDC] == 6

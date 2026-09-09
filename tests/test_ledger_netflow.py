@@ -1867,3 +1867,27 @@ def test_a_purchase_paid_in_ausd_is_valued_at_ausd_s_own_dollar_price():
     assert f.quote_delta == -paid
     assert f.usd_value == Decimal(98)
     assert f.mon_value == Decimal(3920)
+
+
+def test_a_quote_leg_is_valued_in_the_units_the_registry_says_and_never_assumed():
+    """USDC has six decimals and the valuation must learn that from the registry, not from a constant:
+    told the wrong units, the same payment values differently; told nothing, it refuses to price."""
+    from core.ledger.types import QUOTE_DECIMALS
+
+    tokens, paid = 100 * E18, 50 * 10**6
+    b = bundle([tf(1, USDC, WALLET, POOL, paid), tf(2, TOKEN, POOL, WALLET, tokens)], tx_meta=meta(WALLET, POOL))
+    right = Rates(mon_usd=Decimal("0.025"), usdc_per_mon=Decimal("0.025"))
+    f = only(run(b, rates=right))
+    assert f.usd_value == Decimal(50) and f.mon_value == Decimal(2000)
+
+    wrong = Rates(mon_usd=Decimal("0.025"), usdc_per_mon=Decimal("0.025"), units={**QUOTE_DECIMALS, USDC: 18})
+    f = only(run(b, rates=wrong))
+    assert f.usd_value == Decimal(50) / Decimal(10**12), "the units came from the map, not a constant"
+
+    blind = Rates(
+        mon_usd=Decimal("0.025"),
+        usdc_per_mon=Decimal("0.025"),
+        units={k: v for k, v in QUOTE_DECIMALS.items() if k != USDC},
+    )
+    f = only(run(b, rates=blind))
+    assert f.mon_value == Decimal(0) and f.usd_value == Decimal(0), "an asset with unknown units is not priced"

@@ -12,6 +12,7 @@ from core.ledger.types import (
     ENTRYPOINTS,
     KIND_VENUE_POOL,
     QUOTE_ASSETS,
+    QUOTE_DECIMALS,
     TRANSFER_TOPIC,
     USEROP_EVENT_TOPIC,
     WMON,
@@ -96,6 +97,7 @@ class LedgerEngine:
         self._market_tokens: dict[str, str] = {}
         self._market_pairs: dict[str, tuple[str, str]] = {}
         self._pools: dict[str, tuple[str, str, bool]] = {}
+        self._units: dict[str, int] = {}
         self.scope: frozenset[str] | None = None
         self._affected: dict[str, int] = {}
         self._price_cache: dict[tuple[str, int], Decimal | None] = {}
@@ -113,6 +115,7 @@ class LedgerEngine:
         self._market_tokens = self._load_market_tokens(cur)
         self._market_pairs = self._load_market_pairs(cur)
         self._pools = self._load_pools(cur)
+        self._units = self._load_units(cur, self._registry)
         return self._registry
 
     def _seed_registry(self, cur, store) -> dict:
@@ -171,6 +174,25 @@ class LedgerEngine:
             quote = (parsed.get("quote_token") or WMON).lower()
             self._registry[token] = store.register_token(cur, token, source, int(blk), quote, 18)
         return markets_changed
+
+    @staticmethod
+    def _load_units(cur, registry: dict) -> dict[str, int]:
+        """Every asset's decimals, from the registry and the spot markets, over the known quotes.
+
+        The registry records a token's decimals when it is registered, and the spot markets record both
+        sides of each pair from chain, which is the only place the dollar quotes are described. Valuation
+        reads this map and prices nothing it does not describe.
+        """
+        units: dict[str, int] = dict(QUOTE_DECIMALS)
+        for token, reg in registry.items():
+            units[token] = int(getattr(reg, "decimals", 18) or 18)
+        cur.execute("SELECT base_address, base_decimals, quote_address, quote_decimals FROM crystal_markets")
+        for base, base_dec, quote, quote_dec in cur.fetchall():
+            if base:
+                units[base.lower()] = int(base_dec or 18)
+            if quote:
+                units[quote.lower()] = int(quote_dec or 18)
+        return units
 
     @staticmethod
     def _load_market_tokens(cur) -> dict[str, str]:
@@ -454,7 +476,10 @@ class LedgerEngine:
     def _rates_at(self, blk: int, ts: int, cur) -> Rates:
         if self._rates_fn is None:
             self._rates_fn = RateBook()
-        return self._rates_fn(blk, ts, cur)
+        rates = self._rates_fn(blk, ts, cur)
+        if not self._units:
+            return rates
+        return replace(rates, units={**rates.units, **self._units})
 
     def affected_keys(self) -> list[str]:
         return sorted(self._affected)
