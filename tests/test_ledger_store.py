@@ -849,3 +849,77 @@ def test_parked_basis_survives_a_checkpoint_that_goes_through_the_database(cur):
     assert cur.fetchall() == [(vault_b, Decimal(100))], "vault A is emptied and forgotten, vault B untouched"
     cur.execute("SELECT parked_observed_basis, cost_basis_native FROM positions_v2 WHERE wallet = %s", (WALLET_A,))
     assert cur.fetchone() == (Decimal(100), Decimal(100))
+
+
+def test_a_large_token_refolds_in_block_windows_to_the_same_positions(cur, monkeypatch):
+    from core.ledger import store
+    from core.ledger.fold import fold_token
+
+    flows = [
+        _flow(block_number=100, log_index=1, token_delta=4 * 10**18, quote_delta=-(4 * 10**18), mon_value=Decimal(4)),
+        _flow(
+            block_number=101,
+            log_index=1,
+            token_delta=2 * 10**18,
+            quote_delta=-(4 * 10**18),
+            mon_value=Decimal(4),
+            txhash=TX_2,
+        ),
+        _flow(
+            block_number=102,
+            log_index=1,
+            token_delta=-(3 * 10**18),
+            quote_delta=None,
+            quote_asset=None,
+            mon_value=Decimal(0),
+            kind="transfer_out",
+            venue=None,
+            counterparty=WALLET_B,
+            source="transfer_net",
+            txhash="0x" + "33" * 32,
+        ),
+        _flow(
+            block_number=102,
+            log_index=1,
+            sub_index=1,
+            wallet=WALLET_B,
+            token_delta=3 * 10**18,
+            quote_delta=None,
+            quote_asset=None,
+            mon_value=Decimal(0),
+            kind="transfer_in",
+            venue=None,
+            counterparty=WALLET_A,
+            source="transfer_net",
+            basis_state="unresolved",
+            origin=WALLET_A,
+            txhash="0x" + "33" * 32,
+        ),
+        _flow(
+            block_number=104,
+            log_index=1,
+            wallet=WALLET_B,
+            token_delta=-(3 * 10**18),
+            quote_delta=9 * 10**18,
+            mon_value=Decimal(9),
+            kind="sell",
+            txhash="0x" + "44" * 32,
+        ),
+    ]
+    assert store.insert_flows(cur, flows) == 5
+
+    def positions():
+        cur.execute(
+            "SELECT wallet, balance_token, cost_basis_native, realized_pnl_native, trade_count "
+            "FROM positions_v2 WHERE token = %s ORDER BY wallet",
+            (TOKEN_X,),
+        )
+        return [tuple(int(v) if not isinstance(v, str) else v for v in row) for row in cur.fetchall()]
+
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 2
+    whole = positions()
+    assert whole[1][0] == WALLET_B and whole[1][3] == 5 * 10**18
+
+    monkeypatch.setattr(store, "REFOLD_WINDOW_FLOWS", 2)
+    assert store.refold_tokens(cur, {TOKEN_X: 0}, fold_token) == 2
+    assert positions() == whole

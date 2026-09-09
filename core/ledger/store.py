@@ -32,6 +32,7 @@ _FLOW_WEI = {"token_delta", "quote_delta", *FOLD_COLUMNS}
 _FLOW_DECIMAL = {"mon_value", "usd_value", "price_native"}
 _FLOW_ADDRESS = {"txhash", "wallet", "token", "quote_asset", "venue", "counterparty", "origin"}
 _KEY_CHUNK = 500
+REFOLD_WINDOW_FLOWS = 200_000
 _PAGE_SIZE = 1000
 
 _FLOW_KEY_COLUMNS = ("block_number", "tx_index", "log_index", "sub_index")
@@ -233,14 +234,32 @@ def _write_parked(cur, keys: list[tuple[str, str]], parked: list[tuple]) -> None
         )
 
 
-def load_token_flows(cur, token: str, after: int | None = None) -> list[Flow]:
+def load_token_flows(cur, token: str, after: int | None = None, before: int | None = None) -> list[Flow]:
     sql = f"SELECT {', '.join(FLOW_COLUMNS)} FROM wallet_flows WHERE token = %s"
     params: tuple = (_lower(token),)
     if after is not None:
         sql += " AND block_number > %s"
         params += (int(after),)
+    if before is not None:
+        sql += " AND block_number < %s"
+        params += (int(before),)
     cur.execute(sql + " ORDER BY block_number, tx_index, log_index, sub_index", params)
     return [_flow_from_row(row) for row in cur.fetchall()]
+
+
+def _window_end(cur, token: str, after: int | None) -> int | None:
+    """The block holding the flow one window past the start, so a window ends on a block boundary."""
+    sql = "SELECT block_number FROM wallet_flows WHERE token = %s"
+    params: tuple = (_lower(token),)
+    if after is not None:
+        sql += " AND block_number > %s"
+        params += (int(after),)
+    cur.execute(
+        sql + " ORDER BY block_number, tx_index, log_index, sub_index OFFSET %s LIMIT 1",
+        params + (REFOLD_WINDOW_FLOWS,),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else None
 
 
 def _position_from_row(row) -> PositionRow:
@@ -305,6 +324,39 @@ def _write_fold(cur, token: str, states: dict, folded: list[Flow], stored: dict,
     _write_parked(cur, [] if full else keys, parked)
 
 
+def _refold_in_windows(cur, token: str, fold_fn) -> int:
+    """Fold a token from the beginning in windows that end on block boundaries, carrying the state across.
+
+    Loading every flow of a token at once is what a registry-wide refold cannot afford: the largest tokens
+    carry millions of flows and the fold was killed for memory a fiftieth of the way through the registry.
+    A window never splits a block, so a hand-off inside one transaction always folds in one piece.
+    """
+    states = None
+    after = None
+    first = True
+    last_block = None
+    while True:
+        end = _window_end(cur, token, after)
+        flows = load_token_flows(cur, token, after, end)
+        if not flows and end is not None:
+            flows = load_token_flows(cur, token, after, end + 1)
+        if not flows:
+            break
+        states, folded = fold_fn(states, flows)
+        _write_fold(cur, token, states, folded, {_flow_pk(flow): flow for flow in flows}, first)
+        first = False
+        last_block = int(flows[-1].block_number)
+        after = last_block
+        if end is None:
+            break
+    if states is None:
+        cur.execute("DELETE FROM positions_v2 WHERE token = %s", (_lower(token),))
+        cur.execute("DELETE FROM parked_entitlements WHERE token = %s", (_lower(token),))
+        return 0
+    set_fold_watermark(cur, token, last_block)
+    return len(states)
+
+
 def refold_tokens(cur, touched: dict[str, int], fold_fn) -> int:
     """Fold each touched token in chain order, resuming from its checkpoint where the new flows allow it.
 
@@ -318,11 +370,11 @@ def refold_tokens(cur, touched: dict[str, int], fold_fn) -> int:
     for token in sorted(touched):
         watermark = watermarks.get(token)
         full = watermark is None or int(touched[token]) <= watermark
-        flows = load_token_flows(cur, token, None if full else watermark)
+        if full:
+            written += _refold_in_windows(cur, token, fold_fn)
+            continue
+        flows = load_token_flows(cur, token, watermark)
         if not flows:
-            if full:
-                cur.execute("DELETE FROM positions_v2 WHERE token = %s", (_lower(token),))
-                cur.execute("DELETE FROM parked_entitlements WHERE token = %s", (_lower(token),))
             continue
         previous = None if full else load_positions(cur, token, {flow.wallet for flow in flows})
         states, folded = fold_fn(previous, flows)
