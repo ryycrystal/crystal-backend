@@ -277,3 +277,4 @@ class Rates:
     mon_usd: Decimal = Decimal(0)
     lvmon_rate: Decimal = Decimal(1)
     usdc_per_mon: Decimal = Decimal(0)
+    ausd_usd: Decimal = Decimal(1)

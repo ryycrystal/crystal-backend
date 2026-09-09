@@ -40,6 +40,40 @@ SEED_SAMPLES = f"""
     ORDER BY bucket
 """
 
+AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
+USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
+AUSD_BAND = (Decimal("0.5"), Decimal("1.5"))
+_AUSD_MARKET = """
+    SELECT market, quote_decimals + scale_factor - base_decimals FROM crystal_markets
+    WHERE lower(base_address) = %s AND lower(quote_address) = %s
+    ORDER BY is_canonical DESC, updated_block DESC LIMIT 1
+"""
+_AUSD_RATE = """
+    SELECT end_price FROM crystal_market_trades
+    WHERE market = %s AND timestamp < %s AND end_price > 0
+    ORDER BY timestamp DESC, block_number DESC, log_index DESC LIMIT 1
+"""
+
+
+def ausd_from_market(cur, at: int) -> Decimal | None:
+    """AUSD in dollars from the last print on its USDC book before the bucket ends, or None.
+
+    USDC is the dollar anchor and AUSD floats on its own book, so a dollar leg paid in AUSD is worth the
+    book's price, not par. A print outside the plausible band is a thin-book tick rather than a depeg and
+    is ignored, and no print at all means par: the fallback is one, never zero.
+    """
+    cur.execute(_AUSD_MARKET, (AUSD, USDC))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    market, factor = row[0], int(row[1] or 0)
+    cur.execute(_AUSD_RATE, (market, at + BUCKET_SECONDS))
+    row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    rate = Decimal(str(row[0])) / (Decimal(10) ** factor)
+    return rate if AUSD_BAND[0] <= rate <= AUSD_BAND[1] else None
+
 
 def bucket_start(ts) -> int:
     """The bucket a flow falls in, which is the instant both stores are asked about.
@@ -74,8 +108,9 @@ def from_samples(cur, at: int) -> Decimal | None:
 class RateBook:
     """One bucket size, one minimum, one fallback, whichever store the samples come from."""
 
-    def __init__(self, lookup=from_trades) -> None:
+    def __init__(self, lookup=from_trades, ausd_lookup=ausd_from_market) -> None:
         self._lookup = lookup
+        self._ausd_lookup = ausd_lookup
         self._cache: dict[int, Rates] = {}
 
     def __call__(self, blk: int, ts: int, cur) -> Rates:
@@ -90,6 +125,7 @@ class RateBook:
             mon_usd=mon_usd,
             lvmon_rate=meta_decimal(cur, "lvmon_mon_rate", Decimal(1)),
             usdc_per_mon=mon_usd,
+            ausd_usd=self._ausd_lookup(cur, at) or Decimal(1),
         )
         if len(self._cache) > CACHE_LIMIT:
             self._cache.clear()

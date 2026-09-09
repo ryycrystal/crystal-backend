@@ -1852,3 +1852,18 @@ def test_tokens_sent_into_a_pool_that_paid_nothing_out_are_parked_not_sold():
     assert f.kind == KIND_LP_ADD
     assert f.basis_state == BASIS_OBSERVED
     assert f.quote_delta is None
+
+
+def test_a_purchase_paid_in_ausd_is_valued_at_ausd_s_own_dollar_price():
+    from core.ledger.types import AUSD
+
+    tokens, paid = 100 * E18, 100 * 10**6
+    b = bundle([tf(1, AUSD, WALLET, POOL, paid), tf(2, TOKEN, POOL, WALLET, tokens)], tx_meta=meta(WALLET, POOL))
+    rates = Rates(mon_usd=Decimal("0.025"), usdc_per_mon=Decimal("0.025"), ausd_usd=Decimal("0.98"))
+    with with_kinds({AUSD: "token"}):
+        f = only(run(b, rates=rates))
+    assert f.kind == KIND_BUY
+    assert f.quote_asset == AUSD
+    assert f.quote_delta == -paid
+    assert f.usd_value == Decimal(98)
+    assert f.mon_value == Decimal(3920)

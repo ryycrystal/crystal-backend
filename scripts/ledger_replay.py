@@ -226,6 +226,13 @@ def seed_from_prod(src: LogSource, tokens: list[str], reference_tables: bool, ev
         if reference_tables:
             for table in SEED_TABLES:
                 copy_table(src, lcur, table)
+            lcur.execute(
+                "SELECT market FROM crystal_markets WHERE lower(base_address) = %s AND lower(quote_address) = %s",
+                ("0x00000000efe302beaa2b3e6e1b18d08d69a9012a", "0x754704bc059f8c67012fed69bc8a327a5aafb603"),
+            )
+            ausd_markets = [row[0] for row in lcur.fetchall()]
+            if ausd_markets:
+                copy_table(src, lcur, "crystal_market_trades", "WHERE market = ANY(%s)", (ausd_markets,))
             seed_mon_usd_samples(src, lcur)
         if everything and reference_tables:
             copy_table(src, lcur, "launchpad_positions")

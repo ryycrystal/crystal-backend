@@ -1233,10 +1233,12 @@ def _ausd_price_usd() -> Decimal:
     if _ausd_price_cache and (now - _ausd_price_cache[0]) < 30:
         return _ausd_price_cache[1]
     try:
-        stored = storage.get_ausd_price_usd()
-        rate = Decimal(stored) if stored is not None else Decimal(1)
-        if rate <= 0:
-            rate = Decimal(1)
+        from core.oracle import ausd_price_from_market_price
+
+        rate = ausd_price_from_market_price(storage.ausd_usdc_market_price())
+        if rate is None:
+            stored = storage.get_ausd_price_usd()
+            rate = Decimal(stored) if stored is not None and Decimal(stored) > 0 else Decimal(1)
     except Exception:
         return Decimal(1)
     _ausd_price_cache = (now, rate)

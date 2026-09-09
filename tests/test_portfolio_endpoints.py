@@ -454,3 +454,15 @@ def test_a_fee_claim_in_the_activity_feed_carries_its_price_and_dollar_value(db)
     assert token["amountToken"] == str(5 * 10**18)
     assert Decimal(token["priceNative"]) == token_price
     assert Decimal(token["usdAmount"]) == (Decimal(5) * token_price * mon_usd).quantize(Decimal("1e-18"))
+
+
+def test_ausd_dollar_price_comes_from_its_usdc_book(monkeypatch):
+    import api.api as api
+
+    monkeypatch.setattr(api, "_ausd_price_cache", None)
+    monkeypatch.setattr(api.storage, "ausd_usdc_market_price", lambda: Decimal("0.97"))
+    assert api.stable_quote_usd(api.AUSD) == Decimal("0.97")
+    assert api.stable_quote_usd(api.USDC) == Decimal(1)
+    monkeypatch.setattr(api, "_ausd_price_cache", None)
+    monkeypatch.setattr(api.storage, "ausd_usdc_market_price", lambda: Decimal("3"))
+    assert api.stable_quote_usd(api.AUSD) == Decimal(1), "an implausible book print is not a depeg"

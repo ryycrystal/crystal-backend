@@ -426,3 +426,18 @@ def get_crystal_pool_market(market: str):
             ((market or "").lower(),),
         )
         return cur.fetchone()
+
+
+def ausd_usdc_market_price():
+    """The last price on the canonical AUSD/USDC book, which the sequencer keeps current on every trade."""
+    with db_cursor() as cur:
+        cur.execute(
+            """
+            SELECT last_price FROM crystal_markets
+            WHERE lower(base_address) = %s AND lower(quote_address) = %s
+            ORDER BY is_canonical DESC, updated_block DESC LIMIT 1
+            """,
+            ("0x00000000efe302beaa2b3e6e1b18d08d69a9012a", "0x754704bc059f8c67012fed69bc8a327a5aafb603"),
+        )
+        row = cur.fetchone()
+    return row[0] if row and row[0] is not None else None

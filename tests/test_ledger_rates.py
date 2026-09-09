@@ -23,6 +23,8 @@ class FakeCursor:
         if "launchpad_meta" in sql:
             value = self.meta.get(params[0])
             self._result = (value,) if value is not None else None
+        elif "crystal_market" in sql:
+            self._result = None
         elif "launchpad_trades" in sql:
             before, minimum = params
             usable = [t for t in self.trades if t[0] < before and t[2] >= minimum]
@@ -77,3 +79,37 @@ def test_the_rate_book_caches_per_bucket_not_per_call():
     assert calls == [1_699_999_800]
     book(0, 1_700_000_100, cur)
     assert calls == [1_699_999_800, 1_700_000_100]
+
+
+class AusdCursor(FakeCursor):
+    """Adds the AUSD/USDC book to the fake: the market row and its trades, priced in raw ticks."""
+
+    def __init__(self, trades, meta=None, book=(), factor=4):
+        super().__init__(trades, meta)
+        self.book = list(book)
+        self.factor = factor
+
+    def execute(self, sql, params=()):
+        if "crystal_market_trades" in sql:
+            before = params[1]
+            usable = [t for t in self.book if t[0] < before]
+            self._result = (usable[-1][1],) if usable else None
+        elif "crystal_markets" in sql:
+            self._result = ("0xausdmarket", self.factor)
+        else:
+            super().execute(sql, params)
+
+
+def test_ausd_is_priced_off_its_own_book_and_falls_back_to_par():
+    from core.ledger.rates import ausd_from_market
+
+    meta = {"mon_price_usd": Decimal("0.03")}
+    book = [(1_699_999_000, 9_800), (1_700_000_050, 9_900)]
+    rates = RateBook(from_trades, ausd_from_market)(0, 1_700_000_000, AusdCursor(TRADES, meta, book))
+    assert rates.ausd_usd == Decimal("0.99"), "the last print before the bucket ends, scaled by the market's factor"
+    rates = RateBook(from_trades, ausd_from_market)(0, 1_699_998_000, AusdCursor(TRADES, meta, book))
+    assert rates.ausd_usd == Decimal(1), "no print yet means par, not zero"
+    rates = RateBook(from_trades, ausd_from_market)(
+        0, 1_700_000_000, AusdCursor(TRADES, meta, [(1_699_999_000, 30_000)])
+    )
+    assert rates.ausd_usd == Decimal(1), "a print outside the plausible band is a thin-book tick, not a depeg"

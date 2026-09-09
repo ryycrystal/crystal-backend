@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from core.ledger.types import (
     ACCOUNT_KINDS,
+    AUSD,
     BASIS_ESTIMATED,
     BASIS_OBSERVED,
     BASIS_UNRESOLVED,
@@ -262,7 +263,7 @@ def _values(asset: str | None, quote_delta: int | None, rates: Rates) -> tuple[D
     if asset in MON_FAMILY:
         mon = Decimal(abs(quote_delta)) / WEI
         return mon, mon * rates.mon_usd
-    usd = Decimal(abs(quote_delta)) / USD_UNIT
+    usd = Decimal(abs(quote_delta)) / USD_UNIT * (rates.ausd_usd if asset == AUSD else Decimal(1))
     mon = usd / rates.usdc_per_mon if rates.usdc_per_mon > 0 else Decimal(0)
     return mon, usd
 
@@ -287,7 +288,8 @@ def _combine(parts: list[tuple[str, int]], rates: Rates) -> tuple[str, int] | No
         if asset in MON_FAMILY:
             total += Decimal(delta)
         elif rates.usdc_per_mon > 0:
-            total += Decimal(delta) / USD_UNIT / rates.usdc_per_mon * WEI
+            dollars = rates.ausd_usd if asset == AUSD else Decimal(1)
+            total += Decimal(delta) / USD_UNIT * dollars / rates.usdc_per_mon * WEI
         else:
             return None
     return NATIVE, int(total)
