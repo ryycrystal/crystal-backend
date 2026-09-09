@@ -150,6 +150,39 @@ adding a case, and one re-net can carry both whenever it lands.
 - A private RPC endpoint for rebuilds.
 - The live path stays gated until the full-registry grading is read.
 
+## Level one, applied and graded
+
+The 116,349 blocks carrying reference-priced flows, across 257 tokens, were re-netted on image
+`ledger-8130a83` in ten Azure shards and applied to the merged registry: 229,941 flows replaced by exactly
+229,941, and the 257 tokens refolded into 661,921 positions in seventeen minutes.
+
+| | before | after |
+|---|---|---|
+| reference-priced flows | 170,848 | 131,289 |
+| positions carrying any estimate | 33,706, 2.81% | 29,228, 2.44% |
+| positions more than a tenth estimated | 30,178, 2.52% | 27,050, 2.26% |
+| moncock over a tenth | 321 | 270 |
+| JAMES over a tenth | 22 | 10 |
+| CHOG over a tenth | 2,711 | 2,508 |
+
+Nothing regressed. Verify holds the same 21 of 24 with the same three failures, 38 negative balances of
+which 34 are bot contracts and 4 are people's wallets holding a few thousand wei, 4 missing transfer
+halves and 582 cost-travel rows out of 9,372,608 flows. Moncock still answers its hand-derived targets
+inside tolerance with every trade observed, and JAMES still has no missing holders and no mismatch on any
+person's wallet.
+
+So level one removes a quarter of the reference-priced flows but only a tenth of the badly-estimated
+positions, because those flows are spread thinly rather than concentrated in the worst positions. The
+prediction from the pilot shard, a 24.6% fall in flows, was accurate; extrapolating it to positions was
+not.
+
+**What is left, measured rather than guessed.** Of the positions more than a tenth estimated, 12.8% draw
+their estimate from a venue that trades one launchpad token directly against another, where no MON price
+exists on chain at all and no amount of decoding can produce one. The other 87.2% are trades against a
+quote asset that level two would price exactly. That puts the floor at roughly 4,000 positions, 0.3%, and
+means the criterion is better stated as no position more than a tenth estimated except where the trade
+itself had no MON price.
+
 ## Cutover
 
 Measured on 2026-09-09 before starting: prod holds **none** of the ledger tables, so the load is purely
