@@ -87,13 +87,26 @@ what the night's fixes changed is the estimate counts (JAMES 32 positions over a
 
 ## Full registry
 
-Scan published `replay-jobs/ledger/all_blocks.json` (5,586,441 blocks) and 32 partition lists. Each
-partition nets its block range with `ledger_replay.py --all --no-fold` into a Postgres inside the
-container and uploads its tables as CSV; the merge execution waits for every partition's `done.txt`,
-aborts on any `failed.txt`, loads the CSVs, refolds every token, runs the checks, verify and sweeps, and
-dumps the merged database to `out/<run>/merged/`. The run in flight is `ledger-9ba4888-all5`: 34 partitions (the launch-era range split in three) on the
-two good public nodes, expected to net in about four hours and merge in one or two more, so the merged
-grading lands around noon China time on 2026-09-09.
+Scan published `replay-jobs/ledger/all_blocks.json` (5,586,441 hot blocks over 32,221 tokens) and 34
+partition lists (the launch-era range split in three). Every partition netted its range with
+`ledger_replay.py --all --no-fold` on image `ledger-9ba4888` into a Postgres inside the container and
+uploaded its tables as CSV: 9,372,608 flows in all, 862 MB gzipped, no partition failed. The merge loads
+the CSVs, refolds every token, dumps the merged database to `out/ledger-9ba4888-all5/merged/`, then runs
+the checks (moncock, JAMES, chipotle), verify, the sweeps and the acceptance query.
+
+The first merge attempt taught two things about the merge container, both fixed: folding a token by
+loading all of its flows at once was killed for memory 1,500 tokens into the registry (the largest tokens
+carry millions of flows), so a full refold now folds in windows that end on block boundaries and carries
+the state across (`store._refold_in_windows`, test-first, commit 8130a83); and verify's joins over nine
+million flows filled the container's 20 GB disk before the dump was written, so the merge now dumps first,
+caps temp files at 3 GB and drops the CSVs after loading. The second merge is running on `ledger-8130a83`;
+its outputs replace this paragraph.
+
+What that merge cannot fix by itself: the flows were netted by `ledger-9ba4888`, which predates the nad.fun
+pair-liquidity rule (638fbec) and the position-token rule (769c8d0). Tokens with liquidity in nad.fun
+pairs will show those legs as reference-priced trades until the registry is netted again on the newest
+image, which is a rerun of the 34 partitions (about four hours on the two public nodes, two on a private
+RPC).
 
 ## Acceptance
 
