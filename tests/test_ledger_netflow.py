@@ -1730,3 +1730,24 @@ def test_a_pool_paying_the_wallet_for_tokens_it_received_is_still_a_sale():
     )
     f = only(run(b, rates=Rates(mon_usd=Decimal(1))))
     assert f.kind == KIND_SELL and f.basis_state == BASIS_OBSERVED and f.quote_delta == wmon
+
+
+def test_tokens_locked_in_a_pool_against_a_position_token_are_liquidity_not_a_sale():
+    position_token = "0x" + "4c" * 20
+    b = bundle(
+        [tf(1, TOKEN, WALLET, POOL, 5_000 * E18), tf(3, position_token, ZERO, WALLET, 0)],
+        tx_meta=meta(WALLET, POOL),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_ADD and f.basis_state == BASIS_OBSERVED and f.venue == POOL
+    assert f.quote_delta is None
+
+
+def test_tokens_taken_back_from_a_pool_against_a_burnt_position_token_are_liquidity():
+    position_token = "0x" + "4c" * 20
+    b = bundle(
+        [tf(1, position_token, WALLET, ZERO, 0), tf(2, TOKEN, POOL, WALLET, 5_000 * E18)],
+        tx_meta=meta(WALLET, POOL),
+    )
+    f = only(run(b, reference_price=lambda t: Decimal("0.02")))
+    assert f.kind == KIND_LP_REMOVE and f.basis_state == BASIS_OBSERVED and f.venue == POOL

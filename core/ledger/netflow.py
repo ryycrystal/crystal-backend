@@ -972,6 +972,23 @@ def _dominant(ends: list[_End], kinds: _Kinds) -> tuple[str | None, str | None]:
     return party, venue
 
 
+def _position_token_moved(bundle: TxBundle, wallet: str, incoming: bool, registry: dict[str, TokenReg]) -> bool:
+    """Whether the wallet was handed, or gave up, a position token alongside the movement.
+
+    A pool that keeps its liquidity as an NFT mints one to the depositor and burns it on the way out; the
+    transfer of such a token decodes with no amount and belongs to no registered token, and it is the
+    receipt that makes tokens leaving the wallet for the pool a deposit rather than an unpaid sale.
+    """
+    for leg in bundle.transfers:
+        if leg.amount != 0 or leg.token in registry:
+            continue
+        if not incoming and leg.to_addr == wallet and leg.from_addr == ZERO:
+            return True
+        if incoming and leg.from_addr == wallet and leg.to_addr == ZERO:
+            return True
+    return False
+
+
 def _quote_moved_alongside(
     bundle: TxBundle, wallet: str, venue: str, incoming: bool, quote_assets: frozenset[str]
 ) -> bool:
@@ -1017,6 +1034,7 @@ def _classify(
     reference_price: PriceFn | None,
     pools: dict[str, tuple[str, str, bool]] | None = None,
     quote_assets: frozenset[str] = QUOTE_ASSETS,
+    registry: dict[str, TokenReg] | None = None,
 ) -> None:
     incoming = leg.token_delta > 0
     cp = leg.counterparty
@@ -1042,6 +1060,7 @@ def _classify(
     if ck == KIND_VENUE_POOL and (
         _liquidity_modified(bundle, cp, leg.token, pools)
         or _quote_moved_alongside(bundle, leg.wallet, cp, incoming, quote_assets)
+        or _position_token_moved(bundle, leg.wallet, incoming, registry or {})
     ):
         leg.kind = KIND_LP_REMOVE if incoming else KIND_LP_ADD
         leg.basis_state = BASIS_OBSERVED
@@ -1234,7 +1253,7 @@ def net_transaction(
     _swap_pairs(legs_by_wallet, reference_price)
     for leg in all_legs:
         if leg.kind is None:
-            _classify(leg, bundle, kinds, origin, reference_price, pools, quote_assets)
+            _classify(leg, bundle, kinds, origin, reference_price, pools, quote_assets, registry)
 
     sub_index = _sub_indices(all_legs)
     all_legs.sort(key=lambda leg: (leg.wallet, leg.token, leg.log_index))
