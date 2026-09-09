@@ -299,6 +299,13 @@ sometimes receipts, and occasionally a trace, so the indexer's RPC load rises. T
   was netted before this landed; its 2,950 AUSD-quoted flows across 2,589 blocks value AUSD at par, which
   is where the book has sat, and they are enumerable for a targeted re-net.
 
+- `1d24243` quote legs are valued in the units the registry and the spot markets describe. `Rates` carries a
+  `units` map (asset to decimals), the engine lays the registry's and `crystal_markets`' decimals over
+  whatever rate source it was handed, and `_values` and `_combine` read it: an asset with unknown units is
+  not priced rather than assumed to be eighteen. The engine's `USD_UNIT` constant is gone. The token-side
+  registry that calls `decimals()` on chain, the swap handler and the dexscreener adapter are the other
+  agent's change on `main`; this is the ledger's half, and it reads whatever that registry records.
+
 Still on the legacy trade rows: the activity feed (`portfolio_history`, `portfolio_last_trades`) and the
 users-table aggregates behind the leaderboard.
 
