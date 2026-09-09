@@ -108,6 +108,26 @@ pairs will show those legs as reference-priced trades until the registry is nett
 image, which is a rerun of the 34 partitions (about four hours on the two public nodes, two on a private
 RPC).
 
+## Random sample against chain
+
+Before trusting the merge, the partitions' flows were checked directly: for 100 tokens drawn at random
+(seed 7) from the 9,293 registered tokens with ten or more positions, every holder's balance was summed
+from the 34 partition files and read from chain at the scan head, block 103,098,188.
+
+| random 100 tokens | result |
+|---|---|
+| tokens where every person's wallet matches chain | 100 of 100 |
+| holder balances compared | 3,297 |
+| exact to the wei | 3,296 |
+| people's wallets off | 0 |
+| contracts off | 1, a bot contract 308 wei apart |
+| chain reads unanswered | 0 |
+
+The sample is 98 nad.fun v1 tokens and 2 nad.fun v2 tokens, which is what the registry mostly is. This is
+the gate to run before any future full replay: `scratchpad/sample_balance_check.py` does it in about
+half an hour from the partition files, and would have caught this week's defects before a night was spent
+on 5.6 million blocks. It checks balances only; cost and PnL need the fold.
+
 ## Acceptance
 
 The owner's criterion, printed by `scripts/ledger_sweep.py` on every rebuilt token: fewer than one position
