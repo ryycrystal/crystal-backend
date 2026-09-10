@@ -2495,6 +2495,31 @@ def wallet_has_crystal_activity(wallet: str) -> bool:
     return bool(row and row[0])
 
 
+def get_token_decimals(token: str, cur=None) -> int | None:
+    sql = "SELECT decimals FROM token_decimals WHERE token = %s"
+    if cur is not None:
+        cur.execute(sql, ((token or "").lower(),))
+        row = cur.fetchone()
+    else:
+        with db_cursor() as c:
+            c.execute(sql, ((token or "").lower(),))
+            row = c.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def upsert_token_decimals(token: str, decimals: int, cur=None) -> None:
+    sql = (
+        "INSERT INTO token_decimals (token, decimals, fetched_at) VALUES (%s, %s, EXTRACT(EPOCH FROM NOW())::BIGINT) "
+        "ON CONFLICT (token) DO UPDATE SET decimals = EXCLUDED.decimals, fetched_at = EXCLUDED.fetched_at"
+    )
+    args = ((token or "").lower(), int(decimals))
+    if cur is not None:
+        cur.execute(sql, args)
+    else:
+        with db_cursor() as c:
+            c.execute(sql, args)
+
+
 def write_spot_graph_bucket(
     wallet: str,
     bucket_ts: int,

@@ -14,7 +14,7 @@ import core.storage as storage
 import models
 from core import adapters as launchpad_adapters
 from core import chain as h
-from core import oracle
+from core import oracle, token_decimals
 from core.adapters import nadfun as nadfun_geo
 from core.adapters import native as native_adapter_mod
 
@@ -31,7 +31,6 @@ AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
 USD_PEGGED_TOKENS = (USDC,)
 STABLE_USD_TOKENS = (USDC, AUSD)
 NATIVE_EQUIV_QUOTES = {WMON, LVMON}
-QUOTE_DECIMALS = {WMON: 18, LVMON: 18, USDC: 6, AUSD: 6}
 _STABLE_TICKERS = {"usd", "usdc", "usdt", "dai", "usde", "usdm"}
 PINNED_PRICE_TOKENS = frozenset(STABLE_USD_TOKENS) | frozenset(NATIVE_EQUIV_QUOTES)
 
@@ -190,19 +189,14 @@ def _source_for_emitter(log_addr: str) -> int | None:
     return None
 
 
-_ERC20_DECIMALS_SELECTOR = "0x313ce567"
-
-
 def _fetch_token_decimals(token: str) -> int | None:
-    try:
-        res = _eth_call(token, _ERC20_DECIMALS_SELECTOR)
-        if isinstance(res, str) and res.startswith("0x") and len(res) > 2:
-            d = int(res, 16)
-            if 0 <= d <= 36:
-                return d
-    except Exception:
-        pass
-    return None
+    """Kept as the name the market path calls; the registry is the one implementation now.
+
+    This used to be an uncached eth_call, so the same token was asked on every market it appeared
+    in, and nothing was written down. Routing it through the registry gives these callers the cache
+    and the table as well.
+    """
+    return token_decimals.decimals_for(token, storage_module=storage)
 
 
 def _fetch_v2_quote_token(token: str) -> str:
@@ -1028,7 +1022,7 @@ class State:
                 quote_addr = (pi.native_addr or WMON).lower()
                 quote_is_native = quote_addr in NATIVE_EQUIV_QUOTES
                 if not quote_is_native:
-                    converted = self._native_wei_from_quote(native_amt, quote_addr)
+                    converted = self._native_wei_from_quote(native_amt, quote_addr, cur=cur)
                     if converted is None or converted <= 0:
                         print(
                             f"[State] {pool_addr} swap in {quote_addr} not priced, trade skipped",
@@ -1049,28 +1043,45 @@ class State:
                 else:
                     pair_token_res, pair_native_res = sync_r1, sync_r0
 
-                if not quote_is_native:
-                    price_native = Decimal(native_amt) / Decimal(token_amt)
-                elif pair_native_res > 0 and pair_token_res > 0:
-                    price_native = Decimal(pair_native_res) / Decimal(pair_token_res)
-                else:
-                    price_raw = ev.get("sqrt_price_x96") or 0
-                    try:
-                        if int(price_raw) <= 0:
-                            price_native = Decimal(native_amt) / Decimal(token_amt)
-                        else:
-                            sqrt_p = Decimal(int(price_raw)) / Decimal(1 << 96)
-                            ratio = sqrt_p * sqrt_p
+                # A pool's reserve ratio and its sqrtPrice are both in raw units, so they only
+                # equal a human price when the two sides share decimals. Scaling by the decimal
+                # difference is what was missing: a 6-decimal quote against an 18-decimal token
+                # read 10^12 too low. The price is the pool's mid, never what this taker paid --
+                # a pool charging a 99% fee fills tens of times away from mid, and booking that as
+                # the price is what put spikes on the chart in both directions.
+                quote_dec = (
+                    18 if quote_is_native else token_decimals.decimals_for(quote_addr, cur=cur, storage_module=storage)
+                )
+                token_dec = token_decimals.decimals_for(token, cur=cur, storage_module=storage)
+                if quote_dec is None or token_dec is None:
+                    unknown = quote_addr if quote_dec is None else token
+                    print(f"[State] {pool_addr} decimals unknown for {unknown}, trade skipped", flush=True)
+                    return
+                raw_to_human = Decimal(10) ** (int(token_dec) - int(quote_dec))
 
-                            if ratio <= 0:
-                                price_native = Decimal(native_amt) / Decimal(token_amt)
-                            else:
-                                if pi.token_is_0:
-                                    price_native = ratio
-                                else:
-                                    price_native = Decimal(1) / ratio
-                    except Exception:
-                        price_native = Decimal(0)
+                price_quote = Decimal(0)
+                if pair_native_res > 0 and pair_token_res > 0:
+                    price_quote = Decimal(pair_native_res) / Decimal(pair_token_res) * raw_to_human
+                else:
+                    try:
+                        price_raw = int(ev.get("sqrt_price_x96") or 0)
+                    except (TypeError, ValueError):
+                        price_raw = 0
+                    if price_raw > 0:
+                        sqrt_p = Decimal(price_raw) / Decimal(1 << 96)
+                        ratio = sqrt_p * sqrt_p
+                        if ratio > 0:
+                            # sqrtPriceX96 encodes token1 per token0, both raw
+                            quote_per_token = ratio if pi.token_is_0 else Decimal(1) / ratio
+                            price_quote = quote_per_token * raw_to_human
+
+                if price_quote > 0:
+                    price_native = self._quote_to_native(price_quote, quote_addr)
+                else:
+                    price_native = Decimal(0)
+                if price_native <= 0:
+                    # nothing described the pool, so this trade's own rate is all there is
+                    price_native = Decimal(native_amt) / Decimal(token_amt)
 
             self._basis_reset_if_new_block(blk, batched=batch is not None)
             prev_native_reserve = 0
@@ -1749,12 +1760,12 @@ class State:
         entry[1] = cost_basis - released
         return released
 
-    def _native_wei_from_quote(self, amount: int, quote_token: str) -> int | None:
+    def _native_wei_from_quote(self, amount: int, quote_token: str, cur=None) -> int | None:
         """Convert a raw quote-currency amount into MON wei, or None when it cannot be priced."""
         quote = (quote_token or WMON).lower()
         if quote in NATIVE_EQUIV_QUOTES:
             return amount
-        decimals = QUOTE_DECIMALS.get(quote)
+        decimals = token_decimals.decimals_for(quote, cur=cur, storage_module=storage)
         if decimals is None:
             return None
         quote_usd = self._quote_price_usd(quote)
@@ -1763,6 +1774,17 @@ class State:
             return None
         native = Decimal(amount) * quote_usd * Decimal(10**18) / (Decimal(10**decimals) * mon_usd)
         return int(native)
+
+    def _quote_to_native(self, price_in_quote: Decimal, quote_token: str) -> Decimal:
+        """A price quoted in some other asset, expressed in MON. Zero when the rate is unknown."""
+        quote = (quote_token or WMON).lower()
+        if quote in NATIVE_EQUIV_QUOTES:
+            return price_in_quote
+        quote_usd = self._quote_price_usd(quote)
+        mon_usd = self.mon_price_usd
+        if quote_usd <= 0 or mon_usd <= 0:
+            return Decimal(0)
+        return price_in_quote * quote_usd / mon_usd
 
     def _quote_price_usd(self, quote_token: str) -> Decimal:
         quote = (quote_token or WMON).lower()
