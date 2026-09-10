@@ -38,6 +38,13 @@ DEFAULT_MILESTONES = [
     [1_000_000.0, 50_000.0, 0.0],
 ]
 STATUS_LADDER = [("diamond", 0.01), ("platinum", 0.10), ("gold", 0.25), ("silver", 0.50)]
+# best first, so "which of these two is better" is a list position
+STATUS_ORDER = ["diamond", "platinum", "gold", "silver", "bronze"]
+
+# A referee counts for whoever carried them past this many of their own points, once, ever.
+DEFAULT_REFERRAL_QUALIFY_POINTS = 10_000.0
+# Qualified referrals a KOL needs for each permanent floor. Best first.
+DEFAULT_KOL_LADDER = [["diamond", 25], ["platinum", 10]]
 
 BATCH = int(os.getenv("REWARDS_BATCH", "20000"))
 POLL_SECONDS = int(os.getenv("REWARDS_POLL", "120"))
@@ -84,6 +91,23 @@ def gap_tolerance() -> int:
 
 def gap_ack_key(week_start: int) -> str:
     return f"rewards_gaps_ack_{int(week_start)}"
+
+
+def referral_qualify_points() -> Decimal:
+    return Decimal(str(_meta_float("rewards_referral_qualify_points", DEFAULT_REFERRAL_QUALIFY_POINTS)))
+
+
+def kol_ladder() -> list[list]:
+    raw = _meta_json("rewards_kol_ladder", DEFAULT_KOL_LADDER)
+    out = []
+    for entry in raw:
+        try:
+            name, needed = str(entry[0]), int(entry[1])
+        except Exception:
+            continue
+        if name in STATUS_ORDER and needed > 0:
+            out.append([name, needed])
+    return sorted(out, key=lambda e: STATUS_ORDER.index(e[0])) or list(DEFAULT_KOL_LADDER)
 
 
 def milestones() -> list[list[float]]:
@@ -610,6 +634,107 @@ def _status_for(rank: int, total: int) -> str:
     return "bronze"
 
 
+def _better_status(a: str, b: str) -> str:
+    """Whichever of the two sits higher on the ladder. Unknown names lose."""
+    ia = STATUS_ORDER.index(a) if a in STATUS_ORDER else len(STATUS_ORDER)
+    ib = STATUS_ORDER.index(b) if b in STATUS_ORDER else len(STATUS_ORDER)
+    return a if ia <= ib else b
+
+
+def _dense_ranks(rows: list[tuple[str, Decimal]]) -> dict[str, int]:
+    """Wallets sharing a score share a rank, and the next distinct score takes the next position."""
+    ranks: dict[str, int] = {}
+    rank = 0
+    for i, (wallet, score) in enumerate(rows):
+        if i == 0 or score < rows[i - 1][1]:
+            rank = i + 1
+        ranks[wallet] = rank
+    return ranks
+
+
+def _floor_status_for(cur, wallets: list[str], deny: set) -> dict[str, str]:
+    """The permanent floor a wallet holds: a granted one, raised by qualified referrals.
+
+    This is a second, independent way to hold a status. It never lowers what the percentile
+    earned and it is never lost, which is the whole point of granting it.
+    """
+    if not wallets:
+        return {}
+    floors: dict[str, str] = {}
+    cur.execute(
+        "SELECT wallet, floor_status, is_kol FROM crystal_rewards_status_overrides WHERE wallet = ANY(%s)",
+        (wallets,),
+    )
+    kol: set[str] = set()
+    for wallet, floor, is_kol in cur.fetchall():
+        wallet = str(wallet).lower()
+        if wallet in deny:
+            continue
+        if floor in STATUS_ORDER:
+            floors[wallet] = floor
+        if is_kol:
+            kol.add(wallet)
+    if not kol:
+        return floors
+    cur.execute(
+        "SELECT referrer, count(*) FROM crystal_rewards_referral_quals WHERE referrer = ANY(%s) GROUP BY referrer",
+        (sorted(kol),),
+    )
+    counts = {str(r).lower(): int(n) for r, n in cur.fetchall()}
+    ladder = kol_ladder()
+    for wallet in kol:
+        got = counts.get(wallet, 0)
+        for name, needed in ladder:
+            if got >= needed:
+                floors[wallet] = _better_status(floors.get(wallet, "bronze"), name)
+                break
+    return floors
+
+
+def _advance_referral_progress(cur, week_points: dict[str, Decimal], deny: set, now_ts: int) -> int:
+    """Move each referee's counter by what they earned this week, and qualify them once.
+
+    The counter is per referee and carries the referrer it was earned under, so switching links
+    replaces the referrer and restarts from this week rather than inheriting someone else's work.
+    A referee that has already qualified is finished forever; nobody else can earn them again.
+    """
+    threshold = referral_qualify_points()
+    qualified = 0
+    for wallet, gained in week_points.items():
+        if gained <= 0 or wallet in deny:
+            continue
+        cur.execute("SELECT 1 FROM crystal_rewards_referral_quals WHERE referee = %s", (wallet,))
+        if cur.fetchone():
+            continue
+        binding = storage.get_referral_binding(wallet)
+        referrer = str(binding[0]).lower() if binding and binding[0] else ""
+        if not referrer or referrer == wallet or referrer in deny:
+            continue
+        cur.execute(
+            "SELECT referrer, points FROM crystal_rewards_referral_progress WHERE referee = %s",
+            (wallet,),
+        )
+        row = cur.fetchone()
+        running = gained if not row or str(row[0]).lower() != referrer else Decimal(row[1]) + gained
+        if running >= threshold:
+            cur.execute(
+                "INSERT INTO crystal_rewards_referral_quals (referee, referrer, points, qualified_at) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (referee) DO NOTHING",
+                (wallet, referrer, running, now_ts),
+            )
+            if cur.rowcount == 1:
+                qualified += 1
+            cur.execute("DELETE FROM crystal_rewards_referral_progress WHERE referee = %s", (wallet,))
+        else:
+            cur.execute(
+                "INSERT INTO crystal_rewards_referral_progress (referee, referrer, points, updated_at) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT (referee) DO UPDATE SET "
+                "referrer = EXCLUDED.referrer, points = EXCLUDED.points, updated_at = EXCLUDED.updated_at",
+                (wallet, referrer, running, now_ts),
+            )
+    return qualified
+
+
 def _sources_caught_up(cur, week_end: int) -> bool:
     cur.execute(
         """
@@ -761,6 +886,30 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
         adjusted = [Decimal(str(math.pow(float(p), exp))) for _w, p in rows]
         total_adj = sum(adjusted, Decimal(0))
         total_raw = sum((p for _w, p in rows), Decimal(0))
+        week_points = {w: p for w, p in rows}
+
+        # The week pays on its own points; status ranks on every point earned up to and including
+        # it. Both are read here so the two numbers on a row can never disagree about the week.
+        cur.execute(
+            """
+            SELECT wallet, SUM(points) FROM crystal_rewards_contrib
+            WHERE week_start <= %s AND points > 0
+            GROUP BY wallet
+            HAVING SUM(points) > 0
+            ORDER BY SUM(points) DESC, wallet
+            """,
+            (week_start,),
+        )
+        cum_rows = [(str(w).lower(), Decimal(p)) for w, p in cur.fetchall() if str(w).lower() not in deny]
+        cum_points = {w: p for w, p in cum_rows}
+        cum_ranks = _dense_ranks(cum_rows)
+        cum_total = len(cum_rows)
+
+        # Referral progress advances on this week's points before the floors are read, so a
+        # referral that qualifies this week counts towards this week's status.
+        newly_qualified = _advance_referral_progress(cur, week_points, deny, now_ts)
+        floors = _floor_status_for(cur, [w for w, _p in rows], deny)
+
         prev_balances: dict[str, Decimal] = {}
         balances: dict[str, Decimal] = {}
         rank = 0
@@ -769,15 +918,33 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
                 rank = i + 1
             share = (adjusted[i] / total_adj) if total_adj > 0 else Decimal(0)
             crystals = (pool * share).quantize(Decimal("0.000001"))
-            status = _status_for(rank, total)
+            cum = cum_points.get(wallet, points)
+            cum_rank = cum_ranks.get(wallet, rank)
+            earned_status = _status_for(cum_rank, cum_total or total)
+            status = _better_status(earned_status, floors.get(wallet, "bronze"))
             cur.execute(
                 """
                 INSERT INTO crystal_rewards_distributions
-                    (week_start, wallet, raw_points, adjusted, share, crystals, rank, participants, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (week_start, wallet, raw_points, adjusted, share, crystals, rank, participants, status,
+                     cum_points, cum_rank, cum_participants, earned_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (week_start, wallet) DO NOTHING
                 """,
-                (week_start, wallet, points, adjusted[i], share, crystals, rank, total, status),
+                (
+                    week_start,
+                    wallet,
+                    points,
+                    adjusted[i],
+                    share,
+                    crystals,
+                    rank,
+                    total,
+                    status,
+                    cum,
+                    cum_rank,
+                    cum_total,
+                    earned_status,
+                ),
             )
             if cur.rowcount != 1:
                 continue
@@ -797,6 +964,8 @@ def _close_week(week_start: int, now_ts: int) -> bool | None:
             (week_start, week_end, pool, Decimal(str(exp)), total, total_raw, total_adj, now_ts),
         )
         _settle_milestones(cur, prev_balances, balances, now_ts)
+        if newly_qualified:
+            print(f"[REWARDS] week {week_start}: {newly_qualified} referrals qualified", flush=True)
     return True
 
 

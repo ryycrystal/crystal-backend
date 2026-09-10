@@ -79,6 +79,58 @@ def ensure_rewards_tables(cur=None) -> None:
         ON crystal_rewards_distributions (wallet, week_start DESC);
         """
     )
+    # status is ranked on cumulative points while crystals are paid on the week's own, so the row
+    # has to carry both or a reader cannot tell which number produced which.
+    for column, ddl in (
+        ("cum_points", "NUMERIC(50, 18) NOT NULL DEFAULT 0"),
+        ("cum_rank", "BIGINT NOT NULL DEFAULT 0"),
+        ("cum_participants", "BIGINT NOT NULL DEFAULT 0"),
+        ("earned_status", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        cur.execute(f"ALTER TABLE crystal_rewards_distributions ADD COLUMN IF NOT EXISTS {column} {ddl};")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crystal_rewards_status_overrides
+        (
+            wallet       TEXT PRIMARY KEY,
+            floor_status TEXT NOT NULL,
+            is_kol       BOOLEAN NOT NULL DEFAULT FALSE,
+            granted_at   BIGINT NOT NULL DEFAULT 0,
+            note         TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    # Points earned since the referee bound to this referrer. A referee has one row: switching
+    # links replaces the referrer and restarts the count, which is the anti-farm rule.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crystal_rewards_referral_progress
+        (
+            referee    TEXT PRIMARY KEY,
+            referrer   TEXT NOT NULL,
+            points     NUMERIC(50, 18) NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL DEFAULT 0
+        );
+        """
+    )
+    # A referee qualifies once, ever, for whoever carried them over the threshold first.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crystal_rewards_referral_quals
+        (
+            referee      TEXT PRIMARY KEY,
+            referrer     TEXT NOT NULL,
+            points       NUMERIC(50, 18) NOT NULL,
+            qualified_at BIGINT NOT NULL
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_crystal_rewards_quals_referrer
+        ON crystal_rewards_referral_quals (referrer);
+        """
+    )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS crystal_rewards_balances
