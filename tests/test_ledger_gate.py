@@ -1,22 +1,33 @@
 import os
+import re
 import subprocess
 import sys
 
+from core.ledger.schema import LEDGER_TABLES
 from core.ledger_gate import LedgerGate
+
+EVERY_RELATION = (*LEDGER_TABLES, "ledger_token_coverage")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class FakeCursor:
-    def __init__(self, regclass):
-        self._regclass = regclass
+    """Answers to_regclass for whichever relations are present, in either query shape the gate has used."""
+
+    def __init__(self, present):
+        self._present = set(present)
         self.executed: list[str] = []
+        self._names: list[str] = []
 
     def execute(self, sql, params=None):
         self.executed.append(sql)
+        self._names = list(params[0]) if params else re.findall(r"to_regclass\('(\w+)'\)", sql)
 
     def fetchone(self):
-        return (self._regclass, self._regclass)
+        return tuple(name if name in self._present else None for name in self._names)
+
+    def fetchall(self):
+        return [(name, name if name in self._present else None) for name in self._names]
 
 
 class FakeEngine:
@@ -46,7 +57,7 @@ def test_importing_the_sequencer_with_the_flag_off_loads_nothing_from_the_ledger
 def test_gate_stays_off_when_the_flag_is_off(monkeypatch):
     monkeypatch.delenv("LEDGER_ENABLED", raising=False)
     gate = LedgerGate(None)
-    cur = FakeCursor("wallet_flows")
+    cur = FakeCursor(EVERY_RELATION)
     assert gate.enabled is False
     assert gate.process_block(1, 1, [], cur) == 0
     assert gate.flush(cur) == 0
@@ -57,7 +68,7 @@ def test_gate_turns_itself_off_when_the_ledger_tables_are_missing(monkeypatch, c
     monkeypatch.setenv("LEDGER_ENABLED", "1")
     monkeypatch.setattr("core.ledger.engine.LedgerEngine", FakeEngine)
     gate = LedgerGate(None)
-    cur = FakeCursor(None)
+    cur = FakeCursor(())
     assert gate.enabled is True
     assert gate.process_block(1, 1, [{}], cur) == 0
     assert gate.enabled is False
@@ -66,11 +77,25 @@ def test_gate_turns_itself_off_when_the_ledger_tables_are_missing(monkeypatch, c
     assert len(cur.executed) == 1
 
 
+def test_gate_turns_itself_off_when_any_one_ledger_relation_is_missing(monkeypatch, capsys):
+    """Every table the schema declares is one the engine writes inside the block transaction. A database
+    holding the flow tables but not, say, the trace cache would pass a two-table check and then fail on
+    the first block, which stalls indexing on every restart: the gate checks the schema's own list."""
+    monkeypatch.setenv("LEDGER_ENABLED", "1")
+    monkeypatch.setattr("core.ledger.engine.LedgerEngine", FakeEngine)
+    gate = LedgerGate(None)
+    cur = FakeCursor(name for name in EVERY_RELATION if name != "tx_traces")
+    assert gate.process_block(1, 1, [{}], cur) == 0
+    assert gate.enabled is False
+    out = capsys.readouterr().out
+    assert "the ledger tables do not exist here" in out and "tx_traces" in out
+
+
 def test_gate_runs_the_engine_and_covers_each_block_when_the_tables_exist(monkeypatch):
     monkeypatch.setenv("LEDGER_ENABLED", "true")
     monkeypatch.setattr("core.ledger.engine.LedgerEngine", FakeEngine)
     gate = LedgerGate(None)
-    cur = FakeCursor("wallet_flows")
+    cur = FakeCursor(EVERY_RELATION)
     assert gate.process_block(7, 1, [{}], cur) == 3
     assert gate.process_block(8, 1, [], cur) == 3
     assert gate.flush(cur) == 1

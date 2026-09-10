@@ -22,11 +22,17 @@ class LedgerGate:
             return False
         if not self._checked:
             self._checked = True
-            cur.execute("SELECT to_regclass('wallet_flows'), to_regclass('ledger_token_coverage')")
-            row = cur.fetchone()
-            if not row or any(value is None for value in row):
+            from core.ledger.schema import LEDGER_TABLES
+
+            cur.execute(
+                "SELECT name, to_regclass(name) FROM unnest(%s::text[]) AS name",
+                ([*LEDGER_TABLES, "ledger_token_coverage"],),
+            )
+            missing = [name for name, found in cur.fetchall() if found is None]
+            if missing:
                 print(
-                    "[LEDGER] the ledger tables do not exist here; staying off rather than raising inside the block",
+                    f"[LEDGER] the ledger tables do not exist here ({', '.join(missing)} missing); "
+                    "staying off rather than raising inside the block",
                     flush=True,
                 )
                 self.enabled = False
