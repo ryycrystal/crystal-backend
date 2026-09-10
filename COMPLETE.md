@@ -246,6 +246,38 @@ netting changes, so the registry is re-netted from the log cache on image `ledge
 patched: the cancelled leg of the first bug is never written down, so its reach cannot be read from the
 flows.
 
+## The registry re-netted with both fixes: graded 2026-09-11
+
+Run `ledger-a8ee6a9-all6`, 34 partitions, none failed, reloaded into prod's ledger tables and refolded
+there: 31,518 tokens, 1,231,183 positions, 9,372,608 flows, the same counts as the local merge.
+
+| grading | result |
+|---|---|
+| fixture checks | 20 of 20: moncock spent 478,878.24 and realized -196,723.65 against 479,108.51 and -196,953.92, all five trades observed; JAMES 4,970 wallets against chain, 0 mismatches, 0 unanswered |
+| balances, 10,000 random positions against the chain | 9,871 identical, 5 where the chain backs the ledger, 0 where the ledger is wrong, 0 unanswered |
+| verify | 21 of 24: 38 negative balances (34 bots, 4 people at dust), 4 missing transfer halves, 996 cost-travel rows |
+| reference-priced flows | 170,848 before level one, 131,289 after it, **47,343** now |
+| people's positions with any estimate | 29,895 of 1,208,949, 2.47% |
+| more than a tenth estimated | 28,052, 2.32% |
+| moncock sweep | 3.13% with any estimate, 213 over a tenth (was 321, then 270) |
+| JAMES sweep | 0.30% with any estimate, 6 over a tenth (was 22, then 10) |
+
+What the remaining estimates are, measured over the 28,052: 24,714 positions carry a reference-priced
+**sale**, tokens sold for something the ledger does not track or with proceeds paid elsewhere, the class the
+owner chose to accept; reference-priced buys are down to 391 positions; the rest are pro-rata shares of
+pooled fills, labelled `estimated` with source `venue_event`.
+
+The cost-travel rows rose from 582 to 996. Of the 205 hand-offs whose released cost nobody took, 182 come
+from two bot contracts (173,263 MON of basis, hidden from users by the kind filter) and 23 from 15 people's
+wallets, 5,362 MON in all. The shape is a holder selling into an aggregator route where the buyer's own
+payment priced the buy, so the seller's leg fell through to a hand-off and released its basis into
+nothing. It is listed here as the next defect to fix rather than hidden; it does not touch balances.
+
+The ten-thousand sweep's difference buckets no longer apply: since the interim overwrite the served table
+holds the previous ledger, so every "unexplained" difference is a position the two fixes changed, and the
+ones traced were the fixes working (a liquidity hand-out losing its invented price; a wallet that bought
+535,262 CHOG for 75,000 MON and transferred all of it, whose cost now travels with the tokens).
+
 ## Cutover
 
 Measured on 2026-09-09 before starting: prod holds **none** of the ledger tables, so the load is purely
