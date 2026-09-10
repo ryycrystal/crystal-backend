@@ -351,6 +351,49 @@ people's rows the ledger lacks kept, 1,056 rows for uncovered tokens untouched. 
 flipped, so the legacy accumulator keeps adding onto these rows until the flip; the reload chain in Azure
 is unaffected and the fixed data replaces this table in the same flip-then-overwrite step as before.
 
+## Cut over, 2026-09-10
+
+The owner's go came after the last open question was settled with data: twelve of twelve random
+reference-priced sales by people's wallets were swaps straight into another launchpad token, so the
+"proceeds paid to someone else" shape, which rule two already prices from the pool's own payout, is not
+what those 24,714 positions are, and the estimate stands. Order of the day, all in UTC:
+
+1. `main` and `dev` fast-forwarded to `9caca77`; `crystal-api` rolled to it (revision 0000239), then
+   `crystal-indexer` (revision 0000169) with the ledger flag still off.
+2. Found before the flip: prod had no `tx_traces` (nor the replay's `ledger_receipt_logs` cache), because
+   the prod reload copied only the tables in the registry dump, and `LedgerGate._ready` checked two names,
+   so the gate would have turned the ledger on and the first block would have failed inside its
+   transaction. The gate now checks every relation in `LEDGER_TABLES` plus the coverage view and prints
+   which are missing (`5d0c956`, test written to fail first, full suite 859 passed, 4 skipped); the two
+   tables were created by hand with additive `CREATE TABLE IF NOT EXISTS`.
+3. Catch-up pass one as execution `ledger-rebuild-vrlqbti` (scratchpad `ledger_catchup.sh` and
+   `ledger_catchup.py`: the replay's engine over prod as both log source and target, no seeding, no
+   side-database guard, `fold=False`, then a refold of every token with a flow in the window): from block
+   103,098,149 the scan found 8,849 hot blocks, not the ~2,400 estimated on 2026-09-09; 11,031 flows in
+   18 minutes, 214 tokens refolded, 515,549 positions, 12 minutes. One registry entry with no
+   registration block and no `launchpad_tokens` row was skipped by the refold; it is not a launchpad
+   token and the legacy path never tracked it either.
+4. Flip: `crystal-indexer` to `5d0c956` with `LEDGER_ENABLED=1` (revision 0000170, about 07:30). The
+   live engine wrote flows and `'*'` coverage from block 103,551,551; no ledger line in the log, and the
+   indexer sat 12 blocks behind the chain head an hour later.
+5. Pass two (`ledger-rebuild-m5f7hjm`) from 103,544,089 bounded to that first live block: 80 hot blocks,
+   79 flows, 17 tokens refolded. Coverage rows for `'*'` were then extended across every gap the scans
+   had proved empty (21 partition seams plus the 240 blocks before the first live block), so every
+   token's coverage is one island.
+6. Final overwrite of `launchpad_positions` from the fold, snapshot `launchpad_positions_pre_ledger_20260910b`:
+   1,220,000 rows upserted in 62 transactions of 20,000 so the live block path was never blocked (no lock
+   ever queued, the indexer kept streaming), then the 12,716 rows above the last boundary in one more,
+   after the row-for-row check found them untouched: the last batch's upper bound was a U+FFFF sentinel,
+   which the database's collation sorts below every address, so the script now runs its final batch with
+   no upper bound. 550 router, pool and contract rows the ledger never saw move removed, 0 people's rows
+   absent from the ledger, 0 rows for uncovered tokens; `launchpad_positions` holds 1,232,716 rows and
+   0 of them differ from `positions_v2` on balance, basis, realized or spent.
+
+Launch traps recorded for the next time: the job's `BLOB_BASE` is `replay-jobs` with no `/ledger`
+suffix; `curl -o /dev/null` under `MSYS_NO_PATHCONV` reports zero bytes for a healthy blob; and a start
+whose output was lost had still started an execution, so two catch-ups ran against prod for a minute
+until one was stopped (`az containerapp job stop --job-execution-name`).
+
 ## Running it
 
 Everything runs as executions of the Container Apps job `ledger-rebuild` in `crystal-prod-rg` with

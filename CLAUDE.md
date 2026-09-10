@@ -9,6 +9,11 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
+- 2026-09-10: the position ledger is live. `crystal-indexer` runs `5d0c956` with `LEDGER_ENABLED=1`
+  and `crystal-api` `9caca77`; the fold (`core/ledger`) owns `launchpad_positions` through
+  `store.project_positions`, the legacy accumulator and the attribution reconciler stand down while
+  the flag is on, and the served table matched `positions_v2` row for row after the overwrite
+  (snapshot `launchpad_positions_pre_ledger_20260910b`). Runbook and grading: `COMPLETE.md`.
 - Deployed: both container apps run the image tagged with origin/main's commit SHA via
   the new CI pipeline (approval-gated). 2026-09-06: `31f9d9d` (uniswap v4 leg attribution
   fix) was rolled to crystal-indexer then crystal-api directly with the azure cli, and
