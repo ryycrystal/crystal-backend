@@ -174,6 +174,57 @@ def rewards_volumes(address: str) -> dict[str, Any]:
     return {"ok": True, "address": addr, "lifetime": lifetime, "weekly": weekly}
 
 
+@router.get(PREFIX + "/fee/{address}")
+def rewards_fee(address: str) -> dict[str, Any]:
+    """The terminal fee this wallet pays now, from the status it held when the last week closed.
+
+    A status earned this week sets next week's fee, so this reads the newest *finalized* week and
+    nothing else. A wallet with no finished week, or one on the denylist, pays the full fee: the
+    caller must never be able to trade cheaper by being unknown.
+    """
+    addr = _require_address(address)
+    status = "bronze"
+    week_start = 0
+    with db_cursor() as cur:
+        cur.execute("SELECT 1 FROM crystal_rewards_denylist WHERE wallet = %s", (addr,))
+        denied = cur.fetchone() is not None
+        if not denied:
+            cur.execute(
+                """
+                SELECT d.week_start, d.status FROM crystal_rewards_distributions d
+                JOIN crystal_rewards_weeks w ON w.week_start = d.week_start AND w.finalized
+                WHERE d.wallet = %s ORDER BY d.week_start DESC LIMIT 1
+                """,
+                (addr,),
+            )
+            row = cur.fetchone()
+            if row:
+                week_start, status = int(row[0]), str(row[1])
+    fee_bps = rewards.fee_bps_for_status(status)
+    full = rewards.FULL_FEE_BPS
+    return {
+        "wallet": addr,
+        "status": status,
+        "feeBps": fee_bps,
+        "fullFeeBps": full,
+        "discountPct": round((full - fee_bps) * 100 / full, 4) if full else 0.0,
+        "fromWeekStart": week_start,
+    }
+
+
+@router.get(PREFIX + "/fee-tiers")
+def rewards_fee_tiers() -> dict[str, Any]:
+    tiers = rewards.status_fee_bps()
+    full = rewards.FULL_FEE_BPS
+    return {
+        "fullFeeBps": full,
+        "tiers": {
+            name: {"feeBps": bps, "discountPct": round((full - bps) * 100 / full, 4) if full else 0.0}
+            for name, bps in tiers.items()
+        },
+    }
+
+
 @router.get(PREFIX + "/wallet/{address}")
 def rewards_wallet(address: str) -> dict[str, Any]:
     addr = _require_address(address)

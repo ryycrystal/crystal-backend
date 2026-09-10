@@ -46,6 +46,13 @@ DEFAULT_REFERRAL_QUALIFY_POINTS = 10_000.0
 # Qualified referrals a KOL needs for each permanent floor. Best first.
 DEFAULT_KOL_LADDER = [["diamond", 25], ["platinum", 10]]
 
+# The terminal's own fee, in basis points, by the status a wallet held when the last week closed.
+# The full fee is 100 (1%); a status buys a discount off it. Nothing here reaches a contract: the
+# client sends this share of a trade to the venue and sweeps the rest, so the fee is whatever the
+# client was told. A wallet we cannot price pays the full fee, never less.
+DEFAULT_STATUS_FEE_BPS = {"bronze": 100, "silver": 95, "gold": 90, "platinum": 80, "diamond": 50}
+FULL_FEE_BPS = 100
+
 BATCH = int(os.getenv("REWARDS_BATCH", "20000"))
 POLL_SECONDS = int(os.getenv("REWARDS_POLL", "120"))
 LEADER_TTL = int(os.getenv("REWARDS_LEADER_TTL", "300"))
@@ -108,6 +115,26 @@ def kol_ladder() -> list[list]:
         if name in STATUS_ORDER and needed > 0:
             out.append([name, needed])
     return sorted(out, key=lambda e: STATUS_ORDER.index(e[0])) or list(DEFAULT_KOL_LADDER)
+
+
+def status_fee_bps() -> dict[str, int]:
+    out = dict(DEFAULT_STATUS_FEE_BPS)
+    for name, value in _meta_json("rewards_status_fee_bps", {}).items():
+        if name not in out:
+            continue
+        try:
+            bps = int(value)
+        except Exception:
+            continue
+        # a tier may only ever discount, so a bad row cannot hand out a cheaper-than-free trade
+        # or quietly charge more than the advertised fee
+        if 0 <= bps <= FULL_FEE_BPS:
+            out[name] = bps
+    return out
+
+
+def fee_bps_for_status(status: str | None) -> int:
+    return status_fee_bps().get(str(status or "").lower(), FULL_FEE_BPS)
 
 
 def milestones() -> list[list[float]]:
