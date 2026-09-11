@@ -879,9 +879,7 @@ def _commit_subscriber(sub: Subscriber, draft: Subscriber) -> None:
     sub.primed = draft.primed
 
 
-async def _apply_subscribe_many(
-    sub: Subscriber, msg: dict[str, Any]
-) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+async def _apply_subscribe_many(sub: Subscriber, msg: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, str]]]:
     entries = _subscription_entries(msg, addresses=True)
     if isinstance(entries, dict):
         return entries, []

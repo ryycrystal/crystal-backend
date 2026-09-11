@@ -210,9 +210,7 @@ def db_transaction(*, read_only: bool = False) -> Iterator[None]:
             conn.autocommit = False
         cur = conn.cursor()
         try:
-            cur.execute(
-                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" + (" READ ONLY" if read_only else "")
-            )
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" + (" READ ONLY" if read_only else ""))
         finally:
             cur.close()
         token = _TRANSACTION_CONNECTION.set(conn)

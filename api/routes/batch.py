@@ -54,8 +54,7 @@ def _validate_call(call: BatchCall) -> None:
     if normalized in _DENIED_PATHS or normalized.startswith(_DENIED_PREFIXES):
         raise HTTPException(status_code=403, detail=f"Route is not available through batch: {normalized}")
     if normalized.startswith("/user/") and any(
-        value.lower() in {"1", "true", "yes", "on"}
-        for value in parse_qs(parsed.query).get("include_native", [])
+        value.lower() in {"1", "true", "yes", "on"} for value in parse_qs(parsed.query).get("include_native", [])
     ):
         raise HTTPException(status_code=403, detail="RPC-backed user reads are not available through batch")
     if any(header.lower() in _PRIVILEGED_HEADERS for header in call.headers):
@@ -93,9 +92,7 @@ async def batch(payload: BatchRequest, request: Request) -> dict[str, Any]:
             ) as client:
                 for index, call in enumerate(payload.requests):
                     headers = {
-                        key: value
-                        for key, value in call.headers.items()
-                        if key.lower() not in _HOP_BY_HOP_HEADERS
+                        key: value for key, value in call.headers.items() if key.lower() not in _HOP_BY_HOP_HEADERS
                     }
                     response = await client.request(call.method, call.path, headers=headers)
                     try:
