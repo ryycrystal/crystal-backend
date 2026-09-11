@@ -827,8 +827,8 @@ def test_pool_swap_prices_from_synced_reserves_not_amounts(monkeypatch):
     ev2 = {**ev, "amount0": 22 * 10**18}
     st.apply_launchpad_trade(ev2, 202, 2002, "0xnosync", 0, pool)
 
-    assert lp.last_price_native == Decimal(22 * 10**18) / Decimal(100 * 10**18), (
-        "without a pending sync the amount ratio fallback must hold"
+    assert lp.last_price_native == Decimal(200) / Decimal(1000), (
+        "without a pending sync the last mid holds; the taker's fill is not a price"
     )
 
 

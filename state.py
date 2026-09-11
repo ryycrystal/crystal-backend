@@ -1079,9 +1079,6 @@ class State:
                     price_native = self._quote_to_native(price_quote, quote_addr)
                 else:
                     price_native = Decimal(0)
-                if price_native <= 0:
-                    # nothing described the pool, so this trade's own rate is all there is
-                    price_native = Decimal(native_amt) / Decimal(token_amt)
 
             self._basis_reset_if_new_block(blk, batched=batch is not None)
             prev_native_reserve = 0
@@ -1096,7 +1093,11 @@ class State:
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
 
-            lp.last_price_native = price_native
+            if is_pool_swap and price_native <= 0:
+                price_native = Decimal(lp.last_price_native or 0)
+                print(f"[State] {pool_addr} swap {txh} carried no pool price, holding the last mid", flush=True)
+            else:
+                lp.last_price_native = price_native
 
             if not is_pool_swap:
                 if is_buy and blk <= lp.created_block + 10:
@@ -1254,7 +1255,7 @@ class State:
                     last_price_native=lp.last_price_native,
                     cost_basis_delta=cost_basis_delta,
                 )
-                for bucket_seconds in INTERVALS:
+                for bucket_seconds in INTERVALS if lp.last_price_native > 0 else ():
                     bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
                     batch.add_ohlcv(
                         token,
@@ -1327,7 +1328,7 @@ class State:
                     cur=cur,
                 )
 
-                for bucket_seconds in INTERVALS:
+                for bucket_seconds in INTERVALS if lp.last_price_native > 0 else ():
                     bucket_start = (int(ts) // bucket_seconds) * bucket_seconds
                     storage.upsert_ohlcv(
                         token=token,
