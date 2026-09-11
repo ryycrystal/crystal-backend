@@ -165,3 +165,50 @@ def test_a_price_in_a_stable_is_converted_into_mon(monkeypatch):
     # and with no rate there is no price, rather than a wrong one
     st.mon_price_usd = Decimal(0)
     assert st._quote_to_native(Decimal("0.2"), USDC) == Decimal(0)
+
+
+def test_a_swap_that_carries_no_pool_price_holds_the_last_mid_instead_of_inventing_one(monkeypatch, capsys):
+    """A V2 swap whose Sync never arrived, or a fork's swap event with no sqrtPrice, describes nothing
+    about the pool. The taker's own fill is fee and slippage, not a price: the token keeps its last mid,
+    the trade is written at that mid, and the miss is logged so the missing event gets found."""
+    token_decimals.prime({WMON: 18, TOKEN: 18})
+    st = _state(monkeypatch, WMON)
+    st.launchpad_tokens[TOKEN].last_price_native = Decimal("0.2")
+    nf_events.consume_pair_sync(POOL)
+
+    st.apply_launchpad_trade(
+        {"pool": POOL, "user": USER, "amount0": 21 * 10**18, "amount1": -(100 * 10**18), "sqrt_price_x96": 0},
+        201,
+        2001,
+        "0xnosync",
+        0,
+        POOL,
+    )
+
+    lp = st.launchpad_tokens[TOKEN]
+    assert lp.last_price_native == Decimal("0.2"), f"the fill rate {lp.last_price_native} was booked as the price"
+    assert state_mod.storage.insert_trade.call_args.kwargs["price_native"] == Decimal("0.2")
+    assert state_mod.storage.upsert_ohlcv.call_count == len(state_mod.INTERVALS)
+    assert all(c.kwargs["price_native"] == Decimal("0.2") for c in state_mod.storage.upsert_ohlcv.call_args_list)
+    out = capsys.readouterr().out
+    assert POOL in out and "0xnosync" in out and "no pool price" in out
+
+
+def test_a_swap_on_a_pool_that_was_never_priced_records_the_trade_but_cuts_no_candle(monkeypatch):
+    token_decimals.prime({WMON: 18, TOKEN: 18})
+    st = _state(monkeypatch, WMON)
+    st.launchpad_tokens[TOKEN].last_price_native = Decimal(0)
+    nf_events.consume_pair_sync(POOL)
+
+    st.apply_launchpad_trade(
+        {"pool": POOL, "user": USER, "amount0": 21 * 10**18, "amount1": -(100 * 10**18), "sqrt_price_x96": 0},
+        201,
+        2001,
+        "0xneverpriced",
+        0,
+        POOL,
+    )
+
+    assert st.launchpad_tokens[TOKEN].last_price_native == Decimal(0)
+    assert state_mod.storage.insert_trade.call_count == 1
+    assert state_mod.storage.upsert_ohlcv.call_count == 0, "a candle at a price nobody observed"

@@ -9,8 +9,9 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-10: the position ledger is live. Both apps run `dab1798` (indexer revision 0000171 with
-  `LEDGER_ENABLED=1`, api revision 0000240), rolled by hand with the azure cli; the fold (`core/ledger`) owns `launchpad_positions` through
+- 2026-09-11: both apps run `24dbcea` (indexer revision 0000172 with `LEDGER_ENABLED=1`, api revision
+  0000241), rolled by hand with the azure cli after PR #6; a pool swap that carries no pool price now
+  holds the token's last mid instead of booking the taker's fill. The position ledger is live; the fold (`core/ledger`) owns `launchpad_positions` through
   `store.project_positions`, the legacy accumulator and the attribution reconciler stand down while
   the flag is on, and the served table matched `positions_v2` row for row after the overwrite
   (snapshot `launchpad_positions_pre_ledger_20260910b`). Runbook and grading: `COMPLETE.md`.
