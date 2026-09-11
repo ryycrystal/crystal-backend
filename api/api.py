@@ -1378,6 +1378,7 @@ def _sample_evenly_by_time(items, max_points: int, ts_getter) -> list:
     return out[:max_points] if out else pts[-max_points:]
 
 
+from api.routes.batch import router as batch_router
 from api.routes.launchpad import router as launchpad_router
 from api.routes.markets import router as markets_router
 from api.routes.orderbook import router as orderbook_router
@@ -1387,6 +1388,7 @@ from api.routes.system import router as system_router
 from api.routes.trackers import router as trackers_router
 from api.routes.vaults import router as vaults_router
 
+app.include_router(batch_router)
 app.include_router(launchpad_router)
 app.include_router(referrals_router)
 app.include_router(system_router)

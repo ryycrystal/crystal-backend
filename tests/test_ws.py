@@ -125,6 +125,114 @@ def test_unsubscribe_is_granular(client):
         assert reply["channels"] == "all"
 
 
+def test_subscribe_and_unsubscribe_many_use_one_operation(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "subscriptions": [
+                        {"token": TOKEN_A, "channels": ["stats", "trades"]},
+                        {"token": TOKEN_B, "channels": ["holders"]},
+                    ],
+                }
+            )
+        )
+        reply = ws.receive_json()
+        assert reply["op"] == "subscribed"
+        assert [(r["token"], r["channels"]) for r in reply["results"]] == [
+            (TOKEN_A, ["stats", "trades"]),
+            (TOKEN_B, ["holders"]),
+        ]
+
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "unsubscribe",
+                    "subscriptions": [
+                        {"token": TOKEN_A, "channels": ["stats"]},
+                        {"token": TOKEN_B},
+                    ],
+                }
+            )
+        )
+        reply = _next_op(ws)
+        assert reply["op"] == "unsubscribed"
+        assert reply["results"][0]["channels"] == ["stats"]
+        assert reply["results"][1]["channels"] == "all"
+
+
+def test_subscribe_many_is_atomic(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "subscriptions": [
+                        {"token": TOKEN_A, "channels": ["stats"]},
+                        {"token": "invalid", "channels": ["stats"]},
+                    ],
+                }
+            )
+        )
+        reply = ws.receive_json()
+        assert reply["op"] == "error"
+        assert reply["error"] == "atomic subscribe rejected"
+        assert reply["index"] == 1
+        assert any(not sub.subscriptions for sub in HUB.subscribers)
+
+
+def test_subscribe_many_rejects_different_wallet_sets(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "subscriptions": [
+                        {"token": TOKEN_A, "channels": ["positions"], "addresses": [TOKEN_A]},
+                        {"token": TOKEN_B, "channels": ["positions"], "addresses": [TOKEN_B]},
+                    ],
+                }
+            )
+        )
+        reply = ws.receive_json()
+        assert reply["op"] == "error"
+        assert "share one addresses set" in reply["error"]
+        assert any(not sub.subscriptions for sub in HUB.subscribers)
+
+
+def test_unsubscribe_many_is_atomic(client):
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "subscribe",
+                    "subscriptions": [
+                        {"token": TOKEN_A, "channels": ["stats"]},
+                        {"token": TOKEN_B, "channels": ["trades"]},
+                    ],
+                }
+            )
+        )
+        assert ws.receive_json()["op"] == "subscribed"
+        ws.send_text(
+            json.dumps(
+                {
+                    "op": "unsubscribe",
+                    "subscriptions": [{"token": TOKEN_A}, {"token": "invalid"}],
+                }
+            )
+        )
+        reply = _next_op(ws)
+        assert reply["op"] == "error"
+        assert reply["error"] == "atomic unsubscribe rejected"
+        assert any(sub.subscriptions == {TOKEN_A: {"stats"}, TOKEN_B: {"trades"}} for sub in HUB.subscribers)
+
+
 def test_malformed_frame_does_not_kill_the_socket(client):
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
