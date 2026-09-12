@@ -95,6 +95,7 @@ POLL_INTERVAL_SECONDS = 0.3
 IDLE_TIMEOUT_SECONDS = 300
 
 MAX_CONCURRENT_TOKEN_PUSHES = 6
+MAX_SUBSCRIPTIONS_PER_MESSAGE = 100
 
 SNAPSHOT_READ_ATTEMPTS = 3
 
@@ -280,6 +281,8 @@ class Hub:
             after = await asyncio.to_thread(_watermark)
             if after == before:
                 break
+        if channel == "trades":
+            self._prev_rows.setdefault((token, channel), {row["id"]: row for row in body.get("added", [])})
         env = self._envelope(token, channel, before, "snapshot")
         frame = {**env, **body, "seq": sub.next_seq(token, channel)}
         if await sub.send(frame):
@@ -762,10 +765,14 @@ def _watermark() -> int:
 HUB = Hub()
 
 
+def _valid_subscription_token(token: str) -> bool:
+    return token in PSEUDO_TOKENS or _is_tokens_slot(token) or (token.startswith("0x") and len(token) == 42)
+
+
 async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, Any]:
     token = str(msg.get("token") or "").lower().strip()
     channels = msg.get("channels") or []
-    if token not in PSEUDO_TOKENS and not _is_tokens_slot(token) and (not token.startswith("0x") or len(token) != 42):
+    if not _valid_subscription_token(token):
         return {"op": "error", "error": "invalid token address"}
     if not isinstance(channels, list) or not channels:
         return {"op": "error", "error": "channels must be a non-empty list"}
@@ -828,6 +835,107 @@ async def _apply_unsubscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, 
     return {"op": "unsubscribed", "token": token, "channels": channels}
 
 
+def _subscription_entries(msg: dict[str, Any], addresses: bool = False) -> list[dict[str, Any]] | dict[str, Any]:
+    entries = msg.get("subscriptions")
+    if not isinstance(entries, list) or not entries or len(entries) > MAX_SUBSCRIPTIONS_PER_MESSAGE:
+        return {
+            "op": "error",
+            "error": f"subscriptions must contain between 1 and {MAX_SUBSCRIPTIONS_PER_MESSAGE} items",
+        }
+    if any(not isinstance(entry, dict) for entry in entries):
+        return {"op": "error", "error": "every subscription must be an object"}
+    if not addresses:
+        return entries
+    address_sets = []
+    for entry in [msg, *entries]:
+        if isinstance(entry, dict) and isinstance(entry.get("addresses"), list):
+            address_sets.append(
+                {
+                    str(address or "").lower().strip()
+                    for address in entry["addresses"]
+                    if str(address or "").lower().strip().startswith("0x")
+                    and len(str(address or "").lower().strip()) == 42
+                }
+            )
+    if address_sets and any(addresses != address_sets[0] for addresses in address_sets[1:]):
+        return {"op": "error", "error": "batch subscriptions must share one addresses set"}
+    out = []
+    for entry in entries:
+        out.append({**entry, **({"addresses": sorted(address_sets[0])} if address_sets else {})})
+    return out
+
+
+def _draft_subscriber(sub: Subscriber) -> Subscriber:
+    draft = Subscriber(sub.socket)
+    draft.subscriptions = {token: set(channels) for token, channels in sub.subscriptions.items()}
+    draft.addresses = set(sub.addresses)
+    draft.primed = set(sub.primed)
+    return draft
+
+
+def _commit_subscriber(sub: Subscriber, draft: Subscriber) -> None:
+    sub.subscriptions = draft.subscriptions
+    sub.addresses = draft.addresses
+    sub.primed = draft.primed
+
+
+async def _apply_subscribe_many(sub: Subscriber, msg: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    entries = _subscription_entries(msg, addresses=True)
+    if isinstance(entries, dict):
+        return entries, []
+    draft = _draft_subscriber(sub)
+    results = []
+    snapshots = []
+    seen = set()
+    for index, entry in enumerate(entries):
+        reply = await _apply_subscribe(draft, entry)
+        if reply.get("op") == "error":
+            return {"op": "error", "error": "atomic subscribe rejected", "index": index, "detail": reply}, []
+        results.append(reply)
+        token = reply.get("token")
+        for channel in sorted(reply.get("channels") or [], key=lambda c: _SNAPSHOT_ORDER.get(c, 99)):
+            if token and (token, channel) not in seen:
+                snapshots.append((token, channel))
+                seen.add((token, channel))
+    _commit_subscriber(sub, draft)
+    return {"op": "subscribed", "results": results}, snapshots
+
+
+async def _apply_unsubscribe_many(sub: Subscriber, msg: dict[str, Any]) -> dict[str, Any]:
+    entries = _subscription_entries(msg)
+    if isinstance(entries, dict):
+        return entries
+    for index, entry in enumerate(entries):
+        token = str(entry.get("token") or "").lower().strip()
+        channels = entry.get("channels")
+        if not _valid_subscription_token(token):
+            return {
+                "op": "error",
+                "error": "atomic unsubscribe rejected",
+                "index": index,
+                "detail": {"op": "error", "error": "invalid token address"},
+            }
+        if channels is not None and not isinstance(channels, list):
+            return {
+                "op": "error",
+                "error": "atomic unsubscribe rejected",
+                "index": index,
+                "detail": {"op": "error", "error": "channels must be a list"},
+            }
+        unknown = [channel for channel in channels or [] if channel not in KNOWN_CHANNELS]
+        if unknown:
+            return {
+                "op": "error",
+                "error": "atomic unsubscribe rejected",
+                "index": index,
+                "detail": {"op": "error", "error": f"unknown channels: {unknown}", "known": list(KNOWN_CHANNELS)},
+            }
+    draft = _draft_subscriber(sub)
+    results = [await _apply_unsubscribe(draft, entry) for entry in entries]
+    _commit_subscriber(sub, draft)
+    return {"op": "unsubscribed", "results": results}
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(socket: WebSocket) -> None:
     await socket.accept()
@@ -855,6 +963,13 @@ async def websocket_endpoint(socket: WebSocket) -> None:
 
             op = str(msg.get("op") or "").lower()
             if op == "subscribe":
+                if "subscriptions" in msg:
+                    reply, snapshots = await _apply_subscribe_many(sub, msg)
+                    await sub.send(reply)
+                    for tok, ch in snapshots:
+                        with contextlib.suppress(Exception):
+                            await HUB.send_snapshot(sub, tok, ch)
+                    continue
                 reply = await _apply_subscribe(sub, msg)
                 await sub.send(reply)
                 tok = reply.get("token")
@@ -863,7 +978,12 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                     with contextlib.suppress(Exception):
                         await HUB.send_snapshot(sub, tok, ch)
             elif op == "unsubscribe":
-                await sub.send(await _apply_unsubscribe(sub, msg))
+                reply = (
+                    await _apply_unsubscribe_many(sub, msg)
+                    if "subscriptions" in msg
+                    else await _apply_unsubscribe(sub, msg)
+                )
+                await sub.send(reply)
             elif op == "query":
                 from api.routes.launchpad import _search_impl
 

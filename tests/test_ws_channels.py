@@ -168,8 +168,9 @@ def test_user_positions_span_tokens_and_scope_to_wallets(db):
     assert all(r["address"] == USER for r in mine)
 
     row = mine[0]
-    for field in ("symbol", "total_pnl_native", "last_price_native", "balance_native", "source"):
+    for field in ("symbol", "total_pnl_native", "last_price_native", "balance_native", "source", "last_trade_ts"):
         assert field in row, f"row must carry {field} so it renders like the rest response"
+    assert {r["token"]: r["last_trade_ts"] for r in mine} == {TOKEN: 1001, token2: 1003}
 
     assert positions_for_wallets(["0x000000000000000000000000000000000000dead"]) == []
     assert positions_for_wallets([]) == [], "no wallets means no query"
@@ -308,6 +309,42 @@ def test_second_subscriber_gets_its_own_baseline(db):
         assert "holders" in second
 
     HUB.subscribers.clear()
+
+
+def test_trade_snapshot_seeds_delta_baseline(db):
+    import json
+
+    from api.ws import Hub, Subscriber
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1001, txh="0xh01baseline", log_idx=0)
+    storage.record_block_processed(101)
+
+    frames = []
+
+    class Socket:
+        async def send_text(self, text):
+            frames.append(json.loads(text))
+
+    hub = Hub()
+    sub = Subscriber(Socket())
+    sub.subscriptions[TOKEN] = {"trades"}
+    broadcasts = []
+
+    async def capture(token, channel, payload):
+        broadcasts.append(payload)
+
+    async def drive():
+        await hub.send_snapshot(sub, TOKEN, "trades")
+        hub.broadcast = capture
+        await hub._push_trades(TOKEN, 102)
+
+    asyncio.run(drive())
+
+    assert frames[0]["kind"] == "snapshot"
+    assert len(frames[0]["added"]) == 1
+    assert broadcasts == [], "the first block wake-up must not resend the snapshot as a delta"
 
 
 def test_resubscribe_rebaselines(db):

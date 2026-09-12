@@ -209,11 +209,20 @@ One socket per app. Client protocol:
 {"op":"subscribe","token":"tokens","channels":["tokens"]}   // the explorer list — literal pseudo-token "tokens"
 {"op":"subscribe","token":"portfolio","channels":["user_positions"],"addresses":["0xmain","0xsub1"]}  // wallet-scoped, all tokens — literal pseudo-token "portfolio"
 {"op":"unsubscribe","token":"…","channels":[…]}             // omit channels = all for that token
+{"op":"subscribe","subscriptions":[{"token":"0x…","channels":["trades"]},{"token":"portfolio","channels":["user_orders"]}],"addresses":["0xwallet"]}
+{"op":"unsubscribe","subscriptions":[{"token":"0x…","channels":["trades"]},{"token":"portfolio"}]}
 {"op":"ping"} -> {"op":"pong"}                              // send every ≤25s; silent sockets are dropped at 300s
 {"op":"query","id":123,"filters":{…§4…,"limit":50}} -> {"op":"query_result","id":123, …same shape as /search/query}
 ```
 Every data frame: `channel`, `token`, `kind` (`snapshot|delta`), `seq`, `as_of_block`.
 On subscribe you always get a full `snapshot`; deltas follow only when data changed (max 1 frame / 400ms block tick).
+Batch subscribe/unsubscribe accepts 1–100 items and is atomic: every item is staged and
+the socket's complete subscription state changes only if all items are valid. A rejected
+batch returns one `error` with the failing `index` and changes nothing. A successful batch
+returns one acknowledgement with `results` in request order, then the normal per-channel
+snapshots; duplicate token/channel pairs produce only one snapshot. `addresses` is
+socket-wide, so provide it once at the batch top level or use the same set in every
+applicable entry. Different wallet sets reject the complete batch.
 
 Channels:
 - `tokens` (the explorer): snapshot = full `/tokens` response. Delta = `{new:[full rows], u:{addr:{changed fields only}}, gone:[addrs], ids:{bucket membership}}`. Apply patches over held rows; drop rows absent from `ids`. New tokens arrive as complete, quick-buy-ready rows ~0.5–1s after on-chain create.
@@ -222,7 +231,7 @@ Channels:
 - `trades` — `{added:[…]}` append-only; ignore any notion of removal.
 - `holders`/`top_traders` — `{upserts, removed}` keyed by address (top_traders ranked by PnL).
 - `positions` — wallet-scoped; the `addresses` array on subscribe **replaces** the set.
-- `user_positions` — like `positions` but across **every** token for the wallet set (pseudo-token `portfolio`); rows carry the full `/user` row shape keyed `address:token`, so the portfolio page can drop its positions poll.
+- `user_positions` — like `positions` but across **every** token for the wallet set (pseudo-token `portfolio`); rows carry the full `/user` row shape plus per-wallet/token `last_trade_ts`, keyed `address:token`, so the portfolio page can drop its positions poll.
 - `dev_tokens` — creator's launches.
 - `balances` — wallet token balances.
 - `vaults` — vault state for the subscribed wallet set.
@@ -245,6 +254,16 @@ Reconnect contract (client already implements): ping ≤25s; on close reconnect 
 `/health` → `{ok}`. `/sync` → `{last_block}`. `/debug/mon_price` — the cached MON/USD
 reference price used across the backend. `/openapi.json` — machine-readable route list,
 authoritative over this document if the two ever disagree.
+
+`POST /batch` runs 1–20 `GET`/`HEAD` calls sequentially in one PostgreSQL `REPEATABLE
+READ READ ONLY` transaction and returns `{responses:[{id,status,headers,body}]}` in
+request order. Every database read therefore observes the same snapshot. Any inner 4xx/5xx
+rolls back the transaction and returns HTTP 409 with `{error,index,responses}`. Paths must
+be relative routes beginning with `/`; external URLs, nested batches, and mutating methods
+are rejected because arbitrary HTTP side effects cannot be transactionally rolled back.
+Privileged, capability-key, RPC-backed, and GET-with-side-effect routes are also denied;
+per-call authorization/admin headers are rejected and outer credentials are never forwarded.
+
 `/integrity` reports the indexer's self-check: `ok`, `last_block`,
 `seconds_since_last_block`, and the last sweep (processed gaps, cache holes,
 head lag, stall) — alert on `ok: false`. Pools/markets/vaults: `/pools/list`, `/pools/{addr}`, `/markets/list`, `/vaults/*`.
@@ -254,7 +273,7 @@ Pool `apy24h`/`dailyYield24h` = invariant growth per share (wash-resistant), not
 upstream API, server-cached. `POST /x?clear=1` clears that cache. Needs `X_BEARER_TOKEN`
 in the environment or it answers 500.
 
-### Full route inventory (45)
+### Full route inventory (46)
 Token lists `/tokens`, `/tokens/feeds`, `/search/query` (GET+POST) · Token detail `/token/{a}/{res}`,
 `/token/{a}/meta`, `/token/{a}/trades`, `/chart/{a}/{res}`, `/stats/{a}`, `/holders/{a}`,
 `/pair/{p}/fees` · Portfolio `/user`, `/user/{a}`, `/spot/{w}`, `/portfolio/{a}`,
@@ -264,5 +283,5 @@ Token lists `/tokens`, `/tokens/feeds`, `/search/query` (GET+POST) · Token deta
 `/tiers`, `/tiers/{a}` · Pools `/pools/list`, `/pools/{a}`, `/pools/positions/{a}`,
 `/pools/{p}/liquidity`, `/pools/{p}/preview` · Vaults `/vaults/list`, `/vaults/{a}/{u}`,
 `/vaults/{a}/history/{tf}`, `/vaults/{a}/refresh-balance` (POST) · Markets `/markets/list` ·
-Ops `/health`, `/sync`, `/integrity`, `/debug/mon_price` · Misc `/x` (GET+POST) ·
+Ops `/health`, `/sync`, `/integrity`, `/debug/mon_price` · Misc `/batch`, `/x` (GET+POST) ·
 WebSocket `/ws`.

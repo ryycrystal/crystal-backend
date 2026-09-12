@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import quote
 
 import psycopg2
@@ -43,6 +44,9 @@ _DB_MAX_CONN: int = int(os.getenv("DB_MAX_CONN", "25"))
 _POOL: ThreadedConnectionPool | None = None
 _POOL_LOCK = threading.Lock()
 _ADVISORY_LOCK_KEY: int = 18910274772340076
+_TRANSACTION_CONNECTION: ContextVar[psycopg2.extensions.connection | None] = ContextVar(
+    "transaction_connection", default=None
+)
 
 
 def _clean_text(value) -> str:
@@ -166,6 +170,15 @@ def release_indexer_lock(conn: psycopg2.extensions.connection | None) -> None:
 
 @contextmanager
 def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
+    transaction_conn = _TRANSACTION_CONNECTION.get()
+    if transaction_conn is not None:
+        cur = transaction_conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+        return
+
     pool = _get_pool()
     conn = _getconn_waiting(pool)
 
@@ -188,7 +201,34 @@ def db_cursor() -> Iterator[psycopg2.extensions.cursor]:
 
 
 @contextmanager
+def db_transaction(*, read_only: bool = False) -> Iterator[None]:
+    pool = _get_pool()
+    conn = _getconn_waiting(pool)
+    token = None
+    try:
+        if conn.autocommit:
+            conn.autocommit = False
+        cur = conn.cursor()
+        try:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" + (" READ ONLY" if read_only else ""))
+        finally:
+            cur.close()
+        token = _TRANSACTION_CONNECTION.set(conn)
+        yield
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if token is not None:
+            _TRANSACTION_CONNECTION.reset(token)
+        pool.putconn(conn)
+
+
+@contextmanager
 def db_autocommit_cursor() -> Iterator[psycopg2.extensions.cursor]:
+    if _TRANSACTION_CONNECTION.get() is not None:
+        raise RuntimeError("autocommit cursor is unavailable inside a shared transaction")
     pool = _get_pool()
     conn = _getconn_waiting(pool)
 

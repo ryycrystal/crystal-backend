@@ -269,9 +269,16 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
                    p.native_spent, p.native_received, p.realized_pnl_native,
                    p.unrealized_pnl_native, p.total_pnl_native, p.trade_count,
                    p.buy_count, p.sell_count,
-                   t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source
+                   t.name, t.symbol, t.metadata_cid, t.last_price_native, t.market, t.source,
+                   COALESCE(latest.timestamp, 0)
             FROM launchpad_positions_live p
             JOIN launchpad_tokens t ON t.token = p.token
+            LEFT JOIN LATERAL (
+                SELECT timestamp FROM launchpad_trades tr
+                WHERE tr.user_address = p.user_address AND tr.token = p.token
+                ORDER BY timestamp DESC, block_number DESC, log_index DESC
+                LIMIT 1
+            ) latest ON TRUE
             WHERE p.user_address = ANY(%s)
             """,
             (addrs,),
@@ -300,6 +307,7 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
         last_price,
         market,
         source,
+        last_trade_ts,
     ) in rows:
         last_price = last_price or Decimal(0)
         value_native = Decimal(int(balance or 0)) * last_price
@@ -327,6 +335,7 @@ def positions_for_wallets(addresses: list[str]) -> list[dict[str, Any]]:
                 "market": market or None,
                 "source": _api_source(source),
                 "nadfunVersion": _nadfun_version(token, source),
+                "last_trade_ts": int(last_trade_ts or 0),
             }
         )
     return out

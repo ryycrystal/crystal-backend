@@ -46,7 +46,7 @@ def _ensure_fresh() -> None:
 
 
 def _limit(n: int) -> int:
-    return max(1, min(int(n or 100), 500))
+    return max(1, min(int(n or 100), 1000))
 
 
 @router.get("/orderbook/open/{wallet}")
@@ -69,7 +69,7 @@ def wallet_orders(
 ) -> dict[str, Any]:
     ws = _wallets(wallet, addresses)
     _ensure_fresh()
-    lim = max(1, min(int(limit or 200), 500))
+    lim = max(1, min(int(limit or 200), 1000))
     rows = storage.list_wallet_orders(ws, market=(market or "").lower() or None, limit=lim, before_ts=before_ts)
     return {
         "wallet": ws[0],
