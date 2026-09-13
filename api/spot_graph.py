@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
-import urllib.request
 from decimal import Decimal
 from typing import Any
 
 import core.storage as storage
+from core import rpc
 from core.multicall import (
     ERC20_BALANCE_OF_SELECTOR,
     ERC20_TOTAL_SUPPLY_SELECTOR,
@@ -139,7 +138,8 @@ def _balances_at_many(
     tokens: list[dict[str, Any]],
     lp_markets: list[str],
 ) -> dict[int, dict[str, int] | None]:
-    rpc = os.getenv("SPOT_GRAPH_RPC") or os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
+    own_node = os.getenv("SPOT_GRAPH_RPC")
+    endpoints = rpc.Endpoints([own_node]) if own_node else None
     erc20 = [t["address"] for t in tokens if t["address"] != "native"]
 
     calls = [(MULTICALL3_ADDR, MULTICALL3_GET_ETH_BALANCE_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:]))]
@@ -159,8 +159,7 @@ def _balances_at_many(
         }
         for i, (_ts, block) in enumerate(pairs)
     ]
-    req = urllib.request.Request(rpc, data=json.dumps(batch).encode(), headers={"Content-Type": "application/json"})
-    results = json.load(urllib.request.urlopen(req, timeout=30))
+    results = rpc.post(batch, timeout=30, endpoints=endpoints)
     by_id = {r.get("id"): r for r in results if isinstance(r, dict)}
 
     out: dict[int, dict[str, int] | None] = {}

@@ -7,14 +7,13 @@ from collections import deque
 from decimal import Decimal, getcontext
 from typing import Any
 
-import httpx
 import psycopg2
 
 import core.storage as storage
 import models
 from core import adapters as launchpad_adapters
 from core import chain as h
-from core import oracle, token_decimals
+from core import oracle, rpc, token_decimals
 from core.adapters import nadfun as nadfun_geo
 from core.adapters import native as native_adapter_mod
 
@@ -91,9 +90,7 @@ def _eth_call(to: str, data: str) -> str:
         "method": "eth_call",
         "params": [{"to": to, "data": data}, "latest"],
     }
-    resp = httpx.post(RPC_HTTP, json=payload, timeout=10.0)
-    resp.raise_for_status()
-    body = resp.json()
+    body = rpc.post(payload, timeout=10.0)
     if "error" in body:
         raise RuntimeError(body)
     return body.get("result") or "0x"

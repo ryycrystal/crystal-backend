@@ -12,10 +12,9 @@ price rather than assume**: assuming is what turned a missing fact into a silent
 
 from __future__ import annotations
 
-import json
-import os
 import threading
-import urllib.request
+
+from core import rpc
 
 _DECIMALS_SELECTOR = "0x313ce567"  # decimals()
 _MAX_SANE = 36
@@ -25,7 +24,6 @@ _lock = threading.Lock()
 
 
 def _rpc_decimals(token: str) -> int | None:
-    rpc = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -33,10 +31,7 @@ def _rpc_decimals(token: str) -> int | None:
         "params": [{"to": token, "data": _DECIMALS_SELECTOR}, "latest"],
     }
     try:
-        req = urllib.request.Request(
-            rpc, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
-        )
-        out = json.load(urllib.request.urlopen(req, timeout=15))
+        out = rpc.post(payload, timeout=15)
     except Exception:
         return None
     res = out.get("result")

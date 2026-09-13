@@ -5,16 +5,15 @@ import threading
 import time
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException
 
 import core.storage as storage
+from core import rpc
 
 router = APIRouter()
 
 STALE_SECONDS = float(os.getenv("ORDERBOOK_STALE_SECONDS", "300"))
 STALE_BLOCKS = int(os.getenv("ORDERBOOK_STALE_BLOCKS", "300"))
-RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 MAX_WALLETS = 16
 _HEAD_CACHE_SECONDS = 2.0
 _head_cache: dict[str, Any] = {"block": None, "at": 0.0}
@@ -28,11 +27,9 @@ def _chain_head() -> int | None:
             return _head_cache["block"]
     block = None
     try:
-        resp = httpx.post(
-            RPC_HTTP, json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}, timeout=3.0
+        result = rpc.post({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}, timeout=3.0).get(
+            "result"
         )
-        resp.raise_for_status()
-        result = resp.json().get("result")
         if isinstance(result, str) and result.startswith("0x"):
             block = int(result, 16)
     except Exception:

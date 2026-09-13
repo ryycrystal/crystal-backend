@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
 import time
-import urllib.request
 from decimal import Decimal
 from typing import Any
 
 import core.storage as storage
+from core import rpc
 from core.storage import db_cursor
 
 _BALANCE_TTL_SECONDS = 3.0
@@ -282,14 +280,12 @@ def fetch_native_balance(wallet: str) -> tuple[int, int, bool]:
     if cached and now - cached[0] < _BALANCE_TTL_SECONDS:
         return cached[1], cached[2], False
 
-    rpc = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
     batch = [
         {"jsonrpc": "2.0", "id": 0, "method": "eth_blockNumber", "params": []},
         {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [wallet, "latest"]},
     ]
     try:
-        req = urllib.request.Request(rpc, data=json.dumps(batch).encode(), headers={"Content-Type": "application/json"})
-        results = json.load(urllib.request.urlopen(req, timeout=15))
+        results = rpc.post(batch, timeout=15)
         by_id = {r.get("id"): r.get("result") for r in results if isinstance(r, dict)}
         block = int(by_id.get(0) or "0x0", 16)
         native = int(by_id.get(1) or "0x0", 16)
@@ -308,7 +304,6 @@ def fetch_balances(wallet: str, tokens: list[str]) -> tuple[int, dict[str, int],
     if cached and now - cached[0] < _BALANCE_TTL_SECONDS:
         return cached[1], cached[2], cached[3], False
 
-    rpc = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
     arg = wallet[2:].rjust(64, "0")
     batch: list[dict[str, Any]] = [
         {"jsonrpc": "2.0", "id": 0, "method": "eth_blockNumber", "params": []},
@@ -325,8 +320,7 @@ def fetch_balances(wallet: str, tokens: list[str]) -> tuple[int, dict[str, int],
             }
         )
     try:
-        req = urllib.request.Request(rpc, data=json.dumps(batch).encode(), headers={"Content-Type": "application/json"})
-        results = json.load(urllib.request.urlopen(req, timeout=15))
+        results = rpc.post(batch, timeout=15)
         by_id = {r.get("id"): r.get("result") for r in results if isinstance(r, dict)}
         block = int(by_id.get(0) or "0x0", 16)
         native = int(by_id.get(1) or "0x0", 16)
