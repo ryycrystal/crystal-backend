@@ -11,6 +11,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import core.storage as storage
+from core.adapters.native import NativeLaunchpadAdapter
 from core.storage.base import db_cursor
 
 LA = ZoneInfo("America/Los_Angeles")
@@ -304,7 +305,7 @@ def accrue_launchpad(guard=None) -> int:
             cur.execute(
                 """
                 SELECT t.id, t.timestamp, t.user_address, t.usd_amount,
-                       tok.migrated, tok.migrated_at
+                       tok.source, tok.migrated, tok.migrated_at
                 FROM launchpad_trades t
                 LEFT JOIN launchpad_tokens tok ON tok.token = t.token
                 WHERE t.id > %s
@@ -317,9 +318,9 @@ def accrue_launchpad(guard=None) -> int:
             if not rows:
                 return processed
             now_ts = int(time.time())
-            for rid, ts, user, usd, migrated, migrated_at in rows:
+            for rid, ts, user, usd, source, migrated, migrated_at in rows:
                 ts = int(ts)
-                if ts < start_ts:
+                if ts < start_ts or source != NativeLaunchpadAdapter.source:
                     continue
                 user = str(user or "").lower()
                 if not user or user in deny:

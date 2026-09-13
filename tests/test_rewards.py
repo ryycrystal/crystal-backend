@@ -82,16 +82,16 @@ def _clean_rewards(db, clean):
     yield rewards
 
 
-def _seed_token(token: str, migrated_at: int | None) -> None:
+def _seed_token(token: str, migrated_at: int | None, source: int = 0) -> None:
     with storage.db_cursor() as cur:
         cur.execute(
             """
             INSERT INTO launchpad_tokens (token, creator, name, symbol, source, created_block, created_at,
                                           migrated, migrated_block, migrated_at)
-            VALUES (%s, %s, 'T', 'T', 0, 1, %s, %s, %s, %s)
+            VALUES (%s, %s, 'T', 'T', %s, 1, %s, %s, %s, %s)
             ON CONFLICT (token) DO UPDATE SET migrated = EXCLUDED.migrated, migrated_at = EXCLUDED.migrated_at
             """,
-            (token, U4, WEEK1 - 1000, migrated_at is not None, 1 if migrated_at else None, migrated_at),
+            (token, U4, source, WEEK1 - 1000, migrated_at is not None, 1 if migrated_at else None, migrated_at),
         )
 
 
@@ -206,6 +206,45 @@ def test_launchpad_rates_and_idempotency(_clean_rewards):
     assert c2["points"] == pytest.approx(40.0)
     rewards.accrue_launchpad()
     assert _contrib(U1)["points"] == pytest.approx(110.0)
+
+
+def test_only_crystal_launchpad_tokens_earn(_clean_rewards):
+    rewards = _clean_rewards
+    nadfun_v1 = "0x" + "a1" * 20
+    nadfun_v2 = "0x" + "a2" * 20
+    unlisted = "0x" + "a3" * 20
+    _seed_token(TOK_A, None)
+    _seed_token(nadfun_v1, None, source=1)
+    _seed_token(nadfun_v2, WEEK1 + 5, source=2)
+    _seed_launchpad_trade(20, nadfun_v1, U2, WEEK1 + 10, 5000.0)
+    _seed_launchpad_trade(21, TOK_A, U1, WEEK1 + 20, 100.0)
+    _seed_launchpad_trade(22, nadfun_v2, U2, WEEK1 + 30, 5000.0)
+    _seed_launchpad_trade(23, unlisted, U3, WEEK1 + 40, 5000.0)
+    rewards.accrue_launchpad()
+    assert _contrib(U1)["pregrad"] == pytest.approx(100.0)
+    assert _contrib(U2) is None, "a nad.fun trade must not earn, before or after it graduates"
+    assert _contrib(U3) is None, "a trade on a token we cannot place must not earn"
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT MAX(id) FROM launchpad_trades")
+        last_id = int(cur.fetchone()[0])
+    assert int(storage.get_meta("rewards_wm_launchpad")) == last_id, "skipped trades must still be consumed"
+
+
+def test_week_closes_past_nadfun_trades(_clean_rewards):
+    rewards = _clean_rewards
+    week_end = rewards.week_end_for(WEEK1)
+    nadfun = "0x" + "a1" * 20
+    _seed_token(TOK_A, None)
+    _seed_token(nadfun, None, source=1)
+    _seed_launchpad_trade(30, TOK_A, U1, WEEK1 + 10, 100.0)
+    _seed_launchpad_trade(31, nadfun, U2, WEEK1 + 20, 5000.0)
+    _seed_launchpad_trade(32, nadfun, U2, week_end + 5, 5000.0)
+    storage.set_meta("rewards_wm_vault_hour", str(week_end))
+    rewards.accrue_launchpad()
+    assert rewards.close_due_weeks(now_ts=week_end + 100) == [WEEK1]
+    with storage.db_cursor() as cur:
+        cur.execute("SELECT wallet FROM crystal_rewards_distributions WHERE week_start = %s", (WEEK1,))
+        assert {r[0] for r in cur.fetchall()} == {U1}
 
 
 def test_spot_rates_and_self_cross(_clean_rewards):
