@@ -1319,6 +1319,14 @@ Nonzero means something is queued behind a lock. Zero means look elsewhere.
   this, batching through multicall3.
 - There is a client-side rate limiter (`RPC_MAX_RPS`, default 20). Bursty parallel read
   scripts will be throttled rather than 429'd; budget wall-clock accordingly.
+- **Every node call goes through `core/rpc.py`** (`rpc.post` for sync callers, `rpc.async_post` for
+  the indexer's `backfill.http_jsonrpc`). `RPC_HTTP` is the primary node; `RPC_HTTP_FALLBACKS` (comma
+  separated, default the two public nodes) lists what is tried when it cannot be reached; a node that
+  fails at the transport level, answers non-2xx, or returns non-JSON is set aside for
+  `RPC_FAILOVER_COOLDOWN_SECONDS` (default 60) and then tried first again, so the primary comes back on
+  its own. A JSON-RPC error body is the node's answer and never fails over. Tests that fake the node
+  patch `core.rpc.httpx.post`, not a module-local `httpx`. The ledger engine keeps its own pool
+  (`core/ledger/txmeta.py`), because only the primary serves traces.
 
 ---
 

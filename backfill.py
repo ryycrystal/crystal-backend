@@ -1,15 +1,16 @@
-import asyncio
 import argparse
-import httpx
+import asyncio
 import os
 import traceback
 
+import httpx
+
 TIMESTAMP_CONCURRENCY = int(os.getenv("TIMESTAMP_CONCURRENCY", "32"))
 
-from core import chain as h
 import core.storage as storage
+from core import chain as h
+from core import rpc
 from core.sequencer import SEQUENCER
-from state import RPC_HTTP
 from modules import nadfun
 
 
@@ -159,8 +160,10 @@ def parse_args():
     )
     return parser.parse_args()
 
+
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 _BLOCK_TS_CACHE: dict[int, int] = {}
+
 
 async def _get_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
@@ -256,13 +259,11 @@ async def get_head_http() -> int:
     data = await http_jsonrpc("eth_blockNumber", [])
     return int(data["result"], 16)
 
+
 async def http_jsonrpc(method: str, params: list) -> dict:
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     client = await _get_client()
-    await h.rate_gate()
-    resp = await client.post(RPC_HTTP, json=payload)
-    resp.raise_for_status()
-    data = resp.json()
+    data = await rpc.async_post(client, payload, before=h.rate_gate)
     if "error" in data:
         raise RuntimeError(data)
     return data
@@ -271,11 +272,13 @@ async def http_jsonrpc(method: str, params: list) -> dict:
 async def fetch_logs_http(frm: int, to: int) -> list[dict]:
     data = await http_jsonrpc(
         "eth_getLogs",
-        [{
-            "fromBlock": hex(frm),
-            "toBlock": hex(to),
-            "topics": [h.TOPICS],
-        }],
+        [
+            {
+                "fromBlock": hex(frm),
+                "toBlock": hex(to),
+                "topics": [h.TOPICS],
+            }
+        ],
     )
     return data["result"]
 

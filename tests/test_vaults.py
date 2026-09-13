@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 import api.routes.vaults as vault_api
 import core.storage.vaults as vault_storage
+from core import rpc as rpc_module
 from modules import markets, vaults
 
 
@@ -900,7 +901,7 @@ def test_vault_refresh_balance_not_found_and_rpc_failure():
         _assert_http_exc(lambda: vault_api.vault_refresh_balance("0xvault"), 404)
 
     with patch.object(vault_api.storage, "get_crystal_vault", return_value=_vault_row(circulating_shares=10)):
-        with patch.object(vault_api.httpx, "post", side_effect=RuntimeError("rpc down")):
+        with patch.object(rpc_module.httpx, "post", side_effect=RuntimeError("rpc down")):
             _assert_http_exc(lambda: vault_api.vault_refresh_balance("0xvault", user="0xuser"), 502)
 
 
@@ -923,7 +924,7 @@ def test_vault_refresh_balance_success_and_user_projection():
             )
         )
         st.enter_context(patch.object(vault_api, "State", return_value=fake_state))
-        post = st.enter_context(patch.object(vault_api.httpx, "post", side_effect=responses))
+        post = st.enter_context(patch.object(rpc_module.httpx, "post", side_effect=responses))
         out = vault_api.vault_refresh_balance("0xVAULT", user="0xUSER")
 
     assert out["ok"] is True
@@ -954,7 +955,7 @@ def test_vault_refresh_balance_success_and_user_projection():
 def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timestamp():
     vault_row = _vault_row(vault="0xv", circulating_shares=0)
     with patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row):
-        with patch.object(vault_api.httpx, "post", return_value=_HttpxResp({"result": None})):
+        with patch.object(rpc_module.httpx, "post", return_value=_HttpxResp({"result": None})):
             _assert_http_exc(lambda: vault_api.vault_refresh_balance("0xv"), 502)
 
     bad_call_responses = [
@@ -964,7 +965,7 @@ def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timest
     ]
     with ExitStack() as st:
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault", return_value=vault_row))
-        st.enter_context(patch.object(vault_api.httpx, "post", side_effect=bad_call_responses))
+        st.enter_context(patch.object(rpc_module.httpx, "post", side_effect=bad_call_responses))
         st.enter_context(patch.object(vault_api.time, "time", return_value=999.0))
         _assert_http_exc(lambda: vault_api.vault_refresh_balance("0xv", user=None), 502)
 
@@ -980,7 +981,7 @@ def test_vault_refresh_balance_handles_bad_head_and_bad_call_and_fallback_timest
             patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=(10, 321, 1, 2, 9.5))
         )
         st.enter_context(patch.object(vault_api, "State", side_effect=RuntimeError("state rebuild failed")))
-        st.enter_context(patch.object(vault_api.httpx, "post", side_effect=ok_fallback_ts))
+        st.enter_context(patch.object(rpc_module.httpx, "post", side_effect=ok_fallback_ts))
         st.enter_context(patch.object(vault_api.time, "time", return_value=321.0))
         out = vault_api.vault_refresh_balance("0xv")
     assert out["latestBalance"]["timestamp"] == 321
@@ -1002,7 +1003,7 @@ def test_vault_refresh_balance_sample_write_paths_without_latest_row():
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=None))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=None))
         st.enter_context(patch.object(vault_api, "State", return_value=fake_state))
-        st.enter_context(patch.object(vault_api.httpx, "post", side_effect=ok_rpc))
+        st.enter_context(patch.object(rpc_module.httpx, "post", side_effect=ok_rpc))
         out_ok = vault_api.vault_refresh_balance("0xv")
     assert out_ok["samplePersisted"] is False
     assert out_ok["latestBalance"]["usdValue"] == 0.0
@@ -1017,14 +1018,14 @@ def test_vault_refresh_balance_sample_write_paths_without_latest_row():
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_user", return_value=None))
         st.enter_context(patch.object(vault_api.storage, "get_crystal_vault_latest_balance", return_value=None))
         st.enter_context(patch.object(vault_api, "State", side_effect=RuntimeError("boom")))
-        st.enter_context(patch.object(vault_api.httpx, "post", side_effect=ok_rpc_2))
+        st.enter_context(patch.object(rpc_module.httpx, "post", side_effect=ok_rpc_2))
         out_err = vault_api.vault_refresh_balance("0xv")
     assert out_err["samplePersisted"] is False
     assert out_err["latestBalance"]["usdValue"] == 0.0
 
 
 def test_vault_rpc_jsonrpc_sync_invalid_response_branches():
-    with patch.object(vault_api.httpx, "post", return_value=_HttpxResp("not-a-dict")):
+    with patch.object(rpc_module.httpx, "post", return_value=_HttpxResp("not-a-dict")):
         try:
             vault_api._rpc_jsonrpc_sync("eth_blockNumber", [])
         except ValueError as e:
@@ -1032,7 +1033,7 @@ def test_vault_rpc_jsonrpc_sync_invalid_response_branches():
         else:
             raise AssertionError("expected ValueError")
 
-    with patch.object(vault_api.httpx, "post", return_value=_HttpxResp({"error": {"code": -1}})):
+    with patch.object(rpc_module.httpx, "post", return_value=_HttpxResp({"error": {"code": -1}})):
         try:
             vault_api._rpc_jsonrpc_sync("eth_blockNumber", [])
         except ValueError as e:

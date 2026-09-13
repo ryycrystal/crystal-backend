@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from api.api import _bucket_median_by_time, storage, time, ttl_cache
-from state import RPC_HTTP, State
+from core import rpc
+from state import State
 
 router = APIRouter()
 
@@ -47,13 +47,7 @@ def _parse_timeframe(value: Any) -> int:
 
 
 def _rpc_jsonrpc_sync(method: str, params: list[Any]) -> dict:
-    resp = httpx.post(
-        RPC_HTTP,
-        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = rpc.post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=10.0)
     if not isinstance(data, dict):
         raise ValueError("invalid rpc response")
     if data.get("error") is not None:
