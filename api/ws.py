@@ -61,6 +61,10 @@ ORDERBOOK_CHANNELS = ("user_orders", "user_trades", "user_history")
 ORDERBOOK_HISTORY_LIMIT = 500
 
 
+def _balance_material(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k != "balance_block"}
+
+
 def _orderbook_wallet_body(channel: str, wallet: str) -> dict:
     import core.storage as storage
 
@@ -230,6 +234,7 @@ class Hub:
     async def remove(self, sub: Subscriber) -> None:
         async with self.lock:
             self.subscribers.discard(sub)
+            self._forget_subscriber(sub)
             live = set()
             for s in self.subscribers:
                 live |= s.tokens()
@@ -281,12 +286,39 @@ class Hub:
             after = await asyncio.to_thread(_watermark)
             if after == before:
                 break
-        if channel == "trades":
-            self._prev_rows.setdefault((token, channel), {row["id"]: row for row in body.get("added", [])})
+        self._seed_baseline(sub, token, channel, body)
         env = self._envelope(token, channel, before, "snapshot")
         frame = {**env, **body, "seq": sub.next_seq(token, channel)}
         if await sub.send(frame):
             sub.primed.add((token, channel))
+
+    def _seed_baseline(self, sub: Subscriber, token: str, channel: str, body: dict[str, Any]) -> None:
+        """What the snapshot carried is the baseline the next push diffs against.
+
+        Without this the first push after a snapshot found no baseline and sent the whole set again,
+        so every page open loaded its positions and balances twice.
+        """
+        if channel == "trades":
+            self._prev_rows.setdefault((token, channel), {row["id"]: row for row in body.get("added", [])})
+        elif channel == "positions":
+            self._prev_rows[(token, f"positions:{id(sub)}")] = {r["address"]: r for r in body.get("upserts", [])}
+        elif channel == "user_positions":
+            self._prev_rows[(token, f"user_positions:{id(sub)}")] = {
+                f"{r['address']}:{r['token']}": r for r in body.get("upserts", [])
+            }
+        elif channel == "balances":
+            now = time.time()
+            for wallet, wallet_body in (body.get("wallets") or {}).items():
+                self._prev_rows[(token, f"balances:{id(sub)}:{wallet}")] = {"all": _balance_material(wallet_body)}
+                self._balances_checked[wallet] = now
+        elif channel in ORDERBOOK_CHANNELS:
+            for wallet, wallet_body in (body.get("wallets") or {}).items():
+                self._prev_rows[(token, f"{channel}:{id(sub)}:{wallet}")] = {"all": wallet_body}
+
+    def _forget_subscriber(self, sub: Subscriber) -> None:
+        mine = f":{id(sub)}"
+        for key in [k for k in self._prev_rows if mine in k[1]]:
+            self._prev_rows.pop(key, None)
 
     async def _channel_snapshot(self, token: str, channel: str, sub: Subscriber) -> dict[str, Any] | None:
         from api import ws_data as d
@@ -670,29 +702,41 @@ class Hub:
 
         now = time.time()
         union = sorted({a for s in targets for a in s.addresses})
-        changed: dict[str, dict] = {}
+        bodies: dict[str, dict] = {}
         for a in union:
             if now - self._balances_checked.get(a, 0.0) < BALANCES_INTERVAL_SECONDS:
                 continue
             self._balances_checked[a] = now
             try:
-                body = await asyncio.to_thread(spot_body, a)
+                bodies[a] = await asyncio.to_thread(spot_body, a)
             except Exception:
                 continue
-            material = {k: v for k, v in body.items() if k != "balance_block"}
-            key = (token, f"balances:{a}")
-            if self._prev_rows.get(key) == {"all": material}:
-                continue
-            self._prev_rows[key] = {"all": material}
-            changed[a] = body
-        if not changed:
+        if not bodies:
             return
         for sub in targets:
-            mine = {a: b for a, b in changed.items() if a in sub.addresses}
+            mine = self._unseen(sub, token, "balances", bodies, _balance_material)
             if not mine:
                 continue
             env = self._envelope(token, "balances", watermark, "delta")
             await sub.send({**env, "wallets": mine, "seq": sub.next_seq(token, "balances")})
+
+    def _unseen(self, sub: Subscriber, token: str, channel: str, bodies: dict[str, dict], material) -> dict[str, dict]:
+        """The wallet bodies this socket has not been sent yet, remembered per socket.
+
+        A baseline shared between sockets let whichever socket was compared first swallow a change, and
+        sent a late socket a body its own snapshot already carried.
+        """
+        out: dict[str, dict] = {}
+        for wallet, body in bodies.items():
+            if wallet not in sub.addresses:
+                continue
+            key = (token, f"{channel}:{id(sub)}:{wallet}")
+            seen = {"all": material(body)}
+            if self._prev_rows.get(key) == seen:
+                continue
+            self._prev_rows[key] = seen
+            out[wallet] = body
+        return out
 
     async def _push_orderbook_channel(self, token: str, watermark: int, channel: str) -> None:
         from api.routes.orderbook import orderbook_data_is_stale
@@ -707,21 +751,16 @@ class Hub:
             return
 
         union = sorted({a for s in targets for a in s.addresses})
-        changed: dict[str, dict] = {}
+        bodies: dict[str, dict] = {}
         for a in union:
             try:
-                body = await self._tick_call(("orderbook_body", channel, a), _orderbook_wallet_body, channel, a)
+                bodies[a] = await self._tick_call(("orderbook_body", channel, a), _orderbook_wallet_body, channel, a)
             except Exception:
                 continue
-            key = (token, f"{channel}:{a}")
-            if self._prev_rows.get(key) == {"all": body}:
-                continue
-            self._prev_rows[key] = {"all": body}
-            changed[a] = body
-        if not changed:
+        if not bodies:
             return
         for sub in targets:
-            mine = {a: b for a, b in changed.items() if a in sub.addresses}
+            mine = self._unseen(sub, token, channel, bodies, lambda body: body)
             if not mine:
                 continue
             env = self._envelope(token, channel, watermark, "delta")
@@ -795,12 +834,6 @@ async def _apply_subscribe(sub: Subscriber, msg: dict[str, Any]) -> dict[str, An
                     wanted.add(a)
             if wanted != sub.addresses:
                 sub.addresses = wanted
-                for tok, _ch in list(sub.primed):
-                    sub.primed.discard((tok, "positions"))
-                    sub.primed.discard((tok, "user_positions"))
-                    sub.primed.discard((tok, "balances"))
-                    for ch in ORDERBOOK_CHANNELS:
-                        sub.primed.discard((tok, ch))
 
     reply = {
         "op": "subscribed",
@@ -967,6 +1000,8 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                     reply, snapshots = await _apply_subscribe_many(sub, msg)
                     await sub.send(reply)
                     for tok, ch in snapshots:
+                        if (tok, ch) in sub.primed:
+                            continue
                         with contextlib.suppress(Exception):
                             await HUB.send_snapshot(sub, tok, ch)
                     continue
@@ -975,6 +1010,8 @@ async def websocket_endpoint(socket: WebSocket) -> None:
                 tok = reply.get("token")
                 chans = (reply.get("channels") or []) if tok else []
                 for ch in sorted(chans, key=lambda c: _SNAPSHOT_ORDER.get(c, 99)):
+                    if (tok, ch) in sub.primed:
+                        continue
                     with contextlib.suppress(Exception):
                         await HUB.send_snapshot(sub, tok, ch)
             elif op == "unsubscribe":

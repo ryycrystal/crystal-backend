@@ -216,6 +216,11 @@ One socket per app. Client protocol:
 ```
 Every data frame: `channel`, `token`, `kind` (`snapshot|delta`), `seq`, `as_of_block`.
 On subscribe you always get a full `snapshot`; deltas follow only when data changed (max 1 frame / 400ms block tick).
+A channel is snapshotted once per connection: a later `subscribe` for a channel this socket already holds sends no second
+snapshot. Re-sending `subscribe` with a different `addresses` set replaces the socket's wallet set, and the difference
+arrives as a `delta` on the wallet-scoped channels (`upserts` for the wallets added, `removed` keys for the wallets
+dropped); the wallets already held are not re-sent. Each socket keeps its own baseline, so the first frame after a
+snapshot carries only what changed since it, never the snapshot again. `unsubscribe` then `subscribe` forces a fresh snapshot.
 Batch subscribe/unsubscribe accepts 1–100 items and is atomic: every item is staged and
 the socket's complete subscription state changes only if all items are valid. A rejected
 batch returns one `error` with the failing `index` and changes nothing. A successful batch
