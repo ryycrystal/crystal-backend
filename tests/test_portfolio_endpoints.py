@@ -466,3 +466,24 @@ def test_ausd_dollar_price_comes_from_its_usdc_book(monkeypatch):
     monkeypatch.setattr(api, "_ausd_price_cache", None)
     monkeypatch.setattr(api.storage, "ausd_usdc_market_price", lambda: Decimal("3"))
     assert api.stable_quote_usd(api.AUSD) == Decimal(1), "an implausible book print is not a depeg"
+
+
+def test_spot_graph_only_serves_the_stored_series_without_reading_balances(db, monkeypatch):
+    """A client that takes its balances from the websocket snapshot still needs the graph, which only
+    rest serves: asked for the graph alone, the route must not read a single balance and must leave the
+    live end point to the caller, who holds the current total."""
+    from api import spot_data
+    from api.routes.launchpad import spot_portfolio
+
+    wallet = "0x00000000000000000000000000000000000000ab"
+    monkeypatch.setattr(spot_data, "wallet_is_supported", lambda w: True)
+
+    def never(*args, **kwargs):
+        raise AssertionError("graph_only must not read balances")
+
+    monkeypatch.setattr(spot_data, "spot_body", never)
+    body = spot_portfolio(wallet, graph_only=True)
+    assert body["wallet"] == wallet and body["supported"] is True
+    assert "graph" in body and "points" in body["graph"]
+    assert not any(p.get("live") for p in body["graph"]["points"]), "the live point belongs to the caller"
+    assert "rows" not in body and "summary" not in body

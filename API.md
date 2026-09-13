@@ -69,6 +69,9 @@ Curve reserves **freeze at graduation**, so never read `raw.curve_native_reserve
   `/spot/{wallet}` answers `supported: false` with empty rows/graph for anyone
   else — no RPC is spent on them, and clients should render "no activity", not
   zeros. The cheap DB endpoints simply return empty for unknown wallets.
+- `/spot/{wallet}?graph_only=1` returns only `wallet`, `supported`, `graph` and `as_of_block` and reads no
+  balances, for a client whose balances arrive over the websocket `balances` channel; that client appends
+  the live end point from its current total.
 - `/user/{addr}` — per-wallet positions + summary. Rows carry `realized/unrealized/total_pnl_native` and `last_price_native` — render these, never re-derive. `?include_native=1` adds `native_balance` (wei string, null on RPC failure, `native_stale` flag) so spectator views need no client RPC.
 - `/user?addresses=a,b&merged=1` — one combined position list summed per token across up to 100 wallets in a single query (`wallet_count` per row); unmerged form unchanged (max 25).
 - `/portfolio/{addr}[...]` — summary, paginated `/positions`, `/history` (real per-trade history — use for the History tab), and `/daily?days=N`: per-UTC-day `realized_pnl_native` (same average-cost basis as the position columns), `volume_native/usd`, `buy/sell_volume_native`, trade/buy/sell counts. Feeds the PnL calendar and realized-PnL chart.
