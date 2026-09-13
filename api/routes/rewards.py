@@ -19,7 +19,6 @@ ZERO_ADDR = "0x" + "0" * 40
 
 VOLUME_COLS = (
     ("pregrad_usd", "pregradUsd"),
-    ("grad_usd", "gradUsd"),
     ("spot_taker_usd", "spotTakerUsd"),
     ("spot_maker_usd", "spotMakerUsd"),
     ("stable_taker_usd", "stableTakerUsd"),

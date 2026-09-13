@@ -634,9 +634,17 @@ Rates are points per USD, or per USD-hour for vaults:
 | category | rate | | category | rate |
 |---|---|---|---|---|
 | `pregrad` | 1.0 | | `stable_taker` | 0.01 |
-| `grad` | 0.10 | | `stable_maker` | 0.002 |
-| `spot_taker` | 0.05 | | `vault_hour` | 0.05 |
-| `spot_maker` | 0.01 | | | |
+| `spot_taker` | 0.05 | | `stable_maker` | 0.002 |
+| `spot_maker` | 0.01 | | `vault_hour` | 0.05 |
+
+`pregrad` pays only for `venue = 'curve'` trades on crystal.fun tokens (`source = 0`). nad.fun
+tokens earn nothing wherever they trade, and so do outside pools. A graduated crystal.fun token
+trades on a Crystal market, which writes both a `crystal_market_trades` row and a
+`launchpad_trades` row with `venue = 'market'`; it earns once, through the spot categories. There
+is no `grad` category any more: the old one paid those market trades a second time, and it
+classified by `ts >= migrated_at`, which also mislabelled the curve buy that graduates the token.
+The accrual still walks every `launchpad_trades` row by id and skips the ones that do not earn,
+because `_sources_caught_up` reads that watermark and a filter in the SQL would stall week closes.
 
 Weekly close: `adjusted = raw ** 0.8`, then `crystals = pool * adjusted / sum(adjusted)`.
 The 1,000,000 pool is **fully distributed by construction** — the exponent redistributes

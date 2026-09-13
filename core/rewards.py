@@ -23,7 +23,6 @@ NATIVE_EQUIV = {WMON, LVMON, NATIVE_SENTINEL}
 
 DEFAULT_RATES = {
     "pregrad": 1.0,
-    "grad": 0.10,
     "spot_taker": 0.05,
     "spot_maker": 0.01,
     "stable_taker": 0.01,
@@ -304,8 +303,7 @@ def accrue_launchpad(guard=None) -> int:
             deny = storage.rewards_denylist(cur)
             cur.execute(
                 """
-                SELECT t.id, t.timestamp, t.user_address, t.usd_amount,
-                       tok.source, tok.migrated, tok.migrated_at
+                SELECT t.id, t.timestamp, t.user_address, t.usd_amount, t.venue, tok.source
                 FROM launchpad_trades t
                 LEFT JOIN launchpad_tokens tok ON tok.token = t.token
                 WHERE t.id > %s
@@ -318,9 +316,9 @@ def accrue_launchpad(guard=None) -> int:
             if not rows:
                 return processed
             now_ts = int(time.time())
-            for rid, ts, user, usd, source, migrated, migrated_at in rows:
+            for rid, ts, user, usd, venue, source in rows:
                 ts = int(ts)
-                if ts < start_ts or source != NativeLaunchpadAdapter.source:
+                if ts < start_ts or source != NativeLaunchpadAdapter.source or venue != "curve":
                     continue
                 user = str(user or "").lower()
                 if not user or user in deny:
@@ -328,15 +326,13 @@ def accrue_launchpad(guard=None) -> int:
                 usd = Decimal(usd or 0)
                 if usd <= 0:
                     continue
-                graduated = bool(migrated) and migrated_at is not None and ts >= int(migrated_at)
-                rate = r["grad"] if graduated else r["pregrad"]
-                field = "grad_usd" if graduated else "pregrad_usd"
                 storage.add_rewards_contrib(
                     cur,
                     bucket_for(ts, start_ts),
                     user,
                     now_ts,
-                    **{field: usd, "points": usd * Decimal(str(rate))},
+                    pregrad_usd=usd,
+                    points=usd * Decimal(str(r["pregrad"])),
                 )
             storage.set_meta("rewards_wm_launchpad", str(int(rows[-1][0])), cur=cur)
             processed += len(rows)

@@ -1,6 +1,6 @@
 """crystal rewards engine semantics against a real database.
 
-covered invariants: per-activity earning rates, graduated-vs-pregraduation split,
+covered invariants: per-activity earning rates, launchpad points for curve trades only,
 maker and taker stable rates, self-cross exclusion, hourly vault accrual with
 campaign multipliers, watermark idempotency, week close math (power curve,
 shares, competition ranks, percentile statuses with ties taking the higher
@@ -95,7 +95,7 @@ def _seed_token(token: str, migrated_at: int | None, source: int = 0) -> None:
         )
 
 
-def _seed_launchpad_trade(idx: int, token: str, user: str, ts: int, usd: float) -> None:
+def _seed_launchpad_trade(idx: int, token: str, user: str, ts: int, usd: float, venue: str = "curve") -> None:
     storage.insert_trade(
         block_number=idx,
         log_index=0,
@@ -108,6 +108,7 @@ def _seed_launchpad_trade(idx: int, token: str, user: str, ts: int, usd: float) 
         usd_amount=Decimal(str(usd)),
         price_native=Decimal(1),
         txhash=f"0xlp{idx:04d}",
+        venue=venue,
     )
 
 
@@ -164,7 +165,7 @@ def _contrib(wallet: str, week: int = WEEK1) -> dict | None:
     with storage.db_cursor() as cur:
         cur.execute(
             """
-            SELECT pregrad_usd, grad_usd, spot_taker_usd, spot_maker_usd,
+            SELECT pregrad_usd, spot_taker_usd, spot_maker_usd,
                    stable_taker_usd, stable_maker_usd, vault_usd_hours, points
             FROM crystal_rewards_contrib WHERE wallet = %s AND week_start = %s
             """,
@@ -173,7 +174,7 @@ def _contrib(wallet: str, week: int = WEEK1) -> dict | None:
         row = cur.fetchone()
     if not row:
         return None
-    keys = ("pregrad", "grad", "spot_taker", "spot_maker", "stable_taker", "stable_maker", "vault", "points")
+    keys = ("pregrad", "spot_taker", "spot_maker", "stable_taker", "stable_maker", "vault", "points")
     return {k: float(v) for k, v in zip(keys, row)}
 
 
@@ -194,18 +195,38 @@ def test_launchpad_rates_and_idempotency(_clean_rewards):
     _seed_token(TOK_B, WEEK1 + 100)
     _seed_launchpad_trade(1, TOK_A, U1, WEEK1 - 50, 999.0)
     _seed_launchpad_trade(2, TOK_A, U1, WEEK1 + 10, 100.0)
-    _seed_launchpad_trade(3, TOK_B, U1, WEEK1 + 200, 100.0)
+    _seed_launchpad_trade(3, TOK_B, U1, WEEK1 + 200, 100.0, venue="market")
     _seed_launchpad_trade(4, TOK_B, U2, WEEK1 + 50, 40.0)
     rewards.accrue_launchpad()
     c1 = _contrib(U1)
     assert c1["pregrad"] == pytest.approx(100.0)
-    assert c1["grad"] == pytest.approx(100.0)
-    assert c1["points"] == pytest.approx(100.0 * 1.0 + 100.0 * 0.10)
+    assert c1["points"] == pytest.approx(100.0)
     c2 = _contrib(U2)
     assert c2["pregrad"] == pytest.approx(40.0)
     assert c2["points"] == pytest.approx(40.0)
     rewards.accrue_launchpad()
-    assert _contrib(U1)["points"] == pytest.approx(110.0)
+    assert _contrib(U1)["points"] == pytest.approx(100.0)
+
+
+def test_graduated_trade_earns_only_the_spot_rate(_clean_rewards):
+    rewards = _clean_rewards
+    graduated_at = WEEK1 + 100
+    _seed_token(TOK_A, graduated_at)
+    _seed_market(MKT_VOL, USDC, TOK_A)
+    _seed_launchpad_trade(40, TOK_A, U1, graduated_at, 300.0)
+    _seed_launchpad_trade(41, TOK_A, U2, graduated_at + 60, 100.0, venue="market")
+    _seed_taker("0xlp0041", graduated_at + 60, MKT_VOL, U2, 100_000_000)
+    _seed_launchpad_trade(42, TOK_A, U3, graduated_at + 90, 500.0, venue="pool")
+    rewards.accrue_launchpad()
+    rewards.accrue_spot_takers()
+    c1 = _contrib(U1)
+    assert c1["pregrad"] == pytest.approx(300.0), "the buy that graduates a token is still a curve trade"
+    assert c1["points"] == pytest.approx(300.0)
+    c2 = _contrib(U2)
+    assert c2["pregrad"] == pytest.approx(0.0)
+    assert c2["spot_taker"] == pytest.approx(100.0)
+    assert c2["points"] == pytest.approx(100.0 * 0.05), "a market trade must earn once, at the spot rate"
+    assert _contrib(U3) is None, "a trade on an outside pool is not a crystal trade"
 
 
 def test_only_crystal_launchpad_tokens_earn(_clean_rewards):
