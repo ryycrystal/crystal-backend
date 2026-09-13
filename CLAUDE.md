@@ -9,8 +9,10 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-13 (latest): both apps run `9cbcbea` (indexer revision 0000176 with `LEDGER_ENABLED=1`, api
-  revision 0000245), rolled by hand after fast-forwarding `main` to it: launchpad points pay only for
+- 2026-09-13 (latest): both apps run `44cb664` (indexer revision 0000177 with `LEDGER_ENABLED=1`, api
+  revision 0000246), rolled by hand after PR #10: every node call fails over through `core/rpc.py`
+  (see the RPC section). Before that, `9cbcbea` (indexer revision 0000176, api revision 0000245),
+  rolled by hand after fast-forwarding `main` to it: launchpad points pay only for
   `venue = 'curve'` trades, a graduated crystal.fun token's market trades earn once through the spot
   categories, and the `grad` category is gone (see the rewards rates table). Before that, PR #9
   (`de19db7`): only crystal.fun launchpad tokens (`source = 0`) earn launchpad points, so nad.fun trades
