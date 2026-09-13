@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException
 
 import core.storage as storage
@@ -11,13 +13,52 @@ import core.storage as storage
 router = APIRouter()
 
 STALE_SECONDS = float(os.getenv("ORDERBOOK_STALE_SECONDS", "300"))
+STALE_BLOCKS = int(os.getenv("ORDERBOOK_STALE_BLOCKS", "300"))
+RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 MAX_WALLETS = 16
+_HEAD_CACHE_SECONDS = 2.0
+_head_cache: dict[str, Any] = {"block": None, "at": 0.0}
+_head_lock = threading.Lock()
+
+
+def _chain_head() -> int | None:
+    """The chain's head block, read at most every couple of seconds, or None when the node does not answer."""
+    with _head_lock:
+        if time.time() - _head_cache["at"] < _HEAD_CACHE_SECONDS:
+            return _head_cache["block"]
+    block = None
+    try:
+        resp = httpx.post(
+            RPC_HTTP, json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}, timeout=3.0
+        )
+        resp.raise_for_status()
+        result = resp.json().get("result")
+        if isinstance(result, str) and result.startswith("0x"):
+            block = int(result, 16)
+    except Exception:
+        block = None
+    with _head_lock:
+        _head_cache.update(block=block, at=time.time())
+    return block
 
 
 def orderbook_data_is_stale() -> bool:
+    """True only when the indexer is behind the chain, never because the market went quiet.
+
+    The measure is how many blocks the indexer trails the chain head. When the node cannot be asked,
+    the age of the newest processed block stands in: an indexer that wrote a block a moment ago is
+    current, one that has written nothing for minutes is not.
+    """
     if STALE_SECONDS <= 0:
         return False
-    return time.time() - storage.latest_trade_timestamp() > STALE_SECONDS
+    head = storage.indexer_head()
+    if head is None:
+        return True
+    indexed, processed_at = head
+    chain = _chain_head()
+    if chain is not None and STALE_BLOCKS > 0:
+        return chain - indexed > STALE_BLOCKS
+    return time.time() - processed_at > STALE_SECONDS
 
 
 def _wallet(addr: str) -> str:
@@ -42,7 +83,7 @@ def _wallets(wallet: str, addresses: str) -> list[str]:
 
 def _ensure_fresh() -> None:
     if orderbook_data_is_stale():
-        raise HTTPException(status_code=503, detail="indexer is catching up, serve from fallback")
+        raise HTTPException(status_code=503, detail="indexer is behind the chain, serve from fallback")
 
 
 def _limit(n: int) -> int:

@@ -76,6 +76,18 @@ def record_blocks_processed_batch(block_numbers: list[int], cur: psycopg2.extens
         execute_values(cur, query, rows, page_size=10000)
 
 
+def indexer_head() -> tuple[int, float] | None:
+    """The newest block the indexer has processed and when it processed it, as an epoch second."""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT number, EXTRACT(EPOCH FROM processed_at) FROM launchpad_blocks ORDER BY number DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0]), float(row[1] or 0)
+
+
 def get_last_processed_block() -> str | None:
     with db_cursor() as cur:
         cur.execute("SELECT MAX(number) FROM launchpad_blocks;")
