@@ -9,8 +9,12 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-12: both apps run `b35ed8a` (indexer revision 0000173 with `LEDGER_ENABLED=1`, api revision
-  0000242), rolled by hand with the azure cli after PR #7, which added `POST /batch` (up to 20 reads in
+- 2026-09-13: both apps run `d1af643` (indexer revision 0000174 with `LEDGER_ENABLED=1`, api revision
+  0000243), rolled by hand after PR #8: order book staleness is indexer lag (not trade recency), every
+  websocket snapshot seeds its own baseline with balance and order book baselines per socket, a changed
+  `addresses` set arrives as a delta instead of a fresh snapshot, and `GET /spot/{wallet}?graph_only=1`
+  serves the stored graph alone. The main interface adopted socket-first loads in Crystal-Interface
+  PRs #2, #3 and #4 the same day. Before that, PR #7 (`b35ed8a`), which added `POST /batch` (up to 20 reads in
   one repeatable-read snapshot), batch websocket subscribe, the duplicate initial-trades-snapshot fix,
   `last_trade_ts` on portfolio rows, and a 1000-row order book cap. Before that, PR #6: a pool swap that carries no pool price now
   holds the token's last mid instead of booking the taker's fill. The position ledger is live; the fold (`core/ledger`) owns `launchpad_positions` through
