@@ -2512,13 +2512,27 @@ def spot_portfolio(
     wallet: str,
     all: bool = Query(False, description="include zero balances"),
     addresses: str = "",
+    graph_only: bool = False,
 ) -> dict[str, Any]:
-    from api.spot_data import spot_body
+    from api.spot_data import spot_body, wallet_is_supported
     from api.spot_graph import RESOLUTION, ensure_fill, graph_for
 
     wallet = wallet.lower()
     if not wallet.startswith("0x") or len(wallet) != 42:
         raise HTTPException(status_code=400, detail="invalid wallet address")
+    if graph_only:
+        supported = wallet_is_supported(wallet)
+        if supported:
+            ensure_fill(wallet)
+            graph = graph_for(wallet)
+        else:
+            graph = {"resolution": RESOLUTION, "points": [], "complete": True}
+        return {
+            "wallet": wallet,
+            "supported": supported,
+            "graph": graph,
+            "as_of_block": storage.get_last_processed_block() or 0,
+        }
 
     selected = []
     for a in (addresses or "").split(","):

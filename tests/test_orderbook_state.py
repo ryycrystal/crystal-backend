@@ -7,6 +7,7 @@ evolve the order row the way the book evolved on chain.
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -364,9 +365,14 @@ def test_stale_indexer_refuses_orderbook_reads(db, monkeypatch):
     from api.routes import orderbook as ob_routes
 
     monkeypatch.setattr(ob_routes, "STALE_SECONDS", 300.0)
+    monkeypatch.setattr(ob_routes, "_chain_head", lambda: None)
+    storage.record_block_processed(101)
+    assert ob_routes.open_orders(USER)["orders"] == [], "a block processed just now means the indexer is current"
+
+    monkeypatch.setattr(storage, "indexer_head", lambda: (101, time.time() - 3600))
     with _pytest.raises(HTTPException) as exc:
         ob_routes.open_orders(USER)
-    assert exc.value.status_code == 503, "history-era data serves 503, not an empty 200"
+    assert exc.value.status_code == 503, "an indexer that wrote nothing for an hour serves 503"
 
     monkeypatch.setattr(ob_routes, "STALE_SECONDS", 0.0)
     assert ob_routes.open_orders(USER)["orders"] == [], "a disabled gate serves normally"

@@ -504,6 +504,7 @@ def test_switching_wallets_replaces_the_address_set(db):
     a = "0x000000000000000000000000000000000000aaaa"
     b = "0x000000000000000000000000000000000000bbbb"
     sub = Subscriber(None)
+    sub.primed.add((TOKEN, "positions"))
 
     async def _sub(addrs):
         return await _apply_subscribe(
@@ -516,7 +517,7 @@ def test_switching_wallets_replaces_the_address_set(db):
     reply = asyncio.run(_sub([b]))
     assert sub.addresses == {b}, "the previous wallet must not linger"
     assert reply["addresses"] == [b]
-    assert (TOKEN, "positions") not in sub.primed, "a new wallet set needs a fresh baseline"
+    assert (TOKEN, "positions") in sub.primed, "the baseline stays; the wallet change arrives as a delta"
 
     asyncio.run(_apply_subscribe(sub, {"op": "subscribe", "token": TOKEN, "channels": ["trades"]}))
     assert sub.addresses == {b}
