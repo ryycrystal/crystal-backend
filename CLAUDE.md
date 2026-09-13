@@ -9,9 +9,12 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-13 (later): both apps run `de19db7` (indexer revision 0000175 with `LEDGER_ENABLED=1`, api
-  revision 0000244), rolled by hand after PR #9: only crystal.fun launchpad tokens (`source = 0`) earn
-  launchpad points, so nad.fun trades no longer accrue toward the rewards program. Before that, PR #8
+- 2026-09-13 (latest): both apps run `9cbcbea` (indexer revision 0000176 with `LEDGER_ENABLED=1`, api
+  revision 0000245), rolled by hand after fast-forwarding `main` to it: launchpad points pay only for
+  `venue = 'curve'` trades, a graduated crystal.fun token's market trades earn once through the spot
+  categories, and the `grad` category is gone (see the rewards rates table). Before that, PR #9
+  (`de19db7`): only crystal.fun launchpad tokens (`source = 0`) earn launchpad points, so nad.fun trades
+  no longer accrue toward the rewards program. Before that, PR #8
   (`d1af643`): order book staleness is indexer lag (not trade recency), every
   websocket snapshot seeds its own baseline with balance and order book baselines per socket, a changed
   `addresses` set arrives as a delta instead of a fresh snapshot, and `GET /spot/{wallet}?graph_only=1`
