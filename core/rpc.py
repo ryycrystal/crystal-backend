@@ -5,7 +5,8 @@ cannot be reached, and defaults to the public nodes. A node that fails at the tr
 with a non-2xx status or a body that is not JSON, is set aside for RPC_FAILOVER_COOLDOWN_SECONDS and then
 tried first again, so the primary comes back on its own once it is healthy. A JSON-RPC error body is the
 node's answer rather than a failure of the node: it is returned as-is and never causes a failover, since
-every node would say the same thing.
+every node would say the same thing. Log lines and RpcUnavailable name a node by its host only, because a
+paid node's key rides in the path of its url.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import os
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -77,9 +79,26 @@ def _node_failed(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.TransportError, httpx.HTTPStatusError, ValueError))
 
 
+def _host(url: str) -> str:
+    return urlsplit(url).netloc or url
+
+
+def _describe(exc: BaseException) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = str(getattr(exc.response, "text", "") or "")[:80]
+        return f"HTTP {exc.response.status_code} {body}".rstrip()
+    return f"{exc.__class__.__name__}: {str(exc)[:80]}".rstrip(": ")
+
+
 def _note(url: str, exc: BaseException, nxt: str | None) -> None:
-    where = f", trying {nxt}" if nxt else ", no node left"
-    print(f"[RPC] {url} failed ({exc.__class__.__name__}: {str(exc)[:80]}){where}", flush=True)
+    where = f", trying {_host(nxt)}" if nxt else ", no node left"
+    print(f"[RPC] {_host(url)} failed ({_describe(exc)}){where}", flush=True)
+
+
+def _unavailable(order: list[str], last: BaseException | None) -> RpcUnavailable:
+    if last is None:
+        return RpcUnavailable("no rpc node configured")
+    return RpcUnavailable(f"no rpc node answered, last {_host(order[-1])}: {_describe(last)}")
 
 
 def post(payload: Any, timeout: float = 10.0, endpoints: Endpoints | None = None) -> Any:
@@ -101,7 +120,7 @@ def post(payload: Any, timeout: float = 10.0, endpoints: Endpoints | None = None
             continue
         endpoints.mark_ok(url)
         return body
-    raise RpcUnavailable(f"no rpc node answered: {last!r}")
+    raise _unavailable(order, last)
 
 
 async def async_post(client: httpx.AsyncClient, payload: Any, endpoints: Endpoints | None = None, before=None) -> Any:
@@ -125,7 +144,7 @@ async def async_post(client: httpx.AsyncClient, payload: Any, endpoints: Endpoin
             continue
         endpoints.mark_ok(url)
         return body
-    raise RpcUnavailable(f"no rpc node answered: {last!r}")
+    raise _unavailable(order, last)
 
 
 def call(method: str, params: list, timeout: float = 10.0, endpoints: Endpoints | None = None) -> Any:

@@ -1332,6 +1332,19 @@ Nonzero means something is queued behind a lock. Zero means look elsewhere.
   its own. A JSON-RPC error body is the node's answer and never fails over. Tests that fake the node
   patch `core.rpc.httpx.post`, not a module-local `httpx`. The ledger engine keeps its own pool
   (`core/ledger/txmeta.py`), because only the primary serves traces.
+- **The spot graph reads historical balances through `SPOT_GRAPH_RPC`**, tried first, then the
+  app's nodes (`api/spot_graph.py::_graph_endpoints`). Until 2026-09-14 that was an Alchemy key held
+  as the `spotgraphrpc` secret; from 2026-09-10 03:46 UTC it answered every server call with
+  `403 Unspecified origin not on whitelist` (Alchemy retired the Monad endpoint), every fill gave up
+  after 5 failures, and every portfolio graph stopped at its last bucket, 09-09 20:00 UTC, because the
+  graph had no other node to ask. Now `SPOT_GRAPH_RPC=https://rpc-mainnet.monadinfra.com`, Monad's own
+  public node, which serves `eth_call` at any depth (verified 30 days back) but **refuses JSON-RPC
+  batches** (`403 Restricted JSON RPC method`, even a batch of one), so `SPOT_GRAPH_RPC_BATCH=1` and a
+  group of one bucket travels as a single request. `rpc.monad.xyz` keeps about seven days of state
+  (1.4M blocks answered, 1.6M not, 2026-09-14) and is what the fill falls back to; with only that node
+  `spot_graph_floor` rises to its depth, and a later fill that writes below the floor lowers it again.
+  Nothing in this stack has a paid node: the indexer's `RPC_HTTP` is `rpc.monad.xyz` too. Log lines
+  name nodes by host only, because a keyed url carries its key in the path.
 
 ---
 
@@ -2207,6 +2220,14 @@ still fully withdrawable. Keeping it attached to a live market is what keeps it 
 
 Consequence to be aware of after any relaunch: retired vaults surface under the new canonical
 market until someone deletes them, and deleting the one with a holder would hide real funds.
+
+**Erased on 2026-09-14 at the owner's request:** `crystal mm` (`0x581172…`) is gone from
+`crystal_vaults`, `crystal_vault_users`, `crystal_vault_deposits`, `crystal_vault_withdrawals`,
+`crystal_vault_balance_samples` and the two rewards vault tables; every row sits in the matching
+`<table>_erased_20260914` snapshot table, and the indexer was restarted so its in-memory copy stopped
+writing samples. `0x5a90e781…` still holds its shares on chain and can withdraw through the contract
+directly; the app simply no longer lists the vault. Do not restore it from the snapshot tables
+without asking.
 
 ### Two traps met while doing this
 

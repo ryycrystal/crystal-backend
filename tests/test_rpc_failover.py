@@ -3,6 +3,7 @@ dead one is set aside for a cooldown and then tried first again, and a JSON-RPC 
 real answer, never causes a failover."""
 
 import asyncio
+import json
 import os
 import sys
 
@@ -18,13 +19,16 @@ FALLBACK = "https://fallback.test"
 
 
 class Reply:
-    def __init__(self, body, status=200):
+    def __init__(self, body, status=200, url=""):
         self._body = body
         self.status_code = status
+        self.url = url
+        self.text = json.dumps(body)
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise httpx.HTTPStatusError("bad", request=None, response=self)
+            message = f"Client error '{self.status_code}' for url '{self.url}'"
+            raise httpx.HTTPStatusError(message, request=None, response=self)
 
     def json(self):
         return self._body
@@ -43,7 +47,7 @@ class Node:
         self.asked.append(url)
         if url in self.dead:
             raise httpx.ConnectError("refused", request=None)
-        return Reply(self.answers.get(url, {"result": url}), self.status.get(url, 200))
+        return Reply(self.answers.get(url, {"result": url}), self.status.get(url, 200), url)
 
     async def apost(self, url, json=None):
         return self.post(url, json=json)
@@ -98,6 +102,24 @@ def test_every_node_down_raises_one_clear_error(monkeypatch):
     with pytest.raises(rpc.RpcUnavailable):
         rpc.post({"method": "eth_blockNumber"}, endpoints=endpoints)
     assert node.asked == [PRIMARY, FALLBACK]
+
+
+def test_a_node_is_named_by_host_only_in_the_log_and_the_error(monkeypatch, capsys):
+    """A paid node's key rides in the path of its url, and both the log line and the error used to
+    carry the whole url, so one failover put the key in the container logs."""
+    keyed = "https://paid.test/v2/SECRET-KEY-123"
+    node = Node(status={keyed: 403}, dead={FALLBACK}, answers={keyed: {"error": {"message": "origin not allowed"}}})
+    monkeypatch.setattr(rpc.httpx, "post", node.post)
+    endpoints = rpc.Endpoints([keyed, FALLBACK], cooldown=60)
+
+    with pytest.raises(rpc.RpcUnavailable) as err:
+        rpc.post({"method": "eth_blockNumber"}, endpoints=endpoints)
+
+    out = capsys.readouterr().out
+    assert "SECRET-KEY-123" not in out, out
+    assert "SECRET-KEY-123" not in str(err.value), str(err.value)
+    assert "paid.test failed (HTTP 403" in out and "origin not allowed" in out
+    assert "fallback.test" in str(err.value)
 
 
 def test_the_configured_list_is_primary_then_fallbacks_without_repeats(monkeypatch):

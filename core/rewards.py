@@ -50,7 +50,7 @@ DEFAULT_KOL_LADDER = [["diamond", 25], ["platinum", 10]]
 # The full fee is 100 (1%); a status buys a discount off it. Nothing here reaches a contract: the
 # client sends this share of a trade to the venue and sweeps the rest, so the fee is whatever the
 # client was told. A wallet we cannot price pays the full fee, never less.
-DEFAULT_STATUS_FEE_BPS = {"bronze": 100, "silver": 95, "gold": 90, "platinum": 80, "diamond": 50}
+DEFAULT_STATUS_FEE_BPS = {"bronze": 100, "silver": 95, "gold": 90, "platinum": 85, "diamond": 75}
 FULL_FEE_BPS = 100
 
 BATCH = int(os.getenv("REWARDS_BATCH", "20000"))

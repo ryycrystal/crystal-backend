@@ -22,9 +22,9 @@ RAW_URL = os.environ.get("TEST_DATABASE_URL")
 def test_the_advertised_tiers_are_the_discounts_off_one_percent():
     assert rewards.FULL_FEE_BPS == 100
     tiers = rewards.status_fee_bps()
-    assert tiers == {"bronze": 100, "silver": 95, "gold": 90, "platinum": 80, "diamond": 50}
-    # 0%, 5%, 10%, 20%, 50% off
-    for status, want in (("bronze", 0), ("silver", 5), ("gold", 10), ("platinum", 20), ("diamond", 50)):
+    assert tiers == {"bronze": 100, "silver": 95, "gold": 90, "platinum": 85, "diamond": 75}
+    # 0%, 5%, 10%, 15%, 25% off
+    for status, want in (("bronze", 0), ("silver", 5), ("gold", 10), ("platinum", 15), ("diamond", 25)):
         off = (rewards.FULL_FEE_BPS - tiers[status]) * 100 / rewards.FULL_FEE_BPS
         assert off == want, f"{status} should be {want}% off"
 
@@ -33,14 +33,14 @@ def test_an_unknown_or_missing_status_pays_the_full_fee():
     for status in (None, "", "platinumm", "PLATINUM ", "free", "gold "):
         assert rewards.fee_bps_for_status(status) == rewards.FULL_FEE_BPS, status
     # the ones we do know are matched case-insensitively
-    assert rewards.fee_bps_for_status("Diamond") == 50
+    assert rewards.fee_bps_for_status("Diamond") == 75
 
 
 def test_a_tier_can_only_ever_discount(monkeypatch):
     # a mis-set override must not be able to charge more than the advertised fee, nor go negative
     monkeypatch.setattr(rewards, "_meta_json", lambda key, default: {"diamond": 250, "gold": -10, "silver": 90})
     tiers = rewards.status_fee_bps()
-    assert tiers["diamond"] == 50, "over the full fee is refused"
+    assert tiers["diamond"] == 75, "over the full fee is refused"
     assert tiers["gold"] == 90, "negative is refused"
     assert tiers["silver"] == 90, "a sane override is taken"
 
@@ -91,7 +91,7 @@ def test_the_fee_comes_from_the_last_finalized_week_only(db, clean):  # noqa: F8
 
     _week(1_600_000, True, "diamond")
     body = client.get(f"{prefix}/fee/{wallet}").json()
-    assert (body["status"], body["feeBps"]) == ("diamond", 50)
+    assert (body["status"], body["feeBps"]) == ("diamond", 75)
 
     # a denied wallet loses the discount
     with storage.db_cursor() as cur:
@@ -109,6 +109,7 @@ def test_the_tier_table_is_serialisable_for_the_client(db, clean):  # noqa: F811
 
     body = TestClient(api.api.app).get(f"{rewards_routes.PREFIX}/fee-tiers").json()
     assert body["fullFeeBps"] == 100
-    assert body["tiers"]["diamond"] == {"feeBps": 50, "discountPct": 50.0}
+    assert body["tiers"]["diamond"] == {"feeBps": 75, "discountPct": 25.0}
+    assert body["tiers"]["platinum"] == {"feeBps": 85, "discountPct": 15.0}
     assert body["tiers"]["bronze"] == {"feeBps": 100, "discountPct": 0.0}
     assert Decimal(str(body["tiers"]["silver"]["feeBps"])) == 95
