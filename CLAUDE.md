@@ -1332,6 +1332,16 @@ Nonzero means something is queued behind a lock. Zero means look elsewhere.
   its own. A JSON-RPC error body is the node's answer and never fails over. Tests that fake the node
   patch `core.rpc.httpx.post`, not a module-local `httpx`. The ledger engine keeps its own pool
   (`core/ledger/txmeta.py`), because only the primary serves traces.
+- **The spot graph reads historical balances through `SPOT_GRAPH_RPC`** (an Alchemy archive key, a
+  secret on `crystal-api`), tried first, then the app's nodes (`api/spot_graph.py::_graph_endpoints`).
+  On 2026-09-10 03:46 UTC that key began answering every server call with
+  `403 Unspecified origin not on whitelist` (an allowlist on the Alchemy app), every fill gave up after
+  5 failures, and every portfolio graph stopped at its last bucket, 09-09 20:00 UTC; until the failover
+  the graph had no other node to ask. The public nodes keep roughly four days of state, so with the key
+  dead the graph still fills that far and `spot_graph_floor` moves up to that depth; a later fill that
+  writes below the floor lowers it again. Fix the key in the Alchemy dashboard (drop the domain
+  allowlist, or mint a key without one and `az containerapp secret set` it as `spotgraphrpc`); nothing
+  in this repo can. Log lines name nodes by host only, because the key rides in the url's path.
 
 ---
 

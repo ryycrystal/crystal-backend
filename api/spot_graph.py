@@ -32,6 +32,21 @@ _LP_SUPPLY_PREFIX = "__lpSupply:"
 
 _inflight: set[str] = set()
 _inflight_lock = threading.Lock()
+_endpoints: rpc.Endpoints | None = None
+_endpoints_node: str | None = None
+
+
+def _graph_endpoints() -> rpc.Endpoints | None:
+    """The archive node first, then the nodes the rest of the app uses, so a dead archive key still
+    leaves the depth those nodes keep instead of no graph at all."""
+    global _endpoints, _endpoints_node
+    own_node = (os.getenv("SPOT_GRAPH_RPC") or "").strip()
+    if not own_node:
+        return None
+    if _endpoints is None or _endpoints_node != own_node:
+        _endpoints = rpc.Endpoints([own_node, *(u for u in rpc.configured_urls() if u != own_node)])
+        _endpoints_node = own_node
+    return _endpoints
 
 
 def _block_at_ts(ts: int) -> int | None:
@@ -138,8 +153,6 @@ def _balances_at_many(
     tokens: list[dict[str, Any]],
     lp_markets: list[str],
 ) -> dict[int, dict[str, int] | None]:
-    own_node = os.getenv("SPOT_GRAPH_RPC")
-    endpoints = rpc.Endpoints([own_node]) if own_node else None
     erc20 = [t["address"] for t in tokens if t["address"] != "native"]
 
     calls = [(MULTICALL3_ADDR, MULTICALL3_GET_ETH_BALANCE_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:]))]
@@ -159,7 +172,7 @@ def _balances_at_many(
         }
         for i, (_ts, block) in enumerate(pairs)
     ]
-    results = rpc.post(batch, timeout=30, endpoints=endpoints)
+    results = rpc.post(batch, timeout=30, endpoints=_graph_endpoints())
     by_id = {r.get("id"): r for r in results if isinstance(r, dict)}
 
     out: dict[int, dict[str, int] | None] = {}
@@ -341,6 +354,7 @@ def _fill(wallet: str) -> None:
             return
         have = storage.get_spot_graph_bucket_set(wallet, wanted[-1], VALUE_VERSION)
         missing = [t for t in wanted if t not in have]
+        floor = int(storage.get_meta("spot_graph_floor") or 0)
         failures = 0
         empty_batches = 0
         empty_streak_top = 0
@@ -363,13 +377,13 @@ def _fill(wallet: str) -> None:
                 time.sleep(2.0 * failures)
                 continue
             failures = 0
-            wrote = 0
+            written = []
             for ts, block in group:
                 balances = balances_by_ts.get(ts)
                 if balances is not None:
                     _write_bucket(wallet, ts, block, balances, tokens, orders)
-                    wrote += 1
-            if wrote == 0:
+                    written.append(ts)
+            if not written:
                 if empty_batches == 0:
                     empty_streak_top = max(ts for ts, _b in group)
                 empty_batches += 1
@@ -380,6 +394,9 @@ def _fill(wallet: str) -> None:
                     return
             else:
                 empty_batches = 0
+                if 0 < min(written) < floor:
+                    floor = min(written)
+                    storage.set_meta("spot_graph_floor", str(int(floor)))
             time.sleep(FILL_PACE_SECONDS)
     except Exception as e:
         print(f"[GRAPH] fill crashed for {wallet}: {e!r}", flush=True)
