@@ -2218,6 +2218,14 @@ still fully withdrawable. Keeping it attached to a live market is what keeps it 
 Consequence to be aware of after any relaunch: retired vaults surface under the new canonical
 market until someone deletes them, and deleting the one with a holder would hide real funds.
 
+**Erased on 2026-09-14 at the owner's request:** `crystal mm` (`0x581172…`) is gone from
+`crystal_vaults`, `crystal_vault_users`, `crystal_vault_deposits`, `crystal_vault_withdrawals`,
+`crystal_vault_balance_samples` and the two rewards vault tables; every row sits in the matching
+`<table>_erased_20260914` snapshot table, and the indexer was restarted so its in-memory copy stopped
+writing samples. `0x5a90e781…` still holds its shares on chain and can withdraw through the contract
+directly; the app simply no longer lists the vault. Do not restore it from the snapshot tables
+without asking.
+
 ### Two traps met while doing this
 
 - **`record_dex_tip` has no backwards guard.** It blindly `set_meta`s whatever block it is
