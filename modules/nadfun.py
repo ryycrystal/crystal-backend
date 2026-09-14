@@ -5,7 +5,7 @@ import json
 import os
 import time
 from collections import deque
-from decimal import Decimal, getcontext
+from decimal import getcontext
 from urllib.parse import urlparse
 
 import httpx
@@ -327,8 +327,6 @@ def parse_nadfun_token_created(
 
     metadata_cid = ""
 
-    last_price_native = Decimal(0)
-
     return {
         "token": token,
         "creator": creator,
@@ -344,7 +342,8 @@ def parse_nadfun_token_created(
         "social3": telegram,
         "social4": "",
         "source": 1,
-        "last_price_native": last_price_native,
+        "native_reserve": _word(data_no0x, string_base + 3),
+        "token_reserve": _word(data_no0x, string_base + 4),
     }
 
 

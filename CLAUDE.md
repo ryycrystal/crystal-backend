@@ -287,6 +287,14 @@ baseline. Frontends gate on `price_ref_X > 0` before trusting `change_pct_X`.
   candles anymore (removed deliberately): a never-traded token returns an empty klines
   array, a one-trade token returns exactly one candle. Clients render sparse series
   themselves. Do not reintroduce `_initial_price_kline` fallbacks — it is dead code.
+- **A stored `open_price` is the price just before the bucket's first trade** (the token's
+  `last_price_native` before that trade overwrites it), so a token's first candle opens at its
+  launch price instead of sitting flat at its own close. A nad.fun token's launch price comes
+  from its own CurveCreate event (`native_reserve`/`token_reserve`, the two words after the
+  string offsets); the adapter constants are only a fallback, and v1's 90,000 MON is stale
+  (tokens on the v1 emitter now launch at 180,000). `_build_ohlcv_from_db` still rewrites each
+  later open to the previous close; for candles written before 2026-09-14 the stored open is the
+  post-trade price, so those tokens' first candles stay flat unless backfilled.
 - `_mon_usd_window` is token-independent (global rate series). It is snapped to
   resolution boundaries and cached (`ttl_cache("mon_usd:window")`) so every token/poll
   shares one computation. Never call it with a raw `now` end again — that made the key

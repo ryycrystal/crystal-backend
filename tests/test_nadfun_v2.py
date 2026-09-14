@@ -47,9 +47,29 @@ def _v2_create_data(name: str, symbol: str, uri: str) -> str:
         _word(offsets[0]),
         _word(offsets[1]),
         _word(offsets[2]),
-        _word(123),
-        _word(456),
-        _word(789),
+        _word(70_000 * 10**18),
+        _word(1_060_569_000 * 10**18),
+        _word(251_660_440_677_966_101_694_915_255),
+    ]
+    return "".join(head + tails)
+
+
+def _v1_create_data(name: str, symbol: str, uri: str, native_reserve: int, token_reserve: int) -> str:
+    tails = [_string_tail(name), _string_tail(symbol), _string_tail(uri)]
+    head_words = 6
+    offset = head_words * 32
+    offsets = []
+    for tail in tails:
+        offsets.append(offset)
+        offset += len(tail) // 2
+
+    head = [
+        _word(offsets[0]),
+        _word(offsets[1]),
+        _word(offsets[2]),
+        _word(native_reserve),
+        _word(token_reserve),
+        _word(279_900_191 * 10**18),
     ]
     return "".join(head + tails)
 
@@ -84,6 +104,24 @@ def test_parse_v2_create_event_uses_shifted_string_offsets():
     assert parsed["name"] == "Touchgrass"
     assert parsed["symbol"] == "GRASS"
     assert parsed["source"] == 1
+    assert parsed["native_reserve"] == 70_000 * 10**18
+    assert parsed["token_reserve"] == 1_060_569_000 * 10**18
+
+
+def test_parse_v1_create_event_carries_the_launch_reserves():
+    v1_create_topic = next(t for t, tag in chain.EVENT_SIGS.items() if tag == "NFC" and t != nadfun.V2_CREATE_TOPIC)
+    topics = [v1_create_topic, _topic_addr(CREATOR), _topic_addr(TOKEN), _topic_addr(POOL)]
+
+    parsed = nadfun.parse_nadfun_token_created(
+        chain.NADFUN_ADDR,
+        topics,
+        _v1_create_data("Monallions", "MONALLIONS", "", 180_000 * 10**18, 1_073_000_191 * 10**18),
+    )
+
+    assert parsed["name"] == "Monallions"
+    assert parsed["symbol"] == "MONALLIONS"
+    assert parsed["native_reserve"] == 180_000 * 10**18, "the v1 curve now launches at 180,000 virtual MON"
+    assert parsed["token_reserve"] == 1_073_000_191 * 10**18
 
 
 def test_parse_v2_buy_event_uses_token_then_user_topic_order():

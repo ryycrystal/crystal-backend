@@ -665,81 +665,15 @@ def upsert_ohlcv(
     price_native,
     native_amount: int,
     mon_usd=0,
+    open_price=None,
     cur: psycopg2.extensions.cursor | None = None,
 ) -> None:
-    price_native = _fit_n50_18(price_native)
-    mon_usd = _fit_n50_18(mon_usd or 0)
+    row = (token, resolution_sec, bucket_start, open_price, price_native, native_amount, mon_usd)
     if cur is None:
         with db_cursor() as cur2:
-            cur2.execute(
-                """
-                INSERT INTO launchpad_ohlcv (
-                    token,
-                    resolution_sec,
-                    bucket_start,
-                    open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    quote_volume,
-                    mon_usd
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE
-                SET
-                    high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
-                    low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
-                    close_price = EXCLUDED.close_price,
-                    quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume,
-                    mon_usd = EXCLUDED.mon_usd;
-                """,
-                (
-                    token.lower(),
-                    int(resolution_sec),
-                    int(bucket_start),
-                    price_native,
-                    price_native,
-                    price_native,
-                    price_native,
-                    int(abs(native_amount)),
-                    mon_usd,
-                ),
-            )
+            upsert_ohlcv_batch([row], cur2)
     else:
-        cur.execute(
-            """
-            INSERT INTO launchpad_ohlcv (
-                token,
-                resolution_sec,
-                bucket_start,
-                open_price,
-                high_price,
-                low_price,
-                close_price,
-                quote_volume,
-                mon_usd
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (token, resolution_sec, bucket_start) DO UPDATE
-            SET
-                high_price = GREATEST(launchpad_ohlcv.high_price, EXCLUDED.high_price),
-                low_price = LEAST(launchpad_ohlcv.low_price, EXCLUDED.low_price),
-                close_price = EXCLUDED.close_price,
-                quote_volume = launchpad_ohlcv.quote_volume + EXCLUDED.quote_volume,
-                mon_usd = EXCLUDED.mon_usd;
-            """,
-            (
-                token.lower(),
-                int(resolution_sec),
-                int(bucket_start),
-                price_native,
-                price_native,
-                price_native,
-                price_native,
-                int(abs(native_amount)),
-                mon_usd,
-            ),
-        )
+        upsert_ohlcv_batch([row], cur)
 
 
 def add_sniper_address(token: str, user_address: str, cur: psycopg2.extensions.cursor | None = None) -> bool:
@@ -2005,15 +1939,18 @@ def upsert_ohlcv_batch(ohlcv_data: list[tuple], cur) -> None:
     if not ohlcv_data:
         return
     aggregated: dict[tuple, dict] = {}
-    for token, resolution_sec, bucket_start, price_native, native_amount, mon_usd in ohlcv_data:
+    for token, resolution_sec, bucket_start, open_price, price_native, native_amount, mon_usd in ohlcv_data:
         key = (token.lower(), int(resolution_sec), int(bucket_start))
         price_native = _fit_n50_18(price_native)
         mon_usd = _fit_n50_18(mon_usd or 0)
         if key not in aggregated:
+            open_price = _fit_n50_18(open_price)
+            if open_price <= 0:
+                open_price = price_native
             aggregated[key] = {
-                "open": price_native,
-                "high": price_native,
-                "low": price_native,
+                "open": open_price,
+                "high": max(open_price, price_native),
+                "low": min(open_price, price_native),
                 "close": price_native,
                 "volume": int(abs(native_amount)),
                 "mon_usd": mon_usd,

@@ -127,6 +127,17 @@ def _fetch_launchpad_initial_native_supply() -> int:
     return int(cached) if cached is not None else 0
 
 
+def _curve_price(ev: dict) -> Decimal:
+    try:
+        native_reserve = Decimal(int(ev.get("native_reserve") or 0))
+        token_reserve = Decimal(int(ev.get("token_reserve") or 0))
+    except (TypeError, ValueError):
+        return Decimal(0)
+    if native_reserve <= 0 or token_reserve <= 0:
+        return Decimal(0)
+    return native_reserve / token_reserve
+
+
 NATIVE_ADAPTER = native_adapter_mod.build(_fetch_launchpad_initial_native_supply)
 NADFUN_ADAPTERS = nadfun_geo.build_all()
 
@@ -807,11 +818,12 @@ class State:
                 lp.quote_token = quote_token
                 self.launchpad_tokens[token] = lp
 
+                initial_price = _curve_price(ev)
                 adapter = launchpad_adapters.get(source)
-                if adapter is not None:
-                    initial_price = adapter.initial_price_native()
-                    if initial_price is not None and initial_price > 0:
-                        lp.last_price_native = initial_price
+                if initial_price <= 0 and adapter is not None:
+                    initial_price = adapter.initial_price_native() or Decimal(0)
+                if initial_price > 0:
+                    lp.last_price_native = initial_price
 
             storage.upsert_token_created(
                 token=token,
@@ -960,14 +972,7 @@ class State:
                 if native_amt <= 0 or token_amt <= 0:
                     return
 
-                price_native = Decimal(0)
-                try:
-                    reserve_native = Decimal(int(ev.get("native_reserve") or 0))
-                    reserve_token = Decimal(int(ev.get("token_reserve") or 0))
-                    if reserve_native > 0 and reserve_token > 0:
-                        price_native = reserve_native / reserve_token
-                except Exception:
-                    price_native = Decimal(0)
+                price_native = _curve_price(ev)
                 if price_native <= 0:
                     try:
                         price_native = Decimal(native_amt) / Decimal(token_amt)
@@ -1090,6 +1095,7 @@ class State:
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
 
+            open_native = lp.last_price_native
             if is_pool_swap and price_native <= 0:
                 price_native = Decimal(lp.last_price_native or 0)
                 print(f"[State] {pool_addr} swap {txh} carried no pool price, holding the last mid", flush=True)
@@ -1261,6 +1267,7 @@ class State:
                         lp.last_price_native,
                         int(native_amt),
                         self.mon_price_usd,
+                        open_price=open_native,
                     )
             else:
                 storage.insert_trade(
@@ -1334,6 +1341,7 @@ class State:
                         price_native=lp.last_price_native,
                         native_amount=int(native_amt),
                         mon_usd=self.mon_price_usd,
+                        open_price=open_native,
                         cur=cur,
                     )
 
@@ -2074,6 +2082,7 @@ class State:
         if lp is None:
             return
 
+        open_native = lp.last_price_native
         price = self._graduated_mid_price_locked(mi)
         if price is None or price <= 0:
             price = getattr(mi, "price", None)
@@ -2178,6 +2187,7 @@ class State:
                         lp.last_price_native,
                         int(native_amt),
                         self.mon_price_usd,
+                        open_price=open_native,
                     )
                 else:
                     try:
@@ -2188,6 +2198,7 @@ class State:
                             price_native=lp.last_price_native,
                             native_amount=int(native_amt),
                             mon_usd=self.mon_price_usd,
+                            open_price=open_native,
                             cur=cur,
                         )
                     except Exception:

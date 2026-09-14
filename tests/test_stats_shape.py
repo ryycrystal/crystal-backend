@@ -516,6 +516,33 @@ def test_klines_stitch_open_to_previous_close(db, clean):
     assert D(second["close"]) != D(second["open"]), "a real move is no longer a flat doji"
 
 
+def test_first_kline_opens_at_the_launch_price_and_stored_opens_follow_the_price(db, clean):
+    from api.api import _build_ohlcv_from_db, _scaled_price
+
+    st = _new_state()
+    _create(st, blk=100, ts=1000)
+    launch = st.launchpad_tokens[TOKEN].last_price_native
+    with storage.db_cursor() as cur:
+        cur.execute("DELETE FROM launchpad_ohlcv WHERE token = %s", (TOKEN,))
+    _trade(st, native_reserve=1100 * 10**18, blk=101, ts=1000, txh="0xo1", log_idx=0)
+    _trade(st, native_reserve=1200 * 10**18, blk=102, ts=1060, txh="0xo2", log_idx=0)
+
+    first, _second = _build_ohlcv_from_db(TOKEN, bucket_seconds=60)
+    assert first["open"] == _scaled_price(launch), "the first candle starts at the launch price, not flat"
+    assert first["low"] == first["open"]
+    assert first["high"] == first["close"]
+    assert Decimal(first["close"]) > Decimal(first["open"])
+
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "SELECT open_price, close_price FROM launchpad_ohlcv WHERE token = %s AND resolution_sec = 60"
+            " ORDER BY bucket_start",
+            (TOKEN,),
+        )
+        (_open1, close1), (open2, _close2) = cur.fetchall()
+    assert open2 == close1, "a stored open is the price just before the bucket's first trade"
+
+
 def test_spot_portfolio_one_call(db, clean, monkeypatch):
     from fastapi.testclient import TestClient
 

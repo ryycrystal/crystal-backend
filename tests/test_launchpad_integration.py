@@ -997,6 +997,57 @@ def test_nadfun_derived_supply_and_reserves_persist(db):
     assert int(row[0]) == (geo["virtual_token_0"] - tr) // 10**18
 
 
+def test_nadfun_first_candle_opens_at_the_launch_price_from_the_create_event(db):
+    import psycopg2
+
+    from api.api import _build_ohlcv_from_db
+    from core import chain as h
+    from core.sequencer import BatchAccumulator
+
+    token = "0xe47e25863c7355c3391d323cc16a6ca544b47777"
+    st = _new_state()
+    st.apply_token_created(
+        104653894,
+        {
+            "token": token,
+            "creator": CREATOR,
+            "name": "Monallions",
+            "symbol": "MONALLIONS",
+            "native_reserve": 180_000 * 10**18,
+            "token_reserve": 1_073_000_191 * 10**18,
+        },
+        1789360508,
+        h.NADFUN_ADDR,
+    )
+    dev_buy = {
+        "token": token,
+        "user": CREATOR,
+        "is_buy": True,
+        "amount_in": 3_027_315_978_529_725_303_139,
+        "amount_out": 17_573_111_933_470_827_353_157_358,
+        "native_reserve": 182_997_042_818_744_428_050_107,
+        "token_reserve": 1_055_427_079_066_529_172_646_842_642,
+    }
+
+    batch = BatchAccumulator()
+    conn = psycopg2.connect(db)
+    try:
+        with conn.cursor() as cur:
+            st.apply_launchpad_trade(
+                dev_buy, 104653894, 1789360508, "0xdevbuy", 114, h.NADFUN_ADDR, cur=cur, batch=batch
+            )
+            batch.flush(cur)
+        conn.commit()
+    finally:
+        conn.close()
+
+    (candle,) = _build_ohlcv_from_db(token, bucket_seconds=1)
+    assert candle["open"] == "167753.930996271", "the dev buy candle starts at the launch price"
+    assert candle["close"] == "173386.723202702"
+    assert candle["low"] == candle["open"]
+    assert candle["high"] == candle["close"]
+
+
 def test_nadfun_missing_sync_does_not_corrupt_persisted_supply(db):
     """A CurveSync can be missed or lost across a restart. Supply must hold its
     last derived value rather than read as a fully sold curve."""

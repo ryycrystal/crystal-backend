@@ -188,8 +188,10 @@ def test_chart_prices_keep_sub_unit_movement():
 
 def test_nadfun_geometry_matches_chain_verified_constants():
     """Recovered from CurveSync logs on graduated tokens. The k values reproduce
-    exactly, which is what confirms them -- the published mainnet docs describe a
-    later deployment (180,000 virtual MON) that is neither v1 nor v2."""
+    exactly, which is what confirms them for those tokens. Tokens created on the v1
+    emitter since then launch at 180,000 virtual MON (Monallions' CurveCreate, block
+    104,653,894), so a token's launch price comes from its own create event and these
+    constants are only the fallback."""
     from core.adapters import nadfun as nf
 
     assert nf.V1_VIRTUAL_NATIVE_0 == 90_000 * 10**18

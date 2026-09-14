@@ -145,10 +145,25 @@ class BatchAccumulator:
         p["last_price_native"] = last_price_native
 
     def add_ohlcv(
-        self, token: str, resolution_sec: int, bucket_start: int, price_native, native_amount: int, mon_usd=0
+        self,
+        token: str,
+        resolution_sec: int,
+        bucket_start: int,
+        price_native,
+        native_amount: int,
+        mon_usd=0,
+        open_price=None,
     ):
         self.ohlcv_data.append(
-            (token.lower(), int(resolution_sec), int(bucket_start), price_native, int(native_amount), mon_usd or 0)
+            (
+                token.lower(),
+                int(resolution_sec),
+                int(bucket_start),
+                open_price,
+                price_native,
+                int(native_amount),
+                mon_usd or 0,
+            )
         )
 
     def add_sniper(self, token: str, user: str):
