@@ -153,6 +153,9 @@ def _balances_at_many(
     tokens: list[dict[str, Any]],
     lp_markets: list[str],
 ) -> dict[int, dict[str, int] | None]:
+    """Balances at each (ts, block) pair. A group of one bucket travels as a single request rather than a
+    batch of one, because Monad's public archive (rpc-mainnet.monadinfra.com) refuses JSON-RPC batches;
+    SPOT_GRAPH_RPC_BATCH=1 makes every group one bucket."""
     erc20 = [t["address"] for t in tokens if t["address"] != "native"]
 
     calls = [(MULTICALL3_ADDR, MULTICALL3_GET_ETH_BALANCE_SELECTOR + bytes(12) + bytes.fromhex(wallet[2:]))]
@@ -163,7 +166,7 @@ def _balances_at_many(
         calls.append((market, ERC20_TOTAL_SUPPLY_SELECTOR))
     data = encode_multicall3_aggregate3(calls)
 
-    batch = [
+    requests = [
         {
             "jsonrpc": "2.0",
             "id": i,
@@ -172,7 +175,8 @@ def _balances_at_many(
         }
         for i, (_ts, block) in enumerate(pairs)
     ]
-    results = rpc.post(batch, timeout=30, endpoints=_graph_endpoints())
+    answer = rpc.post(requests[0] if len(requests) == 1 else requests, timeout=30, endpoints=_graph_endpoints())
+    results = [answer] if isinstance(answer, dict) else answer
     by_id = {r.get("id"): r for r in results if isinstance(r, dict)}
 
     out: dict[int, dict[str, int] | None] = {}

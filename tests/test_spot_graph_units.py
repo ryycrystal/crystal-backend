@@ -115,14 +115,42 @@ def test_a_dead_archive_node_hands_the_balance_batch_to_the_next_node(monkeypatc
         asked.append(url)
         if url == archive:
             raise httpx.ConnectError("refused", request=None)
-        return _Reply([{"id": call["id"], "result": _aggregate3_result([abi_u256(7)])} for call in json])
+        calls = json if isinstance(json, list) else [json]
+        answers = [{"id": call["id"], "result": _aggregate3_result([abi_u256(7)])} for call in calls]
+        return _Reply(answers if isinstance(json, list) else answers[0])
+
+    monkeypatch.setattr(spot_graph.rpc.httpx, "post", post)
+
+    out = spot_graph._balances_at_many(WALLET, [(1000, 5), (2000, 6)], [{"address": "native"}], [])
+
+    assert asked == [archive, public]
+    assert out == {1000: {"native": 7}, 2000: {"native": 7}}
+
+
+def test_a_group_of_one_bucket_is_one_request_not_a_batch_of_one(monkeypatch):
+    """Monad's public archive answers single JSON-RPC requests at any depth but refuses batches, even a
+    batch of one, with 403 Restricted JSON RPC method; the fill used to wrap every group in a list."""
+    monkeypatch.delenv("SPOT_GRAPH_RPC", raising=False)
+    monkeypatch.setattr(spot_graph, "_endpoints", None)
+    shapes = []
+
+    def post(url, json=None, timeout=None):
+        shapes.append(type(json).__name__)
+        if isinstance(json, list):
+            reply = _Reply({"error": "Restricted JSON RPC method"})
+            reply.status_code = 403
+            reply.raise_for_status = lambda: (_ for _ in ()).throw(
+                httpx.HTTPStatusError("403", request=None, response=reply)
+            )
+            return reply
+        return _Reply({"id": json["id"], "result": _aggregate3_result([abi_u256(9)])})
 
     monkeypatch.setattr(spot_graph.rpc.httpx, "post", post)
 
     out = spot_graph._balances_at_many(WALLET, [(1000, 5)], [{"address": "native"}], [])
 
-    assert asked == [archive, public]
-    assert out == {1000: {"native": 7}}
+    assert shapes == ["dict"], shapes
+    assert out == {1000: {"native": 9}}
 
 
 def test_a_bucket_written_below_the_floor_lowers_it(monkeypatch):
