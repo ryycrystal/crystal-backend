@@ -9,7 +9,16 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-13 (latest): both apps run `44cb664` (indexer revision 0000177 with `LEDGER_ENABLED=1`, api
+- 2026-09-14 (latest): both apps run `f57f103` (indexer revision 0000178, api revision 0000248),
+  rolled by hand after PR #11: the spot graph tries its archive node and then the app's nodes, sends a
+  one-bucket group as a single request, lowers `spot_graph_floor` when a fill writes below it, and
+  `core/rpc.py` names nodes by host only. `crystal-api` now carries the plain env values
+  `SPOT_GRAPH_RPC=https://rpc-mainnet.monadinfra.com` and `SPOT_GRAPH_RPC_BATCH=1`; the `spotgraphrpc`
+  secret (a dead Alchemy key) is gone. The same PR carries `ae8f6db`: status fee tiers are 0, 5, 10, 15
+  and 25 percent off the 1% terminal fee. The `crystal mm` vault was erased the same day (see the vault
+  section). Image `f57f103` was built from the Windows checkout, so its shell scripts are CRLF (see the
+  deploy traps); `.gitattributes` pins LF from the next commit on.
+- 2026-09-13: both apps run `44cb664` (indexer revision 0000177 with `LEDGER_ENABLED=1`, api
   revision 0000246), rolled by hand after PR #10: every node call fails over through `core/rpc.py`
   (see the RPC section). Before that, `9cbcbea` (indexer revision 0000176, api revision 0000245),
   rolled by hand after fast-forwarding `main` to it: launchpad points pay only for
@@ -119,6 +128,15 @@ tag to `git rev-parse origin/main`.
 
 Traps, all hit for real:
 
+- **`az acr build` uploads the working tree's bytes, and the main Windows checkout is CRLF.** Git for
+  Windows sets `core.autocrlf=true` in its system config, so `git ls-files --eol` there shows
+  `i/lf w/crlf` for every text file while the blobs are LF. Python does not care, bash does: image
+  `f57f103`'s `scripts/ledger_job_entry.sh` dies at `set -euo pipefail` with "invalid option name", so
+  a `ledger-rebuild` execution must use `44cb664` (built from the LF worktree
+  `crystal-backend-accounting-fix`) or a later LF build. `.gitattributes` (`* text=auto eol=lf`) pins LF
+  on checkout from 2026-09-14 on, but a file already checked out as CRLF stays CRLF until it is checked
+  out again (`rm <file> && git checkout -- <file>`), so before a manual build confirm
+  `git ls-files --eol -- '*.sh'` says `w/lf`.
 - **`az acr build` ships your WORKING TREE, not your git HEAD.** It uploads the directory
   as-is: uncommitted files are included, and commits you have not pulled are not. Several
   agent sessions share one checkout, so **another agent's half-finished edit can be baked
