@@ -24,6 +24,10 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
+# a launchpad curve has to be denominated in mon for its prices, charts and pnl to
+# mean anything downstream. lvmon counts: it is mon-denominated and carries a live
+# rate from LVMON_MON_POOL. anything else is skipped outright at discovery
+ACCEPTED_LAUNCHPAD_QUOTES = frozenset({WMON, oracle.LVMON_ADDR.lower()})
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
 AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
@@ -671,6 +675,12 @@ class State:
         symbol = _fetch_token_string(token, _ERC20_SYMBOL_SELECTOR)
         token_uri = _fetch_token_string(token, _TOKEN_URI_SELECTOR)
         quote_token = _fetch_v2_quote_token(token)
+        if quote_token not in ACCEPTED_LAUNCHPAD_QUOTES:
+            print(
+                f"[State] skipping nad.fun token {token}: quote {quote_token} is not mon or lvmon",
+                flush=True,
+            )
+            return False
 
         with self._lock:
             if token in self.launchpad_tokens:
@@ -761,6 +771,14 @@ class State:
             if resolved is None:
                 return
             source = resolved
+            if source in nadfun_geo.SOURCES and quote_token not in ACCEPTED_LAUNCHPAD_QUOTES:
+                # a nad.fun curve quoted in anything but mon prices, charts and
+                # settles in a unit nothing downstream carries. index nothing for it
+                print(
+                    f"[State] skipping nad.fun token {token}: quote {quote_token} is not mon or lvmon",
+                    flush=True,
+                )
+                return
             if source == nadfun_geo.SOURCE_V2:
                 storage.mark_nadfun_v2(token, cur=cur)
 
