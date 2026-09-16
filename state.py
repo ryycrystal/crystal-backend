@@ -24,10 +24,9 @@ LABEL = {300: "5m", 3600: "1h", 21600: "6h", 86400: "24h"}
 
 RPC_HTTP = os.getenv("RPC_HTTP", "https://rpc.monad.xyz")
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
-# a launchpad curve has to be denominated in mon for its prices, charts and pnl to
-# mean anything downstream. lvmon counts: it is mon-denominated and carries a live
-# rate from LVMON_MON_POOL. anything else is skipped outright at discovery
-ACCEPTED_LAUNCHPAD_QUOTES = frozenset({WMON, oracle.LVMON_ADDR.lower()})
+# a launchpad curve has to be quoted in mon for its prices, charts and pnl to mean
+# anything downstream. anything else, lvmon included, is skipped outright at discovery
+ACCEPTED_LAUNCHPAD_QUOTES = frozenset({WMON})
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
 AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"

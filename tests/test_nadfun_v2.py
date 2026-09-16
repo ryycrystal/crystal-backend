@@ -224,7 +224,7 @@ def test_v2_create_registers_pair_before_swap_filtering():
         chain.ADDRS[:] = original_addrs
 
 
-def test_v2_created_token_keeps_non_wmon_quote_in_state_and_storage(monkeypatch):
+def test_v2_created_token_with_a_non_wmon_quote_is_skipped_entirely(monkeypatch):
     captured_token = {}
     captured_pool = {}
 
@@ -255,10 +255,9 @@ def test_v2_created_token_keeps_non_wmon_quote_in_state_and_storage(monkeypatch)
     st.apply_token_created(100, ev, 1234, V2_BONDING)
 
     token = TOKEN.lower()
-    quote = LVMON.lower()
-    lp = st.launchpad_tokens[token]
 
-    assert lp.quote_token == quote
-    assert captured_token["quote_token"] == quote
-    assert st.v3_pools[POOL.lower()].native_addr == quote
-    assert captured_pool["native_addr"] == quote
+    # only mon-quoted curves are indexed now, so an lvmon curve writes nothing at all
+    assert token not in st.launchpad_tokens
+    assert captured_token == {}
+    assert POOL.lower() not in st.v3_pools
+    assert captured_pool == {}

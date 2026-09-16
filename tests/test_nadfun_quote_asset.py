@@ -49,9 +49,10 @@ def test_a_mon_quoted_curve_is_still_indexed(monkeypatch):
     assert marked == [TOKEN]
 
 
-def test_lvmon_counts_as_mon_since_it_carries_a_live_rate(monkeypatch):
-    marked, _ = _apply(monkeypatch, LVMON)
-    assert marked == [TOKEN]
+def test_lvmon_is_skipped_too_only_mon_is_accepted(monkeypatch):
+    marked, tokens = _apply(monkeypatch, LVMON)
+    assert marked == []
+    assert tokens == {}
 
 
 def test_a_missing_quote_defaults_to_mon_and_is_indexed(monkeypatch):
