@@ -575,7 +575,7 @@ def open_order_locked_by_token(user) -> dict[str, int]:
         return {t: int(v) for t, v in cur.fetchall() if t}
 
 
-def market_klines(market: str, res: int, limit: int = 3000) -> list[dict[str, Any]]:
+def market_klines(market: str, res: int, limit: int = 3000, before_ts: int = 0) -> list[dict[str, Any]]:
     with db_cursor() as cur:
         cur.execute(
             """
@@ -588,11 +588,12 @@ def market_klines(market: str, res: int, limit: int = 3000) -> list[dict[str, An
                    SUM(CASE WHEN is_buy THEN amount_in ELSE amount_out END) AS quote_volume
             FROM crystal_market_trades
             WHERE market = %(m)s
+              AND (%(before)s = 0 OR timestamp < %(before)s)
             GROUP BY bucket_ts
             ORDER BY bucket_ts DESC
             LIMIT %(lim)s
             """,
-            {"res": int(res), "m": (market or "").lower(), "lim": int(limit)},
+            {"res": int(res), "m": (market or "").lower(), "lim": int(limit), "before": int(before_ts or 0)},
         )
         rows = cur.fetchall()
     return [
