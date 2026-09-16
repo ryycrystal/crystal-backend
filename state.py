@@ -1112,14 +1112,15 @@ class State:
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
             if (
-                lp.source in nadfun_geo.SOURCES
-                and not lp.migrated
+                lp.source == nadfun_geo.SOURCE_V2
                 and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES
             ):
                 # the creation guard only stops new tokens. one loaded before it shipped is
                 # still in memory, and a trade on it would write flows the fold re-projects.
-                # a migrated token is exempt: its quote_token names the pool it graduated
-                # into, which can legitimately be a stable, not the curve it launched on
+                # only v2 is checked: a v2 token's quote_token is fixed by its own create
+                # event, so it names the curve it launched on even after it migrates. v1 has
+                # no quote on its create event and always launches in mon, so a non-mon quote
+                # on a v1 token was filled in from the stable pool it graduated into
                 return
 
             open_native = lp.last_price_native
