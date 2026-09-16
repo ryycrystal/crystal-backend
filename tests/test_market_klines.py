@@ -39,7 +39,7 @@ def test_payload_carries_the_fields_the_chart_reads(monkeypatch):
         "quoteVolume": "6789",
     }
     monkeypatch.setattr(ob, "_ensure_fresh", lambda: None)
-    monkeypatch.setattr(ob.storage, "market_klines", lambda m, r, lim: [row])
+    monkeypatch.setattr(ob.storage, "market_klines", lambda m, r, lim, before=0: [row])
     monkeypatch.setattr(ob.storage, "get_last_processed_block", lambda: 123)
 
     out = ob.market_klines(MARKET.upper(), res=60, limit=10)
@@ -54,7 +54,7 @@ def test_payload_carries_the_fields_the_chart_reads(monkeypatch):
 def test_limit_is_clamped_before_hitting_storage(monkeypatch):
     seen = {}
 
-    def fake(m, r, lim):
+    def fake(m, r, lim, before=0):
         seen["lim"] = lim
         return []
 
@@ -68,3 +68,35 @@ def test_limit_is_clamped_before_hitting_storage(monkeypatch):
     assert seen["lim"] == 3000
     ob.market_klines(MARKET, res=60, limit=-5)
     assert seen["lim"] == 1
+
+
+def test_before_ts_is_passed_through_so_the_chart_can_page_backwards(monkeypatch):
+    seen = {}
+
+    def fake(m, r, lim, before=0):
+        seen.update(market=m, res=r, limit=lim, before=before)
+        return []
+
+    monkeypatch.setattr(ob, "_ensure_fresh", lambda: None)
+    monkeypatch.setattr(ob.storage, "market_klines", fake)
+    monkeypatch.setattr(ob.storage, "get_last_processed_block", lambda: 1)
+
+    out = ob.market_klines(MARKET, res=60, limit=500, before_ts=1700000000)
+    assert seen["before"] == 1700000000
+    assert out["beforeTs"] == 1700000000
+
+
+def test_omitting_before_ts_still_returns_the_newest_page(monkeypatch):
+    seen = {}
+
+    def fake(m, r, lim, before=0):
+        seen["before"] = before
+        return []
+
+    monkeypatch.setattr(ob, "_ensure_fresh", lambda: None)
+    monkeypatch.setattr(ob.storage, "market_klines", fake)
+    monkeypatch.setattr(ob.storage, "get_last_processed_block", lambda: 1)
+
+    out = ob.market_klines(MARKET, res=60)
+    assert seen["before"] == 0
+    assert out["beforeTs"] == 0
