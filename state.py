@@ -1111,6 +1111,13 @@ class State:
                     return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
+            if (
+                lp.source in nadfun_geo.SOURCES
+                and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES
+            ):
+                # the creation guard only stops new tokens. one loaded before it shipped is
+                # still in memory, and a trade on it would write flows the fold re-projects
+                return
 
             open_native = lp.last_price_native
             if is_pool_swap and price_native <= 0:
