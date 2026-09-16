@@ -9,7 +9,11 @@ prod. Deeper docs: `README.md` (operator guide), `ARCHITECTURE.md`, `STARTUP_MOD
 
 ## Current state snapshot (2026-09-02, update me when it changes)
 
-- 2026-09-14 (latest): both apps run `f57f103` (indexer revision 0000178, api revision 0000248),
+- 2026-09-14 (latest): both apps run `c051b74` (indexer revision 0000179, api revision 0000249), rolled
+  by hand after fast-forwarding `main` to it and built from a clean worktree: a stored candle opens at
+  the price before its first trade, and a nad.fun token's launch price comes from its own CurveCreate
+  event (see the OHLCV section). Candles written before this deploy are unchanged, by decision.
+- 2026-09-14: both apps run `f57f103` (indexer revision 0000178, api revision 0000248),
   rolled by hand after PR #11: the spot graph tries its archive node and then the app's nodes, sends a
   one-bucket group as a single request, lowers `spot_graph_floor` when a fill writes below it, and
   `core/rpc.py` names nodes by host only. `crystal-api` now carries the plain env values
@@ -78,6 +82,23 @@ may still answer; it is stale and misleading, never use it.
 ---
 
 ## Watched contract addresses — the failure mode that keeps recurring
+
+**2026-09-16 migration: there are no generations any more.** The crystal core and the
+vault factory were both redeployed for the vault launch and the old addresses were
+deleted outright, not kept alongside. `VAULT_FACTORY_ADDRS` is now a single-entry list
+and the three retired factories (`0x2388208c`, `0xe35937f2`, `0x3dbf7da6`) are
+explicitly rejected, pinned by `tests/test_vault_factory_generations.py`. If a retired
+factory still holds user funds, its events are no longer indexed — that was a deliberate
+call, not an oversight.
+Current: core `0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97`, factory
+`0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b`. nad.fun, the referral manager and the
+Uniswap V4 pool manager were untouched.
+Markets are never configured by address — they are discovered from the core's `MC`
+(MarketCreated) event, so getting the core address right is what matters.
+Tests that assert a committed default must clear the address env vars and reload
+`core.chain`; a local `.env` pointing at dry-run contracts otherwise masks the default
+and the test passes in CI while failing on the machine that wrote it.
+
 
 **A wrong or incomplete watched-contract address fails silently, and fixing the code does
 not repair history.** Blocks are processed exactly once. If the indexer was not watching an
