@@ -1113,10 +1113,13 @@ class State:
                 lp.quote_token = pi.native_addr or WMON
             if (
                 lp.source in nadfun_geo.SOURCES
+                and not lp.migrated
                 and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES
             ):
                 # the creation guard only stops new tokens. one loaded before it shipped is
-                # still in memory, and a trade on it would write flows the fold re-projects
+                # still in memory, and a trade on it would write flows the fold re-projects.
+                # a migrated token is exempt: its quote_token names the pool it graduated
+                # into, which can legitimately be a stable, not the curve it launched on
                 return
 
             open_native = lp.last_price_native

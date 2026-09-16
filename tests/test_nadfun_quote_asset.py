@@ -111,3 +111,13 @@ def test_a_trade_on_a_mon_token_proceeds_past_the_guard(monkeypatch):
     s = _trade_state(st.WMON)
     s.launchpad_tokens[TOKEN].last_price_native = __import__("decimal").Decimal(0)
     assert _run_trade(s) > 0
+
+
+def test_a_migrated_token_in_a_stable_pool_is_not_mistaken_for_a_non_mon_launch(monkeypatch):
+    # quote_token on a graduated token names its pool, so a mon-launched token that
+    # graduated into a usdc pool must keep pricing rather than be skipped
+    monkeypatch.setattr(st.storage, "trade_exists", lambda *a, **k: False)
+    s = _trade_state(USDC)
+    s.launchpad_tokens[TOKEN].migrated = True
+    s.launchpad_tokens[TOKEN].last_price_native = __import__("decimal").Decimal(0)
+    assert _run_trade(s) > 0
