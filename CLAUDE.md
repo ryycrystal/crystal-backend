@@ -83,6 +83,23 @@ may still answer; it is stale and misleading, never use it.
 
 ## Watched contract addresses — the failure mode that keeps recurring
 
+**2026-09-16 migration: there are no generations any more.** The crystal core and the
+vault factory were both redeployed for the vault launch and the old addresses were
+deleted outright, not kept alongside. `VAULT_FACTORY_ADDRS` is now a single-entry list
+and the three retired factories (`0x2388208c`, `0xe35937f2`, `0x3dbf7da6`) are
+explicitly rejected, pinned by `tests/test_vault_factory_generations.py`. If a retired
+factory still holds user funds, its events are no longer indexed — that was a deliberate
+call, not an oversight.
+Current: core `0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97`, factory
+`0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b`. nad.fun, the referral manager and the
+Uniswap V4 pool manager were untouched.
+Markets are never configured by address — they are discovered from the core's `MC`
+(MarketCreated) event, so getting the core address right is what matters.
+Tests that assert a committed default must clear the address env vars and reload
+`core.chain`; a local `.env` pointing at dry-run contracts otherwise masks the default
+and the test passes in CI while failing on the machine that wrote it.
+
+
 **A wrong or incomplete watched-contract address fails silently, and fixing the code does
 not repair history.** Blocks are processed exactly once. If the indexer was not watching an
 address when its events went by, those events are gone from the derived tables forever —
