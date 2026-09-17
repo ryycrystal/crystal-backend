@@ -69,6 +69,7 @@ def rewards_status() -> dict[str, Any]:
         "ok": True,
         "now": now,
         "programStart": start,
+        "firstClose": rewards.first_close_ts(start),
         "vaultStart": rewards.vault_start_ts(),
         "predepositStart": rewards.predeposit_start_ts(),
         "predepositCutoff": rewards.predeposit_cutoff_ts(),
@@ -311,6 +312,7 @@ def rewards_config(req: Request) -> dict[str, Any]:
         "predepositCutoff": rewards.predeposit_cutoff_ts(),
         "vaultStart": rewards.vault_start_ts(),
         "programStart": rewards.program_start_ts(),
+        "firstClose": rewards.first_close_ts(),
         "campaigns": campaigns,
     }
 

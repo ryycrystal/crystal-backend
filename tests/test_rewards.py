@@ -1033,3 +1033,116 @@ def test_unlisted_vault_gets_no_predeposit_boost(_clean_rewards):
     storage.add_predeposit_vaults([VAULT])
     assert rewards.accrue_vaults(now_ts=vault_start + 7210) == 1
     assert _contrib(U1)["points"] == pytest.approx(50.0 + 150.0)
+
+
+START_0700 = int(datetime(2026, 9, 16, 7, 0, tzinfo=LA).timestamp())
+SEPT23 = int(datetime(2026, 9, 23, 0, 0, tzinfo=LA).timestamp())
+SEPT30 = int(datetime(2026, 9, 30, 0, 0, tzinfo=LA).timestamp())
+OCT7 = int(datetime(2026, 10, 7, 0, 0, tzinfo=LA).timestamp())
+
+
+def _arm_close(close_ts: int, idx: int) -> None:
+    storage.set_meta("rewards_wm_vault_hour", str(close_ts))
+    _seed_launchpad_trade(idx, TOK_A, "0x" + f"{idx:02x}" * 20, close_ts + 5, 0.0)
+    storage.set_meta("rewards_wm_launchpad", "999999")
+
+
+def _paid_wallets(week_start: int) -> dict[str, float]:
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "SELECT wallet, crystals FROM crystal_rewards_distributions WHERE week_start = %s",
+            (week_start,),
+        )
+        return {w: float(c) for w, c in cur.fetchall()}
+
+
+def test_first_close_defaults_to_the_end_of_the_starting_week(_clean_rewards):
+    rewards = _clean_rewards
+    assert rewards.first_close_ts() == rewards.week_end_for(WEEK1) == SEPT23
+    storage.set_meta("rewards_program_start", str(START_0700))
+    assert rewards.first_close_ts() == SEPT23
+    assert rewards.bucket_end(START_0700) == SEPT23
+
+
+def test_first_close_can_be_pushed_to_a_later_wednesday(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    assert rewards.first_close_ts() == SEPT30
+    assert rewards.bucket_for(START_0700 + 86400, START_0700) == START_0700
+    assert rewards.bucket_for(SEPT23 + 2 * 86400, START_0700) == START_0700, "the week after 9/23 must roll in"
+    assert rewards.bucket_end(START_0700) == SEPT30
+    assert rewards.bucket_for(SEPT30 + 10, START_0700) == SEPT30
+    assert rewards.bucket_end(SEPT30) == OCT7
+
+
+def test_first_close_ignores_a_value_that_is_not_a_later_wednesday(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    monday = int(datetime(2026, 9, 28, 0, 0, tzinfo=LA).timestamp())
+    earlier_wednesday = int(datetime(2026, 9, 9, 0, 0, tzinfo=LA).timestamp())
+    for bad in (monday, earlier_wednesday, SEPT30 + 3600, "junk"):
+        storage.set_meta("rewards_first_close", str(bad))
+        assert rewards.first_close_ts() == SEPT23, bad
+
+
+def test_without_the_setting_the_short_first_week_pays_on_9_23(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(71, TOK_A, U1, START_0700 + 86400, 100.0)
+    assert rewards.accrue_launchpad() == 1
+    _arm_close(SEPT23, 72)
+    assert rewards.close_due_weeks(now_ts=SEPT23 + 100) == [START_0700]
+    assert set(_paid_wallets(START_0700)) == {U1}
+
+
+def test_first_close_on_9_30_pays_nothing_on_9_23_and_one_week_on_9_30(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(81, TOK_A, U1, START_0700 + 86400, 100.0)
+    _seed_launchpad_trade(82, TOK_A, U2, SEPT23 + 2 * 86400, 300.0)
+    assert rewards.accrue_launchpad() == 2
+    assert _contrib(U1, START_0700) is not None
+    assert _contrib(U2, START_0700) is not None, "a trade after 9/23 must file under the first week"
+
+    _arm_close(SEPT23, 83)
+    assert rewards.close_due_weeks(now_ts=SEPT23 + 100) == [], "nothing may close or pay on 9/23"
+    assert _paid_wallets(START_0700) == {}
+
+    _arm_close(SEPT30, 84)
+    assert rewards.close_due_weeks(now_ts=SEPT30 + 100) == [START_0700]
+    paid = _paid_wallets(START_0700)
+    assert set(paid) == {U1, U2}, "both sides of 9/23 are paid in the one first-week close"
+    assert sum(paid.values()) == pytest.approx(rewards.pool_size(), rel=1e-9)
+
+
+def test_points_already_filed_under_the_start_week_are_paid_on_the_later_close(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    with storage.db_cursor() as cur:
+        storage.add_rewards_contrib(cur, START_0700, U1, START_0700 + 3600, points=500)
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    _seed_token(TOK_A, None)
+    _arm_close(SEPT23, 93)
+    assert rewards.close_due_weeks(now_ts=SEPT23 + 100) == []
+    _arm_close(SEPT30, 94)
+    assert rewards.close_due_weeks(now_ts=SEPT30 + 100) == [START_0700]
+    assert set(_paid_wallets(START_0700)) == {U1}, "rows accrued before the change must not be orphaned"
+
+
+def test_weeks_after_a_pushed_first_close_run_on_the_normal_cadence(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(61, TOK_A, U1, START_0700 + 86400, 100.0)
+    _seed_launchpad_trade(62, TOK_A, U2, SEPT30 + 86400, 100.0)
+    assert rewards.accrue_launchpad() == 2
+    assert _contrib(U2, SEPT30) is not None
+    _arm_close(OCT7, 63)
+    assert rewards.close_due_weeks(now_ts=OCT7 + 100) == [START_0700, SEPT30]
+    assert set(_paid_wallets(START_0700)) == {U1}
+    assert set(_paid_wallets(SEPT30)) == {U2}
