@@ -11,7 +11,6 @@ SOURCE_V1 = 1
 SOURCE_V2 = 2
 SOURCES = (SOURCE_V1, SOURCE_V2)
 
-V1_VIRTUAL_NATIVE_0 = 90_000 * WAD
 V1_VIRTUAL_TOKEN_0 = 1_073_000_191 * WAD
 V1_GRADUATION_VIRTUAL_TOKEN = 279_900_191 * WAD
 V1_CURVE_SUPPLY = V1_VIRTUAL_TOKEN_0 - V1_GRADUATION_VIRTUAL_TOKEN
@@ -28,13 +27,11 @@ V2_FEE_RATE = Decimal("0.02")
 
 _GEOMETRY = {
     SOURCE_V1: {
-        "virtual_native_0": V1_VIRTUAL_NATIVE_0,
         "virtual_token_0": V1_VIRTUAL_TOKEN_0,
         "curve_supply": V1_CURVE_SUPPLY,
         "fee_rate": V1_FEE_RATE,
     },
     SOURCE_V2: {
-        "virtual_native_0": V2_VIRTUAL_NATIVE_0,
         "virtual_token_0": V2_VIRTUAL_TOKEN_0,
         "curve_supply": V2_CURVE_SUPPLY,
         "fee_rate": V2_FEE_RATE,
@@ -70,7 +67,6 @@ class NadfunLaunchpadAdapter:
         geo = _GEOMETRY[int(source)]
         self.source = int(source)
         self.name = f"nadfun-v{source}"
-        self.virtual_native_0 = int(geo["virtual_native_0"])
         self.virtual_token_0 = int(geo["virtual_token_0"])
         self.curve_supply = int(geo["curve_supply"])
         self.fee_rate = geo["fee_rate"]
@@ -94,8 +90,8 @@ class NadfunLaunchpadAdapter:
             token_reserve=token_reserve,
         )
 
-    def initial_price_native(self) -> Decimal:
-        return Decimal(self.virtual_native_0) / Decimal(self.virtual_token_0)
+    def initial_price_native(self) -> None:
+        return None
 
     def graduates_to_market(self) -> bool:
         return False

@@ -194,11 +194,9 @@ def test_nadfun_geometry_matches_chain_verified_constants():
     """Recovered from CurveSync logs on graduated tokens. The k values reproduce
     exactly, which is what confirms them for those tokens. Tokens created on the v1
     emitter since then launch at 180,000 virtual MON (Monallions' CurveCreate, block
-    104,653,894), so a token's launch price comes from its own create event and these
-    constants are only the fallback."""
+    104,653,894), so a token's launch price comes from its own create event."""
     from core.adapters import nadfun as nf
 
-    assert nf.V1_VIRTUAL_NATIVE_0 == 90_000 * 10**18
     assert nf.V1_VIRTUAL_TOKEN_0 == 1_073_000_191 * 10**18
     assert nf.V1_CURVE_SUPPLY // 10**18 == 793_100_000
 
@@ -287,9 +285,7 @@ def test_nadfun_adapter_derives_supply_from_reserves():
         a = nf.NadfunLaunchpadAdapter(src)
         geo = nf.geometry_for(src)
 
-        at_creation = a.curve_state(
-            {"token_reserve": geo["virtual_token_0"], "native_reserve": geo["virtual_native_0"]}
-        )
+        at_creation = a.curve_state({"token_reserve": geo["virtual_token_0"], "native_reserve": 1})
         assert at_creation.tokens_sold == 0
         assert at_creation.progress_bps == 0
 
@@ -320,17 +316,11 @@ def test_nadfun_adapter_refuses_to_invent_a_curve_without_reserves():
     assert a.curve_state({"token_reserve": nf.V2_VIRTUAL_TOKEN_0 * 3}) is None
 
 
-def test_v1_adapter_reproduces_the_old_hardcoded_initial_price():
-    """state.py carried Decimal("0.00008387696") for every nad.fun token. It was
-    v1's 90,000/1,073,000,191 all along, and it is what broke change_pct."""
-    from decimal import Decimal
-
+def test_no_nadfun_adapter_invents_a_launch_price():
     from core.adapters import nadfun as nf
 
-    price = nf.NadfunLaunchpadAdapter(nf.SOURCE_V1).initial_price_native()
-    assert abs(price - Decimal("0.00008387696")) < Decimal("1e-11")
-
-    assert nf.NadfunLaunchpadAdapter(nf.SOURCE_V2).initial_price_native() != price
+    for src in nf.SOURCES:
+        assert nf.NadfunLaunchpadAdapter(src).initial_price_native() is None
 
 
 def test_fee_rates_match_what_the_chain_charges():
