@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
-from eth_utils import keccak  # noqa: E402
+from Crypto.Hash import keccak  # noqa: E402
 
 from modules import protocol as proto  # noqa: E402
 
@@ -17,7 +17,7 @@ def _hex(words):
 
 
 def test_topic_is_the_contract_event_signature():
-    assert proto.LAUNCHPAD_PARAMS_TOPIC == "0x" + keccak(text=SIGNATURE).hex()
+    assert proto.LAUNCHPAD_PARAMS_TOPIC == "0x" + keccak.new(digest_bits=256, data=SIGNATURE.encode()).hexdigest()
 
 
 def test_layout_matches_the_solidity_struct_order():
