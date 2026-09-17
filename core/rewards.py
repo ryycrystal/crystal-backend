@@ -196,12 +196,32 @@ def week_end_for(week_start: int) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=LA).timestamp())
 
 
-def bucket_for(ts: int, main_start: int) -> int:
+def first_close_ts(main_start: int | None = None) -> int:
+    start = program_start_ts() if main_start is None else main_start
+    natural = week_end_for(week_start_for(start))
+    raw = storage.get_meta("rewards_first_close")
+    if raw:
+        try:
+            value = int(float(raw))
+        except Exception:
+            return natural
+        if value >= natural and value == week_start_for(value):
+            return value
+    return natural
+
+
+def bucket_for(ts: int, main_start: int, first_close: int | None = None) -> int:
+    close = first_close_ts(main_start) if first_close is None else first_close
+    if ts < close:
+        return main_start
     ws = week_start_for(ts)
     return ws if ws >= main_start else main_start
 
 
-def bucket_end(bucket: int) -> int:
+def bucket_end(bucket: int, main_start: int | None = None, first_close: int | None = None) -> int:
+    start = program_start_ts() if main_start is None else main_start
+    if bucket == start:
+        return first_close_ts(start) if first_close is None else first_close
     return week_end_for(week_start_for(bucket))
 
 
@@ -292,6 +312,7 @@ def _is_stable_market(meta: dict, stables: set[str]) -> bool:
 
 def accrue_launchpad(guard=None) -> int:
     start_ts = program_start_ts()
+    first_close = first_close_ts(start_ts)
     r = rates()
     processed = 0
     while True:
@@ -328,7 +349,7 @@ def accrue_launchpad(guard=None) -> int:
                     continue
                 storage.add_rewards_contrib(
                     cur,
-                    bucket_for(ts, start_ts),
+                    bucket_for(ts, start_ts, first_close),
                     user,
                     now_ts,
                     pregrad_usd=usd,
@@ -350,6 +371,7 @@ def _parse_keyset(raw: str) -> tuple[int, str, int]:
 
 def accrue_spot_takers(guard=None) -> int:
     start_ts = program_start_ts()
+    first_close = first_close_ts(start_ts)
     r = rates()
     processed = 0
     while True:
@@ -411,7 +433,7 @@ def accrue_spot_takers(guard=None) -> int:
                 field = "stable_taker_usd" if stable else "spot_taker_usd"
                 storage.add_rewards_contrib(
                     cur,
-                    bucket_for(ts, start_ts),
+                    bucket_for(ts, start_ts, first_close),
                     user,
                     now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
@@ -425,6 +447,7 @@ def accrue_spot_takers(guard=None) -> int:
 
 def accrue_spot_makers(guard=None) -> int:
     start_ts = program_start_ts()
+    first_close = first_close_ts(start_ts)
     r = rates()
     processed = 0
     while True:
@@ -484,7 +507,7 @@ def accrue_spot_makers(guard=None) -> int:
                 field = "stable_maker_usd" if stable else "spot_maker_usd"
                 storage.add_rewards_contrib(
                     cur,
-                    bucket_for(ts, start_ts),
+                    bucket_for(ts, start_ts, first_close),
                     maker,
                     now_ts,
                     **{field: usd, "points": usd * Decimal(str(rate))},
@@ -506,6 +529,7 @@ def _campaign_multiplier(campaigns, vault: str, ts: int) -> Decimal:
 
 def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
     main_start = program_start_ts()
+    first_close = first_close_ts(main_start)
     start_ts = min(vault_start_ts(), main_start)
     cutoff = predeposit_cutoff_ts()
     pd_start = predeposit_start_ts()
@@ -588,7 +612,7 @@ def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
                     vl = str(v).lower()
                     supply[vl] = supply.get(vl, Decimal(0)) + Decimal(int(sh))
                     holder_count[vl] = holder_count.get(vl, 0) + 1
-                ws = bucket_for(hour - 1, main_start)
+                ws = bucket_for(hour - 1, main_start, first_close)
                 # a vault holding shares that cannot be valued this hour earns nothing
                 # for everyone in it, and nothing downstream would ever say so. record
                 # the hour so the close can refuse to bake a sampling outage into
@@ -856,15 +880,16 @@ def close_due_weeks(now_ts: int | None = None) -> list[int]:
     start = program_start_ts()
     if now_ts <= start:
         return []
+    first_close = first_close_ts(start)
     closed: list[int] = []
     ws = start
-    while bucket_end(ws) <= now_ts:
+    while bucket_end(ws, start, first_close) <= now_ts:
         closed_one = _close_week(ws, now_ts)
         if closed_one is None:
             break
         if closed_one:
             closed.append(ws)
-        ws = bucket_end(ws)
+        ws = bucket_end(ws, start, first_close)
     return closed
 
 
