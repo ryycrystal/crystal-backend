@@ -19,6 +19,13 @@ GEN_SUPPLIES = {
     2: (INITIAL_TOKEN_SUPPLY + VIRTUAL_TOKEN_SUPPLY, GRADUATED_TOKEN_SUPPLY + VIRTUAL_TOKEN_SUPPLY),
 }
 
+VIRTUAL_NATIVE_SUPPLY = 200_000 * 10**18
+
+GEN_VIRTUAL_NATIVE = {
+    1: 0,
+    2: VIRTUAL_NATIVE_SUPPLY,
+}
+
 
 def launchpad_generation() -> int:
     try:
@@ -60,13 +67,15 @@ class NativeLaunchpadAdapter:
         )
 
     def initial_price_native(self) -> Decimal | None:
+        v0 = 0
         fn = self._initial_native_supply_fn
-        if fn is None:
-            return None
-        try:
-            v0 = int(fn() or 0)
-        except Exception:
-            return None
+        if fn is not None:
+            try:
+                v0 = int(fn() or 0)
+            except Exception:
+                v0 = 0
+        if v0 <= 0:
+            v0 = GEN_VIRTUAL_NATIVE[launchpad_generation()]
         if v0 <= 0:
             return None
         initial_curve_supply, _ = self._supplies()

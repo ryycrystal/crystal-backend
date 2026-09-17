@@ -95,3 +95,50 @@ def test_curve_state_still_rejects_an_absurd_reserve(monkeypatch):
     monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
     assert adapter().curve_state({"token_reserve": IC * 3, "native_reserve": N0}) is None
     assert adapter().curve_state({"token_reserve": 0, "native_reserve": N0}) is None
+
+
+def test_gen2_virtual_native_supply_is_200k_mon():
+    assert native.VIRTUAL_NATIVE_SUPPLY == 200_000 * 10**18
+    assert native.GEN_VIRTUAL_NATIVE[2] == native.VIRTUAL_NATIVE_SUPPLY
+    assert native.GEN_VIRTUAL_NATIVE[1] == 0
+
+
+def test_gen2_launch_price_uses_virtual_supply_on_both_sides_when_the_fetch_reads_zero(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    expected = Decimal(native.VIRTUAL_NATIVE_SUPPLY) / Decimal(IC)
+    assert native.NativeLaunchpadAdapter(lambda: 0).initial_price_native() == expected
+    assert native.NativeLaunchpadAdapter().initial_price_native() == expected
+    assert (
+        native.NativeLaunchpadAdapter(lambda: (_ for _ in ()).throw(RuntimeError())).initial_price_native() == expected
+    )
+
+
+def test_gen2_launch_price_is_never_the_model_placeholder(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    price = native.NativeLaunchpadAdapter(lambda: 0).initial_price_native()
+    assert price is not None and price > Decimal("0.000001") * 100
+
+
+def test_gen2_launch_price_matches_reserves_backed_out_of_real_first_buys(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    price = native.NativeLaunchpadAdapter(lambda: 0).initial_price_native()
+    for spent_mon, got_tokens, post_price in (
+        (8_000, 40_631_012, Decimal("0.000202644030000000")),
+        (223, 1_176_142, Decimal("0.000187914172215904")),
+    ):
+        net_in = Decimal(spent_mon * 10**18) * Decimal("0.99")
+        token_after = Decimal(IC) - Decimal(got_tokens * 10**18)
+        native_before = post_price * token_after - net_in
+        assert abs(native_before / Decimal(IC) - price) / price < Decimal("0.0001")
+
+
+def test_gen2_prefers_a_real_fetched_supply_over_the_constant(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "2")
+    fetched = 250_000 * 10**18
+    assert native.NativeLaunchpadAdapter(lambda: fetched).initial_price_native() == Decimal(fetched) / Decimal(IC)
+
+
+def test_gen1_still_returns_none_when_the_fetch_reads_zero(monkeypatch):
+    monkeypatch.setenv("CRYSTAL_LAUNCHPAD_GEN", "1")
+    assert native.NativeLaunchpadAdapter(lambda: 0).initial_price_native() is None
+    assert native.NativeLaunchpadAdapter().initial_price_native() is None
