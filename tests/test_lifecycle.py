@@ -6,8 +6,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.adapters.native import (
     CURVE_SUPPLY,
+    GRADUATED_CURVE_SUPPLY,
     GRADUATED_TOKEN_SUPPLY,
+    INITIAL_CURVE_SUPPLY,
     INITIAL_TOKEN_SUPPLY,
+    VIRTUAL_NATIVE_SUPPLY,
     NativeLaunchpadAdapter,
 )
 from core.lifecycle import (
@@ -76,19 +79,19 @@ def test_native_geometry_matches_the_contract():
 
 def test_native_adapter_normalizes_reserves():
     a = NativeLaunchpadAdapter()
-    v0 = 1000 * 10**18
-    k = v0 * INITIAL_TOKEN_SUPPLY
+    v0 = VIRTUAL_NATIVE_SUPPLY
+    k = v0 * INITIAL_CURVE_SUPPLY
 
-    st = a.curve_state({"native_reserve": v0, "token_reserve": INITIAL_TOKEN_SUPPLY})
+    st = a.curve_state({"native_reserve": v0, "token_reserve": INITIAL_CURVE_SUPPLY})
     assert st.tokens_sold == 0
     assert st.progress_bps == 0
 
-    st = a.curve_state({"native_reserve": 5 * v0, "token_reserve": GRADUATED_TOKEN_SUPPLY})
+    st = a.curve_state({"native_reserve": 4 * v0, "token_reserve": GRADUATED_CURVE_SUPPLY})
     assert st.tokens_sold == CURVE_SUPPLY
     assert st.is_complete is True
     assert st.progress_bps == BPS_DENOMINATOR
 
-    tr = INITIAL_TOKEN_SUPPLY - (CURVE_SUPPLY * 3 // 4)
+    tr = INITIAL_CURVE_SUPPLY - (CURVE_SUPPLY * 3 // 4)
     st = a.curve_state({"native_reserve": k // tr, "token_reserve": tr})
     assert st.tokens_sold == 600_000_000 * 10**18
     assert st.is_graduating is True
@@ -98,25 +101,26 @@ def test_native_adapter_rejects_unusable_events():
     a = NativeLaunchpadAdapter()
     assert a.curve_state({}) is None
     assert a.curve_state({"token_reserve": 0}) is None
-    assert a.curve_state({"token_reserve": INITIAL_TOKEN_SUPPLY + 1}).tokens_sold == 0
-    assert a.curve_state({"token_reserve": INITIAL_TOKEN_SUPPLY * 3}) is None
+    assert a.curve_state({"token_reserve": INITIAL_CURVE_SUPPLY + 1}).tokens_sold == 0
+    assert a.curve_state({"token_reserve": INITIAL_CURVE_SUPPLY * 3}) is None
     assert a.curve_state({"token_reserve": "junk"}) is None
 
 
 def test_native_adapter_initial_price_and_routing():
     a = NativeLaunchpadAdapter(lambda: 141_600 * 10**18)
-    assert a.initial_price_native() == Decimal(141_600 * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY)
+    assert a.initial_price_native() == Decimal(141_600 * 10**18) / Decimal(INITIAL_CURVE_SUPPLY)
     assert a.graduates_to_market() is True
 
-    assert NativeLaunchpadAdapter(lambda: 0).initial_price_native() is None
-    assert NativeLaunchpadAdapter().initial_price_native() is None
+    launch = Decimal(VIRTUAL_NATIVE_SUPPLY) / Decimal(INITIAL_CURVE_SUPPLY)
+    assert NativeLaunchpadAdapter(lambda: 0).initial_price_native() == launch
+    assert NativeLaunchpadAdapter().initial_price_native() == launch
 
 
 def test_native_geometry_helpers_recover_v0_and_threshold():
     v0 = 49_300 * 10**18
-    k = v0 * INITIAL_TOKEN_SUPPLY
+    k = v0 * INITIAL_CURVE_SUPPLY
     assert NativeLaunchpadAdapter.initial_native_reserve(k) == v0
-    assert NativeLaunchpadAdapter.graduation_native_reserve(k) == 5 * v0
+    assert abs(NativeLaunchpadAdapter.graduation_native_reserve(k) - 4 * v0) <= 1
 
 
 def test_api_lifecycle_fields_map_each_phase():

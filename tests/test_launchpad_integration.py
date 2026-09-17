@@ -38,11 +38,10 @@ USER = "0x1234567890abcdef1234567890abcdef12345678"
 MARKET = "0x975c4885538ba5072c66f48d4c4c7253e388c3e0"
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
-INITIAL_TOKEN_SUPPLY = 10**27
-GRADUATED_TOKEN_SUPPLY = 2 * 10**26
-CURVE_SUPPLY = INITIAL_TOKEN_SUPPLY - GRADUATED_TOKEN_SUPPLY
+from core.adapters.native import INITIAL_CURVE_SUPPLY  # noqa: E402
+
 V0 = 1000 * 10**18
-K = V0 * INITIAL_TOKEN_SUPPLY
+K = V0 * INITIAL_CURVE_SUPPLY
 
 LAUNCHPAD_TABLES = (
     "launchpad_trades",
@@ -147,6 +146,10 @@ def _lt_data(is_buy, amount_in, amount_out, native_reserve, token_reserve) -> st
 
 def _reserve_for(native_reserve: int) -> int:
     return (K + native_reserve - 1) // native_reserve
+
+
+def _native_reserve_for_sold(tokens_sold: int) -> int:
+    return -(-K // (INITIAL_CURVE_SUPPLY - tokens_sold))
 
 
 def _router():
@@ -397,7 +400,7 @@ def test_multiple_tokens_do_not_cross_contaminate(db):
     _create(st, token=TOKEN, name="A", symbol="A")
     _create(st, token=TOKEN_B, name="B", symbol="B")
 
-    _trade(st, token=TOKEN, native_reserve=2500 * 10**18, txh="0xa", log_idx=0)
+    _trade(st, token=TOKEN, native_reserve=_native_reserve_for_sold(600_000_000 * 10**18), txh="0xa", log_idx=0)
     _trade(st, token=TOKEN_B, native_reserve=1500 * 10**18, txh="0xb", log_idx=0)
 
     a = _token_row(db, TOKEN)

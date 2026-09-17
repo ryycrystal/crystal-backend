@@ -2,10 +2,11 @@ from __future__ import annotations
 
 BALANCE_DEPOSIT_TOPIC = "0xd2f8022f659fd9c8c558f30c00fd5ee7038f7cb56da45095c3e0e7d48b3e0c4b"
 BALANCE_WITHDRAW_TOPIC = "0x457f950b75085c30ff780acd57bde642ff1316cc4aad9f286af2c1ffc4163a78"
-LAUNCHPAD_PARAMS_TOPIC = "0x5d2f0c0dd6d77e3386b737e8b626250fe38b8f1afdad9554151797d97496a80a"
+LAUNCHPAD_PARAMS_TOPIC = "0x5a4da743eddb52d9ad86c20ab85827160fbaad19abe30efd82105c07fd069632"
 GOV_CHANGED_TOPIC = "0x3d1e4c3a68fed9f4f8315582b7297cf8fa264bc8e6704287603ba8c72bf05ac2"
 
 LAUNCHPAD_PARAM_FIELDS = (
+    "is_token_creation_paused",
     "initial_native_supply",
     "launchpad_fee",
     "creator_fee_split",

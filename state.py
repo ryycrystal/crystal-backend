@@ -16,6 +16,7 @@ from core import chain as h
 from core import oracle, rpc, token_decimals
 from core.adapters import nadfun as nadfun_geo
 from core.adapters import native as native_adapter_mod
+from modules.protocol import LAUNCHPAD_PARAM_FIELDS
 
 getcontext().prec = 100
 
@@ -124,8 +125,9 @@ def _fetch_launchpad_initial_native_supply() -> int:
     value = 0
     try:
         res = _eth_call(h.CONTRACTS.get("ROUTER", ""), _LAUNCHPAD_PARAMS_SELECTOR)
-        if isinstance(res, str) and res.startswith("0x") and len(res) >= 66:
-            value = int(res[2:66], 16)
+        start = 2 + 64 * LAUNCHPAD_PARAM_FIELDS.index("initial_native_supply")
+        if isinstance(res, str) and res.startswith("0x") and len(res) >= start + 64:
+            value = int(res[start : start + 64], 16)
     except Exception:
         value = 0
     if value > 0:
