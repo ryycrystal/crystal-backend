@@ -868,6 +868,11 @@ class State:
                     initial_price = adapter.initial_price_native() or Decimal(0)
                 if initial_price > 0:
                     lp.last_price_native = initial_price
+                elif source in nadfun_geo.SOURCES:
+                    print(
+                        f"[State] nad.fun create for {token} carried no curve reserves; launch price left unset",
+                        flush=True,
+                    )
 
             storage.upsert_token_created(
                 token=token,
