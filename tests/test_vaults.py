@@ -1550,17 +1550,17 @@ def test_vault_apy_pct_from_samples():
     day = 86400
     now = 2_100_000_000
     rows = [
-        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (1, now - 6 * day, 0, 0, 100.0, 1000),
         (2, now - day, 0, 0, 101.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
         with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(rows)):
             apy = vault_api._vault_apy_pct("0xv")
     assert apy is not None
-    assert abs(apy - ((1.01**365.0) - 1.0) * 100.0) < 1e-6
+    assert abs(apy - ((1.01 ** (365.0 / 5.0)) - 1.0) * 100.0) < 1e-6
 
     losing = [
-        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (1, now - 6 * day, 0, 0, 100.0, 1000),
         (2, now - day, 0, 0, 50.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
@@ -1570,7 +1570,7 @@ def test_vault_apy_pct_from_samples():
     assert -100.0 <= worst < 0.0
 
     mooning = [
-        (1, now - 2 * day, 0, 0, 100.0, 1000),
+        (1, now - 6 * day, 0, 0, 100.0, 1000),
         (2, now - day, 0, 0, 500.0, 1000),
     ]
     with patch.object(vault_api.time, "time", return_value=float(now)):
@@ -1580,6 +1580,43 @@ def test_vault_apy_pct_from_samples():
 
     with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows([rows[0]])):
         assert vault_api._vault_apy_pct("0xv") is None
+
+
+def test_vault_apy_short_window_reports_period_return_not_annualised():
+    now = 2_100_000_000
+    hours = 3600
+    young = [
+        (1, now - 15 * hours, 0, 0, 13248.0, 1000),
+        (2, now, 0, 0, 13248.0 * 1.00575, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(young)):
+            out = vault_api._vault_apy("0xv")
+    assert out is not None
+    pct, window, _basis, mode = out
+    assert mode == "period"
+    assert window == 15 * hours
+    assert abs(pct - 0.575) < 1e-9
+
+    grown = [
+        (1, now - vault_api.VAULT_APY_ANNUALIZE_MIN_SECS, 0, 0, 100.0, 1000),
+        (2, now, 0, 0, 101.0, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(grown)):
+            out = vault_api._vault_apy("0xv")
+    assert out is not None
+    pct, window, _basis, mode = out
+    assert mode == "apy"
+    assert abs(pct - ((1.01 ** (365.0 / 3.0)) - 1.0) * 100.0) < 1e-6
+
+    brief = [
+        (1, now - 2 * hours, 0, 0, 100.0, 1000),
+        (2, now, 0, 0, 101.0, 1000),
+    ]
+    with patch.object(vault_api.time, "time", return_value=float(now)):
+        with patch.object(vault_api.storage, "vault_sample_window_stats", return_value=_stats_from_rows(brief)):
+            assert vault_api._vault_apy("0xv") is None
 
 
 def test_vault_apy_strategy_basis_strips_price_moves():
@@ -1601,10 +1638,11 @@ def test_vault_apy_strategy_basis_strips_price_moves():
                     out = vault_api._vault_apy("0xv")
     vault_api._APY_META_CACHE.clear()
     assert out is not None
-    apy, window, basis = out
+    apy, window, basis, mode = out
     assert basis == "strategy"
     assert abs(apy) < 1e-9
     assert window == day
+    assert mode == "period"
 
 
 def test_vault_history_per_share_pnl_ignores_flows():
@@ -1697,6 +1735,7 @@ if __name__ == "__main__":
         test_avg_cost_from_flows_math,
         test_avg_cost_full_exit_is_exact,
         test_vault_apy_pct_from_samples,
+        test_vault_apy_short_window_reports_period_return_not_annualised,
         test_vault_history_per_share_pnl_ignores_flows,
         test_vault_history_legacy_rows_report_flat_pnl,
         test_vault_history_dollar_series_is_flow_invariant,

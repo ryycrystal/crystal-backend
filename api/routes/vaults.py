@@ -220,6 +220,11 @@ def _per_share_pnl_series(pts: list[dict], meta: tuple[int, int, bool] | None = 
 
 
 VAULT_APY_MIN_WINDOW_SECS = 6 * 3600
+# annualising raises the window's return to the power of 365d/window, so a vault
+# a few hours old turns half a percent of sampling noise into thousands of
+# percent. under this the endpoint reports the window's own return instead and
+# labels it "period" so the ui can stop calling it a yield
+VAULT_APY_ANNUALIZE_MIN_SECS = 3 * 86400
 # the summary used to return every sample in the window: tens of thousands of
 # points no client reads, since the chart pulls /history and the list carries its
 # own snapshot
@@ -249,7 +254,7 @@ def _vault_apy_meta(vault_addr: str) -> tuple[int, int, bool] | None:
     return meta
 
 
-def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str] | None:
+def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str, str] | None:
     now_ts = int(time.time())
     try:
         # only the earliest and latest priced sample feed this, so the window is
@@ -304,6 +309,11 @@ def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str] 
     ratio = last_vps / first_vps
     if ratio <= 0:
         return None
+    if window < VAULT_APY_ANNUALIZE_MIN_SECS:
+        pct = (ratio - 1.0) * 100.0
+        if not (pct == pct):
+            return None
+        return (pct, window, basis, "period")
     periods = 365.0 * 86400.0 / window
     try:
         apy = (ratio**periods - 1.0) * 100.0
@@ -312,7 +322,7 @@ def _vault_apy(vault_addr: str, window_days: int = 7) -> tuple[float, int, str] 
     if not (apy == apy):
         return None
     apy = min(apy, 100000.0)
-    return (apy, window, basis)
+    return (apy, window, basis, "apy")
 
 
 def _vault_apy_pct(vault_addr: str, window_days: int = 7) -> float | None:
@@ -643,6 +653,7 @@ def list_vaults(
                 "apyPct": row_apy[0] if row_apy else None,
                 "apyWindowSecs": row_apy[1] if row_apy else None,
                 "apyBasis": row_apy[2] if row_apy else None,
+                "apyMode": row_apy[3] if row_apy else None,
                 "latestBalance": {
                     "block": int(latest_block or 0),
                     "timestamp": int(latest_ts or 0),
@@ -936,14 +947,16 @@ def vault_user_summary(
     apy_pct = None
     apy_window_secs = None
     apy_basis = None
+    apy_mode = None
     try:
         apy_out = _vault_apy(vaddr)
         if apy_out:
-            apy_pct, apy_window_secs, apy_basis = apy_out
+            apy_pct, apy_window_secs, apy_basis, apy_mode = apy_out
     except Exception:
         apy_pct = None
         apy_window_secs = None
         apy_basis = None
+        apy_mode = None
 
     try:
         owner_row = storage.get_crystal_vault_user(vaddr, str(owner or "").lower())
@@ -981,6 +994,7 @@ def vault_user_summary(
         "apyPct": apy_pct,
         "apyWindowSecs": apy_window_secs,
         "apyBasis": apy_basis,
+        "apyMode": apy_mode,
         "userBalance": {
             "address": uaddr,
             "shares": u_shares,
