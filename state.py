@@ -28,6 +28,17 @@ WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 # a launchpad curve has to be quoted in mon for its prices, charts and pnl to mean
 # anything downstream. anything else, lvmon included, is skipped outright at discovery
 ACCEPTED_LAUNCHPAD_QUOTES = frozenset({WMON})
+_ZERO_ADDR = "0x" + "0" * 40
+
+
+def _quote_or_mon(quote: str | None) -> str:
+    """An empty or zero quote is an unanswered lookup, not a real asset. Reading it as mon keeps
+    the guard from dropping a legitimate token over an rpc blip or a curve not yet registered:
+    only a confirmed non-mon quote may skip a token."""
+    q = (quote or "").lower()
+    return WMON if not q or q == _ZERO_ADDR else q
+
+
 # an un-migrated token's curve is only its price while the curve is still trading. across
 # every un-migrated token with pool trades, curves split cleanly: live within 3 days of the
 # pool swap, or idle 7 days and more, with nothing between. a curve idle past this has
@@ -220,7 +231,7 @@ def _fetch_token_decimals(token: str) -> int | None:
 def _fetch_v2_quote_token(token: str) -> str:
     try:
         data = _GET_QUOTE_TOKEN_SELECTOR + _abi_addr_arg(token)
-        return _decode_abi_address(_eth_call(h.NADFUN_V2_ADDR, data)) or WMON
+        return _quote_or_mon(_decode_abi_address(_eth_call(h.NADFUN_V2_ADDR, data)))
     except Exception:
         return WMON
 
@@ -780,7 +791,7 @@ class State:
             social3 = ev.get("social3", "")
             social4 = ev.get("social4", "")
             source = int(ev.get("source", 0))
-            quote_token = (ev.get("quote_token") or WMON).lower()
+            quote_token = _quote_or_mon(ev.get("quote_token"))
 
             resolved = _source_for_emitter(src)
             if resolved is None:
@@ -1127,7 +1138,7 @@ class State:
                     return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
-            if lp.source == nadfun_geo.SOURCE_V2 and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES:
+            if lp.source == nadfun_geo.SOURCE_V2 and _quote_or_mon(lp.quote_token) not in ACCEPTED_LAUNCHPAD_QUOTES:
                 # the creation guard only stops new tokens. one loaded before it shipped is
                 # still in memory, and a trade on it would write flows the fold re-projects.
                 # only v2 is checked: a v2 token's quote_token is fixed by its own create

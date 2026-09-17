@@ -139,3 +139,37 @@ def test_a_migrated_v2_token_that_launched_off_mon_is_still_skipped(monkeypatch)
     s.launchpad_tokens[TOKEN].migrated = True
     s.launchpad_tokens[TOKEN].last_price_native = __import__("decimal").Decimal(0)
     assert _run_trade(s) == 0
+
+
+ZERO = "0x" + "0" * 40
+
+
+def test_a_zero_quote_lookup_is_unknown_rather_than_a_non_mon_quote(monkeypatch):
+    # nad.fun answers an unregistered token with the zero address instead of raising, and the
+    # guard read that as a confirmed non-mon quote. ci caught it through the preload test
+    monkeypatch.setattr(st, "_eth_call", lambda *a, **k: "0x" + "0" * 64)
+    assert st._fetch_v2_quote_token(TOKEN) == st.WMON
+
+
+def test_discovery_keeps_a_token_whose_quote_lookup_came_back_zero(monkeypatch):
+    s = object.__new__(st.State)
+    s._lock = __import__("threading").RLock()
+    s.launchpad_tokens = {}
+    monkeypatch.setattr(st, "_fetch_token_string", lambda *a, **k: "x")
+    monkeypatch.setattr(st, "_eth_call", lambda *a, **k: "0x" + "0" * 64)
+    try:
+        st.State.ensure_v2_launchpad_token(s, TOKEN, 1, 1)
+    except RuntimeError:
+        pass
+    assert TOKEN in s.launchpad_tokens, "a zero quote must not drop a legitimate token"
+
+
+def test_a_create_event_carrying_a_zero_quote_is_indexed(monkeypatch):
+    marked, _ = _apply(monkeypatch, ZERO)
+    assert marked == [TOKEN]
+
+
+def test_a_real_non_mon_quote_is_still_skipped_after_the_zero_fix(monkeypatch):
+    marked, tokens = _apply(monkeypatch, USDC)
+    assert marked == []
+    assert tokens == {}
