@@ -15,9 +15,15 @@ def _topics(topic, *rest):
 
 
 def test_every_contract_event_is_registered_with_a_parser():
-    for tag in ("IBD", "IBW", "LPC", "GOV"):
-        topics = [t for t, v in h.EVENT_SIGS.items() if v == tag]
-        assert len(topics) == 1, f"{tag} should map from exactly one topic"
+    expected = {
+        "IBD": {proto.BALANCE_DEPOSIT_TOPIC},
+        "IBW": {proto.BALANCE_WITHDRAW_TOPIC},
+        "LPC": {proto.LAUNCHPAD_PARAMS_TOPIC, proto.LAUNCHPAD_PARAMS_V2_TOPIC},
+        "GOV": {proto.GOV_CHANGED_TOPIC},
+    }
+    for tag, topics in expected.items():
+        registered = {t for t, v in h.EVENT_SIGS.items() if v == tag}
+        assert registered == topics, f"{tag} maps from {registered}, expected {topics}"
         assert h.PARSERS.get(tag) is not None, f"{tag} has no parser"
         assert h.accepts_log_for_indexing(tag, h.CONTRACTS["CRYSTAL"].lower()) is True
 
