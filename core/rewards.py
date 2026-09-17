@@ -170,6 +170,17 @@ def predeposit_cutoff_ts() -> int:
     return program_start_ts()
 
 
+def spot_start_ts() -> int:
+    start = program_start_ts()
+    raw = storage.get_meta("rewards_spot_start")
+    if raw:
+        try:
+            return max(int(float(raw)), start)
+        except Exception:
+            pass
+    return start
+
+
 def predeposit_multiplier() -> float:
     return _meta_float("rewards_predeposit_multiplier", 3.0)
 
@@ -306,6 +317,11 @@ def _markets_meta(cur) -> dict[str, dict]:
     return out
 
 
+def _vault_addresses(cur) -> set[str]:
+    cur.execute("SELECT vault FROM crystal_vaults")
+    return {str(v).lower() for (v,) in cur.fetchall()}
+
+
 def _is_stable_market(meta: dict, stables: set[str]) -> bool:
     return meta["quote_address"] in stables and meta["base_address"] in stables
 
@@ -372,6 +388,7 @@ def _parse_keyset(raw: str) -> tuple[int, str, int]:
 def accrue_spot_takers(guard=None) -> int:
     start_ts = program_start_ts()
     first_close = first_close_ts(start_ts)
+    earn_from = spot_start_ts()
     r = rates()
     processed = 0
     while True:
@@ -380,7 +397,7 @@ def accrue_spot_takers(guard=None) -> int:
         with db_cursor() as cur:
             _lock_accrual(cur)
             wm_ts, wm_tx, wm_li = _parse_keyset(_wm_read(cur, "rewards_wm_spot_taker", "0||-1"))
-            deny = storage.rewards_denylist(cur)
+            deny = storage.rewards_denylist(cur) | _vault_addresses(cur)
             stables = storage.rewards_stable_tokens(cur)
             markets = _markets_meta(cur)
             pricer = _QuotePricer(cur, stables)
@@ -414,7 +431,7 @@ def accrue_spot_takers(guard=None) -> int:
             now_ts = int(time.time())
             for ts, tx, li, market, user, is_buy, amount_in, amount_out in rows:
                 ts = int(ts)
-                if ts < start_ts:
+                if ts < earn_from:
                     continue
                 user = str(user or "").lower()
                 meta = markets.get(str(market).lower())
@@ -448,6 +465,7 @@ def accrue_spot_takers(guard=None) -> int:
 def accrue_spot_makers(guard=None) -> int:
     start_ts = program_start_ts()
     first_close = first_close_ts(start_ts)
+    earn_from = spot_start_ts()
     r = rates()
     processed = 0
     while True:
@@ -456,7 +474,7 @@ def accrue_spot_makers(guard=None) -> int:
         with db_cursor() as cur:
             _lock_accrual(cur)
             wm_ts, wm_tx, wm_li = _parse_keyset(_wm_read(cur, "rewards_wm_spot_maker", "0||-1"))
-            deny = storage.rewards_denylist(cur)
+            deny = storage.rewards_denylist(cur) | _vault_addresses(cur)
             stables = storage.rewards_stable_tokens(cur)
             markets = _markets_meta(cur)
             pricer = _QuotePricer(cur, stables)
@@ -487,7 +505,7 @@ def accrue_spot_makers(guard=None) -> int:
             now_ts = int(time.time())
             for ts, tx, li, market, maker, maker_is_buy, amount_high, amount_out in rows:
                 ts = int(ts)
-                if ts < start_ts:
+                if ts < earn_from:
                     continue
                 maker = str(maker or "").lower()
                 meta = markets.get(str(market).lower())
@@ -530,7 +548,7 @@ def _campaign_multiplier(campaigns, vault: str, ts: int) -> Decimal:
 def accrue_vaults(now_ts: int | None = None, guard=None) -> int:
     main_start = program_start_ts()
     first_close = first_close_ts(main_start)
-    start_ts = min(vault_start_ts(), main_start)
+    start_ts = vault_start_ts()
     cutoff = predeposit_cutoff_ts()
     pd_start = predeposit_start_ts()
     pd_mult = Decimal(str(predeposit_multiplier()))
