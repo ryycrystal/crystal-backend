@@ -61,6 +61,7 @@ REWARDS_TABLES = (
     "crystal_vault_deposits",
     "crystal_vault_withdrawals",
     "crystal_vault_balance_samples",
+    "crystal_vaults",
     "referral_bindings",
 )
 
@@ -1146,3 +1147,101 @@ def test_weeks_after_a_pushed_first_close_run_on_the_normal_cadence(_clean_rewar
     assert rewards.close_due_weeks(now_ts=OCT7 + 100) == [START_0700, SEPT30]
     assert set(_paid_wallets(START_0700)) == {U1}
     assert set(_paid_wallets(SEPT30)) == {U2}
+
+
+VAULTS_OPEN = int(datetime(2026, 9, 21, 7, 0, tzinfo=LA).timestamp())
+SPOT_LAUNCH = int(datetime(2026, 9, 23, 7, 0, tzinfo=LA).timestamp())
+
+
+def _seed_vault_row(vault: str) -> None:
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vaults (vault, quote, base, owner) VALUES (%s, %s, %s, %s)",
+            (vault, USDC, WMON, U4),
+        )
+
+
+def test_spot_start_defaults_to_the_program_start_and_never_precedes_it(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    assert rewards.spot_start_ts() == START_0700
+    storage.set_meta("rewards_spot_start", str(START_0700 - 86400))
+    assert rewards.spot_start_ts() == START_0700
+    storage.set_meta("rewards_spot_start", str(SPOT_LAUNCH))
+    assert rewards.spot_start_ts() == SPOT_LAUNCH
+    storage.set_meta("rewards_spot_start", "junk")
+    assert rewards.spot_start_ts() == START_0700
+
+
+def test_spot_trades_before_the_spot_launch_earn_nothing(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    storage.set_meta("rewards_spot_start", str(SPOT_LAUNCH))
+    _seed_market(MKT_VOL, USDC, WMON)
+    before = SPOT_LAUNCH - 60
+    after = SPOT_LAUNCH + 60
+    _seed_taker("0xpre", before, MKT_VOL, U1, 100_000_000)
+    _seed_fill("0xpre", 1, before, MKT_VOL, U3, 100_000_000)
+    _seed_taker("0xpost", after, MKT_VOL, U2, 100_000_000)
+    _seed_fill("0xpost", 1, after, MKT_VOL, U3, 40_000_000)
+    rewards.accrue_spot_takers()
+    rewards.accrue_spot_makers()
+    assert _contrib(U1, START_0700) is None
+    assert _contrib(U2, START_0700)["spot_taker"] == pytest.approx(100.0)
+    assert _contrib(U3, START_0700)["spot_maker"] == pytest.approx(40.0)
+
+
+def test_launchpad_still_earns_from_the_program_start_when_spot_starts_later(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    storage.set_meta("rewards_spot_start", str(SPOT_LAUNCH))
+    _seed_token(TOK_A, None)
+    _seed_launchpad_trade(71, TOK_A, U1, START_0700 + 3600, 100.0)
+    assert rewards.accrue_launchpad() == 1
+    assert _contrib(U1, START_0700)["pregrad"] == pytest.approx(100.0)
+
+
+def test_a_vault_contract_earns_no_spot_points_but_its_counterparties_do(_clean_rewards):
+    rewards = _clean_rewards
+    _seed_market(MKT_VOL, USDC, WMON)
+    _seed_vault_row(VAULT)
+    ts = WEEK1 + 100
+    _seed_taker("0xvm", ts, MKT_VOL, U1, 100_000_000)
+    _seed_fill("0xvm", 1, ts, MKT_VOL, VAULT, 100_000_000)
+    _seed_taker("0xvt", ts + 1, MKT_VOL, VAULT, 50_000_000)
+    _seed_fill("0xvt", 1, ts + 1, MKT_VOL, U3, 50_000_000)
+    rewards.accrue_spot_takers()
+    rewards.accrue_spot_makers()
+    assert _contrib(VAULT) is None
+    assert _contrib(U1)["spot_taker"] == pytest.approx(100.0)
+    assert _contrib(U3)["spot_maker"] == pytest.approx(50.0)
+
+
+def test_vault_hours_wait_for_the_vault_open_even_after_the_program_starts(_clean_rewards):
+    rewards = _clean_rewards
+    storage.set_meta("rewards_program_start", str(START_0700))
+    storage.set_meta("rewards_first_close", str(SEPT30))
+    storage.set_meta("rewards_vault_start", str(VAULTS_OPEN))
+    storage.set_meta("rewards_predeposit_cutoff", str(SPOT_LAUNCH))
+    storage.set_meta("rewards_predeposit_multiplier", "3")
+    storage.add_predeposit_vaults([VAULT])
+    with storage.db_cursor() as cur:
+        cur.execute(
+            "INSERT INTO crystal_vault_deposits (block_number, log_index, timestamp, vault, user_address, shares, quote_amount, base_amount, txhash) "
+            "VALUES (1, 0, %s, %s, %s, 100, 0, 0, '0xvo1'), (2, 0, %s, %s, %s, 100, 0, 0, '0xvo2')",
+            (START_0700 + 3600, VAULT, U1, VAULTS_OPEN + 60, VAULT, U2),
+        )
+        cur.execute(
+            "INSERT INTO crystal_vault_balance_samples (vault, block_number, timestamp, quote_balance, base_balance, usd_value) "
+            "VALUES (%s, 10, %s, 0, 0, 2000)",
+            (VAULT, VAULTS_OPEN + 1800),
+        )
+    assert rewards.accrue_vaults(now_ts=VAULTS_OPEN - 10) == 0
+    assert _contrib(U1, START_0700) is None
+    assert rewards.accrue_vaults(now_ts=VAULTS_OPEN + 3610) == 1
+    assert _contrib(U1, START_0700)["vault"] == pytest.approx(1000.0)
+    assert _contrib(U1, START_0700)["points"] == pytest.approx(50.0)
+    assert _contrib(U2, START_0700)["points"] == pytest.approx(150.0)
+    assert rewards.predeposit_start_ts() == VAULTS_OPEN

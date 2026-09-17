@@ -615,6 +615,16 @@ downstream is broken.
   `crystal_rewards_predeposit_vaults`.** It used to be fail-*open* — an empty table meant
   every vault qualified, so forgetting to seed it would have handed 3× to the whole
   programme. Seeding the table is now what *enables* the boost.
+- **Each surface has its own start.** Launchpad earns from `rewards_program_start`, spot
+  from `rewards_spot_start`, vault hours from `rewards_vault_start`. `rewards_vault_start`
+  used to be `min`'d with the program start, so a vault open date after the program start
+  was silently ignored. Schedule set 9/17 for the 9/23 spot launch: program 9/16 07:00,
+  vaults open 9/21 07:00, 3x window 9/21 07:00 to 9/23 07:00, spot from 9/23 07:00, first
+  close 9/30 00:00. Pre-launch week-one points were rebuilt under the new gates
+  (`crystal_rewards_contrib_erased_20260917` holds the old rows).
+- **Vault contracts never earn spot points.** Every address in `crystal_vaults` is skipped
+  as taker and maker, because the vault's trading is already paid to its depositors as
+  vault hours.
 - `_close_week` takes the same advisory lock the accrual paths take; its `finalized` check
   is check-then-act and would otherwise let two nodes interleave a permanent distribution.
 - A week **refuses to close** if vault hours were unvalued by a sampling outage, unless the
@@ -714,7 +724,8 @@ rank), percentile badges off `STATUS_LADDER`, self-cross earns zero.
 | meta key | default | meaning |
 |---|---|---|
 | `rewards_program_start` | 9/16 00:00 LA | main accrual begins |
-| `rewards_vault_start` | 9/8 07:00 LA | vault accrual may begin |
+| `rewards_vault_start` | 9/8 07:00 LA | vault hours begin; a hard gate even when later than program_start |
+| `rewards_spot_start` | falls back to program_start, never earlier | spot and stable taker/maker accrual begins |
 | `rewards_predeposit_start` | falls back to vault_start | boost window **opens** |
 | `rewards_predeposit_cutoff` | falls back to program_start | boost window **closes** |
 | `rewards_predeposit_multiplier` | 3.0 | the boost |
