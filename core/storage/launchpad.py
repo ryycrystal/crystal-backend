@@ -2655,15 +2655,15 @@ def wallet_activity(
         return []
     params: dict = {"u": addrs, "lim": int(limit)}
 
-    def _cut(alias: str) -> str:
+    def _cut_on(ts: str, blk: str, li: str, tx: str) -> str:
         if before_key is not None:
-            return (
-                f" AND ({alias}.timestamp, {alias}.block_number, {alias}.log_index, {alias}.txhash)"
-                " < (%(cts)s, %(cblk)s, %(cli)s, %(ctx)s)"
-            )
+            return f" AND ({ts}, {blk}, {li}, {tx}) < (%(cts)s, %(cblk)s, %(cli)s, %(ctx)s)"
         if before_ts is not None:
-            return f" AND {alias}.timestamp < %(cut)s"
+            return f" AND {ts} < %(cut)s"
         return ""
+
+    def _cut(alias: str) -> str:
+        return _cut_on(f"{alias}.timestamp", f"{alias}.block_number", f"{alias}.log_index", f"{alias}.txhash")
 
     if before_key is not None:
         params["cts"], params["cblk"], params["cli"], params["ctx"] = (
@@ -2675,7 +2675,7 @@ def wallet_activity(
     elif before_ts is not None:
         params["cut"] = int(before_ts)
 
-    cut_t, cut_d, cut_w, cut_c, cut_e, cut_b, cut_o, cut_f, cut_m, cut_r, cut_k = (
+    cut_t, cut_d, cut_w, cut_c, cut_e, cut_b, cut_o, cut_f, cut_m = (
         _cut("t"),
         _cut("d"),
         _cut("w"),
@@ -2685,9 +2685,18 @@ def wallet_activity(
         _cut("o"),
         _cut("f"),
         _cut("mt"),
-        _cut("r"),
-        _cut("k"),
     )
+    # these three rows are synthesized from tables without timestamp, log_index or txhash, so
+    # the keyset has to compare the same expressions their select emits. cutting on the plain
+    # column names 500ed every load-more past the first page
+    cut_r = _cut_on(
+        "r.timestamp",
+        "r.block_number",
+        "r.log_index",
+        "CONCAT('referral-', r.referee, '-', r.block_number, '-', r.log_index)",
+    )
+    cut_kc = _cut_on("k.created_at", "k.created_block", "0", "CONCAT('token-create-', k.token)")
+    cut_kg = _cut_on("k.migrated_at", "k.migrated_block", "1", "CONCAT('token-graduate-', k.token)")
 
     with db_cursor() as cur:
         cur.execute(
@@ -2803,13 +2812,13 @@ def wallet_activity(
                        CONCAT('token-create-', k.token), 0,
                        k.token, k.symbol, k.name, 0, 0, k.last_price_native, 0
                 FROM launchpad_tokens k
-                WHERE k.creator = ANY(%(u)s){cut_k}
+                WHERE k.creator = ANY(%(u)s){cut_kc}
                 UNION ALL
                 SELECT 'token_graduate', k.migrated_at, k.migrated_block,
                        CONCAT('token-graduate-', k.token), 1,
                        k.token, k.symbol, k.name, 0, 0, k.last_price_native, 0
                 FROM launchpad_tokens k
-                WHERE k.creator = ANY(%(u)s) AND k.migrated = TRUE AND k.migrated_at > 0{cut_k}
+                WHERE k.creator = ANY(%(u)s) AND k.migrated = TRUE AND k.migrated_at > 0{cut_kg}
             ) a
             ORDER BY timestamp DESC, block_number DESC, log_index DESC, txhash DESC
             LIMIT %(lim)s
