@@ -27,6 +27,11 @@ WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 # a launchpad curve has to be quoted in mon for its prices, charts and pnl to mean
 # anything downstream. anything else, lvmon included, is skipped outright at discovery
 ACCEPTED_LAUNCHPAD_QUOTES = frozenset({WMON})
+# an un-migrated token's curve is only its price while the curve is still trading. across
+# every un-migrated token with pool trades, curves split cleanly: live within 3 days of the
+# pool swap, or idle 7 days and more, with nothing between. a curve idle past this has
+# been abandoned for a pool someone opened, and that pool is then the real price
+CURVE_LIVE_SECONDS = 7 * 86400
 LVMON = "0x91b81bfbe3a747230f0529aa28d8b2bc898e6d56"
 USDC = "0x754704bc059f8c67012fed69bc8a327a5aafb603"
 AUSD = "0x00000000efe302beaa2b3e6e1b18d08d69a9012a"
@@ -655,6 +660,15 @@ class State:
         print(f"[State] learned univ4 pool {pid} token={token} quote={quote} via {learned_from}", flush=True)
         return pi
 
+    def _curve_is_live(self, token: str, ts: int, cur) -> bool:
+        cache = self.__dict__.setdefault("_last_curve_ts", {})
+        last = cache.get(token)
+        if last is None:
+            # looked up once per token per process, then kept current by curve trades
+            last = storage.last_curve_trade_ts(token, cur=cur)
+            cache[token] = last
+        return last > 0 and int(ts) - last <= CURVE_LIVE_SECONDS
+
     def ensure_v2_launchpad_token(
         self,
         token: str,
@@ -1111,10 +1125,7 @@ class State:
                     return
             if is_pool_swap and not getattr(lp, "quote_token", ""):
                 lp.quote_token = pi.native_addr or WMON
-            if (
-                lp.source == nadfun_geo.SOURCE_V2
-                and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES
-            ):
+            if lp.source == nadfun_geo.SOURCE_V2 and (lp.quote_token or WMON).lower() not in ACCEPTED_LAUNCHPAD_QUOTES:
                 # the creation guard only stops new tokens. one loaded before it shipped is
                 # still in memory, and a trade on it would write flows the fold re-projects.
                 # only v2 is checked: a v2 token's quote_token is fixed by its own create
@@ -1127,10 +1138,16 @@ class State:
             if is_pool_swap and price_native <= 0:
                 price_native = Decimal(lp.last_price_native or 0)
                 print(f"[State] {pool_addr} swap {txh} carried no pool price, holding the last mid", flush=True)
+            elif is_pool_swap and not lp.migrated and self._curve_is_live(token, ts, cur):
+                # until a token migrates its price is the curve's. a side pool can sit far off
+                # that, and letting its end price set the mid drew a candle straight down to the
+                # pool and back up on the next curve trade. the swap still counts as volume
+                price_native = Decimal(lp.last_price_native or 0)
             else:
                 lp.last_price_native = price_native
 
             if not is_pool_swap:
+                self.__dict__.setdefault("_last_curve_ts", {})[token] = int(ts)
                 if is_buy and blk <= lp.created_block + 10:
                     creator_addr = (lp.creator or "").lower()
                     user_addr = user.lower()

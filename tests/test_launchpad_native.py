@@ -61,6 +61,7 @@ def _reserves_after(native_reserve: int):
 def _fresh_state(monkeypatch):
     stub = MagicMock()
     stub.trade_exists.return_value = False
+    stub.last_curve_trade_ts.return_value = 0
     monkeypatch.setattr(state, "storage", stub)
     state._LAUNCHPAD_PARAMS_CACHE["initial_native_supply"] = V0
     st = state.State()

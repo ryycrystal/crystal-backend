@@ -255,6 +255,22 @@ def aggregate_token_from_trades(token: str, cur: psycopg2.extensions.cursor | No
     return _run(cur)
 
 
+def last_curve_trade_ts(token: str, cur: psycopg2.extensions.cursor | None = None) -> int:
+    t = (token or "").lower()
+    if not t:
+        return 0
+    # walks idx_trades_token_ts newest first and stops at the first curve row
+    sql = "SELECT timestamp FROM launchpad_trades WHERE token = %s AND venue = 'curve' ORDER BY timestamp DESC LIMIT 1;"
+    if cur is None:
+        with db_cursor() as cur2:
+            cur2.execute(sql, (t,))
+            row = cur2.fetchone()
+    else:
+        cur.execute(sql, (t,))
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def trade_exists(txhash: str, log_index: int, cur: psycopg2.extensions.cursor | None = None) -> bool:
     tx = (txhash or "").lower()
     if not tx:

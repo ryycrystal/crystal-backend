@@ -74,8 +74,16 @@ def _trade_state(quote):
     s = object.__new__(st.State)
     s._lock = __import__("threading").RLock()
     lp = __import__("models").LaunchpadToken(
-        token=TOKEN, creator="", name="T", symbol="T", metadata_cid="",
-        description="", social1="", social2="", social3="", social4="",
+        token=TOKEN,
+        creator="",
+        name="T",
+        symbol="T",
+        metadata_cid="",
+        description="",
+        social1="",
+        social2="",
+        social3="",
+        social4="",
     )
     lp.source = nadfun_geo.SOURCE_V2
     lp.quote_token = quote
@@ -85,8 +93,7 @@ def _trade_state(quote):
 
 
 def _trade_event():
-    return {"token": TOKEN, "user": "0x" + "e" * 40, "is_buy": True,
-            "amount_in": 10**18, "amount_out": 10**21}
+    return {"token": TOKEN, "user": "0x" + "e" * 40, "is_buy": True, "amount_in": 10**18, "amount_out": 10**21}
 
 
 def _run_trade(s):
