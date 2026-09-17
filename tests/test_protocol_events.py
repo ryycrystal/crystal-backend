@@ -18,7 +18,7 @@ def test_every_contract_event_is_registered_with_a_parser():
     expected = {
         "IBD": {proto.BALANCE_DEPOSIT_TOPIC},
         "IBW": {proto.BALANCE_WITHDRAW_TOPIC},
-        "LPC": {proto.LAUNCHPAD_PARAMS_TOPIC, proto.LAUNCHPAD_PARAMS_V2_TOPIC},
+        "LPC": {proto.LAUNCHPAD_PARAMS_TOPIC},
         "GOV": {proto.GOV_CHANGED_TOPIC},
     }
     for tag, topics in expected.items():
@@ -55,12 +55,13 @@ def test_balance_events_survive_malformed_logs():
 
 
 def test_launchpad_params_decode_in_declaration_order():
-    words = [11, 22, 33, 44, 55, 66, 77]
+    words = [11, 22, 33, 44, 55, 66, 77, 88]
     data = "".join(f"{w:064x}" for w in words)
     out = proto.parse_launchpad_params_changed("0xcore", [proto.LAUNCHPAD_PARAMS_TOPIC], data)
     assert out["kind"] == "launchpad_params_changed"
-    assert out["params"]["initial_native_supply"] == 11
-    assert out["params"]["graduated_creator_fee_split"] == 77
+    assert out["params"]["is_token_creation_paused"] == 11
+    assert out["params"]["initial_native_supply"] == 22
+    assert out["params"]["graduated_creator_fee_split"] == 88
     assert list(out["params"]) == list(proto.LAUNCHPAD_PARAM_FIELDS)
 
 

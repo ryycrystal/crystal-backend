@@ -17,11 +17,15 @@ USER = "0x1234567890abcdef1234567890abcdef12345678"
 MARKET = "0x975c4885538ba5072c66f48d4c4c7253e388c3e0"
 WMON = "0x3bd359c1119da7da1d913d1c4d2b7c461115433a"
 
-INITIAL_TOKEN_SUPPLY = 10**27
-GRADUATED_TOKEN_SUPPLY = 2 * 10**26
-CURVE_SUPPLY = INITIAL_TOKEN_SUPPLY - GRADUATED_TOKEN_SUPPLY
-V0 = 1000 * 10**18
-K = V0 * INITIAL_TOKEN_SUPPLY
+from core.adapters.native import (  # noqa: E402
+    CURVE_SUPPLY,
+    INITIAL_CURVE_SUPPLY,
+    INITIAL_TOKEN_SUPPLY,
+    VIRTUAL_NATIVE_SUPPLY,
+)
+
+V0 = VIRTUAL_NATIVE_SUPPLY
+K = V0 * INITIAL_CURVE_SUPPLY
 
 
 def _topic_addr(addr: str) -> str:
@@ -56,6 +60,14 @@ def _launchpad_trade_data(is_buy, amount_in, amount_out, native_reserve, token_r
 
 def _reserves_after(native_reserve: int):
     return (K + native_reserve - 1) // native_reserve
+
+
+def _native_reserve_for_sold(tokens_sold: int) -> int:
+    return -(-K // (INITIAL_CURVE_SUPPLY - tokens_sold))
+
+
+def _params_response(initial_native_supply: int, paused: int = 0) -> str:
+    return "0x" + _word(paused) + _word(initial_native_supply)
 
 
 def _fresh_state(monkeypatch):
@@ -141,14 +153,14 @@ def test_final_stretch_fires_at_75pct_of_tokens_sold(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    _buy(st, 1500 * 10**18, blk=101, ts=1001)
+    below = _native_reserve_for_sold(599_000_000 * 10**18)
+    _buy(st, below, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
-    sold_below = INITIAL_TOKEN_SUPPLY - _reserves_after(1500 * 10**18)
-    assert sold_below < (CURVE_SUPPLY * 3) // 4
+    assert INITIAL_CURVE_SUPPLY - _reserves_after(below) < (CURVE_SUPPLY * 3) // 4
     assert lp.approaching_75 is False
 
-    _, tr = _buy(st, 2500 * 10**18, blk=102, ts=1002)
-    assert INITIAL_TOKEN_SUPPLY - tr == (CURVE_SUPPLY * 3) // 4 == 600_000_000 * 10**18
+    _, tr = _buy(st, _native_reserve_for_sold(600_000_000 * 10**18), blk=102, ts=1002)
+    assert (INITIAL_CURVE_SUPPLY - tr) // 10**18 == (CURVE_SUPPLY * 3) // 4 // 10**18 == 600_000_000
     assert lp.approaching_75 is True
     assert lp.approaching_75_block == 102
 
@@ -221,7 +233,7 @@ def test_circulating_supply_is_exact_and_matches_progress_bar(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    nr = 2500 * 10**18
+    nr = _native_reserve_for_sold(600_000_000 * 10**18)
     _, tr = _buy(st, nr, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
 
@@ -238,33 +250,34 @@ def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    _buy(st, 2500 * 10**18, blk=102, ts=1002)
+    _buy(st, _native_reserve_for_sold(600_000_000 * 10**18), blk=102, ts=1002)
     assert st.launchpad_tokens[TOKEN].circulating_supply == 600_000_000
 
 
 def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
-    for v0_mon in (1_000, 49_300, 141_600):
+    for v0_mon in (200_000, 150_000, 250_000):
         st = _fresh_state(monkeypatch)
         monkeypatch.setattr(state.NATIVE_ADAPTER, "_initial_native_supply_fn", lambda v=v0_mon: v * 10**18)
         _create_token(st)
         lp = st.launchpad_tokens[TOKEN]
-        expected = Decimal(v0_mon * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY)
+        expected = Decimal(v0_mon * 10**18) / Decimal(INITIAL_CURVE_SUPPLY)
         assert lp.last_price_native == expected, v0_mon
-    assert Decimal(1_000 * 10**18) / Decimal(INITIAL_TOKEN_SUPPLY) == Decimal("0.000001")
+    launch = Decimal(VIRTUAL_NATIVE_SUPPLY) / Decimal(INITIAL_CURVE_SUPPLY)
+    assert launch.quantize(Decimal("0.0000001")) == Decimal("0.0001875")
 
 
 def test_curve_reserves_are_recorded_for_fee_derivation(monkeypatch):
     st = _fresh_state(monkeypatch)
     _create_token(st)
 
-    nr = 2500 * 10**18
+    nr = V0 + 2500 * 10**18
     _, tr = _buy(st, nr, blk=101, ts=1001)
     lp = st.launchpad_tokens[TOKEN]
 
     assert lp.curve_native_reserve == nr
     assert lp.curve_token_reserve == tr
 
-    nr2 = 3000 * 10**18
+    nr2 = V0 + 3000 * 10**18
     _, tr2 = _buy(st, nr2, blk=102, ts=1002)
     assert lp.curve_native_reserve == nr2
     assert lp.curve_token_reserve == tr2
@@ -594,7 +607,7 @@ def test_launchpad_params_cache_expires(monkeypatch):
 
     def fake_eth_call(addr, sel):
         calls.append(sel)
-        return "0x" + f"{(1000 if len(calls) == 1 else 5) * 10**18:064x}"
+        return _params_response((1000 if len(calls) == 1 else 5) * 10**18)
 
     monkeypatch.setattr(state, "_eth_call", fake_eth_call)
 
@@ -621,7 +634,7 @@ def test_launchpad_params_falls_back_to_cache_on_rpc_failure(monkeypatch):
     state._LAUNCHPAD_PARAMS_CACHE.clear()
     now = [1_000_000.0]
     monkeypatch.setattr(state.time, "time", lambda: now[0])
-    monkeypatch.setattr(state, "_eth_call", lambda a, s: "0x" + f"{7 * 10**18:064x}")
+    monkeypatch.setattr(state, "_eth_call", lambda a, s: _params_response(7 * 10**18))
     assert state._fetch_launchpad_initial_native_supply() == 7 * 10**18
 
     def boom(addr, sel):

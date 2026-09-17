@@ -241,13 +241,18 @@ token-overview/chart behavior, grep every route file**
   migrated/graduated. Prefer `progressBps`.
 - `circulating_supply` counts curve-sold tokens; graduation moves 800,000,000 of the
   1e9 for crystal tokens (793,100,000 for nad.fun).
-- Curve generations: `CRYSTAL_LAUNCHPAD_GEN` env (1 or 2) selects supplies in
-  `core/adapters/native.py`. Gen 2 adds a virtual supply V=ceil(2e26/3):
-  initial 1e27+V, graduated 2e26+V. The flag is set on both container apps.
-  Exact gen-2 values, worth having when you compare against a chain read:
-  `V = 66666666666666666666666667`, `initial_curve_supply = 1066666666666666666666666667`
-  (note the trailing **667**, not 666 — an off-by-one here produced a wrong root-cause
-  diagnosis once; see below), `CURVE_SUPPLY = 8e26`.
+- The crystal.fun curve has **one** shape, with virtual supply on both sides
+  (`core/adapters/native.py`). There are no launchpad generations and no
+  `CRYSTAL_LAUNCHPAD_GEN` flag (removed 2026-09-16; the env var may still be set on the
+  container apps and is ignored). Virtual token supply V=ceil(2e26/3), so
+  `INITIAL_CURVE_SUPPLY = 1e27+V` and `GRADUATED_CURVE_SUPPLY = 2e26+V`. Virtual native
+  supply is `VIRTUAL_NATIVE_SUPPLY = 200,000 MON`, so a token launches at
+  200,000 / (1e27+V) = 0.0001875 MON. Exact values, worth having when you compare against
+  a chain read: `V = 66666666666666666666666667`,
+  `INITIAL_CURVE_SUPPLY = 1066666666666666666666666667` (note the trailing **667**, not
+  666 — an off-by-one here produced a wrong root-cause diagnosis once; see below),
+  `CURVE_SUPPLY = 8e26`. `INITIAL_CURVE_SUPPLY == 4 * GRADUATED_CURVE_SUPPLY - 1`, so
+  graduation lands at 4x the initial native minus 1 wei, not exactly 4x.
 
 ### `curve_state()` returning None silently blanks reserves, permanently
 
@@ -277,7 +282,7 @@ already correct before trusting it.
 That commit says it keeps reserves "when a fully sold back token overshoots its initial
 supply by a wei". **That is not what happened and the guard was not the cause.** The token
 in question (CHIRP) had an on-chain `token_reserve` of `1066666666666666666666666667`,
-which is *exactly* `initial_curve_supply` under gen 2 — the old guard `token_reserve >
+which is *exactly* `INITIAL_CURVE_SUPPLY` — the old guard `token_reserve >
 initial_curve_supply` evaluates false and **accepted** it. The "+1 wei" came from an agent
 hardcoding the constant as `…666` while checking. The real cause was almost certainly
 absent reserve fields on that token's events (the `<= 0` branch above); it was never
@@ -286,7 +291,8 @@ proven. The row was fixed by a manual `UPDATE`, not by the code change.
 The code change in `d11e7b5` is still worth keeping — it widens the ceiling to `* 2` and
 clamps `tokens_sold` to `max(..., 0)` in the nad.fun adapter, which fixes a genuine
 negative-value path — but **do not cite it as the fix for blank reserves.** Four tests
-across `tests/test_launchpad_gen2.py` and `tests/test_lifecycle.py` had asserted
+across `tests/test_launchpad_curve.py` (then named `test_launchpad_gen2.py`) and
+`tests/test_lifecycle.py` had asserted
 `IC + 1 -> None`; they were updated to assert `tokens_sold == 0` for a small overshoot and
 `None` only for absurd values (`IC * 3`).
 
@@ -996,9 +1002,10 @@ verify against the code rather than trusting either. Ideally they get merged.
 ## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
 
 ### Contract generations and the migration history
-- **The live core is `0x8e42afa92A8B0ED3eE23Db6B108419Aae47aD61F` (relaunch 2026-09-06, block
-  102,410,369)** with vault factory `0x2388208C8F39e1E5A7FfbF8a2B30c73C7009cc00`. See the
-  relaunch section near the end of this file.
+- **The live core is `0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97`** with vault factory
+  `0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b` (2026-09-16 redeploy). The previous core
+  `0x8e42afa9…` (relaunch 2026-09-06, block 102,410,369) is retired; see the relaunch
+  section near the end of this file for its history.
 - Gen-3 core router was `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration), now retired.
   Event topics changed at that migration and the `Migrated` event was REMOVED — old
   topic assumptions silently match nothing.
@@ -1868,8 +1875,16 @@ very likely the bug rather than the fix.
 
 The launchpad core has been migrated more than once, most recently to a
 **gen-3 core (Aug 2026)** with changed event topics and the `Migrated` event
-removed. There is also a gen-2 virtual-supply curve with type-4 markets, gated
-behind a `CRYSTAL_LAUNCHPAD_GEN` flag.
+removed. (The crystal.fun curve used to have gen-1/gen-2 variants behind a
+`CRYSTAL_LAUNCHPAD_GEN` flag; that concept was deleted on 2026-09-16 and there is now
+one virtual-supply curve.)
+
+**`LaunchpadParamsChanged` changed signature in the current contracts.** A leading
+`bool isTokenCreationPaused` was added to both `launchpadParams()` and the event, which
+moved `launchpadInitialNativeSupply` to word 1 and changed the event topic. Reading word 0
+returned the paused flag (0), left every token at the `models.py` default launch price of
+1e-6, and the old topic silently dropped every params event. The backend now reads only the
+current layout (`modules/protocol.py::LAUNCHPAD_PARAM_FIELDS`).
 
 The practical consequence: **decoding logic is generation-specific.** Code that
 correctly decodes one generation will silently produce nothing on another,
@@ -2201,10 +2216,10 @@ core's `MarketCreated` events and must never be hardcoded. Vault tags are gated 
 `VAULT_FACTORY_ADDRS`. The event topics did not change in this relaunch — the decoder already
 knew `MARKET_CREATED_V2_TOPIC` — so no parser work was needed.
 
-**Both retired vault factories stay indexed** (`0xe35937…` gen2, `0x3dbf7D…` legacy).
-`tests/test_vault_factory_generations.py` fails if the list drops below two, because a retired
-factory still holds withdrawable user funds. Do not "clean these up" — dropping them strands
-depositors, and it has already caused one incident.
+**Superseded 2026-09-16:** at the time of this relaunch both retired vault factories
+(`0xe35937…`, `0x3dbf7D…`) stayed indexed. They were deliberately dropped on 2026-09-16,
+together with this relaunch's own factory, and `tests/test_vault_factory_generations.py` now
+asserts they are *rejected*. See the 2026-09-16 note under "Watched contract addresses".
 
 ### What the purge did, and what it left
 
