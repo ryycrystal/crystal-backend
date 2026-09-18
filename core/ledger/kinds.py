@@ -47,6 +47,7 @@ CRYSTAL_CORE_ADDRS = frozenset(
         "0x8e42afa92a8b0ed3ee23db6b108419aae47ad61f",
         "0x23df569a15b8c0c2bbddff0a9b312c58f4893f97",
         "0x6571f8a7c9cec8fed629a9a39ee00e8d33252f53",
+        # "0x2a4667b906019382407e18fa1a4df79bba228be6",  prod core, uncomment on sept 21 7am pt and keep every core above
     }
 )
 PAIR_TOKEN0_SELECTOR = "0x0dfe1681"
