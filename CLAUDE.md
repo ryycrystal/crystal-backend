@@ -1169,8 +1169,27 @@ Win32_Process` filtered on the script name) before assuming nothing local can wr
 ## The deploy approval gate, and why not to route around it
 
 `main` auto-deploys, but the deploy job **pauses for manual approval from
-`ryycrystal` and waits indefinitely**. That is deliberate: other people hold
-write access to this repo, and the gate is what stops them moving production.
+`ryycrystal`**. That is deliberate: other people hold write access to this repo,
+and the gate is what stops them moving production. Approve in the Actions UI
+("Review deployments"), or from a shell (`6487057670` is the `production`
+environment id):
+
+    gh api -X POST repos/ryycrystal/crystal-backend/actions/runs/<run>/pending_deployments \
+      -F 'environment_ids[]=6487057670' -f state=approved -f comment='<why>'
+
+**A newer merge supersedes an unapproved deploy.** Once a run's tests pass, its
+`gate` job cancels every older deploy run still `waiting` for approval, so only
+the newest commit is ever up for approval. A deploy that is already approved and
+rolling out is never cancelled: the `deploy-prod` concurrency lock sits on the
+`deploy` job, so a newer run queues behind it instead.
+
+Before 2026-09-18 that lock was workflow-wide, and a job waiting for approval
+holds it until approved, rejected or 30 days pass. One unapproved run from 09-02
+blocked every deploy for 16 days: each newer run sat `pending` with zero jobs
+until the next push replaced it, which looked like a broken pipeline and led to
+weeks of hand-rolled `az acr build` deploys. If runs ever show that pattern
+again, find the run in `waiting` and **cancel** it. Never approve a stale one:
+it ships old code over current prod.
 
 **The gate is enforced by Azure, not by the YAML.** The federated credential is
 bound to the `production` *environment*, so a job that drops the `environment:`
