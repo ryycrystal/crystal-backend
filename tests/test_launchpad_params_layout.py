@@ -9,7 +9,7 @@ from Crypto.Hash import keccak  # noqa: E402
 from modules import protocol as proto  # noqa: E402
 
 SIGNATURE = "LaunchpadParamsChanged(bool,uint112,uint256,uint256,uint256,uint256,uint256,uint256)"
-WORDS = [0, 200_000 * 10**18, 99_000, 10, 100 * 10**18, 99_970, 99_995, 50]
+WORDS = [0, 100_000 * 10**18, 99_000, 10, 100 * 10**18, 99_970, 99_995, 50]
 
 
 def _hex(words):
@@ -36,7 +36,7 @@ def test_layout_matches_the_solidity_struct_order():
 def test_an_event_decodes_every_field_in_place():
     params = proto.parse_launchpad_params_changed("0x0", [proto.LAUNCHPAD_PARAMS_TOPIC], _hex(WORDS))["params"]
     assert params["is_token_creation_paused"] == 0
-    assert params["initial_native_supply"] == 200_000 * 10**18
+    assert params["initial_native_supply"] == 100_000 * 10**18
     assert params["launchpad_fee"] == 99_000
     assert params["creator_fee_split"] == 10
     assert params["graduated_min_size"] == 100 * 10**18
@@ -66,8 +66,8 @@ def fetch(monkeypatch):
 
 
 def test_fetch_reads_the_supply_from_the_second_word(fetch):
-    assert fetch(WORDS) == 200_000 * 10**18
+    assert fetch(WORDS) == 100_000 * 10**18
 
 
 def test_fetch_never_returns_the_paused_flag_as_a_supply(fetch):
-    assert fetch([1, *WORDS[1:]]) == 200_000 * 10**18
+    assert fetch([1, *WORDS[1:]]) == 100_000 * 10**18

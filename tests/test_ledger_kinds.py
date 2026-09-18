@@ -783,7 +783,7 @@ def test_every_generation_of_the_crystal_core_is_custody_not_a_holder():
 
     kinds = known_address_kinds()
     cores = CRYSTAL_CORE_ADDRS | {h.CRYSTAL_ADDR}
-    assert len(CRYSTAL_CORE_ADDRS) == 5
+    assert len(CRYSTAL_CORE_ADDRS) == 6
     assert h.CRYSTAL_ADDR in CRYSTAL_CORE_ADDRS
     rpc = FakeRpc({a: CONTRACT_CODE for a in cores})
     resolver = AddressKinds(FakeCursor().factory, rpc=rpc)

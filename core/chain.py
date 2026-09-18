@@ -61,12 +61,12 @@ def _addrs_from_env(defaults: list[str], *names: str) -> list[str]:
 
 
 CRYSTAL_ADDR = _addr_from_env(
-    "0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97",
+    "0x6571F8A7c9CEC8Fed629A9A39Ee00e8d33252f53",
     "CRYSTAL_ADDRESS",
     "ROUTER_ADDRESS",
 )
 VAULT_FACTORY_ADDR = _addr_from_env(
-    "0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b",
+    "0x17233abbe5248Fb1265E95f9117032e9E82cd134",
     "VAULT_FACTORY_ADDRESS",
     "VAULTS_ADDRESS",
 )
