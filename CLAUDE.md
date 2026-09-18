@@ -90,6 +90,33 @@ and the three retired factories (`0x2388208c`, `0xe35937f2`, `0x3dbf7da6`) are
 explicitly rejected, pinned by `tests/test_vault_factory_generations.py`. If a retired
 factory still holds user funds, its events are no longer indexed — that was a deliberate
 call, not an oversight.
+**Scheduled prod switch — Mon 2026-09-21 07:00 PT (Ryan, 9/17).** The real prod contracts are
+already deployed and sit COMMENTED OUT next to the live defaults in `core/chain.py`,
+`core/ledger/kinds.py` and the graph repo's `subgraph.yaml`:
+
+| | address | block |
+|---|---|---|
+| core | `0x2A4667B906019382407E18fa1A4df79bBA228be6` | 105,821,350 |
+| vault factory | `0xCa26BCB611A56a7C686171Fb5bC79Cd2c29bC043` | 105,821,367 |
+| market | `0x5440211a9735B72870e2F63957666A7FE5506072` | MC at 105,821,354 |
+
+Same runtime bytecode and event topics as the 9/17 test pair (PUSH32 diff: core 16/16, factory
+9/9, market 5/5), virtual native 100k MON, and `launchpadParams()` word 0 = 1, so **token creation
+starts paused**. To switch:
+1. `core/chain.py`: swap the commented defaults in. `core/ledger/kinds.py`: uncomment the prod
+   core (keep every old core) and bump the count in `tests/test_ledger_kinds.py`.
+   `tests/test_vault_factory_generations.py`: repoint `CRYSTAL_CORE` / `VAULT_FACTORY` and add
+   `0x17233abb…` to `RETIRED_FACTORIES`. PR to main, hand-deploy indexer then api.
+2. **Replay what the prod contracts emitted before they were watched**, from 105,821,350 up to the
+   block the new indexer picked up at: at least one `MC` (the market) and one `GOV` already exist,
+   and any vault deposit made between 07:00 and the deploy landing is missed the same way. Use the
+   surgical MC replay recipe (below), extended to every tag, never `backfill.py`.
+3. Graph: swap the commented address/startBlock in `crystal graph/subgraph.yaml`, then
+   `goldsky subgraph delete crystal/1.0.1 --force` and `goldsky subgraph deploy crystal/1.0.1 --path .`.
+4. Frontend `settings.ts`: router, launchpadRouter, crystalVaults.
+5. Clear the 9/17 test pair's data the way 9/16 and 9/17 were cleared (snapshot to
+   `*_erased_<date>`, delete, restart both apps, re-clear stragglers).
+
 Current (2026-09-17 redeploy): core `0x6571F8A7c9CEC8Fed629A9A39Ee00e8d33252f53`, factory
 `0x17233abbe5248Fb1265E95f9117032e9E82cd134`, launchpad virtual native 100,000 MON (was
 200,000 on the 9/16 core `0x23dF569a…`, now retired along with its factory `0xaE1cc58D…`).

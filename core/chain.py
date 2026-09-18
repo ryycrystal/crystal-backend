@@ -60,13 +60,19 @@ def _addrs_from_env(defaults: list[str], *names: str) -> list[str]:
     return list(dict.fromkeys(v.lower() for v in values))
 
 
+# the real prod contracts (deployed at block 105821350) are commented out below each live
+# default. switch to them on sept 21 7am pt: swap each commented default in, uncomment the
+# prod core in core/ledger/kinds.py, and follow "scheduled prod switch" in CLAUDE.md, which
+# covers the event replay, the graph and the frontend
 CRYSTAL_ADDR = _addr_from_env(
     "0x6571F8A7c9CEC8Fed629A9A39Ee00e8d33252f53",
+    # "0x2A4667B906019382407E18fa1A4df79bBA228be6",
     "CRYSTAL_ADDRESS",
     "ROUTER_ADDRESS",
 )
 VAULT_FACTORY_ADDR = _addr_from_env(
     "0x17233abbe5248Fb1265E95f9117032e9E82cd134",
+    # "0xCa26BCB611A56a7C686171Fb5bC79Cd2c29bC043",
     "VAULT_FACTORY_ADDRESS",
     "VAULTS_ADDRESS",
 )
