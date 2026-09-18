@@ -90,9 +90,10 @@ and the three retired factories (`0x2388208c`, `0xe35937f2`, `0x3dbf7da6`) are
 explicitly rejected, pinned by `tests/test_vault_factory_generations.py`. If a retired
 factory still holds user funds, its events are no longer indexed — that was a deliberate
 call, not an oversight.
-Current: core `0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97`, factory
-`0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b`. nad.fun, the referral manager and the
-Uniswap V4 pool manager were untouched.
+Current (2026-09-17 redeploy): core `0x6571F8A7c9CEC8Fed629A9A39Ee00e8d33252f53`, factory
+`0x17233abbe5248Fb1265E95f9117032e9E82cd134`, launchpad virtual native 100,000 MON (was
+200,000 on the 9/16 core `0x23dF569a…`, now retired along with its factory `0xaE1cc58D…`).
+nad.fun, the referral manager and the Uniswap V4 pool manager were untouched.
 Markets are never configured by address — they are discovered from the core's `MC`
 (MarketCreated) event, so getting the core address right is what matters.
 Tests that assert a committed default must clear the address env vars and reload
@@ -1013,8 +1014,10 @@ verify against the code rather than trusting either. Ideally they get merged.
 ## 8. Domain systems living in this repo (quick map + facts that cost time to learn)
 
 ### Contract generations and the migration history
-- **The live core is `0x23dF569a15b8c0C2BbDDFf0a9B312c58F4893F97`** with vault factory
-  `0xaE1cc58D968DBaFb80aFDd90Fe08b23aF5e2C70b` (2026-09-16 redeploy). The previous core
+- **The live core is `0x6571F8A7c9CEC8Fed629A9A39Ee00e8d33252f53`** with vault factory
+  `0x17233abbe5248Fb1265E95f9117032e9E82cd134` (2026-09-17 redeploy, block 105,799,009,
+  virtual native 100k MON). The 9/16 core `0x23dF569a…` / factory `0xaE1cc58D…` is retired,
+  with the same 16 core / 9 factory / 5 market event topics (bytecode PUSH32 diff). The previous core
   `0x8e42afa9…` (relaunch 2026-09-06, block 102,410,369) is retired; see the relaunch
   section near the end of this file for its history.
 - Gen-3 core router was `0x6eb2aF5FC575689053Ac9b413220CaBfd01A2F9A` (Aug 28 migration), now retired.

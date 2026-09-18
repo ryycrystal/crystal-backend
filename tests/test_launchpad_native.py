@@ -255,7 +255,7 @@ def test_circulating_supply_self_corrects_after_a_missed_trade(monkeypatch):
 
 
 def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
-    for v0_mon in (200_000, 150_000, 250_000):
+    for v0_mon in (100_000, 200_000, 150_000):
         st = _fresh_state(monkeypatch)
         monkeypatch.setattr(state.NATIVE_ADAPTER, "_initial_native_supply_fn", lambda v=v0_mon: v * 10**18)
         _create_token(st)
@@ -263,7 +263,7 @@ def test_initial_price_tracks_launchpad_initial_native_supply(monkeypatch):
         expected = Decimal(v0_mon * 10**18) / Decimal(INITIAL_CURVE_SUPPLY)
         assert lp.last_price_native == expected, v0_mon
     launch = Decimal(VIRTUAL_NATIVE_SUPPLY) / Decimal(INITIAL_CURVE_SUPPLY)
-    assert launch.quantize(Decimal("0.0000001")) == Decimal("0.0001875")
+    assert launch.quantize(Decimal("0.00000001")) == Decimal("0.00009375")
 
 
 def test_curve_reserves_are_recorded_for_fee_derivation(monkeypatch):

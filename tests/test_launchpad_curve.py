@@ -69,8 +69,8 @@ def test_curve_state_still_rejects_an_absurd_reserve():
     assert adapter().curve_state({"token_reserve": 0, "native_reserve": N0}) is None
 
 
-def test_virtual_native_supply_is_200k_mon():
-    assert native.VIRTUAL_NATIVE_SUPPLY == 200_000 * 10**18
+def test_virtual_native_supply_is_100k_mon():
+    assert native.VIRTUAL_NATIVE_SUPPLY == 100_000 * 10**18
 
 
 def test_launch_price_uses_virtual_supply_on_both_sides_when_the_fetch_reads_zero():
@@ -84,11 +84,11 @@ def test_launch_price_uses_virtual_supply_on_both_sides_when_the_fetch_reads_zer
 
 def test_launch_price_is_never_the_model_placeholder():
     price = native.NativeLaunchpadAdapter(lambda: 0).initial_price_native()
-    assert price > Decimal("0.000001") * 100
+    assert price > Decimal("0.000001") * 50
 
 
-def test_launch_price_matches_reserves_backed_out_of_real_first_buys():
-    price = native.NativeLaunchpadAdapter(lambda: 0).initial_price_native()
+def test_the_retired_9_16_core_launched_at_200k_backed_out_of_real_first_buys():
+    price = Decimal(200_000 * 10**18) / Decimal(IC)
     for spent_mon, got_tokens, post_price in (
         (8_000, 40_631_012, Decimal("0.000202644030000000")),
         (223, 1_176_142, Decimal("0.000187914172215904")),
